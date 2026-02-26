@@ -18,10 +18,10 @@
     ],
     "ask": [],
     "deny": [
-      "Edit(~/.claude/hooks/*)",
-      "Edit(~/.claude/settings.*)",
       "Edit(.claude/hooks/*)",
       "Edit(.claude/settings.*)",
+      "Edit(~/.claude/hooks/*)",
+      "Edit(~/.claude/settings.*)",
       "Read(.envrc)"
     ]
   }
