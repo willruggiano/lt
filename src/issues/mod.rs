@@ -17,6 +17,32 @@ pub enum SortField {
     Team,
 }
 
+impl SortField {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SortField::Created => "created",
+            SortField::Updated => "updated",
+            SortField::Priority => "priority",
+            SortField::Title => "title",
+            SortField::Assignee => "assignee",
+            SortField::State => "state",
+            SortField::Team => "team",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            SortField::Updated => SortField::Created,
+            SortField::Created => SortField::Priority,
+            SortField::Priority => SortField::Title,
+            SortField::Title => SortField::Assignee,
+            SortField::Assignee => SortField::State,
+            SortField::State => SortField::Team,
+            SortField::Team => SortField::Updated,
+        }
+    }
+}
+
 #[derive(Args, Clone)]
 pub struct IssueArgs {
     /// Filter by team key or name
@@ -85,7 +111,7 @@ impl Default for IssueArgs {
             updated_after: None,
             updated_before: None,
             sort: SortField::Updated,
-            desc: false,
+            desc: true,
             title: None,
             limit: 50,
         }

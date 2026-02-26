@@ -4,8 +4,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Cell, Paragraph, Row, Table};
 
 use super::{App, Status};
-use crate::issues::IssueArgs;
 use crate::issues::list::Issue;
+use crate::issues::{IssueArgs, SortField};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -80,6 +80,8 @@ fn filter_context(args: &IssueArgs) -> String {
     if let Some(d) = &args.updated_before {
         parts.push(format!("updated<{}", d));
     }
+    let dir = if args.desc { "desc" } else { "asc" };
+    parts.push(format!("sort:{} ({})", args.sort.label(), dir));
     parts.join("  ")
 }
 
@@ -90,6 +92,8 @@ fn render_footer(frame: &mut Frame, area: Rect, has_next: bool, has_prev: bool, 
         "j/k navigate",
         "ctrl+d/u half page",
         "/ filter",
+        "s sort field",
+        "d toggle desc",
         "o open",
         "r refresh",
         "q quit",
@@ -134,7 +138,9 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    const HEADERS: [&str; 7] = [
+    let sort_col = sort_col_index(&app.args.sort);
+    let sort_marker = if app.args.desc { "v" } else { "^" };
+    let base_headers: [&str; 7] = [
         "IDENTIFIER",
         "TITLE",
         "STATE",
@@ -143,8 +149,15 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         "TEAM",
         "UPDATED",
     ];
+    let headers: [String; 7] = std::array::from_fn(|i| {
+        if Some(i) == sort_col {
+            format!("{} {}", base_headers[i], sort_marker)
+        } else {
+            base_headers[i].to_string()
+        }
+    });
 
-    let mut widths: [usize; 7] = HEADERS.map(|h| h.len());
+    let mut widths: [usize; 7] = headers.each_ref().map(|h| h.len());
     for issue in &app.issues {
         let row = row_cells(issue);
         for (i, cell) in row.iter().enumerate() {
@@ -154,7 +167,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    let header = Row::new(HEADERS.map(Cell::from)).style(Style::new().add_modifier(Modifier::BOLD));
+    let header = Row::new(headers.map(Cell::from)).style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row> = app
         .issues
@@ -201,4 +214,17 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn date(s: &str) -> &str {
     if s.len() >= 10 { &s[..10] } else { s }
+}
+
+// Returns the column index (0-6) that corresponds to the active sort field, if any.
+fn sort_col_index(field: &SortField) -> Option<usize> {
+    match field {
+        SortField::Title => Some(1),
+        SortField::State => Some(2),
+        SortField::Priority => Some(3),
+        SortField::Assignee => Some(4),
+        SortField::Team => Some(5),
+        SortField::Updated => Some(6),
+        SortField::Created => None,
+    }
 }

@@ -130,6 +130,20 @@ impl App {
         self.do_fetch(false);
     }
 
+    fn cycle_sort(&mut self) {
+        self.args.sort = self.args.sort.next();
+        self.cursor_stack.clear();
+        self.current_cursor = None;
+        self.do_fetch(true);
+    }
+
+    fn toggle_desc(&mut self) {
+        self.args.desc = !self.args.desc;
+        self.cursor_stack.clear();
+        self.current_cursor = None;
+        self.do_fetch(true);
+    }
+
     fn next_page(&mut self) {
         if !self.has_next_page {
             return;
@@ -227,6 +241,8 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             }
         }
         KeyCode::Char('r') => app.refresh(),
+        KeyCode::Char('s') => app.cycle_sort(),
+        KeyCode::Char('d') => app.toggle_desc(),
         KeyCode::Char('/') => {
             app.input_buf = app.args.title.clone().unwrap_or_default();
             app.input_mode = true;
