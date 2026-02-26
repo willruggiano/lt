@@ -42,6 +42,7 @@ pub fn run() -> Result<()> {
         updated_after: None,
         updated_before: None,
         title: None,
+        live: false,
     };
 
     let mut cursor: Option<String> = None;

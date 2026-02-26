@@ -6,7 +6,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
 };
 
-use super::{App, Mode, NewIssueField, NewIssueModal, PopupKind, Status};
+use super::{App, HelpPopup, Mode, NewIssueField, NewIssueModal, PopupKind, Status, ALL_KEYBINDINGS};
 use crate::issues::list::Issue;
 use crate::issues::{IssueArgs, SortField};
 use crate::linear::types::IssueDetail;
@@ -49,7 +49,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             } else if let Some(msg) = &app.footer_msg {
                 frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[2]);
             } else {
-                render_footer(frame, chunks[2], has_next, has_prev, page);
+                let sync_label = app.sync_status_label.clone();
+                render_footer(frame, chunks[2], has_next, has_prev, page, &sync_label);
             }
         }
     }
@@ -69,6 +70,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Mode::NewIssue = app.mode {
         if let Some(ref modal) = app.new_issue_modal {
             render_new_issue_modal(frame, frame.area(), modal);
+        }
+    }
+
+    // Render help popup on top if active (bd-5lz).
+    if let Mode::Help = app.mode {
+        if let Some(ref popup) = app.help_popup {
+            render_help_popup(frame, frame.area(), popup);
         }
     }
 }
@@ -126,37 +134,40 @@ fn filter_context(args: &IssueArgs) -> String {
 
 // -- footer / input overlay --------------------------------------------------
 
-fn render_footer(frame: &mut Frame, area: Rect, has_next: bool, has_prev: bool, page: usize) {
+fn render_footer(
+    frame: &mut Frame,
+    area: Rect,
+    has_next: bool,
+    has_prev: bool,
+    page: usize,
+    sync_label: &str,
+) {
     let mut parts: Vec<&str> = vec![
-        "j/k navigate",
-        "ctrl+d/u half page",
-        "/ filter",
-        "S sort field",
-        "d toggle desc",
-        "n new",
-        "s state",
-        "p priority",
-        "a assignee",
-        "o open",
-        "r refresh",
         "q quit",
+        "/ filter",
+        "? help",
+        "j/k nav",
+        "Enter detail",
+        "n new",
     ];
     if has_prev {
-        parts.push("ctrl+p prev page");
+        parts.push("Ctrl-p prev");
     }
     if has_next {
-        parts.push("ctrl+n next page");
+        parts.push("Ctrl-n next");
     }
 
     let page_str = format!("[{}]", page);
+    // Show sync status on the right side, separated from page indicator.
+    let sync_str = format!("  {}  {}", sync_label, page_str);
     let chunks = Layout::horizontal([
         Constraint::Min(0),
-        Constraint::Length(page_str.len() as u16),
+        Constraint::Length(sync_str.len() as u16),
     ])
     .split(area);
 
     frame.render_widget(Paragraph::new(parts.join("  ")), chunks[0]);
-    frame.render_widget(Paragraph::new(page_str), chunks[1]);
+    frame.render_widget(Paragraph::new(sync_str), chunks[1]);
 }
 
 fn render_input(frame: &mut Frame, area: Rect, buf: &str) {
@@ -556,6 +567,96 @@ fn render_new_issue_modal(frame: &mut Frame, area: Rect, modal: &NewIssueModal) 
         String::new()
     };
     frame.render_widget(Paragraph::new(status_text), chunks[6]);
+}
+
+// -- Help popup (bd-5lz) -----------------------------------------------------
+
+fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
+    // Size: 60% wide, up to 80% tall, centred.
+    let width = ((area.width as f32 * 0.60) as u16).max(50).min(area.width);
+    let max_rows = (ALL_KEYBINDINGS.len() + 4) as u16; // header + search + border
+    let height = max_rows.min((area.height as f32 * 0.80) as u16).max(6);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Help  (type to search, Esc/q to close) ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded);
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    // Split inner: search bar (1 row) + list (rest).
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+
+    // Search bar.
+    frame.render_widget(
+        Paragraph::new(format!("/ {}_", popup.search)),
+        chunks[0],
+    );
+
+    // Keybinding list.
+    let list_height = chunks[1].height as usize;
+    let total = popup.filtered.len();
+
+    // Compute scroll so selected row stays visible.
+    let scroll_offset = if popup.selected >= list_height {
+        popup.selected - list_height + 1
+    } else {
+        0
+    };
+
+    let key_col_width = ALL_KEYBINDINGS
+        .iter()
+        .map(|e| e.key.len())
+        .max()
+        .unwrap_or(10);
+
+    let items: Vec<ListItem> = popup
+        .filtered
+        .iter()
+        .skip(scroll_offset)
+        .take(list_height)
+        .enumerate()
+        .map(|(vis_idx, &real_idx)| {
+            let entry = &ALL_KEYBINDINGS[real_idx];
+            let abs_idx = vis_idx + scroll_offset;
+            let line = format!(
+                " {:<kw$}  {} ",
+                entry.key,
+                entry.description,
+                kw = key_col_width
+            );
+            let style = if abs_idx == popup.selected {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    // Show count hint at bottom if list is truncated.
+    let count_hint = if total > list_height {
+        format!(" [{}/{}] ", popup.selected + 1, total)
+    } else {
+        String::new()
+    };
+    // Render hint in the last row of the list area if needed.
+    if !count_hint.is_empty() && chunks[1].height > 0 {
+        let hint_area = Rect::new(
+            chunks[1].x,
+            chunks[1].y + chunks[1].height - 1,
+            chunks[1].width,
+            1,
+        );
+        frame.render_widget(Paragraph::new(count_hint), hint_area);
+    }
+
+    frame.render_widget(List::new(items), chunks[1]);
 }
 
 /// Render a labelled inline list-picker for a single form field.

@@ -1,3 +1,5 @@
+use crate::db;
+
 use super::list::Issue;
 
 const MAX_TITLE: usize = 40;
@@ -12,6 +14,83 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn date(s: &str) -> &str {
     if s.len() >= 10 { &s[..10] } else { s }
+}
+
+/// Print a table of issues fetched from the local SQLite cache.
+pub fn print_table_cached(issues: &[db::Issue], note: &str) {
+    if issues.is_empty() {
+        println!("No issues found.");
+        return;
+    }
+
+    let rows: Vec<[String; 8]> = issues
+        .iter()
+        .map(|i| {
+            [
+                i.identifier.clone(),
+                truncate(&i.title, MAX_TITLE),
+                i.state_name.clone(),
+                i.priority_label.clone(),
+                i.assignee_name
+                    .as_deref()
+                    .unwrap_or("-")
+                    .to_string(),
+                i.team_name.clone(),
+                date(&i.created_at).to_string(),
+                date(&i.updated_at).to_string(),
+            ]
+        })
+        .collect();
+
+    let headers = [
+        "IDENTIFIER",
+        "TITLE",
+        "STATE",
+        "PRIORITY",
+        "ASSIGNEE",
+        "TEAM",
+        "CREATED",
+        "UPDATED",
+    ];
+
+    let mut widths = [0usize; 8];
+    for (i, h) in headers.iter().enumerate() {
+        widths[i] = h.len();
+    }
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            if cell.len() > widths[i] {
+                widths[i] = cell.len();
+            }
+        }
+    }
+
+    let print_row = |cells: &[&str; 8]| {
+        let parts: Vec<String> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
+            .collect();
+        println!("{}", parts.join("  "));
+    };
+
+    print_row(&headers);
+
+    let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    let sep_refs: Vec<&str> = sep.iter().map(|s| s.as_str()).collect();
+    let sep_arr: [&str; 8] = sep_refs.try_into().unwrap();
+    print_row(&sep_arr);
+
+    for row in &rows {
+        let refs: [&str; 8] = [
+            &row[0], &row[1], &row[2], &row[3], &row[4], &row[5], &row[6], &row[7],
+        ];
+        print_row(&refs);
+    }
+
+    if !note.is_empty() {
+        println!("\n{}", note);
+    }
 }
 
 pub fn print_table(issues: &[Issue]) {

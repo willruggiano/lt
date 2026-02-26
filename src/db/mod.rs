@@ -1,7 +1,7 @@
 pub mod filters;
 pub mod issues;
 
-pub use issues::{Issue, get_meta, query_issues, set_meta, upsert_issues};
+pub use issues::{Issue, get_meta, query_issues, search_issues, set_meta, upsert_issues};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -34,7 +34,27 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS sync_meta (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
-        );",
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS issues_fts USING fts5(
+            identifier,
+            title,
+            content='issues',
+            content_rowid='rowid'
+        );
+        CREATE TRIGGER IF NOT EXISTS issues_ai AFTER INSERT ON issues BEGIN
+            INSERT INTO issues_fts(rowid, identifier, title)
+            VALUES (new.rowid, new.identifier, new.title);
+        END;
+        CREATE TRIGGER IF NOT EXISTS issues_ad AFTER DELETE ON issues BEGIN
+            INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
+            VALUES ('delete', old.rowid, old.identifier, old.title);
+        END;
+        CREATE TRIGGER IF NOT EXISTS issues_au AFTER UPDATE ON issues BEGIN
+            INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
+            VALUES ('delete', old.rowid, old.identifier, old.title);
+            INSERT INTO issues_fts(rowid, identifier, title)
+            VALUES (new.rowid, new.identifier, new.title);
+        END;",
     )
     .context("failed to run migrations")?;
     Ok(())

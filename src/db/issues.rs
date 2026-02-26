@@ -106,6 +106,50 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
     Ok(issues)
 }
 
+/// Search issues using FTS5 full-text search.
+///
+/// `query` supports FTS5 syntax: prefix queries (`oauth*`), phrase queries
+/// (`"oauth token"`), and boolean operators (`oauth AND token`).
+///
+/// Results are returned ordered by FTS5 rank (best match first).
+pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
+    let sql = "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
+                      i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
+                      i.synced_at
+               FROM issues i
+               JOIN issues_fts ON issues_fts.rowid = i.rowid
+               WHERE issues_fts MATCH ?1
+               ORDER BY rank";
+
+    let mut stmt = conn
+        .prepare(sql)
+        .context("failed to prepare search_issues statement")?;
+
+    let rows = stmt
+        .query_map(params![query], |row| {
+            Ok(Issue {
+                id: row.get(0)?,
+                identifier: row.get(1)?,
+                title: row.get(2)?,
+                priority_label: row.get(3)?,
+                state_name: row.get(4)?,
+                assignee_name: row.get(5)?,
+                team_name: row.get(6)?,
+                team_key: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+                synced_at: row.get(10)?,
+            })
+        })
+        .context("failed to execute search_issues query")?;
+
+    let mut issues = Vec::new();
+    for row in rows {
+        issues.push(row.context("failed to read issue row")?);
+    }
+    Ok(issues)
+}
+
 /// Retrieve a value from the sync_meta table. Returns None if key is absent.
 pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
     let mut stmt = conn

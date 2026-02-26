@@ -15,6 +15,9 @@ query Viewer {
     id
     name
     email
+    organization {
+      urlKey
+    }
   }
 }
 "#;
@@ -34,10 +37,17 @@ query TeamMembers($teamId: String!) {
 "#;
 
 #[derive(Deserialize, Debug, Clone)]
+struct Organization {
+    #[serde(rename = "urlKey")]
+    pub url_key: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 struct Viewer {
     pub id: String,
     pub name: String,
     pub email: String,
+    pub organization: Organization,
 }
 
 #[derive(Deserialize)]
@@ -432,7 +442,10 @@ pub fn run(args: NewIssueArgs) -> Result<()> {
 
     let issue = create_issue(&token, input)?;
     println!("Created: {} - {}", issue.identifier, issue.title);
-    println!("URL:     https://linear.app/issue/{}", issue.identifier);
+    println!(
+        "URL:     https://linear.app/{}/issue/{}",
+        viewer.organization.url_key, issue.identifier
+    );
 
     Ok(())
 }

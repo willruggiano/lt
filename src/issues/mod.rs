@@ -98,6 +98,10 @@ pub struct IssueArgs {
     /// Maximum number of issues to return (capped at 250)
     #[arg(long, default_value = "50")]
     pub limit: u32,
+
+    /// Bypass the local cache and fetch directly from the Linear API
+    #[arg(long)]
+    pub live: bool,
 }
 
 impl Default for IssueArgs {
@@ -116,6 +120,7 @@ impl Default for IssueArgs {
             desc: true,
             title: None,
             limit: 50,
+            live: false,
         }
     }
 }

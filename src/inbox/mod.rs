@@ -17,7 +17,12 @@ pub struct InboxArgs {
 }
 
 pub fn run(args: InboxArgs) -> Result<()> {
-    let notifications = fetch_notifications_from_config(args.limit)?;
+    // When --all is set we need to paginate through all pages but still cap the
+    // total at --limit.  Pass max_total so the pagination loop stops early.
+    // When --all is not set we only need unread notifications; fetch with the
+    // limit as a page-size hint and filter afterward.
+    let max_total = Some(args.limit);
+    let notifications = fetch_notifications_from_config(args.limit, max_total)?;
 
     let filtered: Vec<_> = if args.all {
         notifications

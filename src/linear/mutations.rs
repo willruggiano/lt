@@ -49,11 +49,13 @@ query Teams {
 
 const WORKFLOW_STATES_QUERY: &str = r#"
 query WorkflowStates($teamId: String!) {
-  workflowStates(filter: { team: { id: { eq: $teamId } } }) {
-    nodes {
-      id
-      name
-      type
+  team(id: $teamId) {
+    states {
+      nodes {
+        id
+        name
+        type
+      }
     }
   }
 }
@@ -130,9 +132,13 @@ struct WorkflowStateConnection {
 }
 
 #[derive(Deserialize)]
+struct TeamWithStates {
+    states: WorkflowStateConnection,
+}
+
+#[derive(Deserialize)]
 struct WorkflowStatesData {
-    #[serde(rename = "workflowStates")]
-    workflow_states: WorkflowStateConnection,
+    team: TeamWithStates,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -194,7 +200,7 @@ pub fn update_issue_assignee(token: &str, id: &str, assignee_id: Option<String>)
 pub fn fetch_workflow_states(token: &str, team_id: &str) -> Result<Vec<WorkflowState>> {
     let variables = json!({ "teamId": team_id });
     let data: WorkflowStatesData = graphql_query(token, WORKFLOW_STATES_QUERY, variables)?;
-    Ok(data.workflow_states.nodes)
+    Ok(data.team.states.nodes)
 }
 
 pub fn fetch_teams(token: &str) -> Result<Vec<Team>> {
