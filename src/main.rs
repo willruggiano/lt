@@ -4,6 +4,7 @@ mod db;
 mod inbox;
 mod issues;
 mod linear;
+mod logging;
 mod search;
 mod sync;
 mod tui;
@@ -56,6 +57,19 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Determine whether we are entering TUI mode so we can choose the right
+    // logging subscriber before any other code runs.
+    let is_tui = matches!(cli.command, None | Some(Commands::Tui { .. }));
+
+    // Keep the guard alive for the duration of main() so the background
+    // logging thread is not torn down prematurely.
+    let _log_guard = if is_tui {
+        logging::init_tui()?
+    } else {
+        logging::init_cli()?
+    };
+
     match cli.command {
         None => tui::run(issues::IssueArgs::default())?,
         Some(Commands::Auth { command }) => auth::run(command)?,
