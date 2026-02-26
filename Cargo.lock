@@ -921,6 +921,7 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "crossterm",
  "dirs",
  "open",
  "rand",

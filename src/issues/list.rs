@@ -71,12 +71,12 @@ struct IssuesData {
     issues: IssueConnection,
 }
 
-pub fn run(args: IssueArgs) -> Result<()> {
+pub fn fetch(args: &IssueArgs) -> Result<(Vec<Issue>, bool)> {
     let token = config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
 
     let limit = args.limit.min(250);
-    let filter = build_filter(&args)?;
+    let filter = build_filter(args)?;
     let sort = build_sort(&args.sort, args.desc);
 
     let variables = json!({
@@ -89,11 +89,14 @@ pub fn run(args: IssueArgs) -> Result<()> {
         graphql_query(&token.access_token, ISSUES_QUERY, variables)?;
 
     let conn = data.issues;
-    print_table(&conn.nodes);
+    Ok((conn.nodes, conn.page_info.has_next_page))
+}
 
-    if conn.page_info.has_next_page {
+pub fn run(args: IssueArgs) -> Result<()> {
+    let (issues, has_next_page) = fetch(&args)?;
+    print_table(&issues);
+    if has_next_page {
         println!("\n+more issues");
     }
-
     Ok(())
 }

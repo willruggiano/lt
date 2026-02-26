@@ -1,6 +1,6 @@
 mod display;
 mod filter;
-mod list;
+pub mod list;
 mod sort;
 
 use anyhow::Result;
@@ -17,7 +17,7 @@ pub enum SortField {
     Team,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct IssueArgs {
     /// Filter by team key or name
     #[arg(long)]

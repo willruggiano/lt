@@ -3,6 +3,7 @@ mod config;
 mod issues;
 mod linear;
 mod sync;
+mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -30,6 +31,11 @@ enum Commands {
         #[command(flatten)]
         args: issues::IssueArgs,
     },
+    /// Interactive TUI for browsing issues
+    Tui {
+        #[command(flatten)]
+        args: issues::IssueArgs,
+    },
     /// Sync API diagnostics
     Sync {
         #[command(subcommand)]
@@ -42,6 +48,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Auth { command } => auth::run(command)?,
         Commands::Issues { args } => issues::run(args)?,
+        Commands::Tui { args } => tui::run(args)?,
         Commands::Sync { command } => sync::run(command)?,
     }
     Ok(())
