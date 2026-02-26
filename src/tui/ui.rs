@@ -1,11 +1,13 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Cell, Paragraph, Row, Table};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 
-use super::{App, Status};
+use super::{App, Mode, Status};
 use crate::issues::list::Issue;
 use crate::issues::{IssueArgs, SortField};
+use crate::linear::types::IssueDetail;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -26,11 +28,28 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let input_buf = app.input_buf.clone();
 
     render_header(frame, chunks[0], &context);
-    render_table(frame, chunks[1], app);
-    if input_mode {
-        render_input(frame, chunks[2], &input_buf);
-    } else {
-        render_footer(frame, chunks[2], has_next, has_prev, page);
+
+    match app.mode {
+        Mode::List => {
+            render_table(frame, chunks[1], app);
+            if input_mode {
+                render_input(frame, chunks[2], &input_buf);
+            } else {
+                render_footer(frame, chunks[2], has_next, has_prev, page);
+            }
+        }
+        Mode::Detail => {
+            // Vertical split: list (~40%) | detail (~60%).
+            let split = Layout::horizontal([
+                Constraint::Percentage(40),
+                Constraint::Percentage(60),
+            ])
+            .split(chunks[1]);
+
+            render_table(frame, split[0], app);
+            render_detail(frame, split[1], app);
+            render_detail_footer(frame, chunks[2]);
+        }
     }
 }
 
@@ -227,4 +246,115 @@ fn sort_col_index(field: &SortField) -> Option<usize> {
         SortField::Updated => Some(6),
         SortField::Created => None,
     }
+}
+
+// -- Detail pane -------------------------------------------------------------
+
+fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .title(" Detail ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Show loading / error overlay if applicable.
+    match &app.status {
+        Status::Loading => {
+            frame.render_widget(Paragraph::new("Loading..."), inner);
+            return;
+        }
+        Status::Error(msg) => {
+            frame.render_widget(Paragraph::new(format!("Error: {}", msg)), inner);
+            return;
+        }
+        Status::Idle => {}
+    }
+
+    if let Some(detail) = &app.detail {
+        let lines = build_detail_lines(detail);
+        let para = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.detail_scroll, 0));
+        frame.render_widget(para, inner);
+    }
+}
+
+fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Header line: IDENTIFIER - Title
+    lines.push(Line::from(vec![
+        Span::styled(
+            d.identifier.clone(),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" - {}", d.title)),
+    ]));
+
+    // Meta line: state, priority, assignee, team
+    let assignee = d
+        .assignee
+        .as_ref()
+        .map(|u| u.name.clone())
+        .unwrap_or_else(|| "unassigned".to_string());
+    lines.push(Line::from(format!(
+        "[{}]  {}  {}  {}",
+        d.state.name, d.priority_label, assignee, d.team.name
+    )));
+
+    lines.push(Line::from(""));
+
+    // Description
+    if let Some(desc) = &d.description {
+        if !desc.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Description",
+                Style::new().add_modifier(Modifier::UNDERLINED),
+            )));
+            lines.push(Line::from(""));
+            for raw_line in desc.lines() {
+                lines.push(Line::from(strip_markdown(raw_line)));
+            }
+            lines.push(Line::from(""));
+        }
+    }
+
+    // Comments
+    if !d.comments.nodes.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Comments",
+            Style::new().add_modifier(Modifier::UNDERLINED),
+        )));
+        for comment in &d.comments.nodes {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} on {}",
+                    comment.author(),
+                    date(&comment.created_at)
+                ),
+                Style::new().add_modifier(Modifier::BOLD),
+            )));
+            for raw_line in comment.body.lines() {
+                lines.push(Line::from(strip_markdown(raw_line)));
+            }
+        }
+    }
+
+    lines
+}
+
+/// Minimal markdown stripping: remove **bold** markers and *italic* markers.
+fn strip_markdown(s: &str) -> String {
+    let s = s.replace("**", "");
+    let s = s.replace("__", "");
+    // Replace single-asterisk/underscore italic markers is tricky; skip for now.
+    s
+}
+
+fn render_detail_footer(frame: &mut Frame, area: Rect) {
+    frame.render_widget(
+        Paragraph::new("j/k scroll  o open in browser  Esc/q close"),
+        area,
+    );
 }

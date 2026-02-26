@@ -7,12 +7,22 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 
 use crate::issues::IssueArgs;
+use crate::issues::detail::fetch_issue_detail_with_config;
 use crate::issues::list::{Issue, fetch};
+use crate::linear::types::IssueDetail;
 
 pub enum Status {
     Idle,
     Loading,
     Error(String),
+}
+
+/// Application mode -- only one active at a time.
+pub enum Mode {
+    /// Normal list browsing mode.
+    List,
+    /// Detail pane showing full issue content.
+    Detail,
 }
 
 pub struct App {
@@ -31,6 +41,12 @@ pub struct App {
     pub input_buf: String,
     // Set by ui::render each frame so key handlers know page size.
     pub viewport_height: u16,
+    // -- Detail pane --
+    pub mode: Mode,
+    /// Loaded detail for the currently-open issue. None while loading or in List mode.
+    pub detail: Option<IssueDetail>,
+    /// Vertical scroll offset inside the detail pane (in lines).
+    pub detail_scroll: u16,
 }
 
 impl App {
@@ -57,6 +73,9 @@ impl App {
             input_mode: false,
             input_buf: String::new(),
             viewport_height: 0,
+            mode: Mode::List,
+            detail: None,
+            detail_scroll: 0,
         }
     }
 
@@ -161,6 +180,45 @@ impl App {
         self.current_cursor = self.cursor_stack.pop().unwrap();
         self.do_fetch(true);
     }
+
+    // -- Detail pane ----------------------------------------------------------
+
+    /// Open the detail pane for the currently selected issue.
+    fn open_detail(&mut self) {
+        let id = match self.selected_issue() {
+            Some(issue) => issue.identifier.clone(),
+            None => return,
+        };
+        self.mode = Mode::Detail;
+        self.detail = None;
+        self.detail_scroll = 0;
+        self.status = Status::Loading;
+        match fetch_issue_detail_with_config(&id) {
+            Ok(detail) => {
+                self.detail = Some(detail);
+                self.status = Status::Idle;
+            }
+            Err(e) => {
+                self.status = Status::Error(e.to_string());
+            }
+        }
+    }
+
+    /// Close the detail pane and return to the list.
+    fn close_detail(&mut self) {
+        self.mode = Mode::List;
+        self.detail = None;
+        self.detail_scroll = 0;
+        self.status = Status::Idle;
+    }
+
+    fn detail_scroll_down(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_add(1);
+    }
+
+    fn detail_scroll_up(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(1);
+    }
 }
 
 pub fn run(args: IssueArgs) -> Result<()> {
@@ -188,7 +246,10 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
                 if app.input_mode {
                     handle_input_key(&mut app, key.code);
                 } else {
-                    handle_normal_key(&mut app, key.code, key.modifiers);
+                    match app.mode {
+                        Mode::Detail => handle_detail_key(&mut app, key.code),
+                        Mode::List => handle_normal_key(&mut app, key.code, key.modifiers),
+                    }
                 }
             }
         }
@@ -220,10 +281,31 @@ fn handle_input_key(app: &mut App, code: KeyCode) {
     }
 }
 
+// -- Detail pane keybindings -------------------------------------------------
+
+fn handle_detail_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => app.close_detail(),
+        KeyCode::Char('j') | KeyCode::Down => app.detail_scroll_down(),
+        KeyCode::Char('k') | KeyCode::Up => app.detail_scroll_up(),
+        KeyCode::Char('o') => {
+            if let Some(detail) = &app.detail {
+                let url = format!("https://linear.app/issue/{}", detail.identifier);
+                let _ = open::that(url);
+            }
+        }
+        _ => {}
+    }
+}
+
+// -- Normal list keybindings -------------------------------------------------
+
 fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
+        // -- Detail pane --
+        KeyCode::Enter => app.open_detail(),
         KeyCode::Char('j') | KeyCode::Down => app.move_down(),
         KeyCode::Char('k') | KeyCode::Up => app.move_up(),
         KeyCode::Char('g') => app.move_top(),
