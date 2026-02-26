@@ -1,5 +1,5 @@
 pub mod detail;
-mod display;
+pub mod display;
 mod filter;
 pub mod list;
 pub mod new;
