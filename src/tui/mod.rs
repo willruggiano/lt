@@ -51,6 +51,80 @@ pub enum Mode {
     Popup(PopupKind),
     /// New-issue modal form (bd-l6r).
     NewIssue,
+    /// Searchable help popup (bd-5lz).
+    Help,
+}
+
+// ---------------------------------------------------------------------------
+// Help popup state (bd-5lz)
+// ---------------------------------------------------------------------------
+
+/// A single keybinding entry shown in the help popup.
+pub struct HelpEntry {
+    pub key: &'static str,
+    pub description: &'static str,
+}
+
+/// All keybindings shown in the help popup.
+pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
+    HelpEntry { key: "q / Esc",       description: "quit" },
+    HelpEntry { key: "j / Down",      description: "move down" },
+    HelpEntry { key: "k / Up",        description: "move up" },
+    HelpEntry { key: "g",             description: "go to top" },
+    HelpEntry { key: "G",             description: "go to bottom" },
+    HelpEntry { key: "Ctrl-d",        description: "half page down" },
+    HelpEntry { key: "Ctrl-u",        description: "half page up" },
+    HelpEntry { key: "PageDown",      description: "page down" },
+    HelpEntry { key: "PageUp",        description: "page up" },
+    HelpEntry { key: "Enter",         description: "open detail pane" },
+    HelpEntry { key: "/",             description: "filter by title" },
+    HelpEntry { key: "?",             description: "open this help popup" },
+    HelpEntry { key: "n",             description: "new issue" },
+    HelpEntry { key: "s",             description: "set state" },
+    HelpEntry { key: "p",             description: "set priority" },
+    HelpEntry { key: "a",             description: "set assignee" },
+    HelpEntry { key: "o",             description: "open in browser" },
+    HelpEntry { key: "r",             description: "refresh" },
+    HelpEntry { key: "S",             description: "cycle sort field" },
+    HelpEntry { key: "d",             description: "toggle sort direction" },
+    HelpEntry { key: "Ctrl-n",        description: "next page" },
+    HelpEntry { key: "Ctrl-p",        description: "previous page" },
+];
+
+/// Mutable state for the help popup.
+pub struct HelpPopup {
+    /// Current search query typed by the user.
+    pub search: String,
+    /// Indices into ALL_KEYBINDINGS that match the current search.
+    pub filtered: Vec<usize>,
+    /// Currently highlighted row in the filtered list.
+    pub selected: usize,
+}
+
+impl HelpPopup {
+    pub fn new() -> Self {
+        let filtered = (0..ALL_KEYBINDINGS.len()).collect();
+        Self {
+            search: String::new(),
+            filtered,
+            selected: 0,
+        }
+    }
+
+    pub fn update_filter(&mut self) {
+        let q = self.search.to_lowercase();
+        self.filtered = ALL_KEYBINDINGS
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                q.is_empty()
+                    || e.key.to_lowercase().contains(&q)
+                    || e.description.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +239,9 @@ pub struct App {
 
     // -- new-issue modal (bd-l6r) --------------------------------------------
     pub new_issue_modal: Option<NewIssueModal>,
+
+    // -- help popup (bd-5lz) -------------------------------------------------
+    pub help_popup: Option<HelpPopup>,
 }
 
 impl App {
@@ -198,6 +275,7 @@ impl App {
             popup_selected: 0,
             footer_msg: None,
             new_issue_modal: None,
+            help_popup: None,
         }
     }
 
@@ -1023,6 +1101,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
                     Mode::Popup(_) => handle_popup_key(&mut app, key.code),
                     Mode::Detail => handle_detail_key(&mut app, key.code),
                     Mode::NewIssue => handle_new_issue_key(&mut app, key.code, key.modifiers),
+                    Mode::Help => handle_help_key(&mut app, key.code),
                     Mode::List => handle_normal_key(&mut app, key.code, key.modifiers),
                 }
             }
@@ -1252,6 +1331,65 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('a') => app.open_assignee_popup(),
         // New issue modal (bd-l6r)
         KeyCode::Char('n') => app.open_new_issue_modal(),
+        // Help popup (bd-5lz)
+        KeyCode::Char('?') => {
+            app.help_popup = Some(HelpPopup::new());
+            app.mode = Mode::Help;
+        }
+        _ => {}
+    }
+}
+
+// -- Help popup key handler (bd-5lz) -----------------------------------------
+
+fn handle_help_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.mode = Mode::List;
+            app.help_popup = None;
+        }
+        KeyCode::Down => {
+            if let Some(ref mut popup) = app.help_popup {
+                let max = popup.filtered.len().saturating_sub(1);
+                if popup.selected < max {
+                    popup.selected += 1;
+                }
+            }
+        }
+        KeyCode::Up => {
+            if let Some(ref mut popup) = app.help_popup {
+                popup.selected = popup.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(ref mut popup) = app.help_popup {
+                popup.search.pop();
+                popup.update_filter();
+            }
+        }
+        KeyCode::Char('q') => {
+            app.mode = Mode::List;
+            app.help_popup = None;
+        }
+        KeyCode::Char('j') => {
+            if let Some(ref mut popup) = app.help_popup {
+                let max = popup.filtered.len().saturating_sub(1);
+                if popup.selected < max {
+                    popup.selected += 1;
+                }
+            }
+        }
+        KeyCode::Char('k') => {
+            if let Some(ref mut popup) = app.help_popup {
+                popup.selected = popup.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(ref mut popup) = app.help_popup {
+                popup.search.push(c);
+                popup.update_filter();
+            }
+        }
         _ => {}
     }
 }
