@@ -2,10 +2,11 @@ pub mod detail;
 mod display;
 mod filter;
 pub mod list;
+pub mod new;
 mod sort;
 
 use anyhow::Result;
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 
 #[derive(Clone, ValueEnum)]
 pub enum SortField {
@@ -119,6 +120,48 @@ impl Default for IssueArgs {
     }
 }
 
-pub fn run(args: IssueArgs) -> Result<()> {
-    list::run(args)
+#[derive(Subcommand)]
+pub enum IssueSubcommand {
+    /// Create a new issue interactively (or via flags)
+    New {
+        /// Team name (skips team prompt)
+        #[arg(long)]
+        team: Option<String>,
+        /// Issue title (skips title prompt)
+        #[arg(long)]
+        title: Option<String>,
+        /// Issue description (skips description prompt)
+        #[arg(long)]
+        description: Option<String>,
+        /// Priority: none/urgent/high/normal/low (skips priority prompt)
+        #[arg(long)]
+        priority: Option<String>,
+        /// Workflow state name (skips state prompt)
+        #[arg(long)]
+        state: Option<String>,
+        /// Assignee name, email, or 'me' (skips assignee prompt)
+        #[arg(long)]
+        assignee: Option<String>,
+    },
+}
+
+pub fn run(args: IssueArgs, subcommand: Option<IssueSubcommand>) -> Result<()> {
+    match subcommand {
+        Some(IssueSubcommand::New {
+            team,
+            title,
+            description,
+            priority,
+            state,
+            assignee,
+        }) => new::run(new::NewIssueArgs {
+            team,
+            title,
+            description,
+            priority,
+            state,
+            assignee,
+        }),
+        None => list::run(args),
+    }
 }
