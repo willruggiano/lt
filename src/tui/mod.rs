@@ -9,7 +9,7 @@ use ratatui::widgets::TableState;
 
 use crate::issues::IssueArgs;
 use crate::issues::detail::fetch_issue_detail_with_config;
-use crate::issues::list::{Issue, fetch};
+use crate::issues::list::Issue;
 use crate::linear::types::IssueDetail;
 
 pub enum Status {
@@ -371,12 +371,25 @@ impl App {
 
     fn do_fetch(&mut self, reset_selection: bool) {
         self.status = Status::Loading;
-        let cursor = self.current_cursor.as_deref();
-        match fetch(&self.args, cursor) {
-            Ok((issues, has_next_page, end_cursor)) => {
-                self.issues = issues;
+        // Use the SQLite cache for pagination instead of hitting the API.
+        let offset: i64 = self
+            .current_cursor
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        match crate::db::open_db()
+            .and_then(|conn| crate::db::query_issues_page(&conn, &self.args, offset))
+        {
+            Ok((issues, has_next_page)) => {
+                self.issues = issues.into_iter().map(db_issue_to_list_issue).collect();
                 self.has_next_page = has_next_page;
-                self.end_cursor = end_cursor;
+                // end_cursor holds the offset of the *next* page as a string.
+                let limit = self.args.limit.min(250) as i64;
+                self.end_cursor = if has_next_page {
+                    Some((offset + limit).to_string())
+                } else {
+                    None
+                };
                 let n = self.issues.len();
                 let sel = if reset_selection {
                     0
