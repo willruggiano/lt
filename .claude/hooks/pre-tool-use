@@ -13,35 +13,87 @@ def main() -> None:
 
     command = tool_input.get("command", "")
     tokens = command.split()
+    if not tokens:
+        return
+
+    def has(*args, op=all) -> bool:
+        return op([arg in tokens for arg in args])
+
+    def blocked(what):
+        return f"Blocked: {what}."
+
+    def surprise(*args):
+        something = ", ".join([f"'{arg}'" for arg in args])
+        if len(args) > 1:
+            something = f"one of {something}"
+        return (
+            "If were *trying* to commit and are thus surpised by this outcome, "
+            f"perhaps you included {something} in your commit message... "
+            "remove it and try again... :)"
+        )
 
     # Steer the agent towards jj.
-    if tokens and "git" in tokens:
+    if has("git"):
         print(
-            "Blocked: use `jj` instead.",
+            blocked("use `jj` instead"),
+            surprise("git"),
             file=sys.stderr,
+            sep="\n",
         )
         sys.exit(2)
 
+    if not has("jj"):
+        return
+
     # --force is almost always the wrong choice.
-    if tokens and "jj" in tokens and "--force" in tokens:
-        print("Blocked: using --force is almost certainly wrong.", file=sys.stderr)
+    if has("--force"):
+        print(
+            blocked("using --force is almost certainly wrong"),
+            surprise("--force"),
+            file=sys.stderr,
+            sep="\n",
+        )
         sys.exit(2)
 
     # No pushes.
-    if tokens and "jj" in tokens and "push" in tokens:
-        print("Blocked: pushing to a remote is not permitted.", file=sys.stderr)
+    if has("push"):
+        print(
+            blocked("pushing to a remote is not permitted"),
+            surprise("push"),
+            file=sys.stderr,
+            sep="\n",
+        )
         sys.exit(2)
 
     # No re-writing history.
-    if tokens and "jj" in tokens and "--ignore-immutable" in tokens:
-        print("Blocked: rewriting commit history is not permitted.", file=sys.stderr)
+    if has("--ignore-immutable"):
+        print(
+            blocked("rewriting commit history is not permitted"),
+            surprise("--ignore-immutable"),
+            file=sys.stderr,
+            sep="\n",
+        )
         sys.exit(2)
 
-    # No sneaky maneuvers.
-    if tokens and "jj" in tokens and ("--config" in tokens or "--config-file" in tokens):
+    # No funny business.
+    if has("--config", "--config-file"):
         print(
-            "Blocked: are you sure you're doing the right thing? Maybe ask for help.",
+            blocked("are you sure you're doing the right thing? Maybe ask for help."),
+            surprise("--config", "--config-file"),
             file=sys.stderr,
+            sep="\n",
+        )
+        sys.exit(2)
+
+    # This one just won't work lol.
+    if has("resolve"):
+        print(
+            blocked("`jj resolve` requires a tui that you cannot access"),
+            "Read jj's output carefully -- it will tell you how to proceed "
+            "(typically: use `jj new <rev>` + edit the files directly to remove conflict markers + `jj squash`).",
+            surprise("resolve"),
+            file=sys.stderr,
+            sep="\n",
         )
         sys.exit(2)
 

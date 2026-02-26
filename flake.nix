@@ -44,6 +44,9 @@
           ccusage-pi
           claude-code-wrapped
           pi-wrapped
+          python3
+          ruff
+          ty
         ];
       };
     });

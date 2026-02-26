@@ -16,76 +16,119 @@ documents for ready tasks in parallel.
 
 ## Assemble the team
 
-1. Run `bp` (beads prime) to load the current issue graph into context.
+1.  Run `br ready --type=design` to load the current design tasks into context.
 
-2. Parse the "Ready work" section to identify unblocked bead IDs.
-   Do **not** gather additional context -- proceed immediately.
+2.  Parse the "Ready work" section to identify unblocked bead IDs.
+    Do **not** gather additional context -- proceed immediately.
 
-3. For each ready bead ID, create a jj workspace:
+3.  Claim all ready beads in the default workspace (before creating any
+    isolated workspaces):
 
-```
-jj workspace add --name=<id> .campfire/workspaces/<id>
-```
+    ```bash
+    br update <id1> --claim
+    br update <id2> --claim
+    # ... one per ready bead
+    ```
 
-If a workspace already exists, prepend this to the teammate prompt:
+    This records the in-progress state in the default workspace's working copy.
+    Sub-agents will inherit this state and must NOT run `br update` or `br close`
+    themselves -- the team lead owns all bead mutations.
 
-    **Your workspace already exists!** A previous agent may have left it in an
-    incomplete state. Run `bp <id>` and explore to find where they left off.
-    Avoid redundant re-work. If the state looks broken, report back.
+4.  For each ready bead ID, create a jj workspace:
 
-4. Spawn a teammate using model **$0** (or opus if unspecified) per bead:
-   (set working directory to the isolated jj workspace)
+    ```bash
+    jj workspace add --name=<id> .beads/workspaces/<id>
+    ```
 
-   <prompt_template>
+    If a workspace already exists, prepend this to the teammate prompt:
 
-   You are a design agent working on bead `<id>`.
+        **Your workspace already exists!** A previous agent may have left it in an
+        incomplete state. Run `br show <id>` and explore to find where they left off.
+        Avoid redundant re-work. If the state looks broken, report back.
 
-   Your working directory is already set to your isolated jj workspace. Do not leave it.
+5.  Spawn a teammate using model **$0** (or opus if unspecified) per bead:
+    (set working directory to the isolated jj workspace)
 
-   **Step 1 -- Load the task:**
+    <prompt_template>
 
-   ```
-   br show <id> --no-auto-flush
-   ```
+    You are a design agent working on bead `<id>`.
+    Your isolated workspace is: /path/to/isolated/workspace
+    **You may not modify files outside of your isolated workspace.**
+    **Do not leave your workspace.**
 
-   Read the output carefully. This is your complete specification.
+    **Step 1 -- Load the task:**
 
-   **Step 2 -- Produce a design document:**
-   Write at least one markdown design document to a sensible path such as
-   `docs/plans/<id>.md`. Create additional files only if the task requires it.
+    ```bash
+    br show <id>
+    ```
 
-   **Step 3 -- Update beads and commit:**
+    Read the output carefully. This is your complete specification.
+    Your bead is already claimed -- do NOT run `br update` or `br close`.
+    The team lead manages all bead state.
 
-   ```
-   br update <id> --no-auto-flush --status=in_progress
-   # ... do your work ...
-   br close <id> --no-auto-flush --reason="<one sentence describing what was produced>"
-   br sync --flush-only
-   jj diff --summary   # .beads/issues.jsonl MUST appear as modified
-   jj commit -m "design(<id>): <short description>"
-   ```
+    **Step 2 -- Produce a design document:**
+    Write at least one markdown design document to a sensible path such as
+    `docs/plans/<id>.md`. Create additional files only if the task requires it.
 
-   If `.beads/issues.jsonl` is not modified, stop and report back -- do not
-   commit without it.
+    **Step 3 -- Commit and signal completion:**
 
-   **On permissions/sandbox errors:** debug what you can, write a `debug.md`
-   summarising what you tried and your hypothesis, commit it with
-   `jj commit -m "debug(<id>): ..."`, then stop. Regardless, always provide your
-   diagnosis and debugging traces in your response in such cases.
+    ```bash
+    # Give your change a descriptive commit message:
+    jj commit -m "design(<id>): <short description>"
+    ```
 
-   </prompt_template>
+    Then return your response to the team lead. Include a one-sentence summary
+    of what you produced and any caveats and/or open questions.
 
-5. Run all sub-agents in parallel (single message, multiple Task tool calls).
+    **On permissions/sandbox errors:** debug (quickly) as best you can, write a
+    `debug.md` summarising what you tried and your hypothesis, then stop.
+    Regardless, always provide your diagnosis and debugging traces in your
+    response to the team lead.
 
-6. After all agents complete, merge workspaces and reconcile beads:
+    ACCEPTANCE CRITERIA:
+    1. Your workspace MUST be ahead by exactly one change relative to its
+       starting point.
+    2. Do NOT touch .beads/issues.jsonl -- leave bead state to the team lead.
 
-```bash
-jj log -r 'heads(all())'
-jj new <rev1> <rev2> ...
-python3 scripts/resolve-beads-merge.py
-br sync --import-only
-br ready --no-auto-flush
-jj describe -m "merge: integrate <id1>, <id2>, ... designs"
-```
+    </prompt_template>
 
-7. Report a brief summary of outcomes per bead.
+6.  Run all sub-agents in parallel.
+
+7.  After all agents complete, merge their workspaces into the default workspace:
+
+    ```bash
+    # List the heads, including up to two commits for each head.
+    jj log -r 'ancestors(heads(all()), 2)'
+
+    # Create a merge commit from @ (team lead) and all agent tips.
+    # NOTE: @ must be included so the claimed-bead state is a parent.
+    jj new @ <agent-rev1> <agent-rev2> ...
+    ```
+
+    Because sub-agents never touched .beads/issues.jsonl, there are no bead
+    conflicts to resolve.
+
+8.  If there are conflicts, resolve them manually:
+
+    **Do NOT use `jj resolve` -- it requires an interactive TUI and will be
+    blocked.** Instead, read jj's output carefully. jj will print instructions
+    for how to proceed (typically: `jj new <rev>` to check out the conflicted
+    commit, edit the conflicted files directly to remove conflict markers, then
+    `jj squash` to fold the resolution back). Follow those instructions exactly.
+
+9.  Close beads for all agents that completed successfully:
+
+    ```bash
+    br close <id1> <id2> ... --reason="..."
+    ```
+
+    Do NOT close beads for agents that reported failure or incomplete work.
+    Create follow-up beads as needed.
+
+10. Commit the merge:
+
+    ```bash
+    jj commit -m "merge(<id1>, <id2>, ...): integrate designs"
+    ```
+
+11. Report a brief summary of outcomes per bead.
