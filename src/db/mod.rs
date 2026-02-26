@@ -1,3 +1,5 @@
+pub mod filters;
+
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::fs;
