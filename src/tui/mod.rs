@@ -80,7 +80,7 @@ pub struct HelpEntry {
 
 /// All keybindings shown in the help popup.
 pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
-    HelpEntry { key: "q / Esc",       description: "quit" },
+    HelpEntry { key: "q / Esc",       description: "quit (list view; help: Esc only)" },
     HelpEntry { key: "j / Down",      description: "move down" },
     HelpEntry { key: "k / Up",        description: "move up" },
     HelpEntry { key: "g",             description: "go to top" },
@@ -1722,10 +1722,6 @@ fn handle_help_key(app: &mut App, code: KeyCode) {
                 popup.search.pop();
                 popup.update_filter();
             }
-        }
-        KeyCode::Char('q') => {
-            app.mode = Mode::List;
-            app.help_popup = None;
         }
         KeyCode::Char('j') => {
             if let Some(ref mut popup) = app.help_popup {
