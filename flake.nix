@@ -60,7 +60,6 @@
       dev = final: prev: let
         inherit (prev.stdenv.hostPlatform) system;
       in {
-        inherit (self.packages.${system}) agent-tools beads-primer jail;
         inherit (inputs.codex.packages.${system}) codex-rs;
         inherit
           (inputs.llm-agents.packages.${system})
@@ -70,6 +69,15 @@
           ccusage-codex
           ccusage-pi
           pi
+          ;
+        inherit
+          (self.packages.${system})
+          agent-tools
+          beads-docs
+          beads-primer
+          claude-code-wrapped
+          pi-wrapped
+          jail
           ;
 
         codex = final.codex-rs;
@@ -217,8 +225,8 @@
           (add-pkg-deps (
             with pkgs;
               [agent-tools]
-              ++ pkgs'.campfire.buildInputs
-              ++ pkgs'.campfire.nativeBuildInputs
+              ++ pkgs'.lt.buildInputs
+              ++ pkgs'.lt.nativeBuildInputs
           ))
           (readwrite (noescape "~/.cargo"))
           (set-env "BD_ACTOR" pkgs.claude-code.name)
@@ -232,9 +240,10 @@
           (add-pkg-deps (
             with pkgs;
               [agent-tools]
-              ++ pkgs'.campfire.buildInputs
-              ++ pkgs'.campfire.nativeBuildInputs
+              ++ pkgs'.lt.buildInputs
+              ++ pkgs'.lt.nativeBuildInputs
           ))
+          (readwrite (noescape "~/.cargo"))
           (readwrite (noescape "~/.pi"))
           (set-env "BD_ACTOR" pkgs.pi.name)
           (try-fwd-env "BR_OUTPUT_FORMAT")
