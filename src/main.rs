@@ -24,10 +24,12 @@ enum Commands {
         #[command(subcommand)]
         command: auth::AuthCommands,
     },
-    /// List Linear issues
+    /// List Linear issues or manage issues
     Issues {
         #[command(flatten)]
         args: issues::IssueArgs,
+        #[command(subcommand)]
+        subcommand: Option<issues::IssueSubcommand>,
     },
     /// Interactive TUI for browsing issues
     Tui {
@@ -52,7 +54,7 @@ fn main() -> Result<()> {
         None => tui::run(issues::IssueArgs::default())?,
         Some(Commands::Auth { command }) => auth::run(command)?,
         Some(Commands::Inbox { args }) => inbox::run(args)?,
-        Some(Commands::Issues { args }) => issues::run(args)?,
+        Some(Commands::Issues { args, subcommand }) => issues::run(args, subcommand)?,
         Some(Commands::Tui { args }) => tui::run(args)?,
         Some(Commands::Sync { command }) => sync::run(command)?,
     }

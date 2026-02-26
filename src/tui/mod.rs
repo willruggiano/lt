@@ -49,6 +49,85 @@ pub enum Mode {
     Detail,
     /// A generic list-picker popup is open (bd-3dz).
     Popup(PopupKind),
+    /// New-issue modal form (bd-l6r).
+    NewIssue,
+}
+
+// ---------------------------------------------------------------------------
+// New-issue modal state (bd-l6r)
+// ---------------------------------------------------------------------------
+
+/// Which field of the new-issue form is currently focused.
+#[derive(Clone, PartialEq)]
+pub enum NewIssueField {
+    Title,
+    Team,
+    Priority,
+    State,
+    Assignee,
+    Description,
+}
+
+impl NewIssueField {
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Title => Self::Team,
+            Self::Team => Self::Priority,
+            Self::Priority => Self::State,
+            Self::State => Self::Assignee,
+            Self::Assignee => Self::Description,
+            Self::Description => Self::Description,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::Title => Self::Title,
+            Self::Team => Self::Title,
+            Self::Priority => Self::Team,
+            Self::State => Self::Priority,
+            Self::Assignee => Self::State,
+            Self::Description => Self::Assignee,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Title => "Title",
+            Self::Team => "Team",
+            Self::Priority => "Priority",
+            Self::State => "State",
+            Self::Assignee => "Assignee",
+            Self::Description => "Description",
+        }
+    }
+}
+
+/// All mutable state for the new-issue modal form.
+pub struct NewIssueModal {
+    pub focused_field: NewIssueField,
+
+    // Text fields
+    pub title: String,
+    pub description: String,
+
+    // Picker fields -- each holds a list of items + current selection index.
+    pub teams: Vec<PopupItem>,
+    pub team_selected: usize,
+
+    pub priorities: Vec<PopupItem>,
+    pub priority_selected: usize,
+
+    pub states: Vec<PopupItem>,
+    pub state_selected: usize,
+
+    pub assignees: Vec<PopupItem>,
+    pub assignee_selected: usize,
+
+    /// True while we are waiting for picker data to load.
+    pub loading: bool,
+    /// Non-empty when a load or submit error occurred.
+    pub error: String,
 }
 
 pub struct App {
@@ -83,6 +162,9 @@ pub struct App {
 
     // -- footer message (bd-3dz) ----------------------------------------------
     pub footer_msg: Option<String>,
+
+    // -- new-issue modal (bd-l6r) --------------------------------------------
+    pub new_issue_modal: Option<NewIssueModal>,
 }
 
 impl App {
@@ -115,6 +197,7 @@ impl App {
             popup_items: Vec::new(),
             popup_selected: 0,
             footer_msg: None,
+            new_issue_modal: None,
         }
     }
 
@@ -465,6 +548,282 @@ impl App {
     fn popup_cancel(&mut self) {
         self.mode = Mode::List;
     }
+
+    // -- New-issue modal (bd-l6r) --------------------------------------------
+
+    fn open_new_issue_modal(&mut self) {
+        let token = match crate::config::load_token() {
+            Ok(Some(t)) => t,
+            _ => {
+                self.footer_msg = Some("Not logged in".to_string());
+                return;
+            }
+        };
+
+        // Pre-fill team from active filter if set.
+        let preset_team = self.args.team.clone();
+
+        let mut modal = NewIssueModal {
+            focused_field: NewIssueField::Title,
+            title: String::new(),
+            description: String::new(),
+            teams: Vec::new(),
+            team_selected: 0,
+            priorities: vec![
+                PopupItem {
+                    label: "No priority".to_string(),
+                    id: Some("0".to_string()),
+                },
+                PopupItem {
+                    label: "Urgent".to_string(),
+                    id: Some("1".to_string()),
+                },
+                PopupItem {
+                    label: "High".to_string(),
+                    id: Some("2".to_string()),
+                },
+                PopupItem {
+                    label: "Normal".to_string(),
+                    id: Some("3".to_string()),
+                },
+                PopupItem {
+                    label: "Low".to_string(),
+                    id: Some("4".to_string()),
+                },
+            ],
+            priority_selected: 0,
+            states: Vec::new(),
+            state_selected: 0,
+            assignees: Vec::new(),
+            assignee_selected: 0,
+            loading: true,
+            error: String::new(),
+        };
+
+        // Fetch teams.
+        match crate::linear::mutations::fetch_teams(&token.access_token) {
+            Ok(teams) => {
+                modal.teams = teams
+                    .into_iter()
+                    .map(|t| PopupItem {
+                        label: t.name.clone(),
+                        id: Some(t.id),
+                    })
+                    .collect();
+                // Pre-select team from filter.
+                if let Some(ref preset) = preset_team {
+                    if let Some(idx) = modal
+                        .teams
+                        .iter()
+                        .position(|t| t.label.to_lowercase().contains(&preset.to_lowercase()))
+                    {
+                        modal.team_selected = idx;
+                    }
+                }
+                modal.loading = false;
+            }
+            Err(e) => {
+                modal.error = format!("Failed to fetch teams: {}", e);
+                modal.loading = false;
+            }
+        }
+
+        self.mode = Mode::NewIssue;
+        self.new_issue_modal = Some(modal);
+    }
+
+    /// Load states for the currently selected team into the modal.
+    fn new_issue_load_states(&mut self) {
+        let token = match crate::config::load_token() {
+            Ok(Some(t)) => t,
+            _ => return,
+        };
+        let modal = match self.new_issue_modal.as_mut() {
+            Some(m) => m,
+            None => return,
+        };
+        let team_id = match modal.teams.get(modal.team_selected) {
+            Some(t) => match &t.id {
+                Some(id) => id.clone(),
+                None => return,
+            },
+            None => return,
+        };
+        match crate::linear::mutations::fetch_workflow_states(&token.access_token, &team_id) {
+            Ok(states) => {
+                modal.states = states
+                    .into_iter()
+                    .map(|s| PopupItem {
+                        label: s.name,
+                        id: Some(s.id),
+                    })
+                    .collect();
+                modal.state_selected = 0;
+                modal.error.clear();
+            }
+            Err(e) => {
+                modal.error = format!("Failed to fetch states: {}", e);
+            }
+        }
+    }
+
+    /// Load assignees for the currently selected team into the modal.
+    fn new_issue_load_assignees(&mut self) {
+        let token = match crate::config::load_token() {
+            Ok(Some(t)) => t,
+            _ => return,
+        };
+        let modal = match self.new_issue_modal.as_mut() {
+            Some(m) => m,
+            None => return,
+        };
+        let team_id = match modal.teams.get(modal.team_selected) {
+            Some(t) => match &t.id {
+                Some(id) => id.clone(),
+                None => return,
+            },
+            None => return,
+        };
+        let mut items = vec![PopupItem {
+            label: "Unassigned".to_string(),
+            id: None,
+        }];
+        match fetch_team_members(&token.access_token, &team_id) {
+            Ok(members) => {
+                for m in members {
+                    items.push(PopupItem {
+                        label: m.name,
+                        id: Some(m.id),
+                    });
+                }
+                modal.error.clear();
+            }
+            Err(e) => {
+                modal.error = format!("Failed to fetch assignees: {}", e);
+            }
+        }
+        modal.assignees = items;
+        modal.assignee_selected = 0;
+    }
+
+    fn new_issue_submit(&mut self) {
+        let token = match crate::config::load_token() {
+            Ok(Some(t)) => t,
+            _ => {
+                if let Some(m) = self.new_issue_modal.as_mut() {
+                    m.error = "Not logged in".to_string();
+                }
+                return;
+            }
+        };
+
+        let modal = match self.new_issue_modal.as_ref() {
+            Some(m) => m,
+            None => return,
+        };
+
+        if modal.title.trim().is_empty() {
+            if let Some(m) = self.new_issue_modal.as_mut() {
+                m.error = "Title is required".to_string();
+                m.focused_field = NewIssueField::Title;
+            }
+            return;
+        }
+
+        let team_id = match modal
+            .teams
+            .get(modal.team_selected)
+            .and_then(|t| t.id.clone())
+        {
+            Some(id) => id,
+            None => {
+                if let Some(m) = self.new_issue_modal.as_mut() {
+                    m.error = "Select a team".to_string();
+                }
+                return;
+            }
+        };
+
+        let input = crate::linear::mutations::CreateIssueInput {
+            title: modal.title.trim().to_string(),
+            team_id: team_id.clone(),
+            description: if modal.description.trim().is_empty() {
+                None
+            } else {
+                Some(modal.description.trim().to_string())
+            },
+            state_id: modal
+                .states
+                .get(modal.state_selected)
+                .and_then(|s| s.id.clone()),
+            priority: modal
+                .priorities
+                .get(modal.priority_selected)
+                .and_then(|p| p.id.as_ref())
+                .and_then(|s| s.parse::<u8>().ok()),
+            assignee_id: modal
+                .assignees
+                .get(modal.assignee_selected)
+                .and_then(|a| a.id.clone()),
+        };
+
+        let title_for_db = input.title.clone();
+        let team_name = modal
+            .teams
+            .get(modal.team_selected)
+            .map(|t| t.label.clone())
+            .unwrap_or_default();
+        let state_name = modal
+            .states
+            .get(modal.state_selected)
+            .map(|s| s.label.clone())
+            .unwrap_or_else(|| "Backlog".to_string());
+        let priority_label = modal
+            .priorities
+            .get(modal.priority_selected)
+            .map(|p| p.label.clone())
+            .unwrap_or_else(|| "No priority".to_string());
+        let assignee_name = modal.assignees.get(modal.assignee_selected).and_then(|a| {
+            if a.id.is_some() {
+                Some(a.label.clone())
+            } else {
+                None
+            }
+        });
+
+        match crate::linear::mutations::create_issue(&token.access_token, input) {
+            Ok(created) => {
+                // Optimistically insert into SQLite.
+                let now = chrono::Utc::now().to_rfc3339();
+                let db_issue = crate::db::Issue {
+                    id: created.id.clone(),
+                    identifier: created.identifier.clone(),
+                    title: title_for_db,
+                    priority_label,
+                    state_name,
+                    assignee_name,
+                    team_name,
+                    team_key: Some(team_id),
+                    created_at: now.clone(),
+                    updated_at: now,
+                    synced_at: chrono::Utc::now().to_rfc3339(),
+                };
+                if let Ok(conn) = crate::db::open_db() {
+                    let _ = crate::db::upsert_issues(&conn, &[db_issue]);
+                }
+                // Refresh list and highlight new issue.
+                self.mode = Mode::List;
+                self.new_issue_modal = None;
+                self.footer_msg = Some(format!("Created {}", created.identifier));
+                self.do_fetch(true);
+            }
+            Err(e) => {
+                if let Some(m) = self.new_issue_modal.as_mut() {
+                    m.error = format!("Failed to create issue: {}", e);
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +1022,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
                     Mode::InputFilter => handle_input_key(&mut app, key.code),
                     Mode::Popup(_) => handle_popup_key(&mut app, key.code),
                     Mode::Detail => handle_detail_key(&mut app, key.code),
+                    Mode::NewIssue => handle_new_issue_key(&mut app, key.code, key.modifiers),
                     Mode::List => handle_normal_key(&mut app, key.code, key.modifiers),
                 }
             }
@@ -694,6 +1054,133 @@ fn handle_input_key(app: &mut App, code: KeyCode) {
             app.input_buf.push(c);
         }
         _ => {}
+    }
+}
+
+// -- New-issue modal key handler (bd-l6r) ------------------------------------
+
+fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let shift = modifiers.contains(KeyModifiers::SHIFT);
+
+    // Ctrl-Enter submits the form.
+    if ctrl && code == KeyCode::Enter {
+        app.new_issue_submit();
+        return;
+    }
+
+    // Esc cancels.
+    if code == KeyCode::Esc {
+        app.mode = Mode::List;
+        app.new_issue_modal = None;
+        return;
+    }
+
+    let modal = match app.new_issue_modal.as_mut() {
+        Some(m) => m,
+        None => return,
+    };
+
+    match &modal.focused_field.clone() {
+        // ---- Text fields ----
+        NewIssueField::Title => match code {
+            KeyCode::Tab => {
+                modal.focused_field = modal.focused_field.next();
+            }
+            KeyCode::BackTab => {
+                modal.focused_field = modal.focused_field.prev();
+            }
+            KeyCode::Backspace => {
+                modal.title.pop();
+            }
+            KeyCode::Char(c) => {
+                if !ctrl {
+                    modal.title.push(c);
+                }
+            }
+            _ => {}
+        },
+        NewIssueField::Description => match code {
+            KeyCode::Tab => {
+                // Description is last field; Tab wraps to Title.
+                modal.focused_field = modal.focused_field.next();
+            }
+            KeyCode::BackTab => {
+                modal.focused_field = modal.focused_field.prev();
+            }
+            KeyCode::Backspace => {
+                modal.description.pop();
+            }
+            KeyCode::Enter => {
+                modal.description.push('\n');
+            }
+            KeyCode::Char(c) => {
+                if !ctrl {
+                    modal.description.push(c);
+                }
+            }
+            _ => {}
+        },
+        // ---- Picker fields ----
+        field => {
+            let field = field.clone();
+            match code {
+                KeyCode::Tab if !shift => {
+                    // When leaving Team field, pre-load states and assignees.
+                    if field == NewIssueField::Team {
+                        // We need temporary borrow-release; do the field advance first.
+                        let next = modal.focused_field.next();
+                        modal.focused_field = next;
+                        drop(modal);
+                        app.new_issue_load_states();
+                        app.new_issue_load_assignees();
+                    } else {
+                        modal.focused_field = modal.focused_field.next();
+                    }
+                }
+                KeyCode::BackTab => {
+                    modal.focused_field = modal.focused_field.prev();
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let (items_len, selected) = new_issue_picker_state(modal, &field);
+                    if items_len > 0 {
+                        *selected = (*selected + 1).min(items_len - 1);
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    let (_items_len, selected) = new_issue_picker_state(modal, &field);
+                    *selected = selected.saturating_sub(1);
+                }
+                KeyCode::Enter => {
+                    // Enter on a picker field advances to the next field.
+                    if field == NewIssueField::Team {
+                        let next = modal.focused_field.next();
+                        modal.focused_field = next;
+                        drop(modal);
+                        app.new_issue_load_states();
+                        app.new_issue_load_assignees();
+                    } else {
+                        modal.focused_field = modal.focused_field.next();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Returns a mutable reference to (item count, selected index) for a picker field.
+fn new_issue_picker_state<'a>(
+    modal: &'a mut NewIssueModal,
+    field: &NewIssueField,
+) -> (usize, &'a mut usize) {
+    match field {
+        NewIssueField::Team => (modal.teams.len(), &mut modal.team_selected),
+        NewIssueField::Priority => (modal.priorities.len(), &mut modal.priority_selected),
+        NewIssueField::State => (modal.states.len(), &mut modal.state_selected),
+        NewIssueField::Assignee => (modal.assignees.len(), &mut modal.assignee_selected),
+        // Text fields should not reach here.
+        _ => (0, &mut modal.team_selected),
     }
 }
 
@@ -763,6 +1250,8 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('s') => app.open_state_popup(),
         KeyCode::Char('p') => app.open_priority_popup(),
         KeyCode::Char('a') => app.open_assignee_popup(),
+        // New issue modal (bd-l6r)
+        KeyCode::Char('n') => app.open_new_issue_modal(),
         _ => {}
     }
 }
