@@ -1,4 +1,5 @@
 mod display;
+pub mod detail;
 mod filter;
 pub mod list;
 mod sort;
