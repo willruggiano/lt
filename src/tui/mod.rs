@@ -1,7 +1,7 @@
 mod ui;
 
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -56,8 +56,6 @@ pub struct PopupItem {
 pub enum Mode {
     /// Normal list browsing mode.
     List,
-    /// Filter input overlay is active.
-    InputFilter,
     /// Detail pane showing full issue content (bd-2g8).
     Detail,
     /// A generic list-picker popup is open (bd-3dz).
@@ -66,6 +64,8 @@ pub enum Mode {
     NewIssue,
     /// Searchable help popup (bd-5lz).
     Help,
+    /// FTS incremental search overlay (bd-2g4).
+    Search,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,28 +80,94 @@ pub struct HelpEntry {
 
 /// All keybindings shown in the help popup.
 pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
-    HelpEntry { key: "q / Esc",       description: "quit (list view; help: Esc only)" },
-    HelpEntry { key: "j / Down",      description: "move down" },
-    HelpEntry { key: "k / Up",        description: "move up" },
-    HelpEntry { key: "g",             description: "go to top" },
-    HelpEntry { key: "G",             description: "go to bottom" },
-    HelpEntry { key: "Ctrl-d",        description: "half page down" },
-    HelpEntry { key: "Ctrl-u",        description: "half page up" },
-    HelpEntry { key: "PageDown",      description: "page down" },
-    HelpEntry { key: "PageUp",        description: "page up" },
-    HelpEntry { key: "Enter",         description: "open detail pane" },
-    HelpEntry { key: "/",             description: "filter by title" },
-    HelpEntry { key: "?",             description: "open this help popup" },
-    HelpEntry { key: "n",             description: "new issue" },
-    HelpEntry { key: "s",             description: "set state" },
-    HelpEntry { key: "p",             description: "set priority" },
-    HelpEntry { key: "a",             description: "set assignee" },
-    HelpEntry { key: "o",             description: "open in browser" },
-    HelpEntry { key: "r",             description: "refresh" },
-    HelpEntry { key: "S",             description: "cycle sort field" },
-    HelpEntry { key: "d",             description: "toggle sort direction" },
-    HelpEntry { key: "Ctrl-n",        description: "next page" },
-    HelpEntry { key: "Ctrl-p",        description: "previous page" },
+    HelpEntry {
+        key: "q / Esc",
+        description: "quit (list view; help: Esc only)",
+    },
+    HelpEntry {
+        key: "j / Down",
+        description: "move down",
+    },
+    HelpEntry {
+        key: "k / Up",
+        description: "move up",
+    },
+    HelpEntry {
+        key: "g",
+        description: "go to top",
+    },
+    HelpEntry {
+        key: "G",
+        description: "go to bottom",
+    },
+    HelpEntry {
+        key: "Ctrl-d",
+        description: "half page down",
+    },
+    HelpEntry {
+        key: "Ctrl-u",
+        description: "half page up",
+    },
+    HelpEntry {
+        key: "PageDown",
+        description: "page down",
+    },
+    HelpEntry {
+        key: "PageUp",
+        description: "page up",
+    },
+    HelpEntry {
+        key: "Enter",
+        description: "open detail pane",
+    },
+    HelpEntry {
+        key: "/",
+        description: "filter by title",
+    },
+    HelpEntry {
+        key: "?",
+        description: "open this help popup",
+    },
+    HelpEntry {
+        key: "n",
+        description: "new issue",
+    },
+    HelpEntry {
+        key: "s",
+        description: "set state",
+    },
+    HelpEntry {
+        key: "p",
+        description: "set priority",
+    },
+    HelpEntry {
+        key: "a",
+        description: "set assignee",
+    },
+    HelpEntry {
+        key: "o",
+        description: "open in browser",
+    },
+    HelpEntry {
+        key: "r",
+        description: "refresh",
+    },
+    HelpEntry {
+        key: "S",
+        description: "cycle sort field",
+    },
+    HelpEntry {
+        key: "d",
+        description: "toggle sort direction",
+    },
+    HelpEntry {
+        key: "Ctrl-n",
+        description: "next page",
+    },
+    HelpEntry {
+        key: "Ctrl-p",
+        description: "previous page",
+    },
 ];
 
 /// Mutable state for the help popup.
@@ -141,6 +207,78 @@ impl HelpPopup {
 }
 
 // ---------------------------------------------------------------------------
+// FTS search overlay state (bd-2g4)
+// ---------------------------------------------------------------------------
+
+/// Mutable state for the FTS search overlay.
+pub struct SearchOverlay {
+    /// Current query string typed by the user.
+    pub query: String,
+    /// Issues returned by the last FTS query.
+    pub results: Vec<crate::issues::list::Issue>,
+    /// Table selection state for the results list.
+    pub table_state: TableState,
+    /// When the query was last modified (used for 150ms debounce).
+    pub last_changed: Option<Instant>,
+    /// True when FTS index is unavailable (no sync yet).
+    pub fts_unavailable: bool,
+}
+
+impl SearchOverlay {
+    pub fn new() -> Self {
+        Self {
+            query: String::new(),
+            results: Vec::new(),
+            table_state: TableState::default(),
+            last_changed: None,
+            fts_unavailable: false,
+        }
+    }
+
+    /// Run the FTS query and refresh results. Called after debounce fires.
+    pub fn run_search(&mut self) {
+        self.fts_unavailable = false;
+        if self.query.trim().is_empty() {
+            self.results.clear();
+            self.table_state.select(None);
+            return;
+        }
+        // Append '*' for prefix matching so typing "oauth" matches "oauth2" etc.
+        let fts_query = format!("{}*", self.query.trim());
+        match crate::db::open_db().and_then(|conn| crate::db::search_issues(&conn, &fts_query)) {
+            Ok(db_issues) => {
+                self.results = db_issues.into_iter().map(db_issue_to_list_issue).collect();
+                if self.results.is_empty() {
+                    self.table_state.select(None);
+                } else {
+                    self.table_state.select(Some(0));
+                }
+            }
+            Err(_) => {
+                // FTS index unavailable (table missing or no sync done yet).
+                self.fts_unavailable = true;
+                self.results.clear();
+                self.table_state.select(None);
+            }
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        let n = self.results.len();
+        if n == 0 {
+            return;
+        }
+        let i = self.table_state.selected().unwrap_or(0);
+        self.table_state.select(Some((i + 1).min(n - 1)));
+    }
+
+    pub fn move_up(&mut self) {
+        let i = self.table_state.selected().unwrap_or(0);
+        self.table_state.select(Some(i.saturating_sub(1)));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // New-issue modal state (bd-l6r)
 // ---------------------------------------------------------------------------
 
@@ -175,17 +313,6 @@ impl NewIssueField {
             Self::State => Self::Priority,
             Self::Assignee => Self::State,
             Self::Description => Self::Assignee,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Title => "Title",
-            Self::Team => "Team",
-            Self::Priority => "Priority",
-            Self::State => "State",
-            Self::Assignee => "Assignee",
-            Self::Description => "Description",
         }
     }
 }
@@ -232,7 +359,6 @@ pub struct NewIssueModal {
 
     /// Receiver for background-loaded modal data (bd-vfi).
     pub modal_rx: Option<mpsc::Receiver<ModalEvent>>,
-
 }
 
 pub struct App {
@@ -281,6 +407,9 @@ pub struct App {
 
     // -- help popup (bd-5lz) -------------------------------------------------
     pub help_popup: Option<HelpPopup>,
+
+    // -- FTS search overlay (bd-2g4) -------------------------------------------
+    pub search_overlay: Option<SearchOverlay>,
 }
 
 impl App {
@@ -321,6 +450,7 @@ impl App {
             syncing,
             sync_status_label,
             help_popup: None,
+            search_overlay: None,
         }
     }
 
@@ -412,10 +542,10 @@ impl App {
     /// Fetch and then seek to the newly created issue by identifier (bd-3ba).
     fn do_fetch_and_select(&mut self, target_identifier: Option<String>) {
         self.do_fetch(true);
-        if let Some(id) = target_identifier {
-            if let Some(idx) = self.issues.iter().position(|i| i.identifier == id) {
-                self.table_state.select(Some(idx));
-            }
+        if let Some(id) = target_identifier
+            && let Some(idx) = self.issues.iter().position(|i| i.identifier == id)
+        {
+            self.table_state.select(Some(idx));
         }
     }
 
@@ -758,14 +888,13 @@ impl App {
                     })
                     .collect();
                 // Pre-select team from filter.
-                if let Some(ref preset) = preset_team {
-                    if let Some(idx) = modal
+                if let Some(ref preset) = preset_team
+                    && let Some(idx) = modal
                         .teams
                         .iter()
                         .position(|t| t.label.to_lowercase().contains(&preset.to_lowercase()))
-                    {
-                        modal.team_selected = idx;
-                    }
+                {
+                    modal.team_selected = idx;
                 }
                 modal.loading = false;
             }
@@ -785,7 +914,11 @@ impl App {
             Some(m) => m,
             None => return,
         };
-        let team_id = match modal.teams.get(modal.team_selected).and_then(|t| t.id.clone()) {
+        let team_id = match modal
+            .teams
+            .get(modal.team_selected)
+            .and_then(|t| t.id.clone())
+        {
             Some(id) => id,
             None => return,
         };
@@ -821,7 +954,10 @@ impl App {
                     let _ = tx.send(ModalEvent::StatesLoaded(items));
                 }
                 Err(e) => {
-                    let _ = tx.send(ModalEvent::LoadError(format!("Failed to fetch states: {}", e)));
+                    let _ = tx.send(ModalEvent::LoadError(format!(
+                        "Failed to fetch states: {}",
+                        e
+                    )));
                     return;
                 }
             }
@@ -855,7 +991,10 @@ impl App {
                     let _ = tx.send(ModalEvent::AssigneesLoaded(items));
                 }
                 Err(e) => {
-                    let _ = tx.send(ModalEvent::LoadError(format!("Failed to fetch assignees: {}", e)));
+                    let _ = tx.send(ModalEvent::LoadError(format!(
+                        "Failed to fetch assignees: {}",
+                        e
+                    )));
                 }
             }
         });
@@ -1254,8 +1393,8 @@ fn build_sync_status_label(syncing: bool) -> String {
             // Parse RFC3339 and compute elapsed minutes.
             match chrono::DateTime::parse_from_rfc3339(&ts) {
                 Ok(dt) => {
-                    let elapsed = chrono::Utc::now()
-                        .signed_duration_since(dt.with_timezone(&chrono::Utc));
+                    let elapsed =
+                        chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc));
                     let mins = elapsed.num_minutes();
                     if mins < 1 {
                         "synced just now".to_string()
@@ -1283,10 +1422,7 @@ fn spawn_sync_thread(args: IssueArgs) -> mpsc::Receiver<SyncEvent> {
                     let conn = crate::db::open_db()?;
                     let db_issues = crate::db::query_issues(&conn, &args)?;
                     // Convert db::Issue -> issues::list::Issue.
-                    Ok(db_issues
-                        .into_iter()
-                        .map(db_issue_to_list_issue)
-                        .collect())
+                    Ok(db_issues.into_iter().map(db_issue_to_list_issue).collect())
                 })();
                 match issues {
                     Ok(list) => {
@@ -1393,25 +1529,28 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         // Poll modal background loader channel (bd-vfi).
         app.poll_modal_events();
 
+        // Poll FTS search debounce (bd-2g4).
+        poll_search_debounce(&mut app);
+
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         if app.quit {
             return Ok(());
         }
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match app.mode {
-                    Mode::InputFilter => handle_input_key(&mut app, key.code),
-                    Mode::Popup(_) => handle_popup_key(&mut app, key.code),
-                    Mode::Detail => handle_detail_key(&mut app, key.code),
-                    Mode::NewIssue => handle_new_issue_key(&mut app, key.code, key.modifiers),
-                    Mode::Help => handle_help_key(&mut app, key.code),
-                    Mode::List => handle_normal_key(&mut app, key.code, key.modifiers),
-                }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match app.mode {
+                Mode::Popup(_) => handle_popup_key(&mut app, key.code),
+                Mode::Detail => handle_detail_key(&mut app, key.code),
+                Mode::NewIssue => handle_new_issue_key(&mut app, key.code, key.modifiers),
+                Mode::Help => handle_help_key(&mut app, key.code),
+                Mode::Search => handle_search_key(&mut app, key.code),
+                Mode::List => handle_normal_key(&mut app, key.code, key.modifiers),
             }
         }
     }
@@ -1430,7 +1569,10 @@ fn poll_sync_events(app: &mut App) {
         match rx.try_recv() {
             Ok(SyncEvent::Done(new_issues)) => {
                 // Only replace list if the user is in normal list mode and not paginated.
-                if matches!(app.mode, Mode::List) && app.cursor_stack.is_empty() && app.current_cursor.is_none() {
+                if matches!(app.mode, Mode::List)
+                    && app.cursor_stack.is_empty()
+                    && app.current_cursor.is_none()
+                {
                     let prev_selected = app.table_state.selected();
                     app.issues = new_issues;
                     let n = app.issues.len();
@@ -1467,33 +1609,6 @@ fn poll_sync_events(app: &mut App) {
     // Put the receiver back if the thread may still send more messages.
     if !got_event || app.syncing {
         app.sync_rx = Some(rx);
-    }
-}
-
-fn handle_input_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc => {
-            app.mode = Mode::List;
-            app.input_mode = false;
-            app.input_buf.clear();
-        }
-        KeyCode::Enter => {
-            app.mode = Mode::List;
-            app.input_mode = false;
-            let query = app.input_buf.trim().to_string();
-            app.args.title = if query.is_empty() { None } else { Some(query) };
-            app.input_buf.clear();
-            app.cursor_stack.clear();
-            app.current_cursor = None;
-            app.do_fetch(true);
-        }
-        KeyCode::Backspace => {
-            app.input_buf.pop();
-        }
-        KeyCode::Char(c) => {
-            app.input_buf.push(c);
-        }
-        _ => {}
     }
 }
 
@@ -1593,10 +1708,10 @@ fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // "m" shortcut: select "Me (...)" entry in Assignee picker (bd-1fz).
                 KeyCode::Char('m') if field == NewIssueField::Assignee => {
                     // The "Me (name)" entry is always at index 0 when present.
-                    if let Some(first) = modal.assignees.first() {
-                        if first.label.starts_with("Me (") {
-                            modal.assignee_selected = 0;
-                        }
+                    if let Some(first) = modal.assignees.first()
+                        && first.label.starts_with("Me (")
+                    {
+                        modal.assignee_selected = 0;
                     }
                 }
                 KeyCode::Enter => {
@@ -1690,9 +1805,8 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('S') => app.cycle_sort(),
         KeyCode::Char('d') => app.toggle_desc(),
         KeyCode::Char('/') => {
-            app.input_buf = app.args.title.clone().unwrap_or_default();
-            app.input_mode = true;
-            app.mode = Mode::InputFilter;
+            app.search_overlay = Some(SearchOverlay::new());
+            app.mode = Mode::Search;
         }
         // Write op keybindings (bd-3dz)
         KeyCode::Char('s') => app.open_state_popup(),
@@ -1756,5 +1870,69 @@ fn handle_help_key(app: &mut App, code: KeyCode) {
             }
         }
         _ => {}
+    }
+}
+
+// -- FTS search overlay key handler (bd-2g4) --------------------------------
+
+fn handle_search_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            // Clear search, return to full list.
+            app.mode = Mode::List;
+            app.search_overlay = None;
+        }
+        KeyCode::Enter => {
+            // Confirm: leave search mode with filtered results visible.
+            // Transfer results into app.issues so normal keybindings work.
+            if let Some(ref mut overlay) = app.search_overlay {
+                let results = std::mem::take(&mut overlay.results);
+                let selected = overlay.table_state.selected();
+                app.issues = results;
+                let n = app.issues.len();
+                let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
+                app.table_state.select(if n > 0 { Some(sel) } else { None });
+            }
+            app.mode = Mode::List;
+            app.search_overlay = None;
+        }
+        KeyCode::Backspace => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.query.pop();
+                overlay.last_changed = Some(Instant::now());
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.move_down();
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.move_up();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.query.push(c);
+                overlay.last_changed = Some(Instant::now());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Fire the FTS search when the debounce interval (150ms) has elapsed.
+fn poll_search_debounce(app: &mut App) {
+    let should_search = match app.search_overlay {
+        Some(ref overlay) => match overlay.last_changed {
+            Some(t) => t.elapsed() >= Duration::from_millis(150),
+            None => false,
+        },
+        None => false,
+    };
+    if should_search && let Some(ref mut overlay) = app.search_overlay {
+        overlay.last_changed = None;
+        overlay.run_search();
     }
 }

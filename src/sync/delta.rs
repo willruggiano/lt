@@ -141,7 +141,6 @@ pub fn run() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("not logged in -- run `lt auth login` first"))?;
 
     let mut cursor: Option<String> = None;
-    let mut total = 0usize;
 
     loop {
         let after = cursor.as_deref();
@@ -152,8 +151,6 @@ pub fn run() -> Result<()> {
             let db_issues: Vec<db::Issue> = issues.iter().map(to_db_issue).collect();
             db::upsert_issues(&conn, &db_issues)?;
         }
-
-        total += count;
 
         if !has_next {
             break;

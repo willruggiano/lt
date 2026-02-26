@@ -4,6 +4,7 @@ mod db;
 mod inbox;
 mod issues;
 mod linear;
+mod search;
 mod sync;
 mod tui;
 
@@ -46,6 +47,11 @@ enum Commands {
         #[command(subcommand)]
         command: Option<sync::SyncCommands>,
     },
+    /// Search the local SQLite FTS5 index for issues
+    Search {
+        #[command(flatten)]
+        args: search::SearchArgs,
+    },
 }
 
 fn main() -> Result<()> {
@@ -60,6 +66,7 @@ fn main() -> Result<()> {
             let cmd = command.unwrap_or(sync::SyncCommands::Delta);
             sync::run(cmd)?;
         }
+        Some(Commands::Search { args }) => search::run(args)?,
     }
     Ok(())
 }

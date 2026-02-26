@@ -46,6 +46,7 @@ struct Organization {
 struct Viewer {
     pub id: String,
     pub name: String,
+    #[allow(dead_code)]
     pub email: String,
     pub organization: Organization,
 }
@@ -126,10 +127,11 @@ fn pick_team<'a>(teams: &'a [Team], hint: Option<&str>) -> Result<&'a Team> {
         if let Some(t) = teams.iter().find(|t| t.name.to_lowercase() == lower) {
             return Ok(t);
         }
-        if let Ok(n) = h.parse::<usize>() {
-            if n >= 1 && n <= teams.len() {
-                return Ok(&teams[n - 1]);
-            }
+        if let Ok(n) = h.parse::<usize>()
+            && n >= 1
+            && n <= teams.len()
+        {
+            return Ok(&teams[n - 1]);
         }
         return Err(anyhow!("no team matching '{}'", h));
     }
@@ -149,10 +151,11 @@ fn pick_team<'a>(teams: &'a [Team], hint: Option<&str>) -> Result<&'a Team> {
         if let Some(t) = teams.iter().find(|t| t.name.to_lowercase() == lower) {
             return Ok(t);
         }
-        if let Ok(n) = input.parse::<usize>() {
-            if n >= 1 && n <= teams.len() {
-                return Ok(&teams[n - 1]);
-            }
+        if let Ok(n) = input.parse::<usize>()
+            && n >= 1
+            && n <= teams.len()
+        {
+            return Ok(&teams[n - 1]);
         }
         println!(
             "Invalid selection. Enter a number (1-{}) or team name.",
@@ -162,10 +165,10 @@ fn pick_team<'a>(teams: &'a [Team], hint: Option<&str>) -> Result<&'a Team> {
 }
 
 fn prompt_title(hint: Option<&str>) -> Result<String> {
-    if let Some(t) = hint {
-        if !t.trim().is_empty() {
-            return Ok(t.to_string());
-        }
+    if let Some(t) = hint
+        && !t.trim().is_empty()
+    {
+        return Ok(t.to_string());
     }
     loop {
         let input = read_line("Title: ")?;
@@ -245,10 +248,11 @@ fn pick_state<'a>(
         if let Some(s) = states.iter().find(|s| s.name.to_lowercase() == lower) {
             return Ok(Some(s));
         }
-        if let Ok(n) = h.parse::<usize>() {
-            if n >= 1 && n <= states.len() {
-                return Ok(Some(&states[n - 1]));
-            }
+        if let Ok(n) = h.parse::<usize>()
+            && n >= 1
+            && n <= states.len()
+        {
+            return Ok(Some(&states[n - 1]));
         }
         return Err(anyhow!("no state matching '{}'", h));
     }
@@ -278,10 +282,11 @@ fn pick_state<'a>(
     if let Some(s) = states.iter().find(|s| s.name.to_lowercase() == lower) {
         return Ok(Some(s));
     }
-    if let Ok(n) = input.trim().parse::<usize>() {
-        if n >= 1 && n <= states.len() {
-            return Ok(Some(&states[n - 1]));
-        }
+    if let Ok(n) = input.trim().parse::<usize>()
+        && n >= 1
+        && n <= states.len()
+    {
+        return Ok(Some(&states[n - 1]));
     }
 
     println!("Invalid state, using default: {}", default_name);
@@ -335,10 +340,11 @@ fn pick_assignee(
     {
         return Ok(Some(m.id.clone()));
     }
-    if let Ok(n) = trimmed.parse::<usize>() {
-        if n >= 1 && n <= members.len() {
-            return Ok(Some(members[n - 1].id.clone()));
-        }
+    if let Ok(n) = trimmed.parse::<usize>()
+        && n >= 1
+        && n <= members.len()
+    {
+        return Ok(Some(members[n - 1].id.clone()));
     }
 
     println!("Invalid selection, defaulting to unassigned.");

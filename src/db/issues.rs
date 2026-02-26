@@ -17,6 +17,7 @@ pub struct Issue {
     pub team_key: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[allow(dead_code)]
     pub synced_at: String,
 }
 

@@ -31,10 +31,7 @@ pub fn print_table_cached(issues: &[db::Issue], note: &str) {
                 truncate(&i.title, MAX_TITLE),
                 i.state_name.clone(),
                 i.priority_label.clone(),
-                i.assignee_name
-                    .as_deref()
-                    .unwrap_or("-")
-                    .to_string(),
+                i.assignee_name.as_deref().unwrap_or("-").to_string(),
                 i.team_name.clone(),
                 date(&i.created_at).to_string(),
                 date(&i.updated_at).to_string(),

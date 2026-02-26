@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use serde_json::json;
@@ -112,11 +114,11 @@ pub fn fetch_notifications(
         all.extend(conn.nodes);
 
         // Stop if we have reached the total cap.
-        if let Some(max) = max_total {
-            if all.len() >= max {
-                all.truncate(max);
-                break;
-            }
+        if let Some(max) = max_total
+            && all.len() >= max
+        {
+            all.truncate(max);
+            break;
         }
 
         if !conn.page_info.has_next_page {

@@ -6,7 +6,10 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
 };
 
-use super::{App, HelpPopup, Mode, NewIssueField, NewIssueModal, PopupKind, Status, ALL_KEYBINDINGS};
+use super::{
+    ALL_KEYBINDINGS, App, HelpPopup, Mode, NewIssueField, NewIssueModal, PopupKind, SearchOverlay,
+    Status,
+};
 use crate::issues::list::Issue;
 use crate::issues::{IssueArgs, SortField};
 use crate::linear::types::IssueDetail;
@@ -67,17 +70,24 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     // Render new-issue modal on top if active.
-    if let Mode::NewIssue = app.mode {
-        if let Some(ref modal) = app.new_issue_modal {
-            render_new_issue_modal(frame, frame.area(), modal);
-        }
+    if let Mode::NewIssue = app.mode
+        && let Some(ref modal) = app.new_issue_modal
+    {
+        render_new_issue_modal(frame, frame.area(), modal);
     }
 
     // Render help popup on top if active (bd-5lz).
-    if let Mode::Help = app.mode {
-        if let Some(ref popup) = app.help_popup {
-            render_help_popup(frame, frame.area(), popup);
-        }
+    if let Mode::Help = app.mode
+        && let Some(ref popup) = app.help_popup
+    {
+        render_help_popup(frame, frame.area(), popup);
+    }
+
+    // Render FTS search overlay (bd-2g4).
+    if let Mode::Search = app.mode
+        && let Some(ref mut overlay) = app.search_overlay
+    {
+        render_search_overlay(frame, chunks, overlay);
     }
 }
 
@@ -338,18 +348,18 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
     // Description
-    if let Some(desc) = &d.description {
-        if !desc.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "Description",
-                Style::new().add_modifier(Modifier::UNDERLINED),
-            )));
-            lines.push(Line::from(""));
-            for raw_line in desc.lines() {
-                lines.push(Line::from(strip_markdown(raw_line)));
-            }
-            lines.push(Line::from(""));
+    if let Some(desc) = &d.description
+        && !desc.is_empty()
+    {
+        lines.push(Line::from(Span::styled(
+            "Description",
+            Style::new().add_modifier(Modifier::UNDERLINED),
+        )));
+        lines.push(Line::from(""));
+        for raw_line in desc.lines() {
+            lines.push(Line::from(strip_markdown(raw_line)));
         }
+        lines.push(Line::from(""));
     }
 
     // Comments
@@ -376,8 +386,8 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
 /// Minimal markdown stripping: remove **bold** markers and __underline__ markers.
 fn strip_markdown(s: &str) -> String {
     let s = s.replace("**", "");
-    let s = s.replace("__", "");
-    s
+
+    s.replace("__", "")
 }
 
 fn render_detail_footer(frame: &mut Frame, area: Rect) {
@@ -593,10 +603,7 @@ fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
 
     // Search bar.
-    frame.render_widget(
-        Paragraph::new(format!("/ {}_", popup.search)),
-        chunks[0],
-    );
+    frame.render_widget(Paragraph::new(format!("/ {}_", popup.search)), chunks[0]);
 
     // Keybinding list.
     let list_height = chunks[1].height as usize;
@@ -728,4 +735,104 @@ fn render_field_picker(
         .collect();
 
     frame.render_widget(List::new(list_items), chunks[1]);
+}
+
+// -- FTS search overlay (bd-2g4) ---------------------------------------------
+
+fn render_search_overlay(
+    frame: &mut Frame,
+    chunks: std::rc::Rc<[Rect]>,
+    overlay: &mut SearchOverlay,
+) {
+    // Search bar sits in the footer row (chunks[2]).
+    let search_bar_area = chunks[2];
+
+    // Build the search bar text.
+    let bar_text = if overlay.fts_unavailable {
+        "Search unavailable: run lt sync first".to_string()
+    } else {
+        format!("/ {}_", overlay.query)
+    };
+    frame.render_widget(Paragraph::new(bar_text), search_bar_area);
+
+    // Render search results in the main content area (chunks[1]).
+    let area = chunks[1];
+
+    if overlay.fts_unavailable || overlay.query.trim().is_empty() {
+        // Nothing to show yet.
+        return;
+    }
+
+    if overlay.results.is_empty() {
+        frame.render_widget(Paragraph::new("No results."), area);
+        return;
+    }
+
+    // Render results as a table identical in style to the main list.
+    let base_headers: [&str; 7] = [
+        "IDENTIFIER",
+        "TITLE",
+        "STATE",
+        "PRIORITY",
+        "ASSIGNEE",
+        "TEAM",
+        "UPDATED",
+    ];
+    let headers: [String; 7] = std::array::from_fn(|i| base_headers[i].to_string());
+
+    let mut widths: [usize; 7] = headers.each_ref().map(|h| h.len());
+    for issue in &overlay.results {
+        let row = search_row_cells(issue);
+        for (i, cell) in row.iter().enumerate() {
+            if cell.len() > widths[i] {
+                widths[i] = cell.len();
+            }
+        }
+    }
+
+    let header = Row::new(headers.map(Cell::from)).style(Style::new().add_modifier(Modifier::BOLD));
+
+    let rows: Vec<Row> = overlay
+        .results
+        .iter()
+        .map(|issue| Row::new(search_row_cells(issue).map(Cell::from)))
+        .collect();
+
+    let constraints: Vec<Constraint> = widths
+        .iter()
+        .map(|w| Constraint::Length(*w as u16))
+        .collect();
+
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .column_spacing(2);
+
+    frame.render_stateful_widget(table, area, &mut overlay.table_state);
+}
+
+fn search_row_cells(issue: &Issue) -> [String; 7] {
+    fn truncate(s: &str, max: usize) -> String {
+        if s.len() <= max {
+            s.to_string()
+        } else {
+            format!("{}...", &s[..max.saturating_sub(3)])
+        }
+    }
+    fn date(s: &str) -> &str {
+        if s.len() >= 10 { &s[..10] } else { s }
+    }
+    [
+        issue.identifier.clone(),
+        truncate(&issue.title, 40),
+        issue.state.name.clone(),
+        issue.priority_label.clone(),
+        issue
+            .assignee
+            .as_ref()
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|| "-".to_string()),
+        issue.team.name.clone(),
+        date(&issue.updated_at).to_string(),
+    ]
 }

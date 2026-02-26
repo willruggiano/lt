@@ -46,8 +46,6 @@ pub fn run() -> Result<()> {
     };
 
     let mut cursor: Option<String> = None;
-    let mut total = 0usize;
-
     loop {
         let after = cursor.as_deref();
         let (issues, has_next, end_cursor) = fetch(&args, after)?;
@@ -57,8 +55,6 @@ pub fn run() -> Result<()> {
             let db_issues: Vec<db::Issue> = issues.iter().map(to_db_issue).collect();
             db::upsert_issues(&conn, &db_issues)?;
         }
-
-        total += count;
 
         if !has_next {
             break;

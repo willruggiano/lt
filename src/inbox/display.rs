@@ -56,7 +56,7 @@ fn parse_iso8601_secs(s: &str) -> Option<u64> {
 
 /// Returns number of days since 1970-01-01 for a given (y, m, d).
 fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
-    if m < 1 || m > 12 || d < 1 || d > 31 {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return None;
     }
     // Adjust year/month so March = month 1
@@ -90,8 +90,7 @@ pub fn print_table(notifications: &[Notification]) {
         .map(|n| n.issue.as_ref().map(|i| i.title.len()).unwrap_or(0))
         .max()
         .unwrap_or(5)
-        .max(5)
-        .min(60);
+        .clamp(5, 60);
 
     let actor_w = notifications
         .iter()
@@ -102,12 +101,11 @@ pub fn print_table(notifications: &[Notification]) {
 
     // Header
     println!(
-        "{:<type_w$}  {:<issue_w$}  {:<title_w$}  {:<actor_w$}  {}",
+        "{:<type_w$}  {:<issue_w$}  {:<title_w$}  {:<actor_w$}  AGE",
         "TYPE",
         "ISSUE",
         "TITLE",
         "ACTOR",
-        "AGE",
         type_w = type_w,
         issue_w = issue_w,
         title_w = title_w,
