@@ -68,6 +68,25 @@ pub struct IssueArgs {
     pub limit: u32,
 }
 
+impl Default for IssueArgs {
+    fn default() -> Self {
+        Self {
+            team: None,
+            assignee: None,
+            no_assignee: false,
+            state: None,
+            priority: None,
+            created_after: None,
+            created_before: None,
+            updated_after: None,
+            updated_before: None,
+            sort: SortField::Updated,
+            desc: false,
+            limit: 50,
+        }
+    }
+}
+
 pub fn run(args: IssueArgs) -> Result<()> {
     list::run(args)
 }

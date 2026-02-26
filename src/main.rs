@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -46,10 +46,11 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Auth { command } => auth::run(command)?,
-        Commands::Issues { args } => issues::run(args)?,
-        Commands::Tui { args } => tui::run(args)?,
-        Commands::Sync { command } => sync::run(command)?,
+        None => tui::run(issues::IssueArgs::default())?,
+        Some(Commands::Auth { command }) => auth::run(command)?,
+        Some(Commands::Issues { args }) => issues::run(args)?,
+        Some(Commands::Tui { args }) => tui::run(args)?,
+        Some(Commands::Sync { command }) => sync::run(command)?,
     }
     Ok(())
 }
