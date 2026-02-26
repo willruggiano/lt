@@ -1,3 +1,7 @@
+pub mod issues;
+
+pub use issues::{get_meta, query_issues, set_meta, upsert_issues, Issue};
+
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::fs;
