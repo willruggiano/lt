@@ -1,15 +1,20 @@
 use anyhow::{Result, anyhow};
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::config;
+use crate::db;
 use crate::linear::client::graphql_query;
 use crate::linear::types::PageInfo;
 
 use super::IssueArgs;
-use super::display::print_table;
+use super::display::{print_table, print_table_cached};
 use super::filter::build_filter;
 use super::sort::build_sort;
+
+/// Cache TTL in seconds (5 minutes).
+const CACHE_TTL_SECS: i64 = 300;
 
 const ISSUES_QUERY: &str = r#"
 query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
@@ -104,10 +109,58 @@ pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool,
 }
 
 pub fn run(args: IssueArgs) -> Result<()> {
-    let (issues, has_next_page, _) = fetch(&args, None)?;
-    print_table(&issues);
-    if has_next_page {
-        println!("\n+more issues");
+    // --live: bypass cache entirely.
+    if args.live {
+        let (issues, has_next_page, _) = fetch(&args, None)?;
+        print_table(&issues);
+        if has_next_page {
+            println!("\n+more issues");
+        }
+        return Ok(());
     }
+
+    let conn = db::open_db()?;
+
+    // Check last_synced_at from sync_meta.
+    let last_synced_at = db::get_meta(&conn, "last_synced_at")?;
+
+    match last_synced_at {
+        None => {
+            // Cache is empty (never synced). Run full sync first.
+            println!("Cache empty -- running full sync...");
+            drop(conn);
+            crate::sync::full::run()?;
+            // Re-open after sync.
+            let conn2 = db::open_db()?;
+            let issues = db::query_issues(&conn2, &args)?;
+            print_table_cached(&issues, "(cached)");
+        }
+        Some(ref ts) => {
+            // Parse the timestamp and check age.
+            let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(ts)
+                .map(|t| Utc::now().signed_duration_since(t).num_seconds())
+                .unwrap_or(i64::MAX);
+
+            if age_secs < CACHE_TTL_SECS {
+                // Fresh cache -- serve immediately.
+                let issues = db::query_issues(&conn, &args)?;
+                let note = format!("(cached, age {}s)", age_secs);
+                print_table_cached(&issues, &note);
+            } else {
+                // Stale cache -- serve immediately, then run delta sync in background.
+                let issues = db::query_issues(&conn, &args)?;
+                let note = format!("(stale cache, age {}s -- syncing in background)", age_secs);
+                print_table_cached(&issues, &note);
+
+                // Trigger delta sync in a background thread; ignore join errors.
+                std::thread::spawn(|| {
+                    if let Err(e) = crate::sync::delta::run() {
+                        eprintln!("background sync error: {}", e);
+                    }
+                });
+            }
+        }
+    }
+
     Ok(())
 }
