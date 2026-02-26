@@ -1,7 +1,7 @@
 mod ui;
 
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -66,6 +66,8 @@ pub enum Mode {
     NewIssue,
     /// Searchable help popup (bd-5lz).
     Help,
+    /// FTS incremental search overlay (bd-2g4).
+    Search,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +139,81 @@ impl HelpPopup {
             .map(|(i, _)| i)
             .collect();
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FTS search overlay state (bd-2g4)
+// ---------------------------------------------------------------------------
+
+/// Mutable state for the FTS search overlay.
+pub struct SearchOverlay {
+    /// Current query string typed by the user.
+    pub query: String,
+    /// Issues returned by the last FTS query.
+    pub results: Vec<crate::issues::list::Issue>,
+    /// Table selection state for the results list.
+    pub table_state: TableState,
+    /// When the query was last modified (used for 150ms debounce).
+    pub last_changed: Option<Instant>,
+    /// True when FTS index is unavailable (no sync yet).
+    pub fts_unavailable: bool,
+}
+
+impl SearchOverlay {
+    pub fn new() -> Self {
+        Self {
+            query: String::new(),
+            results: Vec::new(),
+            table_state: TableState::default(),
+            last_changed: None,
+            fts_unavailable: false,
+        }
+    }
+
+    /// Run the FTS query and refresh results. Called after debounce fires.
+    pub fn run_search(&mut self) {
+        self.fts_unavailable = false;
+        if self.query.trim().is_empty() {
+            self.results.clear();
+            self.table_state.select(None);
+            return;
+        }
+        // Append '*' for prefix matching so typing "oauth" matches "oauth2" etc.
+        let fts_query = format!("{}*", self.query.trim());
+        match crate::db::open_db().and_then(|conn| crate::db::search_issues(&conn, &fts_query)) {
+            Ok(db_issues) => {
+                self.results = db_issues
+                    .into_iter()
+                    .map(db_issue_to_list_issue)
+                    .collect();
+                if self.results.is_empty() {
+                    self.table_state.select(None);
+                } else {
+                    self.table_state.select(Some(0));
+                }
+            }
+            Err(_) => {
+                // FTS index unavailable (table missing or no sync done yet).
+                self.fts_unavailable = true;
+                self.results.clear();
+                self.table_state.select(None);
+            }
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        let n = self.results.len();
+        if n == 0 {
+            return;
+        }
+        let i = self.table_state.selected().unwrap_or(0);
+        self.table_state.select(Some((i + 1).min(n - 1)));
+    }
+
+    pub fn move_up(&mut self) {
+        let i = self.table_state.selected().unwrap_or(0);
+        self.table_state.select(Some(i.saturating_sub(1)));
     }
 }
 
@@ -281,6 +358,9 @@ pub struct App {
 
     // -- help popup (bd-5lz) -------------------------------------------------
     pub help_popup: Option<HelpPopup>,
+
+    // -- FTS search overlay (bd-2g4) -------------------------------------------
+    pub search_overlay: Option<SearchOverlay>,
 }
 
 impl App {
@@ -321,6 +401,7 @@ impl App {
             syncing,
             sync_status_label,
             help_popup: None,
+            search_overlay: None,
         }
     }
 
@@ -1393,6 +1474,9 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         // Poll modal background loader channel (bd-vfi).
         app.poll_modal_events();
 
+        // Poll FTS search debounce (bd-2g4).
+        poll_search_debounce(&mut app);
+
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         if app.quit {
@@ -1410,6 +1494,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
                     Mode::Detail => handle_detail_key(&mut app, key.code),
                     Mode::NewIssue => handle_new_issue_key(&mut app, key.code, key.modifiers),
                     Mode::Help => handle_help_key(&mut app, key.code),
+                    Mode::Search => handle_search_key(&mut app, key.code),
                     Mode::List => handle_normal_key(&mut app, key.code, key.modifiers),
                 }
             }
@@ -1690,9 +1775,8 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('S') => app.cycle_sort(),
         KeyCode::Char('d') => app.toggle_desc(),
         KeyCode::Char('/') => {
-            app.input_buf = app.args.title.clone().unwrap_or_default();
-            app.input_mode = true;
-            app.mode = Mode::InputFilter;
+            app.search_overlay = Some(SearchOverlay::new());
+            app.mode = Mode::Search;
         }
         // Write op keybindings (bd-3dz)
         KeyCode::Char('s') => app.open_state_popup(),
@@ -1756,5 +1840,71 @@ fn handle_help_key(app: &mut App, code: KeyCode) {
             }
         }
         _ => {}
+    }
+}
+
+// -- FTS search overlay key handler (bd-2g4) --------------------------------
+
+fn handle_search_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            // Clear search, return to full list.
+            app.mode = Mode::List;
+            app.search_overlay = None;
+        }
+        KeyCode::Enter => {
+            // Confirm: leave search mode with filtered results visible.
+            // Transfer results into app.issues so normal keybindings work.
+            if let Some(ref mut overlay) = app.search_overlay {
+                let results = std::mem::take(&mut overlay.results);
+                let selected = overlay.table_state.selected();
+                app.issues = results;
+                let n = app.issues.len();
+                let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
+                app.table_state.select(if n > 0 { Some(sel) } else { None });
+            }
+            app.mode = Mode::List;
+            app.search_overlay = None;
+        }
+        KeyCode::Backspace => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.query.pop();
+                overlay.last_changed = Some(Instant::now());
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.query.push(c);
+                overlay.last_changed = Some(Instant::now());
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.move_down();
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.move_up();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Fire the FTS search when the debounce interval (150ms) has elapsed.
+fn poll_search_debounce(app: &mut App) {
+    let should_search = match app.search_overlay {
+        Some(ref overlay) => match overlay.last_changed {
+            Some(t) => t.elapsed() >= Duration::from_millis(150),
+            None => false,
+        },
+        None => false,
+    };
+    if should_search {
+        if let Some(ref mut overlay) = app.search_overlay {
+            overlay.last_changed = None;
+            overlay.run_search();
+        }
     }
 }
