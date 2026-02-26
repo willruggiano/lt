@@ -1482,20 +1482,29 @@ fn priority_label_to_u8(label: &str) -> u8 {
 
 pub fn run(args: IssueArgs) -> Result<()> {
     // Try to load issues from the local SQLite cache first (local-first UX).
-    let cached_issues: Vec<Issue> = (|| -> Result<Vec<Issue>> {
+    // Use query_issues_page so we get has_next_page / end_cursor for Ctrl-n/p.
+    let cached: Option<(Vec<Issue>, bool, Option<String>)> = (|| -> Result<_> {
         let conn = crate::db::open_db()?;
-        let db_issues = crate::db::query_issues(&conn, &args)?;
-        Ok(db_issues.into_iter().map(db_issue_to_list_issue).collect())
+        let (db_issues, has_next) = crate::db::query_issues_page(&conn, &args, 0)?;
+        let limit = args.limit.min(250) as i64;
+        let end_cursor = if has_next {
+            Some(limit.to_string())
+        } else {
+            None
+        };
+        let issues = db_issues.into_iter().map(db_issue_to_list_issue).collect();
+        Ok((issues, has_next, end_cursor))
     })()
-    .unwrap_or_default();
+    .ok();
 
-    let have_cache = !cached_issues.is_empty();
+    let have_cache = cached.as_ref().map_or(false, |(v, _, _)| !v.is_empty());
 
     // Determine whether to show "Syncing..." overlay (no cache yet).
-    let (issues, syncing, initial_status) = if have_cache {
-        (cached_issues, true, Status::Idle)
+    let (issues, has_next_page, end_cursor, syncing, initial_status) = if have_cache {
+        let (issues, has_next, end_cursor) = cached.unwrap();
+        (issues, has_next, end_cursor, true, Status::Idle)
     } else {
-        (Vec::new(), true, Status::Loading)
+        (Vec::new(), false, None, true, Status::Loading)
     };
 
     let sync_status_label = build_sync_status_label(syncing);
@@ -1505,8 +1514,8 @@ pub fn run(args: IssueArgs) -> Result<()> {
 
     let app = App::new(
         issues,
-        false,
-        None,
+        has_next_page,
+        end_cursor,
         args,
         Some(sync_rx),
         syncing,
