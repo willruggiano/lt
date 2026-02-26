@@ -301,7 +301,7 @@ impl NewIssueField {
             Self::Priority => Self::State,
             Self::State => Self::Assignee,
             Self::Assignee => Self::Description,
-            Self::Description => Self::Description,
+            Self::Description => Self::Title,
         }
     }
 
@@ -1482,20 +1482,29 @@ fn priority_label_to_u8(label: &str) -> u8 {
 
 pub fn run(args: IssueArgs) -> Result<()> {
     // Try to load issues from the local SQLite cache first (local-first UX).
-    let cached_issues: Vec<Issue> = (|| -> Result<Vec<Issue>> {
-        let conn = crate::db::open_db()?;
-        let db_issues = crate::db::query_issues(&conn, &args)?;
-        Ok(db_issues.into_iter().map(db_issue_to_list_issue).collect())
-    })()
-    .unwrap_or_default();
+    // Use query_issues_page so we can capture the correct has_next_page flag.
+    let (cached_issues, initial_has_next_page, initial_end_cursor) =
+        (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
+            let conn = crate::db::open_db()?;
+            let limit = args.limit.min(250) as i64;
+            let (db_issues, has_next) = crate::db::query_issues_page(&conn, &args, 0)?;
+            let end_cursor = if has_next {
+                Some(limit.to_string())
+            } else {
+                None
+            };
+            let issues = db_issues.into_iter().map(db_issue_to_list_issue).collect();
+            Ok((issues, has_next, end_cursor))
+        })()
+        .unwrap_or_default();
 
     let have_cache = !cached_issues.is_empty();
 
     // Determine whether to show "Syncing..." overlay (no cache yet).
-    let (issues, syncing, initial_status) = if have_cache {
-        (cached_issues, true, Status::Idle)
+    let (issues, has_next_page, end_cursor, syncing, initial_status) = if have_cache {
+        (cached_issues, initial_has_next_page, initial_end_cursor, true, Status::Idle)
     } else {
-        (Vec::new(), true, Status::Loading)
+        (Vec::new(), false, None, true, Status::Loading)
     };
 
     let sync_status_label = build_sync_status_label(syncing);
@@ -1505,8 +1514,8 @@ pub fn run(args: IssueArgs) -> Result<()> {
 
     let app = App::new(
         issues,
-        false,
-        None,
+        has_next_page,
+        end_cursor,
         args,
         Some(sync_rx),
         syncing,
@@ -1567,20 +1576,15 @@ fn poll_sync_events(app: &mut App) {
     let mut got_event = false;
     loop {
         match rx.try_recv() {
-            Ok(SyncEvent::Done(new_issues)) => {
-                // Only replace list if the user is in normal list mode and not paginated.
+            Ok(SyncEvent::Done(_new_issues)) => {
+                // Sync finished: refresh the issue list from SQLite so that
+                // has_next_page and end_cursor are recalculated correctly.
+                // Only refresh if the user is in normal list mode on page 1.
                 if matches!(app.mode, Mode::List)
                     && app.cursor_stack.is_empty()
                     && app.current_cursor.is_none()
                 {
-                    let prev_selected = app.table_state.selected();
-                    app.issues = new_issues;
-                    let n = app.issues.len();
-                    let sel = prev_selected.unwrap_or(0).min(n.saturating_sub(1));
-                    app.table_state.select(if n > 0 { Some(sel) } else { None });
-                    if matches!(app.status, Status::Loading) {
-                        app.status = Status::Idle;
-                    }
+                    app.do_fetch(false);
                 }
                 app.syncing = false;
                 app.sync_status_label = build_sync_status_label(false);
