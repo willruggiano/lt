@@ -6,6 +6,8 @@ use std::net::TcpListener;
 
 use crate::config::{self, AuthToken};
 
+use tracing::info;
+
 const CALLBACK_PORT: u16 = 7342;
 const AUTH_URL: &str = "https://linear.app/oauth/authorize";
 const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
@@ -19,16 +21,15 @@ pub fn run() -> Result<()> {
 
     let auth_url = build_auth_url(&client_id, &redirect_uri, &state, &code_challenge);
 
-    eprintln!("Opening Linear authorization page in your browser...");
-    eprintln!("If the browser does not open, visit:");
-    eprintln!("  {}\n", auth_url);
+    info!("Opening Linear authorization page in your browser...");
+    info!("If the browser does not open, visit: {}", auth_url);
 
     // Best-effort: ignore errors from open (headless environments, etc.)
     let _ = open::that(&auth_url);
 
     let code = listen_for_callback(CALLBACK_PORT, &state).context("waiting for OAuth callback")?;
 
-    eprintln!("Authorization received. Exchanging for token...");
+    info!("Authorization received. Exchanging for token...");
 
     let token = exchange_code(
         &client_id,
@@ -65,10 +66,12 @@ fn resolve_credentials() -> Result<(String, String)> {
     }
 
     // 3. Interactive prompt.
-    eprintln!("No Linear OAuth credentials found.");
-    eprintln!("Register an application at: https://linear.app/settings/api/applications");
-    eprintln!(
-        "Set the redirect URI to:     http://localhost:{}/callback\n",
+    info!("No Linear OAuth credentials found.");
+    info!(
+        "Register an application at: https://linear.app/settings/api/applications"
+    );
+    info!(
+        "Set the redirect URI to: http://localhost:{}/callback",
         CALLBACK_PORT
     );
 
@@ -145,7 +148,7 @@ fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
         .with_context(|| format!("binding callback listener on port {}", port))?;
 
-    eprintln!("Listening for callback on http://localhost:{}/ ...", port);
+    info!("Listening for callback on http://localhost:{}/ ...", port);
 
     loop {
         let (mut stream, _peer) = listener.accept().context("accepting connection")?;

@@ -17,6 +17,7 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
     filter::LevelFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
@@ -33,6 +34,33 @@ fn log_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Removes log files from `dir` whose modification time is older than `days` days.
+///
+/// All errors are silently ignored -- this is a best-effort cleanup step.
+fn prune_old_logs(dir: &PathBuf, days: u64) {
+    let threshold = match SystemTime::now().checked_sub(Duration::from_secs(days * 24 * 60 * 60)) {
+        Some(t) => t,
+        None => return,
+    };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let mtime = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if mtime < threshold {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// Initialise logging for **TUI mode**.
 ///
 /// All output goes to the rotating file log; nothing is written to stdout or
@@ -42,6 +70,7 @@ fn log_dir() -> Result<PathBuf> {
 /// program to ensure all buffered log records are flushed.
 pub fn init_tui() -> Result<WorkerGuard> {
     let dir = log_dir()?;
+    prune_old_logs(&dir, 7);
     let file_appender = tracing_appender::rolling::daily(&dir, "lt.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -69,6 +98,7 @@ pub fn init_tui() -> Result<WorkerGuard> {
 /// program to ensure all buffered log records are flushed.
 pub fn init_cli() -> Result<WorkerGuard> {
     let dir = log_dir()?;
+    prune_old_logs(&dir, 7);
     let file_appender = tracing_appender::rolling::daily(&dir, "lt.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 

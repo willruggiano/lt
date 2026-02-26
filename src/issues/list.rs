@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
+use tracing::{error, info};
 
 use crate::config;
 use crate::db;
@@ -127,7 +128,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     match last_synced_at {
         None => {
             // Cache is empty (never synced). Run full sync first.
-            println!("Cache empty -- running full sync...");
+            info!("Cache empty -- running full sync...");
             drop(conn);
             crate::sync::full::run()?;
             // Re-open after sync.
@@ -155,7 +156,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
                 // Trigger delta sync in a background thread; ignore join errors.
                 std::thread::spawn(|| {
                     if let Err(e) = crate::sync::delta::run() {
-                        eprintln!("background sync error: {}", e);
+                        error!("background sync error: {}", e);
                     }
                 });
             }
