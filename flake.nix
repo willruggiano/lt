@@ -45,9 +45,6 @@
           claude-code-wrapped
           pi-wrapped
         ];
-        env = {
-          BR_OUTPUT_FORMAT = "toon";
-        };
       };
     });
     overlays = {
