@@ -63,6 +63,10 @@ pub struct IssueArgs {
     #[arg(long)]
     pub desc: bool,
 
+    /// Filter by title (case-insensitive substring)
+    #[arg(long)]
+    pub title: Option<String>,
+
     /// Maximum number of issues to return (capped at 250)
     #[arg(long, default_value = "50")]
     pub limit: u32,
@@ -82,6 +86,7 @@ impl Default for IssueArgs {
             updated_before: None,
             sort: SortField::Updated,
             desc: false,
+            title: None,
             limit: 50,
         }
     }

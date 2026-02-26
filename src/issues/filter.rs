@@ -102,6 +102,10 @@ pub fn build_filter(args: &IssueArgs) -> Result<Option<Value>> {
         filters.push(json!({ "updatedAt": { "lt": ts } }));
     }
 
+    if let Some(title) = &args.title {
+        filters.push(json!({ "title": { "containsIgnoreCase": title } }));
+    }
+
     match filters.len() {
         0 => Ok(None),
         1 => Ok(Some(filters.remove(0))),

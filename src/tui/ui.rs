@@ -1,11 +1,11 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Cell, Paragraph, Row, Table};
-use ratatui::Frame;
 
 use super::{App, Status};
-use crate::issues::list::Issue;
 use crate::issues::IssueArgs;
+use crate::issues::list::Issue;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -15,13 +15,23 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     ])
     .split(frame.area());
 
-    // Compute header content before mutable borrow for table.
+    // Expose visible row count to key handlers (subtract table header row).
+    app.viewport_height = chunks[1].height.saturating_sub(1);
+
     let context = filter_context(&app.args);
     let has_next = app.has_next_page;
+    let has_prev = !app.cursor_stack.is_empty();
+    let page = app.cursor_stack.len() + 1;
+    let input_mode = app.input_mode;
+    let input_buf = app.input_buf.clone();
 
     render_header(frame, chunks[0], &context);
     render_table(frame, chunks[1], app);
-    render_footer(frame, chunks[2], has_next);
+    if input_mode {
+        render_input(frame, chunks[2], &input_buf);
+    } else {
+        render_footer(frame, chunks[2], has_next, has_prev, page);
+    }
 }
 
 // -- header ------------------------------------------------------------------
@@ -32,8 +42,10 @@ fn render_header(frame: &mut Frame, area: Rect, context: &str) {
     } else {
         format!("lt issues  {}", context)
     };
-    let para = Paragraph::new(text).style(Style::new().add_modifier(Modifier::BOLD));
-    frame.render_widget(para, area);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::new().add_modifier(Modifier::BOLD)),
+        area,
+    );
 }
 
 fn filter_context(args: &IssueArgs) -> String {
@@ -53,6 +65,9 @@ fn filter_context(args: &IssueArgs) -> String {
     if let Some(p) = &args.priority {
         parts.push(format!("priority:{}", p));
     }
+    if let Some(t) = &args.title {
+        parts.push(format!("title:{}", t));
+    }
     if let Some(d) = &args.created_after {
         parts.push(format!("created>={}", d));
     }
@@ -68,20 +83,42 @@ fn filter_context(args: &IssueArgs) -> String {
     parts.join("  ")
 }
 
-// -- footer ------------------------------------------------------------------
+// -- footer / input overlay --------------------------------------------------
 
-fn render_footer(frame: &mut Frame, area: Rect, has_next: bool) {
-    let mut text = "j/k navigate  o open  r refresh  g/G top/bottom  q quit".to_string();
-    if has_next {
-        text.push_str("  +more issues");
+fn render_footer(frame: &mut Frame, area: Rect, has_next: bool, has_prev: bool, page: usize) {
+    let mut parts: Vec<&str> = vec![
+        "j/k navigate",
+        "ctrl+d/u half page",
+        "/ filter",
+        "o open",
+        "r refresh",
+        "q quit",
+    ];
+    if has_prev {
+        parts.push("ctrl+p prev page");
     }
-    frame.render_widget(Paragraph::new(text), area);
+    if has_next {
+        parts.push("ctrl+n next page");
+    }
+
+    let page_str = format!("[{}]", page);
+    let chunks = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(page_str.len() as u16),
+    ])
+    .split(area);
+
+    frame.render_widget(Paragraph::new(parts.join("  ")), chunks[0]);
+    frame.render_widget(Paragraph::new(page_str), chunks[1]);
+}
+
+fn render_input(frame: &mut Frame, area: Rect, buf: &str) {
+    frame.render_widget(Paragraph::new(format!("/ {}_", buf)), area);
 }
 
 // -- table -------------------------------------------------------------------
 
 fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
-    // Show status overlays before borrowing table_state.
     let overlay: Option<String> = match &app.status {
         Status::Error(msg) => Some(format!("Error: {}", msg)),
         Status::Loading => Some("Loading...".to_string()),
@@ -98,10 +135,15 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     const HEADERS: [&str; 7] = [
-        "IDENTIFIER", "TITLE", "STATE", "PRIORITY", "ASSIGNEE", "TEAM", "UPDATED",
+        "IDENTIFIER",
+        "TITLE",
+        "STATE",
+        "PRIORITY",
+        "ASSIGNEE",
+        "TEAM",
+        "UPDATED",
     ];
 
-    // Dynamic column widths.
     let mut widths: [usize; 7] = HEADERS.map(|h| h.len());
     for issue in &app.issues {
         let row = row_cells(issue);
@@ -112,8 +154,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    let header = Row::new(HEADERS.map(Cell::from))
-        .style(Style::new().add_modifier(Modifier::BOLD));
+    let header = Row::new(HEADERS.map(Cell::from)).style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row> = app
         .issues
@@ -140,7 +181,8 @@ fn row_cells(issue: &Issue) -> [String; 7] {
         truncate(&issue.title, 40),
         issue.state.name.clone(),
         issue.priority_label.clone(),
-        issue.assignee
+        issue
+            .assignee
             .as_ref()
             .map(|u| u.name.clone())
             .unwrap_or_else(|| "-".to_string()),
@@ -158,9 +200,5 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn date(s: &str) -> &str {
-    if s.len() >= 10 {
-        &s[..10]
-    } else {
-        s
-    }
+    if s.len() >= 10 { &s[..10] } else { s }
 }

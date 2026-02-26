@@ -15,7 +15,7 @@ def main() -> None:
     tokens = command.split()
 
     # Steer the agent towards jj.
-    if tokens and "git" in tokens and "commit" in tokens:
+    if tokens and "git" in tokens:
         print(
             "Blocked: use `jj` instead.",
             file=sys.stderr,
@@ -23,12 +23,12 @@ def main() -> None:
         sys.exit(2)
 
     # --force is almost always the wrong choice.
-    if tokens and ("git" in tokens or "jj" in tokens) and "--force" in tokens:
+    if tokens and "jj" in tokens and "--force" in tokens:
         print("Blocked: using --force is almost certainly wrong.", file=sys.stderr)
         sys.exit(2)
 
     # No pushes.
-    if tokens and ("git" in tokens or "jj" in tokens) and "push" in tokens:
+    if tokens and "jj" in tokens and "push" in tokens:
         print("Blocked: pushing to a remote is not permitted.", file=sys.stderr)
         sys.exit(2)
 
@@ -38,7 +38,7 @@ def main() -> None:
         sys.exit(2)
 
     # No sneaky maneuvers.
-    if tokens and "git" in tokens and "-c" in tokens:
+    if tokens and "jj" in tokens and ("--config" in tokens or "--config-file" in tokens):
         print(
             "Blocked: are you sure you're doing the right thing? Maybe ask for help.",
             file=sys.stderr,

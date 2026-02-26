@@ -12,8 +12,8 @@ use super::filter::build_filter;
 use super::sort::build_sort;
 
 const ISSUES_QUERY: &str = r#"
-query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int) {
-  issues(filter: $filter, sort: $sort, first: $first) {
+query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
+  issues(filter: $filter, sort: $sort, first: $first, after: $after) {
     nodes {
       identifier
       title
@@ -71,7 +71,7 @@ struct IssuesData {
     issues: IssueConnection,
 }
 
-pub fn fetch(args: &IssueArgs) -> Result<(Vec<Issue>, bool)> {
+pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool, Option<String>)> {
     let token = config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
 
@@ -83,17 +83,18 @@ pub fn fetch(args: &IssueArgs) -> Result<(Vec<Issue>, bool)> {
         "filter": filter,
         "sort": sort,
         "first": limit,
+        "after": after,
     });
 
     let data: IssuesData =
         graphql_query(&token.access_token, ISSUES_QUERY, variables)?;
 
     let conn = data.issues;
-    Ok((conn.nodes, conn.page_info.has_next_page))
+    Ok((conn.nodes, conn.page_info.has_next_page, conn.page_info.end_cursor))
 }
 
 pub fn run(args: IssueArgs) -> Result<()> {
-    let (issues, has_next_page) = fetch(&args)?;
+    let (issues, has_next_page, _) = fetch(&args, None)?;
     print_table(&issues);
     if has_next_page {
         println!("\n+more issues");
