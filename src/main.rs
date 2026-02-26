@@ -41,10 +41,10 @@ enum Commands {
         #[command(flatten)]
         args: inbox::InboxArgs,
     },
-    /// Sync API diagnostics
+    /// Sync issues from Linear (incremental by default; use 'full' subcommand for a full sync)
     Sync {
         #[command(subcommand)]
-        command: sync::SyncCommands,
+        command: Option<sync::SyncCommands>,
     },
 }
 
@@ -56,7 +56,10 @@ fn main() -> Result<()> {
         Some(Commands::Inbox { args }) => inbox::run(args)?,
         Some(Commands::Issues { args, subcommand }) => issues::run(args, subcommand)?,
         Some(Commands::Tui { args }) => tui::run(args)?,
-        Some(Commands::Sync { command }) => sync::run(command)?,
+        Some(Commands::Sync { command }) => {
+            let cmd = command.unwrap_or(sync::SyncCommands::Delta);
+            sync::run(cmd)?;
+        }
     }
     Ok(())
 }
