@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod db;
+mod inbox;
 mod issues;
 mod linear;
 mod sync;
@@ -33,6 +34,11 @@ enum Commands {
         #[command(flatten)]
         args: issues::IssueArgs,
     },
+    /// Show Linear notification inbox
+    Inbox {
+        #[command(flatten)]
+        args: inbox::InboxArgs,
+    },
     /// Sync API diagnostics
     Sync {
         #[command(subcommand)]
@@ -45,6 +51,7 @@ fn main() -> Result<()> {
     match cli.command {
         None => tui::run(issues::IssueArgs::default())?,
         Some(Commands::Auth { command }) => auth::run(command)?,
+        Some(Commands::Inbox { args }) => inbox::run(args)?,
         Some(Commands::Issues { args }) => issues::run(args)?,
         Some(Commands::Tui { args }) => tui::run(args)?,
         Some(Commands::Sync { command }) => sync::run(command)?,
