@@ -124,6 +124,14 @@
             (try-fwd-env "BR_OUTPUT_FORMAT")
           ];
       };
+
+      mkVcsConfig = agent: reply-to:
+        (pkgs.formats.toml {}).generate "jj-config.toml" {
+          user = {
+            email = reply-to;
+            name = agent.name;
+          };
+        };
     in {
       lt = let
         rustPlatform = pkgs.makeRustPlatform {
@@ -225,34 +233,47 @@
       '';
 
       claude-code-wrapped = jail "claude" pkgs.claude-code (cs:
-        with cs; [
+        with cs; let
+          vcs-config = mkVcsConfig pkgs.claude-code "noreply@anthropic.com";
+        in [
+          (readonly vcs-config)
           (readwrite (noescape "~/.claude"))
           (readwrite (noescape "~/.claude.json"))
+          (set-env "BD_ACTOR" pkgs.claude-code.name)
           (set-env "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" "1")
+          (set-env "JJ_CONFIG" "${vcs-config}")
           ## readonly mount into the sandbox so claude can't hack around problems
           ## (esp. in auto-approve mode) by modifying its own settings/tools :)
-          (defer (ro-bind (noescape ''"$PWD/.claude"'') (noescape ''"$PWD/.claude"'')))
+          (defer (try-ro-bind (noescape ''"$PWD/.claude"'') (noescape ''"$PWD/.claude"'')))
         ]);
 
       opencode-wrapped = jail "opencode" pkgs.opencode (cs:
-        with cs; [
+        with cs; let
+          vcs-config = mkVcsConfig pkgs.opencode "noreply@opencode.ai";
+        in [
+          (readonly vcs-config)
           (readwrite (noescape "~/.config/opencode"))
           (readwrite (noescape "~/.cache/opencode"))
           (readwrite (noescape "~/.local/share/opencode"))
           (readwrite (noescape "~/.local/state/opencode"))
           (set-env "BD_ACTOR" pkgs.opencode.name)
+          (set-env "JJ_CONFIG" "${vcs-config}")
           ## readonly mount into the sandbox so opencode can't hack around problems
           ## (esp. in auto-approve mode) by modifying its own settings/tools :)
           (defer (try-ro-bind (noescape ''"$PWD/.opencode"'') (noescape ''"$PWD/.opencode"'')))
         ]);
 
       pi-wrapped = jail "pi" pkgs.pi (cs:
-        with cs; [
+        with cs; let
+          vcs-config = mkVcsConfig pkgs.pi "noreply@pi.dev";
+        in [
+          (readonly vcs-config)
           (readwrite (noescape "~/.pi"))
           (set-env "BD_ACTOR" pkgs.pi.name)
+          (set-env "JJ_CONFIG" "${vcs-config}")
           ## readonly mount into the sandbox so pi can't hack around problems
           ## (esp. in auto-approve mode) by modifying its own settings/tools :)
-          (defer (ro-bind (noescape ''"$PWD/.pi"'') (noescape ''"$PWD/.pi"'')))
+          (defer (try-ro-bind (noescape ''"$PWD/.pi"'') (noescape ''"$PWD/.pi"'')))
         ]);
     });
   };

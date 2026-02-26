@@ -21,8 +21,16 @@ pub enum SyncCommands {
 
 pub fn run(cmd: SyncCommands) -> Result<()> {
     match cmd {
-        SyncCommands::Delta => delta::run(),
-        SyncCommands::Full => full::run(),
+        SyncCommands::Delta => {
+            delta::run()?;
+            println!("Sync complete.");
+            Ok(())
+        }
+        SyncCommands::Full => {
+            full::run()?;
+            println!("Sync complete.");
+            Ok(())
+        }
         SyncCommands::Probe { token } => probe::run(token),
     }
 }

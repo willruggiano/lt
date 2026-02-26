@@ -69,6 +69,5 @@ pub fn run() -> Result<()> {
     let now = Utc::now().to_rfc3339();
     db::set_meta(&conn, "last_synced_at", &now)?;
 
-    println!("Synced {} issues", total);
     Ok(())
 }

@@ -131,7 +131,6 @@ pub fn run() -> Result<()> {
     let since = match last_synced_at {
         None => {
             // No previous sync -- fall back to full sync.
-            println!("No previous sync found -- running full sync.");
             return super::full::run();
         }
         Some(ts) => ts,
@@ -164,6 +163,5 @@ pub fn run() -> Result<()> {
     let now = Utc::now().to_rfc3339();
     db::set_meta(&conn, "last_synced_at", &now)?;
 
-    println!("Delta sync: {} issue(s) updated since {}", total, since);
     Ok(())
 }
