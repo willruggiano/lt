@@ -3,10 +3,11 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+    Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
+    Wrap,
 };
 
-use super::{App, Mode, PopupKind, Status};
+use super::{App, Mode, NewIssueField, NewIssueModal, PopupKind, Status};
 use crate::issues::list::Issue;
 use crate::issues::{IssueArgs, SortField};
 use crate::linear::types::IssueDetail;
@@ -63,6 +64,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             &app.popup_items,
             app.popup_selected,
         );
+    }
+
+    // Render new-issue modal on top if active.
+    if let Mode::NewIssue = app.mode {
+        if let Some(ref modal) = app.new_issue_modal {
+            render_new_issue_modal(frame, frame.area(), modal);
+        }
     }
 }
 
@@ -126,6 +134,7 @@ fn render_footer(frame: &mut Frame, area: Rect, has_next: bool, has_prev: bool, 
         "/ filter",
         "S sort field",
         "d toggle desc",
+        "n new",
         "s state",
         "p priority",
         "a assignee",
@@ -411,4 +420,195 @@ fn render_popup(
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
     frame.render_stateful_widget(list, popup_area, &mut list_state);
+}
+
+// -- New-issue modal (bd-l6r) ------------------------------------------------
+
+fn render_new_issue_modal(frame: &mut Frame, area: Rect, modal: &NewIssueModal) {
+    // Modal dimensions: 70% wide, 22 rows tall, centred.
+    let width = (area.width as f32 * 0.70) as u16;
+    let height = 22_u16.min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    // Clear the area under the modal.
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title(" New Issue  [Tab next]  [Shift-Tab prev]  [Ctrl-Enter submit]  [Esc cancel] ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded);
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    // Layout: fields stacked vertically.
+    // Title (1), Team (picker rows up to 5), Priority (picker), State (picker),
+    // Assignee (picker), Description (remaining), error line (1).
+    let picker_height = 5_u16;
+    let constraints = [
+        Constraint::Length(2),          // 0: Title label+input
+        Constraint::Length(picker_height + 1), // 1: Team
+        Constraint::Length(picker_height + 1), // 2: Priority
+        Constraint::Length(picker_height + 1), // 3: State
+        Constraint::Length(picker_height + 1), // 4: Assignee
+        Constraint::Min(2),             // 5: Description
+        Constraint::Length(1),          // 6: error / hint
+    ];
+    let chunks = Layout::vertical(constraints).split(inner);
+
+    // Helper: field label style.
+    let label_style_active = Style::new().add_modifier(Modifier::REVERSED);
+    let label_style_normal = Style::new().add_modifier(Modifier::BOLD);
+
+    // ---- Title ----
+    let title_active = modal.focused_field == NewIssueField::Title;
+    let title_label = Span::styled(
+        if title_active { "[Title]" } else { " Title " },
+        if title_active { label_style_active } else { label_style_normal },
+    );
+    let cursor = if title_active { "_" } else { "" };
+    let title_line = Line::from(vec![
+        title_label,
+        Span::raw(format!("  {}{}", modal.title, cursor)),
+    ]);
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    // ---- Team picker ----
+    render_field_picker(
+        frame,
+        chunks[1],
+        "Team",
+        &modal.teams,
+        modal.team_selected,
+        modal.focused_field == NewIssueField::Team,
+        picker_height,
+    );
+
+    // ---- Priority picker ----
+    render_field_picker(
+        frame,
+        chunks[2],
+        "Priority",
+        &modal.priorities,
+        modal.priority_selected,
+        modal.focused_field == NewIssueField::Priority,
+        picker_height,
+    );
+
+    // ---- State picker ----
+    render_field_picker(
+        frame,
+        chunks[3],
+        "State",
+        &modal.states,
+        modal.state_selected,
+        modal.focused_field == NewIssueField::State,
+        picker_height,
+    );
+
+    // ---- Assignee picker ----
+    render_field_picker(
+        frame,
+        chunks[4],
+        "Assignee",
+        &modal.assignees,
+        modal.assignee_selected,
+        modal.focused_field == NewIssueField::Assignee,
+        picker_height,
+    );
+
+    // ---- Description ----
+    let desc_active = modal.focused_field == NewIssueField::Description;
+    let desc_label = Span::styled(
+        if desc_active { "[Description]" } else { " Description " },
+        if desc_active { label_style_active } else { label_style_normal },
+    );
+    let desc_cursor = if desc_active { "_" } else { "" };
+    let desc_text = format!("{}{}", modal.description, desc_cursor);
+    let desc_block = Block::default().title(Line::from(desc_label)).borders(Borders::NONE);
+    let desc_inner = desc_block.inner(chunks[5]);
+    frame.render_widget(desc_block, chunks[5]);
+    frame.render_widget(
+        Paragraph::new(desc_text)
+            .wrap(Wrap { trim: false }),
+        desc_inner,
+    );
+
+    // ---- Error / loading line ----
+    let status_text = if modal.loading {
+        "Loading...".to_string()
+    } else if !modal.error.is_empty() {
+        format!("[!] {}", modal.error)
+    } else {
+        String::new()
+    };
+    frame.render_widget(Paragraph::new(status_text), chunks[6]);
+}
+
+/// Render a labelled inline list-picker for a single form field.
+fn render_field_picker(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    items: &[super::PopupItem],
+    selected: usize,
+    active: bool,
+    visible_rows: u16,
+) {
+    let label_style_active = Style::new().add_modifier(Modifier::REVERSED);
+    let label_style_normal = Style::new().add_modifier(Modifier::BOLD);
+
+    // Split: 1 row for label, rest for list.
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+
+    let label_span = Span::styled(
+        if active {
+            format!("[{}]", label)
+        } else {
+            format!(" {} ", label)
+        },
+        if active { label_style_active } else { label_style_normal },
+    );
+    // Show currently selected value next to label when not active.
+    let selected_preview = if !active {
+        items
+            .get(selected)
+            .map(|i| format!("  {}", i.label))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let label_line = Line::from(vec![label_span, Span::raw(selected_preview)]);
+    frame.render_widget(Paragraph::new(label_line), chunks[0]);
+
+    if !active || items.is_empty() {
+        return;
+    }
+
+    // Compute scroll offset so the selected item is always visible.
+    let visible = (chunks[1].height as usize).min(visible_rows as usize);
+    let scroll_offset = if selected >= visible {
+        selected - visible + 1
+    } else {
+        0
+    };
+
+    let list_items: Vec<ListItem> = items
+        .iter()
+        .skip(scroll_offset)
+        .take(visible)
+        .enumerate()
+        .map(|(i, item)| {
+            let real_idx = i + scroll_offset;
+            let style = if real_idx == selected {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(format!(" {} ", item.label)).style(style)
+        })
+        .collect();
+
+    frame.render_widget(List::new(list_items), chunks[1]);
 }
