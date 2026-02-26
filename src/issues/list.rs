@@ -15,12 +15,14 @@ const ISSUES_QUERY: &str = r#"
 query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
   issues(filter: $filter, sort: $sort, first: $first, after: $after) {
     nodes {
+      id
       identifier
       title
       priorityLabel
-      state { name }
-      assignee { name }
-      team { name }
+      priority
+      state { id name }
+      assignee { id name }
+      team { id name }
       createdAt
       updatedAt
     }
@@ -29,27 +31,32 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
 }
 "#;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct State {
+    pub id: String,
     pub name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct User {
+    pub id: String,
     pub name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct Team {
+    pub id: String,
     pub name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct Issue {
+    pub id: String,
     pub identifier: String,
     pub title: String,
     #[serde(rename = "priorityLabel")]
     pub priority_label: String,
+    pub priority: u8,
     pub state: State,
     pub assignee: Option<User>,
     pub team: Team,
