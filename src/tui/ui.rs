@@ -49,7 +49,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             } else if let Some(msg) = &app.footer_msg {
                 frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[2]);
             } else {
-                render_footer(frame, chunks[2], has_next, has_prev, page);
+                let sync_label = app.sync_status_label.clone();
+                render_footer(frame, chunks[2], has_next, has_prev, page, &sync_label);
             }
         }
     }
@@ -126,7 +127,14 @@ fn filter_context(args: &IssueArgs) -> String {
 
 // -- footer / input overlay --------------------------------------------------
 
-fn render_footer(frame: &mut Frame, area: Rect, has_next: bool, has_prev: bool, page: usize) {
+fn render_footer(
+    frame: &mut Frame,
+    area: Rect,
+    has_next: bool,
+    has_prev: bool,
+    page: usize,
+    sync_label: &str,
+) {
     let mut parts: Vec<&str> = vec![
         "j/k navigate",
         "ctrl+d/u half page",
@@ -149,14 +157,16 @@ fn render_footer(frame: &mut Frame, area: Rect, has_next: bool, has_prev: bool, 
     }
 
     let page_str = format!("[{}]", page);
+    // Show sync status on the right side, separated from page indicator.
+    let sync_str = format!("  {}  {}", sync_label, page_str);
     let chunks = Layout::horizontal([
         Constraint::Min(0),
-        Constraint::Length(page_str.len() as u16),
+        Constraint::Length(sync_str.len() as u16),
     ])
     .split(area);
 
     frame.render_widget(Paragraph::new(parts.join("  ")), chunks[0]);
-    frame.render_widget(Paragraph::new(page_str), chunks[1]);
+    frame.render_widget(Paragraph::new(sync_str), chunks[1]);
 }
 
 fn render_input(frame: &mut Frame, area: Rect, buf: &str) {
