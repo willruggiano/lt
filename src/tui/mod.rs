@@ -280,10 +280,7 @@ impl App {
             }
         };
         let current_state_name = issue.state.name.clone();
-        match crate::linear::mutations::fetch_workflow_states(
-            &token.access_token,
-            &issue.team.id,
-        ) {
+        match crate::linear::mutations::fetch_workflow_states(&token.access_token, &issue.team.id) {
             Ok(states) => {
                 self.popup_items = states
                     .into_iter()
@@ -313,11 +310,26 @@ impl App {
         let priority = self.selected_issue().unwrap().priority;
         // Linear priority: 0=No priority, 1=Urgent, 2=High, 3=Normal, 4=Low
         self.popup_items = vec![
-            PopupItem { label: "No priority".to_string(), id: Some("0".to_string()) },
-            PopupItem { label: "Urgent".to_string(),      id: Some("1".to_string()) },
-            PopupItem { label: "High".to_string(),        id: Some("2".to_string()) },
-            PopupItem { label: "Normal".to_string(),      id: Some("3".to_string()) },
-            PopupItem { label: "Low".to_string(),         id: Some("4".to_string()) },
+            PopupItem {
+                label: "No priority".to_string(),
+                id: Some("0".to_string()),
+            },
+            PopupItem {
+                label: "Urgent".to_string(),
+                id: Some("1".to_string()),
+            },
+            PopupItem {
+                label: "High".to_string(),
+                id: Some("2".to_string()),
+            },
+            PopupItem {
+                label: "Normal".to_string(),
+                id: Some("3".to_string()),
+            },
+            PopupItem {
+                label: "Low".to_string(),
+                id: Some("4".to_string()),
+            },
         ];
         self.popup_selected = priority as usize;
         self.mode = Mode::Popup(PopupKind::Priority);
@@ -336,13 +348,17 @@ impl App {
                 return;
             }
         };
-        let mut items: Vec<PopupItem> = vec![
-            PopupItem { label: "Unassign".to_string(), id: None },
-        ];
+        let mut items: Vec<PopupItem> = vec![PopupItem {
+            label: "Unassign".to_string(),
+            id: None,
+        }];
         match fetch_team_members(&token.access_token, &issue.team.id) {
             Ok(members) => {
                 for m in members {
-                    items.push(PopupItem { label: m.name, id: Some(m.id) });
+                    items.push(PopupItem {
+                        label: m.name,
+                        id: Some(m.id),
+                    });
                 }
             }
             Err(e) => {
@@ -353,7 +369,11 @@ impl App {
         self.popup_selected = issue
             .assignee
             .as_ref()
-            .and_then(|a| items.iter().position(|item| item.id.as_deref() == Some(a.id.as_str())))
+            .and_then(|a| {
+                items
+                    .iter()
+                    .position(|item| item.id.as_deref() == Some(a.id.as_str()))
+            })
             .unwrap_or(0);
         self.popup_items = items;
         self.mode = Mode::Popup(PopupKind::Assignee);
@@ -426,14 +446,12 @@ impl App {
                         Ok(())
                     }
                 }
-                PopupKind::Assignee => {
-                    crate::linear::mutations::update_issue_assignee(
-                        &token.access_token,
-                        &issue_id,
-                        item2.id.clone(),
-                    )
-                    .map(|_| ())
-                }
+                PopupKind::Assignee => crate::linear::mutations::update_issue_assignee(
+                    &token.access_token,
+                    &issue_id,
+                    item2.id.clone(),
+                )
+                .map(|_| ()),
             };
             if let Err(_e) = result {
                 // On failure: revert SQLite to the original values.
@@ -501,7 +519,10 @@ query TeamMembers($teamId: String!) {
         .members
         .nodes
         .into_iter()
-        .map(|m| Member { id: m.id, name: m.name })
+        .map(|m| Member {
+            id: m.id,
+            name: m.name,
+        })
         .collect())
 }
 

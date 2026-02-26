@@ -86,8 +86,7 @@ pub fn fetch_notifications(token: &str, first: usize) -> Result<Vec<Notification
             "after": cursor,
         });
 
-        let data: NotificationsData =
-            graphql_query(token, NOTIFICATIONS_QUERY, variables)?;
+        let data: NotificationsData = graphql_query(token, NOTIFICATIONS_QUERY, variables)?;
 
         let conn = data.notifications;
         all.extend(conn.nodes);

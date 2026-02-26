@@ -27,7 +27,7 @@ fn parse_priority_label(s: &str) -> Result<String> {
             return Err(anyhow!(
                 "--priority: expected none/urgent/high/normal/medium/low or 0-4, got {:?}",
                 s
-            ))
+            ));
         }
     };
     Ok(label.to_string())

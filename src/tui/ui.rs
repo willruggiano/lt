@@ -2,7 +2,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+};
 
 use super::{App, Mode, PopupKind, Status};
 use crate::issues::list::Issue;
@@ -32,11 +34,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.mode {
         Mode::Detail => {
             // Vertical split: list (~40%) | detail (~60%).
-            let split = Layout::horizontal([
-                Constraint::Percentage(40),
-                Constraint::Percentage(60),
-            ])
-            .split(chunks[1]);
+            let split =
+                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(chunks[1]);
 
             render_table(frame, split[0], app);
             render_detail(frame, split[1], app);
@@ -56,7 +56,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // Render popup on top if active.
     if let Mode::Popup(ref kind) = app.mode {
-        render_popup(frame, frame.area(), kind, &app.popup_items, app.popup_selected);
+        render_popup(
+            frame,
+            frame.area(),
+            kind,
+            &app.popup_items,
+            app.popup_selected,
+        );
     }
 }
 
@@ -261,9 +267,7 @@ fn sort_col_index(field: &SortField) -> Option<usize> {
 // -- Detail pane (bd-2g8) ----------------------------------------------------
 
 fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::LEFT)
-        .title(" Detail ");
+    let block = Block::default().borders(Borders::LEFT).title(" Detail ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -338,11 +342,7 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
         for comment in &d.comments.nodes {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!(
-                    "{} on {}",
-                    comment.author(),
-                    date(&comment.created_at)
-                ),
+                format!("{} on {}", comment.author(), date(&comment.created_at)),
                 Style::new().add_modifier(Modifier::BOLD),
             )));
             for raw_line in comment.body.lines() {
@@ -385,7 +385,9 @@ fn render_popup(
 
     // Centre a box that is wide enough for the items.
     let max_label = items.iter().map(|i| i.label.len()).max().unwrap_or(10);
-    let width = (max_label + 4).max(title.len() + 2).min(area.width as usize) as u16;
+    let width = (max_label + 4)
+        .max(title.len() + 2)
+        .min(area.width as usize) as u16;
     let height = (items.len() + 2).min(area.height as usize) as u16;
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;

@@ -1,7 +1,7 @@
 pub mod filters;
 pub mod issues;
 
-pub use issues::{get_meta, query_issues, set_meta, upsert_issues, Issue};
+pub use issues::{Issue, get_meta, query_issues, set_meta, upsert_issues};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
