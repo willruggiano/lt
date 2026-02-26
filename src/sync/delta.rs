@@ -41,6 +41,7 @@ struct User {
 
 #[derive(Deserialize)]
 struct Team {
+    id: String,
     name: String,
 }
 
@@ -81,7 +82,7 @@ fn to_db_issue(src: &Issue) -> db::Issue {
         state_name: src.state.name.clone(),
         assignee_name: src.assignee.as_ref().map(|u| u.name.clone()),
         team_name: src.team.name.clone(),
-        team_key: None,
+        team_key: Some(src.team.id.clone()),
         created_at: src.created_at.clone(),
         updated_at: src.updated_at.clone(),
         synced_at: String::new(), // filled by upsert_issues
