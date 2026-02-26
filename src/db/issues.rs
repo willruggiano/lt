@@ -56,6 +56,19 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
 /// Filtering is intentionally minimal here.
 /// TODO(bd-2km): replace with build_sql_filter(args) for the WHERE clause.
 pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
+    let (issues, _) = query_issues_page(conn, args, 0)?;
+    Ok(issues)
+}
+
+/// Query issues with an explicit row offset for pagination.
+///
+/// Returns up to `args.limit` rows starting at `offset`, plus a boolean
+/// indicating whether a next page exists.
+pub fn query_issues_page(
+    conn: &Connection,
+    args: &IssueArgs,
+    offset: i64,
+) -> Result<(Vec<Issue>, bool)> {
     let order_col = match args.sort {
         crate::issues::SortField::Created => "created_at",
         crate::issues::SortField::Updated => "updated_at",
@@ -66,7 +79,9 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
         crate::issues::SortField::Team => "team_name",
     };
     let direction = if args.desc { "DESC" } else { "ASC" };
+    // Fetch one extra row to detect whether there is a next page.
     let limit = args.limit.min(250) as i64;
+    let fetch_limit = limit + 1;
 
     let sql = format!(
         "SELECT id, identifier, title, priority_label, state_name,
@@ -74,7 +89,7 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
          FROM issues
          WHERE 1=1
          ORDER BY {order_col} {direction}
-         LIMIT ?1"
+         LIMIT ?1 OFFSET ?2"
     );
 
     let mut stmt = conn
@@ -82,7 +97,7 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
         .context("failed to prepare query statement")?;
 
     let rows = stmt
-        .query_map(params![limit], |row| {
+        .query_map(params![fetch_limit, offset], |row| {
             Ok(Issue {
                 id: row.get(0)?,
                 identifier: row.get(1)?,
@@ -103,7 +118,12 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
     for row in rows {
         issues.push(row.context("failed to read issue row")?);
     }
-    Ok(issues)
+
+    let has_next = issues.len() > limit as usize;
+    if has_next {
+        issues.truncate(limit as usize);
+    }
+    Ok((issues, has_next))
 }
 
 /// Search issues using FTS5 full-text search.
