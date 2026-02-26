@@ -38,23 +38,21 @@ pub fn load_token() -> Result<Option<AuthToken>> {
     if !path.exists() {
         return Ok(None);
     }
-    let data = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let data =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     Ok(Some(serde_json::from_str(&data)?))
 }
 
 pub fn save_token(token: &AuthToken) -> Result<()> {
     let path = token_path()?;
     let data = serde_json::to_string_pretty(token)?;
-    write_private_file(&path, &data)
-        .with_context(|| format!("writing {}", path.display()))
+    write_private_file(&path, &data).with_context(|| format!("writing {}", path.display()))
 }
 
 pub fn remove_token() -> Result<()> {
     let path = token_path()?;
     if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("removing {}", path.display()))?;
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
     Ok(())
 }
@@ -64,8 +62,8 @@ pub fn load_config() -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
-    let data = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let data =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     Ok(serde_json::from_str(&data)?)
 }
 

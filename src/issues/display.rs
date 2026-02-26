@@ -83,8 +83,7 @@ pub fn print_table(issues: &[Issue]) {
 
     for row in &rows {
         let refs: [&str; 8] = [
-            &row[0], &row[1], &row[2], &row[3],
-            &row[4], &row[5], &row[6], &row[7],
+            &row[0], &row[1], &row[2], &row[3], &row[4], &row[5], &row[6], &row[7],
         ];
         print_row(&refs);
     }

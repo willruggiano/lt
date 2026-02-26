@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -86,11 +86,14 @@ pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool,
         "after": after,
     });
 
-    let data: IssuesData =
-        graphql_query(&token.access_token, ISSUES_QUERY, variables)?;
+    let data: IssuesData = graphql_query(&token.access_token, ISSUES_QUERY, variables)?;
 
     let conn = data.issues;
-    Ok((conn.nodes, conn.page_info.has_next_page, conn.page_info.end_cursor))
+    Ok((
+        conn.nodes,
+        conn.page_info.has_next_page,
+        conn.page_info.end_cursor,
+    ))
 }
 
 pub fn run(args: IssueArgs) -> Result<()> {

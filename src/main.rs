@@ -9,11 +9,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(
-    name = "lt",
-    about = "Linear TUI for terminal power users",
-    version
-)]
+#[command(name = "lt", about = "Linear TUI for terminal power users", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

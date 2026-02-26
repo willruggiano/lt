@@ -6,8 +6,8 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 
-use crate::issues::list::{fetch, Issue};
 use crate::issues::IssueArgs;
+use crate::issues::list::{Issue, fetch};
 
 pub enum Status {
     Idle,
@@ -34,7 +34,12 @@ pub struct App {
 }
 
 impl App {
-    fn new(issues: Vec<Issue>, has_next_page: bool, end_cursor: Option<String>, args: IssueArgs) -> Self {
+    fn new(
+        issues: Vec<Issue>,
+        has_next_page: bool,
+        end_cursor: Option<String>,
+        args: IssueArgs,
+    ) -> Self {
         let mut table_state = TableState::default();
         if !issues.is_empty() {
             table_state.select(Some(0));
@@ -69,14 +74,30 @@ impl App {
         self.table_state.select(Some(new_i));
     }
 
-    fn move_down(&mut self)       { self.move_by(1); }
-    fn move_up(&mut self)         { self.move_by(-1); }
-    fn move_top(&mut self)        { self.move_by(i32::MIN / 2); }
-    fn move_bottom(&mut self)     { self.move_by(i32::MAX / 2); }
-    fn page_down(&mut self)       { self.move_by(self.viewport_height as i32); }
-    fn page_up(&mut self)         { self.move_by(-(self.viewport_height as i32)); }
-    fn half_page_down(&mut self)  { self.move_by(self.viewport_height as i32 / 2); }
-    fn half_page_up(&mut self)    { self.move_by(-(self.viewport_height as i32 / 2)); }
+    fn move_down(&mut self) {
+        self.move_by(1);
+    }
+    fn move_up(&mut self) {
+        self.move_by(-1);
+    }
+    fn move_top(&mut self) {
+        self.move_by(i32::MIN / 2);
+    }
+    fn move_bottom(&mut self) {
+        self.move_by(i32::MAX / 2);
+    }
+    fn page_down(&mut self) {
+        self.move_by(self.viewport_height as i32);
+    }
+    fn page_up(&mut self) {
+        self.move_by(-(self.viewport_height as i32));
+    }
+    fn half_page_down(&mut self) {
+        self.move_by(self.viewport_height as i32 / 2);
+    }
+    fn half_page_up(&mut self) {
+        self.move_by(-(self.viewport_height as i32 / 2));
+    }
 
     fn do_fetch(&mut self, reset_selection: bool) {
         self.status = Status::Loading;
@@ -90,9 +111,13 @@ impl App {
                 let sel = if reset_selection {
                     0
                 } else {
-                    self.table_state.selected().unwrap_or(0).min(n.saturating_sub(1))
+                    self.table_state
+                        .selected()
+                        .unwrap_or(0)
+                        .min(n.saturating_sub(1))
                 };
-                self.table_state.select(if n > 0 { Some(sel) } else { None });
+                self.table_state
+                    .select(if n > 0 { Some(sel) } else { None });
                 self.status = Status::Idle;
             }
             Err(e) => {
@@ -185,8 +210,8 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
-        KeyCode::Char('j') | KeyCode::Down  => app.move_down(),
-        KeyCode::Char('k') | KeyCode::Up    => app.move_up(),
+        KeyCode::Char('j') | KeyCode::Down => app.move_down(),
+        KeyCode::Char('k') | KeyCode::Up => app.move_up(),
         KeyCode::Char('g') => app.move_top(),
         KeyCode::Char('G') => app.move_bottom(),
         KeyCode::Char('d') if ctrl => app.half_page_down(),
@@ -194,7 +219,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('n') if ctrl => app.next_page(),
         KeyCode::Char('p') if ctrl => app.prev_page(),
         KeyCode::PageDown => app.page_down(),
-        KeyCode::PageUp   => app.page_up(),
+        KeyCode::PageUp => app.page_up(),
         KeyCode::Char('o') => {
             if let Some(issue) = app.selected_issue() {
                 let url = format!("https://linear.app/issue/{}", issue.identifier);

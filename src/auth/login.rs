@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write as _};
 use std::net::TcpListener;
@@ -26,8 +26,7 @@ pub fn run() -> Result<()> {
     // Best-effort: ignore errors from open (headless environments, etc.)
     let _ = open::that(&auth_url);
 
-    let code = listen_for_callback(CALLBACK_PORT, &state)
-        .context("waiting for OAuth callback")?;
+    let code = listen_for_callback(CALLBACK_PORT, &state).context("waiting for OAuth callback")?;
 
     eprintln!("Authorization received. Exchanging for token...");
 
@@ -157,10 +156,7 @@ fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
 
         // The request line is: GET /path?query HTTP/1.1
         let request_line = raw.lines().next().unwrap_or("");
-        let path_and_query = request_line
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("/");
+        let path_and_query = request_line.split_whitespace().nth(1).unwrap_or("/");
 
         // Only handle the callback path; ignore /favicon.ico etc.
         let (path, query) = match path_and_query.split_once('?') {
@@ -174,11 +170,10 @@ fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
         }
 
         // Parse query parameters.
-        let params: std::collections::HashMap<String, String> = url::form_urlencoded::parse(
-            query.as_bytes(),
-        )
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(query.as_bytes())
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
 
         // CSRF check.
         if params.get("state").map(String::as_str) != Some(expected_state) {
@@ -252,7 +247,9 @@ fn exchange_code(
     ];
 
     match ureq::post(TOKEN_URL).send_form(params) {
-        Ok(resp) => Ok(resp.into_json::<AuthToken>().context("parsing token response")?),
+        Ok(resp) => Ok(resp
+            .into_json::<AuthToken>()
+            .context("parsing token response")?),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
             Err(anyhow!("token exchange failed (HTTP {}): {}", code, body))

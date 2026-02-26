@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::config;
 
@@ -36,10 +36,7 @@ pub fn run(override_token: Option<String>) -> Result<()> {
     match result {
         Ok(res) => {
             let status = res.status();
-            let content_type = res
-                .header("content-type")
-                .unwrap_or("(none)")
-                .to_string();
+            let content_type = res.header("content-type").unwrap_or("(none)").to_string();
             println!("status:       {}", status);
             println!("content-type: {}", content_type);
             println!();
@@ -61,10 +58,7 @@ pub fn run(override_token: Option<String>) -> Result<()> {
             }
         }
         Err(ureq::Error::Status(code, res)) => {
-            let content_type = res
-                .header("content-type")
-                .unwrap_or("(none)")
-                .to_string();
+            let content_type = res.header("content-type").unwrap_or("(none)").to_string();
             println!("status:       {} (error)", code);
             println!("content-type: {}", content_type);
             println!();

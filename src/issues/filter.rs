@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 
 use super::IssueArgs;
 
@@ -11,11 +11,7 @@ fn parse_date(s: &str, field: &str) -> Result<String> {
         || parts[2].len() != 2
         || !parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
     {
-        return Err(anyhow!(
-            "--{}: date must be YYYY-MM-DD, got {:?}",
-            field,
-            s
-        ));
+        return Err(anyhow!("--{}: date must be YYYY-MM-DD, got {:?}", field, s));
     }
     Ok(format!("{}T00:00:00Z", s))
 }

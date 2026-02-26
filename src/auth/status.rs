@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 use crate::config;
@@ -48,9 +48,8 @@ pub fn run() -> Result<()> {
         .send_json(&body)
         .context("querying Linear API")?;
 
-    let parsed: GraphqlResponse<ViewerData> = response
-        .into_json()
-        .context("parsing API response")?;
+    let parsed: GraphqlResponse<ViewerData> =
+        response.into_json().context("parsing API response")?;
 
     if let Some(errors) = parsed.errors {
         let msgs: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
