@@ -75,14 +75,34 @@ struct NotificationsData {
     notifications: NotificationConnection,
 }
 
-pub fn fetch_notifications(token: &str, first: usize) -> Result<Vec<Notification>> {
-    let first = first.min(250);
+/// Fetch notifications from the Linear API.
+///
+/// `page_size` is the number of items to request per GraphQL page (capped at 250).
+/// `max_total` is the maximum number of items to return across all pages.
+/// When `max_total` is `None` the function fetches every available page.
+pub fn fetch_notifications(
+    token: &str,
+    page_size: usize,
+    max_total: Option<usize>,
+) -> Result<Vec<Notification>> {
+    let page_size = page_size.min(250);
     let mut all: Vec<Notification> = Vec::new();
     let mut cursor: Option<String> = None;
 
     loop {
+        // Never request more items per page than we still need.
+        let fetch_count = if let Some(max) = max_total {
+            let remaining = max.saturating_sub(all.len());
+            if remaining == 0 {
+                break;
+            }
+            page_size.min(remaining)
+        } else {
+            page_size
+        };
+
         let variables = json!({
-            "first": first,
+            "first": fetch_count,
             "after": cursor,
         });
 
@@ -90,6 +110,14 @@ pub fn fetch_notifications(token: &str, first: usize) -> Result<Vec<Notification
 
         let conn = data.notifications;
         all.extend(conn.nodes);
+
+        // Stop if we have reached the total cap.
+        if let Some(max) = max_total {
+            if all.len() >= max {
+                all.truncate(max);
+                break;
+            }
+        }
 
         if !conn.page_info.has_next_page {
             break;
@@ -103,8 +131,11 @@ pub fn fetch_notifications(token: &str, first: usize) -> Result<Vec<Notification
     Ok(all)
 }
 
-pub fn fetch_notifications_from_config(first: usize) -> Result<Vec<Notification>> {
+pub fn fetch_notifications_from_config(
+    page_size: usize,
+    max_total: Option<usize>,
+) -> Result<Vec<Notification>> {
     let token = crate::config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
-    fetch_notifications(&token.access_token, first)
+    fetch_notifications(&token.access_token, page_size, max_total)
 }
