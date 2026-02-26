@@ -1,3 +1,4 @@
+pub mod detail;
 mod display;
 mod filter;
 pub mod list;
