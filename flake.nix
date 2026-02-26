@@ -43,6 +43,7 @@
           ccusage
           ccusage-pi
           claude-code-wrapped
+          opencode-wrapped
           pi-wrapped
           python3
           ruff
@@ -68,6 +69,7 @@
           ccusage
           ccusage-codex
           ccusage-pi
+          opencode
           pi
           ;
         inherit
@@ -76,12 +78,10 @@
           beads-docs
           beads-primer
           claude-code-wrapped
+          opencode-wrapped
           pi-wrapped
           jail
           ;
-
-        codex = final.codex-rs;
-        tuicr = final.agents.tuicr.overrideAttrs (_: {buildFeatures = ["jj"];});
 
         # Expose for convenience:
         agents = inputs.llm-agents.packages.${system};
@@ -90,6 +90,8 @@
           toolchain.default.override {
             extensions = ["rust-src"];
           });
+
+        tuicr = final.agents.tuicr.overrideAttrs (_: {buildFeatures = ["jj"];});
       };
     };
 
@@ -100,6 +102,7 @@
         inherit pkgs;
         basePermissions = cs:
           with cs; [
+            # base
             base
             bind-nix-store-runtime-closure
             fake-passwd
@@ -109,6 +112,16 @@
             (try-fwd-env "ANTHROPIC_API_KEY")
             (try-fwd-env "GEMINI_API_KEY")
             (try-fwd-env "OPENAI_API_KEY")
+            # toolchain
+            (add-pkg-deps (
+              with pkgs;
+                [agent-tools]
+                ++ pkgs'.lt.buildInputs
+                ++ pkgs'.lt.nativeBuildInputs
+            ))
+            (readwrite (noescape "~/.cargo"))
+            (set-env "SHELL" "${lib.getExe pkgs.bash}")
+            (try-fwd-env "BR_OUTPUT_FORMAT")
           ];
       };
     in {
@@ -211,42 +224,35 @@
         cp -r ${pkgs.beads-rust.src}/docs $out
       '';
 
-      claude-code-unwrapped = pkgs.claude-code;
       claude-code-wrapped = jail "claude" pkgs.claude-code (cs:
         with cs; [
-          # claude-code
           (readwrite (noescape "~/.claude"))
           (readwrite (noescape "~/.claude.json"))
           (set-env "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" "1")
           ## readonly mount into the sandbox so claude can't hack around problems
           ## (esp. in auto-approve mode) by modifying its own settings/tools :)
-          (ro-bind (noescape ''"$PWD/.claude"'') (noescape ''"$PWD/.claude"''))
-          # toolchain
-          (add-pkg-deps (
-            with pkgs;
-              [agent-tools]
-              ++ pkgs'.lt.buildInputs
-              ++ pkgs'.lt.nativeBuildInputs
-          ))
-          (readwrite (noescape "~/.cargo"))
-          (set-env "BD_ACTOR" pkgs.claude-code.name)
-          (set-env "SHELL" "${lib.getExe pkgs.bash}")
-          (try-fwd-env "BR_OUTPUT_FORMAT")
+          (defer (ro-bind (noescape ''"$PWD/.claude"'') (noescape ''"$PWD/.claude"'')))
         ]);
 
-      pi-unwrapped = pkgs.pi;
+      opencode-wrapped = jail "opencode" pkgs.opencode (cs:
+        with cs; [
+          (readwrite (noescape "~/.config/opencode"))
+          (readwrite (noescape "~/.cache/opencode"))
+          (readwrite (noescape "~/.local/share/opencode"))
+          (readwrite (noescape "~/.local/state/opencode"))
+          (set-env "BD_ACTOR" pkgs.opencode.name)
+          ## readonly mount into the sandbox so opencode can't hack around problems
+          ## (esp. in auto-approve mode) by modifying its own settings/tools :)
+          (defer (try-ro-bind (noescape ''"$PWD/.opencode"'') (noescape ''"$PWD/.opencode"'')))
+        ]);
+
       pi-wrapped = jail "pi" pkgs.pi (cs:
         with cs; [
-          (add-pkg-deps (
-            with pkgs;
-              [agent-tools]
-              ++ pkgs'.lt.buildInputs
-              ++ pkgs'.lt.nativeBuildInputs
-          ))
-          (readwrite (noescape "~/.cargo"))
           (readwrite (noescape "~/.pi"))
           (set-env "BD_ACTOR" pkgs.pi.name)
-          (try-fwd-env "BR_OUTPUT_FORMAT")
+          ## readonly mount into the sandbox so pi can't hack around problems
+          ## (esp. in auto-approve mode) by modifying its own settings/tools :)
+          (defer (ro-bind (noescape ''"$PWD/.pi"'') (noescape ''"$PWD/.pi"'')))
         ]);
     });
   };
