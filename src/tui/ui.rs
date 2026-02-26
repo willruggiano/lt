@@ -1,9 +1,9 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table};
 
-use super::{App, Status};
+use super::{App, Mode, PopupKind, Status};
 use crate::issues::list::Issue;
 use crate::issues::{IssueArgs, SortField};
 
@@ -29,8 +29,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_table(frame, chunks[1], app);
     if input_mode {
         render_input(frame, chunks[2], &input_buf);
+    } else if let Some(msg) = &app.footer_msg {
+        frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[2]);
     } else {
         render_footer(frame, chunks[2], has_next, has_prev, page);
+    }
+
+    // Render popup on top if active.
+    if let Mode::Popup(ref kind) = app.mode {
+        render_popup(frame, frame.area(), kind, &app.popup_items, app.popup_selected);
     }
 }
 
@@ -92,8 +99,11 @@ fn render_footer(frame: &mut Frame, area: Rect, has_next: bool, has_prev: bool, 
         "j/k navigate",
         "ctrl+d/u half page",
         "/ filter",
-        "s sort field",
+        "S sort field",
         "d toggle desc",
+        "s state",
+        "p priority",
+        "a assignee",
         "o open",
         "r refresh",
         "q quit",
@@ -227,4 +237,47 @@ fn sort_col_index(field: &SortField) -> Option<usize> {
         SortField::Updated => Some(6),
         SortField::Created => None,
     }
+}
+
+// -- generic list-picker popup (bd-3dz) --------------------------------------
+
+fn render_popup(
+    frame: &mut Frame,
+    area: Rect,
+    kind: &PopupKind,
+    items: &[super::PopupItem],
+    selected: usize,
+) {
+    let title = match kind {
+        PopupKind::State => " Set State ",
+        PopupKind::Priority => " Set Priority ",
+        PopupKind::Assignee => " Reassign ",
+    };
+
+    // Centre a box that is wide enough for the items.
+    let max_label = items.iter().map(|i| i.label.len()).max().unwrap_or(10);
+    let width = (max_label + 4).max(title.len() + 2).min(area.width as usize) as u16;
+    let height = (items.len() + 2).min(area.height as usize) as u16;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup_area = Rect::new(x, y, width, height);
+
+    let list_items: Vec<ListItem> = items
+        .iter()
+        .map(|i| ListItem::new(format!(" {} ", i.label)))
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+
+    let list = List::new(list_items)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+        )
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+
+    frame.render_stateful_widget(list, popup_area, &mut list_state);
 }
