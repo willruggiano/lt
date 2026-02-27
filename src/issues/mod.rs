@@ -8,7 +8,7 @@ mod sort;
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum)]
 pub enum SortField {
     Created,
     Updated,

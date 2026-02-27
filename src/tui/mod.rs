@@ -1,3 +1,4 @@
+mod search_query;
 mod ui;
 
 use std::sync::mpsc;
@@ -493,26 +494,41 @@ pub struct SearchOverlay {
 
 impl SearchOverlay {
     pub fn new() -> Self {
+        // Pre-populate the query bar with the default sort stem (bd-7qo).
+        let default_q = search_query::DEFAULT_QUERY.to_string();
         Self {
-            query: TextInput::new(),
+            query: TextInput::from_string(default_q),
             results: Vec::new(),
             table_state: TableState::default(),
-            last_changed: None,
+            last_changed: Some(Instant::now()),
             fts_unavailable: false,
         }
     }
 
-    /// Run the FTS query and refresh results. Called after debounce fires.
+    /// Run the structured search query and refresh results (bd-7qo).
+    ///
+    /// The query string is parsed into stems (sort:, assignee:, priority:,
+    /// state:, team:) plus optional free-text FTS terms.  The default query
+    /// is `sort:updated-` which shows all issues sorted by updated desc.
     pub fn run_search(&mut self) {
         self.fts_unavailable = false;
-        if self.query.value.trim().is_empty() {
+        let raw = self.query.value.trim().to_string();
+
+        // An entirely blank query: show nothing (user cleared the bar).
+        if raw.is_empty() {
             self.results.clear();
             self.table_state.select(None);
             return;
         }
-        // Append '*' for prefix matching so typing "oauth" matches "oauth2" etc.
-        let fts_query = format!("{}*", self.query.value.trim());
-        match crate::db::open_db().and_then(|conn| crate::db::search_issues(&conn, &fts_query)) {
+
+        let parsed = search_query::parse_query(&raw);
+
+        // If the query is just the default sort stem with no other constraints,
+        // run it anyway so the user sees the full list sorted correctly.
+        let limit = 200;
+        match crate::db::open_db()
+            .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
+        {
             Ok(db_issues) => {
                 self.results = db_issues.into_iter().map(db_issue_to_list_issue).collect();
                 if self.results.is_empty() {
@@ -2098,9 +2114,13 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('d') => app.toggle_desc(),
         KeyCode::Char('/') => {
             let mut overlay = SearchOverlay::new();
+            // Restore last search query when re-opening, but keep the default
+            // sort:updated- prefix if the last query was just that (bd-7qo).
             if let Some(ref q) = app.last_search_query {
-                overlay.query = TextInput::from_string(q.clone());
-                overlay.last_changed = Some(Instant::now());
+                if q != search_query::DEFAULT_QUERY {
+                    overlay.query = TextInput::from_string(q.clone());
+                    overlay.last_changed = Some(Instant::now());
+                }
             }
             app.search_overlay = Some(overlay);
             app.mode = Mode::Search;
