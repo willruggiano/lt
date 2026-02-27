@@ -2553,6 +2553,33 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 overlay.move_up();
             }
         }
+        // Ctrl+N -- cycle completion forward.
+        KeyCode::Char('n') if ctrl => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.completer.cycle_next();
+            }
+        }
+        // Ctrl+P -- cycle completion backward.
+        KeyCode::Char('p') if ctrl => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.completer.cycle_prev();
+            }
+        }
+        // Ctrl+Y -- accept the highlighted completion candidate.
+        KeyCode::Char('y') if ctrl => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
+                if overlay
+                    .completer
+                    .accept_completion(&mut overlay.query, &ast_snapshot)
+                {
+                    let new_raw = overlay.query.value.clone();
+                    overlay.ast = search_query::parse_query_ast(&new_raw);
+                    overlay.completer.update(&overlay.ast, overlay.query.cursor);
+                    overlay.last_changed = Some(Instant::now());
+                }
+            }
+        }
         // Tab / Shift-Tab: apply stem-key completion (bd-3qb).
         // These must NOT be forwarded to TextInput::handle_key.
         KeyCode::Tab => {
