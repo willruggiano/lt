@@ -873,6 +873,12 @@ fn render_search_overlay(
         return;
     }
 
+    // Search is queued but hasn't fired yet (debounce pending).
+    // Keep the underlying list visible to avoid a flash of empty content.
+    if overlay.results.is_empty() && overlay.last_changed.is_some() {
+        return;
+    }
+
     frame.render_widget(Clear, area);
 
     if overlay.results.is_empty() {
