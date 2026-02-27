@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Expose visible row count to key handlers (subtract table header row).
     app.viewport_height = chunks[2].height.saturating_sub(1);
 
-    let context = filter_context(&app.args);
+    let context = filter_context(&app.args, app.last_search_query.as_deref());
     let has_next = app.has_next_page;
     let has_prev = !app.cursor_stack.is_empty();
     let page = app.cursor_stack.len() + 1;
@@ -148,7 +148,7 @@ fn render_header(
     );
 }
 
-fn filter_context(args: &IssueArgs) -> String {
+fn filter_context(args: &IssueArgs, last_search_query: Option<&str>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(t) = &args.team {
         parts.push(format!("team:{}", t));
@@ -179,6 +179,11 @@ fn filter_context(args: &IssueArgs) -> String {
     }
     if let Some(d) = &args.updated_before {
         parts.push(format!("updated<{}", d));
+    }
+    if let Some(q) = last_search_query {
+        if q != super::search_query::DEFAULT_QUERY {
+            parts.push(format!("search:{}", q));
+        }
     }
     let dir = if args.desc { "-" } else { "+" };
     parts.push(format!("sort:{}{}", args.sort.label(), dir));
