@@ -5,44 +5,11 @@ pub mod new;
 mod sort;
 
 use anyhow::Result;
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand};
 
-#[derive(Clone, Debug, PartialEq, ValueEnum)]
-pub enum SortField {
-    Created,
-    Updated,
-    Priority,
-    Title,
-    Assignee,
-    State,
-    Team,
-}
-
-impl SortField {
-    pub fn label(&self) -> &'static str {
-        match self {
-            SortField::Created => "created",
-            SortField::Updated => "updated",
-            SortField::Priority => "priority",
-            SortField::Title => "title",
-            SortField::Assignee => "assignee",
-            SortField::State => "state",
-            SortField::Team => "team",
-        }
-    }
-
-    pub fn next(&self) -> Self {
-        match self {
-            SortField::Updated => SortField::Created,
-            SortField::Created => SortField::Priority,
-            SortField::Priority => SortField::Title,
-            SortField::Title => SortField::Assignee,
-            SortField::Assignee => SortField::State,
-            SortField::State => SortField::Team,
-            SortField::Team => SortField::Updated,
-        }
-    }
-}
+// SortField enum and impls (label, next) -- generated from [[sort_field]] entries
+// in build/search_filter_fields.toml by build.rs (bd-2w5).
+include!(concat!(env!("OUT_DIR"), "/sort_field.rs"));
 
 #[derive(Args, Clone)]
 pub struct IssueArgs {
