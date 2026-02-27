@@ -1,0 +1,55 @@
+# Allowlist of IssueFilter fields exposed as stem keys in the search bar.
+#
+# Each [[field]] entry is validated at build time against
+# docs/reference/linear-schema-definition.graphql:
+#   - gql_field must exist in IssueFilter
+#   - gql_type must match the field's GraphQL type (base name, ignoring
+#     NonNull/List wrappers)
+#
+# The sort: stem is a UI concept with no IssueFilter backing and is
+# hard-coded in build.rs; it is not listed here.
+
+[[field]]
+key        = "assignee"
+gql_field  = "assignee"
+gql_type   = "NullableUserFilter"
+value_hint = "<name>"
+sql_col    = "assignee_name"
+sql_op     = "LIKE"
+sql_lower  = true
+
+[[field]]
+key        = "priority"
+gql_field  = "priority"
+gql_type   = "NullableNumberComparator"
+value_hint = "urgent|high|normal|low|none"
+sql_col    = "priority_label"
+sql_op     = "="
+sql_lower  = false
+
+[[field]]
+key        = "state"
+gql_field  = "state"
+gql_type   = "WorkflowStateFilter"
+value_hint = "<name>"
+sql_col    = "state_name"
+sql_op     = "LIKE"
+sql_lower  = true
+
+[[field]]
+key        = "team"
+gql_field  = "team"
+gql_type   = "TeamFilter"
+value_hint = "<name>"
+sql_col    = "team_name"
+sql_op     = "LIKE"
+sql_lower  = true
+
+[[field]]
+key        = "label"
+gql_field  = "labels"
+gql_type   = "IssueLabelCollectionFilter"
+value_hint = "<name>"
+sql_col    = "label_names"
+sql_op     = "LIKE"
+sql_lower  = true
