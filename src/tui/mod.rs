@@ -567,9 +567,20 @@ impl SearchOverlay {
                     self.table_state.select(Some(0));
                 }
             }
-            Err(_) => {
-                // FTS index unavailable (table missing or no sync done yet).
-                self.fts_unavailable = true;
+            Err(e) => {
+                // Only mark FTS as unavailable when the error is genuinely
+                // about the FTS index or the issues table being missing (i.e.
+                // no sync has been done yet).  A query-syntax error caused by
+                // an incomplete stem token must NOT set fts_unavailable -- that
+                // would show the misleading "run lt sync first" banner while
+                // the user is still typing (bd-3q0).
+                let msg = e.to_string().to_lowercase();
+                let is_missing = msg.contains("issues_fts")
+                    || msg.contains("no such table")
+                    || msg.contains("could not open database");
+                if is_missing {
+                    self.fts_unavailable = true;
+                }
                 self.results.clear();
                 self.table_state.select(None);
             }
