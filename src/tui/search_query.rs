@@ -288,38 +288,8 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
     }
 }
 
-/// Parse the value portion of a `sort:` stem.
-///
-/// Accepted forms:
-///   `updated-`   `updated+`   `updated`
-///   `created-`   `created+`   `created`
-///   `priority-`  `priority+`  `priority`
-///   `title-`     `title+`     `title`
-///   `assignee-`  `assignee+`  `assignee`
-///   `state-`     `state+`     `state`
-///   `team-`      `team+`      `team`
-fn parse_sort_value(value: &str) -> Option<(SortField, SortDir)> {
-    let (field_str, dir) = if let Some(s) = value.strip_suffix('-') {
-        (s, SortDir::Desc)
-    } else if let Some(s) = value.strip_suffix('+') {
-        (s, SortDir::Asc)
-    } else {
-        (value, SortDir::Asc)
-    };
-
-    let field = match field_str.to_lowercase().as_str() {
-        "updated" => SortField::Updated,
-        "created" => SortField::Created,
-        "priority" => SortField::Priority,
-        "title" => SortField::Title,
-        "assignee" => SortField::Assignee,
-        "state" => SortField::State,
-        "team" => SortField::Team,
-        _ => return None,
-    };
-
-    Some((field, dir))
-}
+// parse_sort_value() is generated into search_stems.rs (bd-2w5).
+// sort_col() is generated into search_stems.rs (bd-2w5).
 
 // ---------------------------------------------------------------------------
 // Normalise priority label
@@ -341,19 +311,6 @@ fn normalise_priority(s: &str) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 // SQL execution
 // ---------------------------------------------------------------------------
-
-/// Sort-field to SQLite column name.
-fn sort_col(field: &SortField) -> &'static str {
-    match field {
-        SortField::Updated => "updated_at",
-        SortField::Created => "created_at",
-        SortField::Priority => "priority_label",
-        SortField::Title => "title",
-        SortField::Assignee => "assignee_name",
-        SortField::State => "state_name",
-        SortField::Team => "team_name",
-    }
-}
 
 /// Execute a `ParsedQuery` against the local SQLite database.
 ///

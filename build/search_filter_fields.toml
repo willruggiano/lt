@@ -48,3 +48,50 @@ gql_type  = "NullableCycleFilter"
 key       = "creator"
 gql_field = "creator"
 gql_type  = "NullableUserFilter"
+
+# ---------------------------------------------------------------------------
+# Sort field allowlist.
+#
+# Each [[sort_field]] entry is validated at build time against IssueSortInput
+# in docs/reference/linear-schema-definition.graphql:
+#   - gql_field must exist in IssueSortInput
+#
+# key     -- the user-typed sort key (e.g. "updated" -> sort:updated-)
+# gql_field -- the field name inside IssueSortInput (schema-validated)
+# sql_col -- the SQLite ORDER BY column (used by sort_col() and build_sql_order())
+# ---------------------------------------------------------------------------
+
+[[sort_field]]
+key       = "updated"
+gql_field = "updatedAt"
+sql_col   = "updated_at"
+
+[[sort_field]]
+key       = "created"
+gql_field = "createdAt"
+sql_col   = "created_at"
+
+[[sort_field]]
+key       = "priority"
+gql_field = "priority"
+sql_col   = "priority_label"
+
+[[sort_field]]
+key       = "title"
+gql_field = "title"
+sql_col   = "title"
+
+[[sort_field]]
+key       = "assignee"
+gql_field = "assignee"
+sql_col   = "assignee_name"
+
+[[sort_field]]
+key       = "state"
+gql_field = "workflowState"
+sql_col   = "state_name"
+
+[[sort_field]]
+key       = "team"
+gql_field = "team"
+sql_col   = "team_name"

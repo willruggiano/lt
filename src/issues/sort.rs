@@ -1,17 +1,8 @@
-use serde_json::{Value, json};
-
+// build_sort() -- generated from [[sort_field]] entries in
+// build/search_filter_fields.toml by build.rs (bd-2w5).
+//
+// The generated function maps each SortField variant to its IssueSortInput
+// field key and wraps it in the Linear GraphQL sort JSON envelope.
 use super::SortField;
 
-pub fn build_sort(field: &SortField, desc: bool) -> Value {
-    let order = if desc { "Descending" } else { "Ascending" };
-    let field_key = match field {
-        SortField::Created => "createdAt",
-        SortField::Updated => "updatedAt",
-        SortField::Priority => "priority",
-        SortField::Title => "title",
-        SortField::Assignee => "assignee",
-        SortField::State => "workflowState",
-        SortField::Team => "team",
-    };
-    json!([{ field_key: { "order": order } }])
-}
+include!(concat!(env!("OUT_DIR"), "/sort_build.rs"));
