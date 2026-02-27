@@ -347,10 +347,9 @@ impl From<&QueryAst> for ParsedQuery {
                         team = Some(value.clone());
                     }
                 },
-                Token::PartialStem { span, .. } => {
-                    // Treat like the existing parse_query: fall through to FTS.
-                    let raw_slice = &ast.raw[span.start..span.end];
-                    fts_words.push(format!("{}*", raw_slice));
+                Token::PartialStem { .. } => {
+                    // Incomplete stem -- skip; emitting the raw slice (e.g. ":*")
+                    // produces invalid FTS5 syntax and trips the fts_unavailable flag.
                 }
                 Token::Word { text, .. } => {
                     fts_words.push(format!("{}*", text));
@@ -1314,22 +1313,21 @@ mod tests {
     }
 
     #[test]
-    fn from_ast_parity_unknown_sort_field() {
-        let raw = "sort:bogus";
-        let q1 = parse_query(raw);
-        let ast = parse_query_ast(raw);
-        let q2 = ParsedQuery::from(&ast);
-        assert_eq!(q1.sort, q2.sort);
-        assert_eq!(q1.fts_terms, q2.fts_terms);
+    fn from_ast_unknown_sort_field_not_fts() {
+        // "sort:bogus" is a PartialStem -- should produce no FTS terms, not "sort:bogus*".
+        let ast = parse_query_ast("sort:bogus");
+        let q = ParsedQuery::from(&ast);
+        assert_eq!(q.fts_terms, "");
+        assert_eq!(q.sort, None);
     }
 
     #[test]
-    fn from_ast_parity_unknown_stem() {
-        let raw = "foo:bar baz";
-        let q1 = parse_query(raw);
-        let ast = parse_query_ast(raw);
-        let q2 = ParsedQuery::from(&ast);
-        assert_eq!(q1.fts_terms, q2.fts_terms);
+    fn from_ast_unknown_stem_skipped() {
+        // "foo:bar" is an unknown PartialStem and must not be emitted as FTS.
+        // "baz" is a plain Word and should be emitted.
+        let ast = parse_query_ast("foo:bar baz");
+        let q = ParsedQuery::from(&ast);
+        assert_eq!(q.fts_terms, "baz*");
     }
 
     // -----------------------------------------------------------------------
