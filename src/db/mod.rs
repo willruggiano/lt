@@ -1,6 +1,8 @@
+pub mod comments;
 pub mod filters;
 pub mod issues;
 
+pub use comments::{Comment, delete_comments_for_issue, query_comments, upsert_comments};
 pub use issues::{
     Issue, get_meta, query_issues, query_issues_page, search_issues, set_meta, upsert_issues,
 };
@@ -56,9 +58,51 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             VALUES ('delete', old.rowid, old.identifier, old.title);
             INSERT INTO issues_fts(rowid, identifier, title)
             VALUES (new.rowid, new.identifier, new.title);
-        END;",
+        END;
+        CREATE TABLE IF NOT EXISTS issue_comments (
+            id          TEXT PRIMARY KEY,
+            issue_id    TEXT NOT NULL,
+            body        TEXT NOT NULL,
+            author_name TEXT,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            synced_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_issue_comments_issue_id
+            ON issue_comments (issue_id);
+        CREATE INDEX IF NOT EXISTS idx_issue_comments_created_at
+            ON issue_comments (issue_id, created_at);",
     )
     .context("failed to run migrations")?;
+
+    // Migration: add description column if absent.
+    let has_description: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='description'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_description {
+        conn.execute_batch("ALTER TABLE issues ADD COLUMN description TEXT;")
+            .context("failed to add description column")?;
+    }
+
+    // Migration: add labels column if absent.
+    let has_labels: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='labels'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_labels {
+        conn.execute_batch("ALTER TABLE issues ADD COLUMN labels TEXT NOT NULL DEFAULT '';")
+            .context("failed to add labels column")?;
+    }
+
     Ok(())
 }
 

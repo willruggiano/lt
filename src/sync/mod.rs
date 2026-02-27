@@ -1,3 +1,4 @@
+pub mod comments;
 pub mod delta;
 pub mod full;
 mod probe;

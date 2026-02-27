@@ -1405,6 +1405,8 @@ impl App {
                     created_at: now.clone(),
                     updated_at: now,
                     synced_at: chrono::Utc::now().to_rfc3339(),
+                    description: None,
+                    labels: String::new(),
                 };
                 if let Ok(conn) = crate::db::open_db() {
                     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
@@ -1613,6 +1615,8 @@ fn revert_sqlite(orig: &crate::issues::list::Issue, _kind: &PopupKind) {
         created_at: orig.created_at.clone(),
         updated_at: orig.updated_at.clone(),
         synced_at: chrono::Utc::now().to_rfc3339(),
+        description: orig.description.clone(),
+        labels: orig.labels.nodes.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(","),
     };
     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
 }
@@ -1652,6 +1656,8 @@ fn build_db_issue_optimistic(
         created_at: issue.created_at.clone(),
         updated_at: issue.updated_at.clone(),
         synced_at: chrono::Utc::now().to_rfc3339(),
+        description: issue.description.clone(),
+        labels: issue.labels.nodes.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(","),
     }
 }
 
@@ -1777,6 +1783,10 @@ fn db_issue_to_list_issue(src: crate::db::Issue) -> Issue {
         },
         created_at: src.created_at,
         updated_at: src.updated_at,
+        description: src.description,
+        labels: crate::issues::list::LabelConnection {
+            nodes: src.labels.split(',').filter(|s| !s.is_empty()).map(|n| crate::issues::list::LabelNode { name: n.to_string() }).collect(),
+        },
     }
 }
 
