@@ -118,6 +118,7 @@ pub fn init_cli() -> Result<WorkerGuard> {
         .from_env_lossy();
 
     let stdout_layer = fmt::layer()
+        .with_ansi(false)
         .with_writer(std::io::stdout)
         .with_filter(stdout_env_filter);
 
