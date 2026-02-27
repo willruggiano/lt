@@ -206,6 +206,11 @@ impl ParsedQuery {
 ///
 /// Unknown stems are treated as free-text words so that partial typing
 /// (e.g. `sort:`) does not produce hard errors.
+///
+/// NOTE: Production code now uses `ParsedQuery::from(&QueryAst)` instead.
+/// This function is retained for unit tests that verify parity between the
+/// two parsing paths.
+#[cfg(test)]
 pub fn parse_query(raw: &str) -> ParsedQuery {
     let mut sort: Option<(SortField, SortDir)> = None;
     let mut assignee: Option<String> = None;

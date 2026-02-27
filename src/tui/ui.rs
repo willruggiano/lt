@@ -11,7 +11,7 @@ use super::{
     Status, TextInput,
 };
 use crate::issues::list::Issue;
-use crate::issues::{IssueArgs, SortField};
+use crate::issues::SortField;
 use crate::linear::types::IssueDetail;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -27,7 +27,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Expose visible row count to key handlers (subtract table header row).
     app.viewport_height = chunks[2].height.saturating_sub(1);
 
-    let context = filter_context(&app.args);
+    let context = super::search_query::render_filter_context(&app.active_filter);
     let has_next = app.has_next_page;
     let has_prev = !app.cursor_stack.is_empty();
     let page = app.cursor_stack.len() + 1;
@@ -200,43 +200,6 @@ fn render_header_with_search(
     }
 
     frame.render_widget(Paragraph::new(line), area);
-}
-
-fn filter_context(args: &IssueArgs) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(t) = &args.team {
-        parts.push(format!("team:{}", t));
-    }
-    if let Some(a) = &args.assignee {
-        parts.push(format!("assignee:{}", a));
-    }
-    if args.no_assignee {
-        parts.push("no-assignee".to_string());
-    }
-    if let Some(s) = &args.state {
-        parts.push(format!("state:{}", s));
-    }
-    if let Some(p) = &args.priority {
-        parts.push(format!("priority:{}", p));
-    }
-    if let Some(t) = &args.title {
-        parts.push(format!("title:{}", t));
-    }
-    if let Some(d) = &args.created_after {
-        parts.push(format!("created>={}", d));
-    }
-    if let Some(d) = &args.created_before {
-        parts.push(format!("created<{}", d));
-    }
-    if let Some(d) = &args.updated_after {
-        parts.push(format!("updated>={}", d));
-    }
-    if let Some(d) = &args.updated_before {
-        parts.push(format!("updated<{}", d));
-    }
-    let dir = if args.desc { "-" } else { "+" };
-    parts.push(format!("sort:{}{}", args.sort.label(), dir));
-    parts.join("  ")
 }
 
 // -- footer / input overlay --------------------------------------------------
