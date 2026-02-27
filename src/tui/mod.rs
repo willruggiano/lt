@@ -40,6 +40,7 @@ impl TextInput {
         Self { value: s, cursor }
     }
 
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         &self.value
     }
