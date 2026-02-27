@@ -2396,7 +2396,15 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             if let Some(ref mut overlay) = app.search_overlay {
                 let results = std::mem::take(&mut overlay.results);
                 let selected = overlay.table_state.selected();
-                app.last_search_query = Some(overlay.query.value.clone());
+                let raw_query = overlay.query.value.clone();
+                app.last_search_query = Some(raw_query.clone());
+                // Update app.args sort/desc so the header and table column
+                // marker reflect the sort that was actually used (bd-23g).
+                let parsed = search_query::parse_query(&raw_query);
+                if let Some((field, dir)) = parsed.sort {
+                    app.args.sort = field;
+                    app.args.desc = dir == search_query::SortDir::Desc;
+                }
                 app.issues = results;
                 let n = app.issues.len();
                 let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
