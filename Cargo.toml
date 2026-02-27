@@ -22,3 +22,8 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+
+[build-dependencies]
+graphql-parser = "0.4"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
