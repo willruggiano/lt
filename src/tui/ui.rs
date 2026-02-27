@@ -19,6 +19,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
+        Constraint::Length(1), // spacer
         Constraint::Length(1),
     ])
     .split(frame.area());
@@ -65,16 +66,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     match app.mode {
         Mode::Detail => {
-            render_detail_footer(frame, chunks[3]);
+            render_detail_footer(frame, chunks[4]);
         }
         _ => {
             if input_mode {
-                render_input(frame, chunks[3], &input_buf);
+                render_input(frame, chunks[4], &input_buf);
             } else if let Some(msg) = &app.footer_msg {
-                frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[3]);
+                frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[4]);
             } else {
                 let sync_label = app.sync_status_label.clone();
-                render_footer(frame, chunks[3], has_next, has_prev, page, &sync_label);
+                render_footer(frame, chunks[4], has_next, has_prev, page, &sync_label);
             }
         }
     }
