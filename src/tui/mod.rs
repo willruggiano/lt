@@ -501,18 +501,26 @@ pub struct SearchOverlay {
     pub last_changed: Option<Instant>,
     /// True when FTS index is unavailable (no sync yet).
     pub fts_unavailable: bool,
+    /// Parsed AST of the current query string (bd-3qb).
+    pub ast: search_query::QueryAst,
+    /// Tab-completion state (bd-3qb).
+    pub completer: search_query::Completer,
 }
 
 impl SearchOverlay {
     pub fn new() -> Self {
         // Pre-populate the query bar with the default sort stem (bd-7qo).
         let default_q = search_query::DEFAULT_QUERY.to_string();
+        let ast = search_query::parse_query_ast(&default_q);
+        let completer = search_query::Completer::new();
         Self {
             query: TextInput::from_string(default_q),
             results: Vec::new(),
             table_state: TableState::default(),
             last_changed: Some(Instant::now()),
             fts_unavailable: false,
+            ast,
+            completer,
         }
     }
 
@@ -537,7 +545,9 @@ impl SearchOverlay {
             return;
         }
 
-        let parsed = search_query::parse_query(&raw);
+        self.ast = search_query::parse_query_ast(&raw);
+        let parsed = search_query::ParsedQuery::from(&self.ast);
+        self.completer.update(&self.ast, self.query.cursor);
 
         // Use the same limit as the normal issue list so both views show the
         // same number of results.  Cap to viewport height so we never render
@@ -2459,6 +2469,28 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Up | KeyCode::Char('k') if !ctrl => {
             if let Some(ref mut overlay) = app.search_overlay {
                 overlay.move_up();
+            }
+        }
+        // Tab / Shift-Tab: apply stem-key completion (bd-3qb).
+        // These must NOT be forwarded to TextInput::handle_key.
+        KeyCode::Tab => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
+                overlay.completer.apply_tab(&mut overlay.query, &ast_snapshot, true);
+                let new_raw = overlay.query.value.clone();
+                overlay.ast = search_query::parse_query_ast(&new_raw);
+                overlay.completer.update(&overlay.ast, overlay.query.cursor);
+                overlay.last_changed = Some(Instant::now());
+            }
+        }
+        KeyCode::BackTab => {
+            if let Some(ref mut overlay) = app.search_overlay {
+                let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
+                overlay.completer.apply_tab(&mut overlay.query, &ast_snapshot, false);
+                let new_raw = overlay.query.value.clone();
+                overlay.ast = search_query::parse_query_ast(&new_raw);
+                overlay.completer.update(&overlay.ast, overlay.query.cursor);
+                overlay.last_changed = Some(Instant::now());
             }
         }
         // Everything else goes to the TextInput query bar.
