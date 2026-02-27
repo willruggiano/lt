@@ -690,16 +690,20 @@ impl Completer {
                     self.selected = (self.selected + n - 1) % n;
                 }
 
-                // Determine the replacement range: from key_span.start to cursor.
-                let replace_start = match &self.active_token {
+                // Determine the replacement range: from key_span.start to just
+                // after the colon so that the colon itself is replaced and not
+                // left behind when the candidate (which already contains the
+                // colon) is inserted.
+                let (replace_start, replace_end) = match &self.active_token {
                     Some(Token::PartialStem { key_span, .. })
-                    | Some(Token::Stem { key_span, .. }) => key_span.start,
+                    | Some(Token::Stem { key_span, .. }) => {
+                        (key_span.start, (key_span.end + 1).min(input.value.len()))
+                    }
                     _ => {
                         // Fallback: find start by subtracting prefix length.
-                        input.cursor.saturating_sub(prefix.len())
+                        (input.cursor.saturating_sub(prefix.len()), input.cursor)
                     }
                 };
-                let replace_end = input.cursor;
 
                 // Replace the text in the input.
                 let mut new_value = input.value[..replace_start].to_string();
@@ -738,12 +742,13 @@ impl Completer {
                     return false;
                 }
                 let candidate = self.candidates[self.selected].clone();
-                let replace_start = match &self.active_token {
+                let (replace_start, replace_end) = match &self.active_token {
                     Some(Token::PartialStem { key_span, .. })
-                    | Some(Token::Stem { key_span, .. }) => key_span.start,
-                    _ => input.cursor.saturating_sub(prefix.len()),
+                    | Some(Token::Stem { key_span, .. }) => {
+                        (key_span.start, (key_span.end + 1).min(input.value.len()))
+                    }
+                    _ => (input.cursor.saturating_sub(prefix.len()), input.cursor),
                 };
-                let replace_end = input.cursor;
                 let mut new_value = input.value[..replace_start].to_string();
                 new_value.push_str(&candidate);
                 new_value.push_str(&input.value[replace_end..]);
