@@ -39,6 +39,31 @@ use crate::db::Issue;
 use crate::issues::SortField;
 
 // ---------------------------------------------------------------------------
+// Generated parser (bd-1pl): StemKey, StemKind, parse_query_ast_impl,
+// From<&QueryAst> for ParsedQuery, apply_generated_conditions
+// ---------------------------------------------------------------------------
+
+// SortDir is referenced by StemKind::Sort in the generated file.
+// We forward-declare the sort direction enum here so it is in scope when
+// search_stems.rs is included below.
+//
+// NOTE: SortDir is also used by ParsedQuery and related helpers defined later
+// in this file.  The include! expands here, so it sees SortDir.
+
+/// Direction suffix on a sort stem.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SortDir {
+    /// Ascending ('+' suffix or no suffix).
+    Asc,
+    /// Descending ('-' suffix).
+    Desc,
+}
+
+// Include the generated enums (StemKey, StemKind), parse_query_ast_impl(), and
+// From<&QueryAst> for ParsedQuery.
+include!(concat!(env!("OUT_DIR"), "/search_stems.rs"));
+
+// ---------------------------------------------------------------------------
 // AST types (bd-22c)
 // ---------------------------------------------------------------------------
 
@@ -49,24 +74,13 @@ pub struct Span {
     pub end: usize,
 }
 
-/// The key side of a stem token (used for completion context).
+/// A structured parse error with span and human-readable message.
 #[derive(Debug, Clone, PartialEq)]
-pub enum StemKey {
-    Sort,
-    Assignee,
-    Priority,
-    State,
-    Team,
-}
-
-/// The fully-parsed meaning of a recognised stem.
-#[derive(Debug, Clone, PartialEq)]
-pub enum StemKind {
-    Sort { field: SortField, dir: SortDir },
-    Assignee { value: String },
-    Priority { value: String },
-    State { value: String },
-    Team { value: String },
+pub struct ParseError {
+    /// Byte span of the offending input region.
+    pub span: Span,
+    /// Human-readable description, e.g. "unknown key 'priorty', did you mean 'priority'?"
+    pub message: String,
 }
 
 /// A single token in the query string, with its location in the source.
@@ -93,6 +107,7 @@ pub enum Token {
     /// A bare word (goes to FTS).
     Word { span: Span, text: String },
     /// Anything that could not be classified (e.g. empty string, stray colon).
+    #[allow(dead_code)]
     Unknown { span: Span, raw: String },
 }
 
@@ -102,280 +117,35 @@ pub struct QueryAst {
     pub raw: String,
     /// Ordered list of tokens (whitespace gaps are not represented).
     pub tokens: Vec<Token>,
+    /// Structured parse errors collected during parsing (e.g. unknown stem keys).
+    /// Always empty for well-formed input. Consumed by bd-2gj (TUI highlighting).
+    #[allow(dead_code)]
+    pub errors: Vec<ParseError>,
 }
 
 // ---------------------------------------------------------------------------
-// parse_query_ast -- single-pass byte scanner (bd-22c)
+// parse_query_ast -- Chumsky-backed parser (bd-1pl)
 // ---------------------------------------------------------------------------
 
 /// Parse a raw query string into a `QueryAst` with full span information.
 ///
-/// The parser is a single-pass, left-to-right byte scanner. It never panics;
-/// any input string yields a valid `QueryAst`. Every non-whitespace byte in
-/// `raw` is covered by exactly one token.
+/// Delegates to the generated `parse_query_ast_impl()` function (from
+/// search_stems.rs) which uses Chumsky error recovery.  Never panics;
+/// any input string yields a valid `QueryAst`.
 pub fn parse_query_ast(raw: &str) -> QueryAst {
-    let mut tokens = Vec::new();
-    let mut pos = 0;
-    let bytes = raw.as_bytes();
-
-    loop {
-        // Skip ASCII whitespace.
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-
-        // Find end of token (next whitespace boundary).
-        let start = pos;
-        while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        let end = pos;
-
-        // Safety: start and end are on ASCII whitespace boundaries, so they
-        // are valid UTF-8 char boundaries.
-        let slice = &raw[start..end];
-
-        let token = classify_token(raw, start, end, slice);
-        tokens.push(token);
-    }
-
+    let (tokens, errors) = parse_query_ast_impl(raw);
     QueryAst {
         raw: raw.to_string(),
         tokens,
+        errors,
     }
 }
 
-/// Classify a single token slice into the appropriate `Token` variant.
-fn classify_token(raw: &str, start: usize, end: usize, slice: &str) -> Token {
-    let span = Span { start, end };
-
-    if let Some(colon_offset) = slice.find(':') {
-        let key = &slice[..colon_offset];
-        let val = &slice[colon_offset + 1..];
-
-        let key_start = start;
-        let key_end = start + colon_offset;
-        // val_span covers the bytes after the colon (may be empty)
-        let val_start = start + colon_offset + 1;
-        let val_end = end;
-
-        let key_span = Span {
-            start: key_start,
-            end: key_end,
-        };
-        let val_span = Span {
-            start: val_start,
-            end: val_end,
-        };
-
-        // Check if key is a known StemKey.
-        let stem_key = match key.to_lowercase().as_str() {
-            "sort" => Some(StemKey::Sort),
-            "assignee" => Some(StemKey::Assignee),
-            "priority" => Some(StemKey::Priority),
-            "state" => Some(StemKey::State),
-            "team" => Some(StemKey::Team),
-            _ => None,
-        };
-
-        match stem_key {
-            Some(StemKey::Sort) => {
-                if let Some((field, dir)) = parse_sort_value(val) {
-                    Token::Stem {
-                        span,
-                        key_span,
-                        val_span,
-                        kind: StemKind::Sort { field, dir },
-                    }
-                } else {
-                    Token::PartialStem {
-                        span,
-                        key_span,
-                        val_span,
-                        known_key: Some(StemKey::Sort),
-                    }
-                }
-            }
-            Some(StemKey::Assignee) => {
-                if !val.is_empty() {
-                    Token::Stem {
-                        span,
-                        key_span,
-                        val_span,
-                        kind: StemKind::Assignee {
-                            value: val.to_lowercase(),
-                        },
-                    }
-                } else {
-                    Token::PartialStem {
-                        span,
-                        key_span,
-                        val_span,
-                        known_key: Some(StemKey::Assignee),
-                    }
-                }
-            }
-            Some(StemKey::Priority) => {
-                if !val.is_empty() {
-                    Token::Stem {
-                        span,
-                        key_span,
-                        val_span,
-                        kind: StemKind::Priority {
-                            value: val.to_lowercase(),
-                        },
-                    }
-                } else {
-                    Token::PartialStem {
-                        span,
-                        key_span,
-                        val_span,
-                        known_key: Some(StemKey::Priority),
-                    }
-                }
-            }
-            Some(StemKey::State) => {
-                if !val.is_empty() {
-                    Token::Stem {
-                        span,
-                        key_span,
-                        val_span,
-                        kind: StemKind::State {
-                            value: val.to_lowercase(),
-                        },
-                    }
-                } else {
-                    Token::PartialStem {
-                        span,
-                        key_span,
-                        val_span,
-                        known_key: Some(StemKey::State),
-                    }
-                }
-            }
-            Some(StemKey::Team) => {
-                if !val.is_empty() {
-                    Token::Stem {
-                        span,
-                        key_span,
-                        val_span,
-                        kind: StemKind::Team {
-                            value: val.to_string(),
-                        },
-                    }
-                } else {
-                    Token::PartialStem {
-                        span,
-                        key_span,
-                        val_span,
-                        known_key: Some(StemKey::Team),
-                    }
-                }
-            }
-            None => {
-                // Unknown key -- emit PartialStem with no known_key.
-                // The value (if any) is preserved in the span but not parsed.
-                Token::PartialStem {
-                    span,
-                    key_span,
-                    val_span,
-                    known_key: None,
-                }
-            }
-        }
-    } else {
-        // No colon -- bare word.
-        if slice.is_empty() {
-            Token::Unknown {
-                span,
-                raw: raw[start..end].to_string(),
-            }
-        } else {
-            Token::Word {
-                span,
-                text: slice.to_string(),
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// From<&QueryAst> for ParsedQuery (bd-22c)
-// ---------------------------------------------------------------------------
-
-impl From<&QueryAst> for ParsedQuery {
-    /// Derive a SQL-ready `ParsedQuery` from the AST.
-    ///
-    /// Produces identical results to `parse_query(ast.raw.trim())` for all
-    /// valid inputs.
-    fn from(ast: &QueryAst) -> Self {
-        let mut sort: Option<(SortField, SortDir)> = None;
-        let mut assignee: Option<String> = None;
-        let mut priority: Option<String> = None;
-        let mut state: Option<String> = None;
-        let mut team: Option<String> = None;
-        let mut fts_words: Vec<String> = Vec::new();
-
-        for token in &ast.tokens {
-            match token {
-                Token::Stem { kind, .. } => match kind {
-                    StemKind::Sort { field, dir } => {
-                        sort = Some((field.clone(), dir.clone()));
-                    }
-                    StemKind::Assignee { value } => {
-                        assignee = Some(value.clone());
-                    }
-                    StemKind::Priority { value } => {
-                        priority = Some(value.clone());
-                    }
-                    StemKind::State { value } => {
-                        state = Some(value.clone());
-                    }
-                    StemKind::Team { value } => {
-                        team = Some(value.clone());
-                    }
-                },
-                Token::PartialStem { .. } => {
-                    // Incomplete stem -- skip; emitting the raw slice (e.g. ":*")
-                    // produces invalid FTS5 syntax and trips the fts_unavailable flag.
-                }
-                Token::Word { text, .. } => {
-                    fts_words.push(format!("{}*", text));
-                }
-                Token::Unknown { raw: raw_slice, .. } => {
-                    if !raw_slice.is_empty() {
-                        fts_words.push(format!("{}*", raw_slice));
-                    }
-                }
-            }
-        }
-
-        ParsedQuery {
-            sort,
-            assignee,
-            priority,
-            state,
-            team,
-            fts_terms: fts_words.join(" "),
-        }
-    }
-}
+// From<&QueryAst> for ParsedQuery is generated in search_stems.rs (bd-1pl).
 
 // ---------------------------------------------------------------------------
 // ParsedQuery -- result of parsing a raw query string
 // ---------------------------------------------------------------------------
-
-/// Direction suffix on a sort stem.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SortDir {
-    /// Ascending ('+' suffix or no suffix).
-    Asc,
-    /// Descending ('-' suffix).
-    Desc,
-}
 
 /// A fully parsed search query.
 #[derive(Debug, Clone)]
@@ -390,6 +160,8 @@ pub struct ParsedQuery {
     pub state: Option<String>,
     /// Team filter (substring match).
     pub team: Option<String>,
+    /// Label filter (substring match, lowercased).
+    pub label: Option<String>,
     /// Free-text words joined into an FTS5 query.  Empty string means no FTS.
     pub fts_terms: String,
 }
@@ -403,6 +175,7 @@ impl ParsedQuery {
             && self.priority.is_none()
             && self.state.is_none()
             && self.team.is_none()
+            && self.label.is_none()
             && self.fts_terms.is_empty()
     }
 }
@@ -421,6 +194,7 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
     let mut priority: Option<String> = None;
     let mut state: Option<String> = None;
     let mut team: Option<String> = None;
+    let mut label: Option<String> = None;
     let mut fts_words: Vec<String> = Vec::new();
 
     for token in raw.split_whitespace() {
@@ -449,6 +223,10 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
                     team = Some(value.to_string());
                     continue;
                 }
+                "label" if !value.is_empty() => {
+                    label = Some(value.to_lowercase());
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -464,6 +242,7 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
         priority,
         state,
         team,
+        label,
         fts_terms,
     }
 }
@@ -585,6 +364,12 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         let pat = format!("%{}%", t.to_lowercase());
         bind.push(Box::new(pat.clone()));
         bind.push(Box::new(pat));
+    }
+
+    // -- label --
+    if let Some(ref l) = q.label {
+        conditions.push("LOWER(COALESCE(labels,'')) LIKE ?".to_string());
+        bind.push(Box::new(format!("%{}%", l)));
     }
 
     // -- ORDER BY --
