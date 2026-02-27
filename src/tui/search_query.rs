@@ -406,6 +406,7 @@ pub struct ParsedQuery {
 
 impl ParsedQuery {
     /// Return `true` when no filter constraints are set and no FTS terms exist.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.sort.is_none()
             && self.assignee.is_none()
@@ -696,6 +697,7 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
 ///
 /// If `viewer_name` is Some and the assignee filter is "me", it is replaced
 /// with the actual name so that the SQL LIKE filter works correctly.
+#[allow(dead_code)]
 pub fn resolve_me(q: &mut ParsedQuery, viewer_name: Option<&str>) {
     if q.assignee.as_deref() == Some("me") {
         q.assignee = viewer_name.map(|n| n.to_lowercase());
@@ -741,6 +743,7 @@ pub struct Completer {
     /// Index of the currently highlighted candidate (cycles on Tab).
     pub selected: usize,
     /// True when candidate list is being populated asynchronously (Phase 2).
+    #[allow(dead_code)]
     pub candidates_pending: bool,
 }
 

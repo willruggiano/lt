@@ -1,4 +1,3 @@
-pub mod detail;
 pub mod display;
 mod filter;
 pub mod list;
