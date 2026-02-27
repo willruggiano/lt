@@ -112,6 +112,8 @@
             (try-fwd-env "ANTHROPIC_API_KEY")
             (try-fwd-env "GEMINI_API_KEY")
             (try-fwd-env "OPENAI_API_KEY")
+            # application state
+            (readonly (noescape "~/.local/share/lt"))
             # toolchain
             (add-pkg-deps (
               with pkgs;
