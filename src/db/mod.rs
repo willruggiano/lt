@@ -59,6 +59,35 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         END;",
     )
     .context("failed to run migrations")?;
+
+    // Migration: add description column if absent.
+    let has_description: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='description'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_description {
+        conn.execute_batch("ALTER TABLE issues ADD COLUMN description TEXT;")
+            .context("failed to add description column")?;
+    }
+
+    // Migration: add labels column if absent.
+    let has_labels: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='labels'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_labels {
+        conn.execute_batch("ALTER TABLE issues ADD COLUMN labels TEXT NOT NULL DEFAULT '';")
+            .context("failed to add labels column")?;
+    }
+
     Ok(())
 }
 

@@ -24,11 +24,13 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
       id
       identifier
       title
+      description
       priorityLabel
       priority
       state { id name }
       assignee { id name }
       team { id name }
+      labels { nodes { name } }
       createdAt
       updatedAt
     }
@@ -66,10 +68,22 @@ pub struct Issue {
     pub state: State,
     pub assignee: Option<User>,
     pub team: Team,
+    pub description: Option<String>,
+    pub labels: LabelConnection,
     #[serde(rename = "createdAt")]
     pub created_at: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct LabelNode {
+    pub name: String,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct LabelConnection {
+    pub nodes: Vec<LabelNode>,
 }
 
 #[derive(Deserialize)]

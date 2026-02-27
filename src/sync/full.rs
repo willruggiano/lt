@@ -7,6 +7,13 @@ use crate::issues::{IssueArgs, SortField};
 
 /// Convert a list::Issue into a db::Issue.
 fn to_db_issue(src: &crate::issues::list::Issue) -> db::Issue {
+    let labels = src
+        .labels
+        .nodes
+        .iter()
+        .map(|l| l.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     db::Issue {
         id: src.id.clone(),
         identifier: src.identifier.clone(),
@@ -19,6 +26,8 @@ fn to_db_issue(src: &crate::issues::list::Issue) -> db::Issue {
         created_at: src.created_at.clone(),
         updated_at: src.updated_at.clone(),
         synced_at: String::new(), // filled by upsert_issues
+        description: src.description.clone(),
+        labels,
     }
 }
 

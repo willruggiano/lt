@@ -283,7 +283,7 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         format!(
             "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
                     i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
-                    i.synced_at
+                    i.synced_at, i.description, i.labels
              FROM issues i
              JOIN issues_fts ON issues_fts.rowid = i.rowid
              WHERE issues_fts MATCH ?{extra_cond}
@@ -301,7 +301,8 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
     } else {
         format!(
             "SELECT id, identifier, title, priority_label, state_name,
-                    assignee_name, team_name, team_key, created_at, updated_at, synced_at
+                    assignee_name, team_name, team_key, created_at, updated_at, synced_at,
+                    description, labels
              FROM issues
              {where_clause}
              ORDER BY {col} {dir}
@@ -344,6 +345,8 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
                 created_at: row.get(8)?,
                 updated_at: row.get(9)?,
                 synced_at: row.get(10)?,
+                description: row.get(11)?,
+                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
             })
         })
         .map_err(|e| anyhow::anyhow!("execute search_query: {}", e))?;

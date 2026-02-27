@@ -16,11 +16,13 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
       id
       identifier
       title
+      description
       priorityLabel
       priority
       state { id name }
       assignee { id name }
       team { id name }
+      labels { nodes { name } }
       createdAt
       updatedAt
     }
@@ -46,6 +48,16 @@ struct Team {
 }
 
 #[derive(Deserialize)]
+struct LabelNode {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct LabelConnection {
+    nodes: Vec<LabelNode>,
+}
+
+#[derive(Deserialize)]
 struct Issue {
     id: String,
     identifier: String,
@@ -55,6 +67,8 @@ struct Issue {
     state: State,
     assignee: Option<User>,
     team: Team,
+    description: Option<String>,
+    labels: LabelConnection,
     #[serde(rename = "createdAt")]
     created_at: String,
     #[serde(rename = "updatedAt")]
@@ -74,6 +88,13 @@ struct IssuesData {
 }
 
 fn to_db_issue(src: &Issue) -> db::Issue {
+    let labels = src
+        .labels
+        .nodes
+        .iter()
+        .map(|l| l.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     db::Issue {
         id: src.id.clone(),
         identifier: src.identifier.clone(),
@@ -86,6 +107,8 @@ fn to_db_issue(src: &Issue) -> db::Issue {
         created_at: src.created_at.clone(),
         updated_at: src.updated_at.clone(),
         synced_at: String::new(), // filled by upsert_issues
+        description: src.description.clone(),
+        labels,
     }
 }
 

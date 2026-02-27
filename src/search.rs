@@ -50,7 +50,8 @@ pub fn run(args: SearchArgs) -> Result<()> {
         let like_pattern = format!("%{}%", args.query);
         let sql = format!(
             "SELECT id, identifier, title, priority_label, state_name,
-                    assignee_name, team_name, team_key, created_at, updated_at, synced_at
+                    assignee_name, team_name, team_key, created_at, updated_at, synced_at,
+                    description, labels
              FROM issues
              WHERE title LIKE ?1
              LIMIT {}",
@@ -73,6 +74,8 @@ pub fn run(args: SearchArgs) -> Result<()> {
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
                     synced_at: row.get(10)?,
+                    description: row.get(11)?,
+                    labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
                 })
             })
             .context("failed to execute fallback search")?;

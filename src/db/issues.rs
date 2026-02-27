@@ -19,6 +19,8 @@ pub struct Issue {
     pub updated_at: String,
     #[allow(dead_code)]
     pub synced_at: String,
+    pub description: Option<String>,
+    pub labels: String,
 }
 
 /// Insert or replace a slice of issues, setting synced_at to now (UTC).
@@ -28,8 +30,9 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
         .prepare(
             "INSERT OR REPLACE INTO issues
              (id, identifier, title, priority_label, state_name,
-              assignee_name, team_name, team_key, created_at, updated_at, synced_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              assignee_name, team_name, team_key, created_at, updated_at, synced_at,
+              description, labels)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .context("failed to prepare upsert statement")?;
 
@@ -46,6 +49,8 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
             issue.created_at,
             issue.updated_at,
             synced_at,
+            issue.description,
+            issue.labels,
         ])
         .context("failed to upsert issue")?;
     }
@@ -86,7 +91,8 @@ pub fn query_issues_page(
 
     let sql = format!(
         "SELECT id, identifier, title, priority_label, state_name,
-                assignee_name, team_name, team_key, created_at, updated_at, synced_at
+                assignee_name, team_name, team_key, created_at, updated_at, synced_at,
+                description, labels
          FROM issues
          WHERE 1=1
          ORDER BY {order_col} {direction}
@@ -111,6 +117,8 @@ pub fn query_issues_page(
                 created_at: row.get(8)?,
                 updated_at: row.get(9)?,
                 synced_at: row.get(10)?,
+                description: row.get(11)?,
+                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
             })
         })
         .context("failed to execute query")?;
@@ -136,7 +144,7 @@ pub fn query_issues_page(
 pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
     let sql = "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
                       i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
-                      i.synced_at
+                      i.synced_at, i.description, i.labels
                FROM issues i
                JOIN issues_fts ON issues_fts.rowid = i.rowid
                WHERE issues_fts MATCH ?1
@@ -160,6 +168,8 @@ pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
                 created_at: row.get(8)?,
                 updated_at: row.get(9)?,
                 synced_at: row.get(10)?,
+                description: row.get(11)?,
+                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
             })
         })
         .context("failed to execute search_issues query")?;
