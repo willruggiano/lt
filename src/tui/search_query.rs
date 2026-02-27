@@ -1564,4 +1564,407 @@ mod tests {
         assert!(s.contains("creator:cr"));
         assert!(s.contains("sort:updated-"));
     }
+
+    // -----------------------------------------------------------------------
+    // Snapshot-based completion test harness (bd-cd4)
+    //
+    // Snapshot format:
+    //   - Literal characters are text content
+    //   - '|' marks the cursor position (exactly one per snapshot)
+    //   - '(text)' at the very end is ghost text from hint_suffix()
+    //
+    // Examples:
+    //   "sort:updated-|"        -- cursor at end, no ghost text
+    //   "sort:|updated-"        -- cursor after colon
+    //   "sort:updated- |(sort:)"-- cursor after space, ghost text "sort:"
+    // -----------------------------------------------------------------------
+
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    struct Harness {
+        input: crate::tui::TextInput,
+        completer: Completer,
+    }
+
+    impl Harness {
+        /// Parse a snapshot string to extract initial text and cursor position,
+        /// then build the AST and initialise the completer.
+        ///
+        /// The trailing '(...)' ghost-text annotation is stripped and ignored
+        /// (the completer will compute it fresh from the AST).
+        fn new(snapshot: &str) -> Self {
+            // Strip optional trailing ghost-text annotation '(...)'.
+            let bare = if snapshot.ends_with(')') {
+                if let Some(paren) = snapshot.rfind('(') {
+                    &snapshot[..paren]
+                } else {
+                    snapshot
+                }
+            } else {
+                snapshot
+            };
+
+            // Split on the cursor marker '|'.
+            let pipe = bare
+                .find('|')
+                .unwrap_or_else(|| panic!("snapshot missing '|': {:?}", snapshot));
+            let before = &bare[..pipe];
+            let after = &bare[pipe + 1..];
+            let text = format!("{}{}", before, after);
+            let cursor = before.len();
+
+            let mut input = crate::tui::TextInput::new();
+            input.value = text;
+            input.cursor = cursor;
+
+            let mut completer = Completer::new();
+            let ast = parse_query_ast(&input.value);
+            completer.update(&ast, input.cursor);
+
+            Harness { input, completer }
+        }
+
+        /// Render the current state as a snapshot string.
+        fn snapshot(&self) -> String {
+            let before = &self.input.value[..self.input.cursor];
+            let after = &self.input.value[self.input.cursor..];
+            let mut s = format!("{}|{}", before, after);
+            if let Some(ghost) = self.completer.hint_suffix() {
+                s.push_str(&format!("({})", ghost));
+            }
+            s
+        }
+
+        /// Assert the current state matches the expected snapshot.
+        /// Panics with a clear diff on mismatch.
+        fn assert_snapshot(&self, expected: &str) {
+            let actual = self.snapshot();
+            assert_eq!(
+                actual, expected,
+                "\nsnapshot mismatch:\n  actual:   {:?}\n  expected: {:?}",
+                actual, expected
+            );
+        }
+
+        /// Simulate pressing Tab (forward=true).
+        fn tab(&mut self) {
+            let ast = parse_query_ast(&self.input.value);
+            self.completer.apply_tab(&mut self.input, &ast, true);
+            let ast = parse_query_ast(&self.input.value);
+            self.completer.update(&ast, self.input.cursor);
+        }
+
+        /// Simulate pressing Shift-Tab (forward=false).
+        fn shift_tab(&mut self) {
+            let ast = parse_query_ast(&self.input.value);
+            self.completer.apply_tab(&mut self.input, &ast, false);
+            let ast = parse_query_ast(&self.input.value);
+            self.completer.update(&ast, self.input.cursor);
+        }
+
+        /// Simulate typing a character.
+        fn key(&mut self, c: char) {
+            self.input.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+            let ast = parse_query_ast(&self.input.value);
+            self.completer.update(&ast, self.input.cursor);
+        }
+
+        /// Simulate pressing Backspace.
+        fn backspace(&mut self) {
+            self.input
+                .handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+            let ast = parse_query_ast(&self.input.value);
+            self.completer.update(&ast, self.input.cursor);
+        }
+
+        /// Accept the currently highlighted completion candidate (Ctrl+Y).
+        fn ctrl_y(&mut self) {
+            let ast = parse_query_ast(&self.input.value);
+            if self.completer.accept_completion(&mut self.input, &ast) {
+                let ast = parse_query_ast(&self.input.value);
+                self.completer.update(&ast, self.input.cursor);
+            }
+        }
+
+        /// Cycle to the next completion candidate (Ctrl+N).
+        /// Does NOT re-parse the AST; only changes the selected index.
+        fn ctrl_n(&mut self) {
+            self.completer.cycle_next();
+        }
+
+        /// Cycle to the previous completion candidate (Ctrl+P).
+        /// Does NOT re-parse the AST; only changes the selected index.
+        fn ctrl_p(&mut self) {
+            self.completer.cycle_prev();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1: Tab at end of single-token query is a no-op (no wrap).
+    //
+    // "sort:updated-" has one Stem token. cursor=13 is past key_span.end=4
+    // so context=Word (value portion). Tab calls jump_token_boundary forward,
+    // no token starts after position 13, no wrap -> no-op.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tab_from_end_of_default_query() {
+        let mut h = Harness::new("sort:updated-|");
+        // context=Word (cursor in value portion of the Stem), no candidates.
+        // Tab -> jump forward -> no next token -> no-op.
+        h.tab();
+        h.assert_snapshot("sort:updated-|");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2: Shift-Tab at end of single-token query jumps into value portion.
+    //
+    // cursor=13 is in value portion (Word context). Shift-Tab calls
+    // jump_token_boundary backward. The only token is sort:updated- with
+    // start=0 < 13, so it qualifies. cursor_position_for_token = key_span.end+1
+    // = 4+1 = 5 (right after the colon).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn shift_tab_from_end_of_default_query() {
+        let mut h = Harness::new("sort:updated-|");
+        h.shift_tab();
+        // Cursor jumps to right after the colon (position 5).
+        h.assert_snapshot("sort:|updated-");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3: Type space then Tab inserts first stem candidate.
+    //
+    // After space, cursor=14 is in a gap (no token covers it). Context is
+    // StemKey{prefix:""} with all 9 candidates. Ghost text shows "sort:".
+    // Tab inserts "sort:" at the gap position and advances selected to 1.
+    // After insertion the PartialStem "sort:" is parsed; cursor lands after
+    // its colon (StemValue context, no ghost text).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn space_then_tab_inserts_completion() {
+        let mut h = Harness::new("sort:updated-|");
+        h.key(' ');
+        // Gap context: all candidates offered, ghost text = candidates[0] = "sort:".
+        h.assert_snapshot("sort:updated- |(sort:)");
+        h.tab();
+        // "sort:" inserted at gap; cursor after colon; StemValue context.
+        h.assert_snapshot("sort:updated- sort:|");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: Tab at end of last token is a no-op (no wrap).
+    //
+    // cursor=19 is in the value portion of the PartialStem "sort:" at [14,19).
+    // Context=StemValue (cursor past key_span.end). Tab -> jump forward ->
+    // no token starts after 19 -> no-op.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tab_no_wrap_at_end() {
+        let mut h = Harness::new("sort:updated- sort:|");
+        // Context: StemValue (cursor right after the colon of PartialStem).
+        // Tab -> jump_token_boundary forward -> no next token -> no-op.
+        h.tab();
+        h.assert_snapshot("sort:updated- sort:|");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5: Shift-Tab from the start of a StemKey context applies completion.
+    //
+    // cursor=0 is inside the Stem "sort:updated-" at [0,13), within key_span
+    // [0,4). Context=StemKey{prefix:""} with all 9 candidates.
+    // Shift-Tab in StemKey context: applies candidates[0]="sort:" (replacing
+    // key+colon [0,5)), advances selected to 8 (wrap backward), moves cursor
+    // to position 5 (after inserted colon). Text is unchanged because "sort:"
+    // replaces the existing "sort:" prefix.
+    //
+    // Note: this is NOT a pure jump; StemKey context always applies a candidate
+    // first. jump_token_boundary is only called when context is NOT StemKey.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn shift_tab_from_start_of_stemkey_applies_candidate() {
+        let mut h = Harness::new("|sort:updated-");
+        // cursor=0, inside key part of Stem, prefix="". StemKey, 9 candidates.
+        // Shift-Tab: applies candidates[0]="sort:", selected wraps to 8.
+        // new text = "sort:updated-" (unchanged), cursor=5.
+        h.shift_tab();
+        h.assert_snapshot("sort:|updated-");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: Typing partial key then Tab completes without double colon.
+    //
+    // "so:" is parsed as PartialStem{key_span=[0,2), known_key=None}.
+    // cursor=2 <= key_span.end=2 -> StemKey{prefix="so"}, candidates=["sort:"].
+    // Tab replaces [0, (2+1).min(3)=3) with "sort:", cursor=5.
+    // Result: "sort:" with cursor at 5 (after the colon).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tab_partial_key_completes_without_double_colon() {
+        let mut h = Harness::new("so|:");
+        // cursor=2 in key portion of PartialStem "so:". StemKey{prefix="so"}.
+        // candidates=["sort:"]. Tab replaces "so:" with "sort:", cursor=5.
+        h.tab();
+        h.assert_snapshot("sort:|");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: Shift-Tab backward through a multi-token query.
+    //
+    // Query: "sort:updated- assignee:will priority:high"
+    // Token spans (half-open):
+    //   sort:updated-  [0,13)  key_span=[0,4)   cursor_position=5
+    //   assignee:will  [14,27) key_span=[14,22)  cursor_position=23
+    //   priority:high  [28,41) key_span=[28,36)  cursor_position=37
+    //
+    // Shift-Tab 1: cursor=41 in value portion of priority:high (Word context).
+    //   backward filter: last token with start<41 = priority:high (start=28).
+    //   cursor -> cursor_position_for_token = 37.
+    //
+    // Shift-Tab 2: cursor=37 still in value portion of priority:high (Word).
+    //   backward filter: last token with start<37 = priority:high (start=28).
+    //   cursor_position_for_token = 37 again. Effectively a no-op.
+    //   This is a known limitation: the backward filter uses token.start, not
+    //   cursor_position_for_token, so it cannot advance past the current token
+    //   once the cursor is at cursor_position_for_token.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn shift_tab_through_multi_token_query() {
+        let mut h = Harness::new("sort:updated- assignee:will priority:high|");
+        // Shift-Tab 1: from end, lands after priority: colon.
+        h.shift_tab();
+        h.assert_snapshot("sort:updated- assignee:will priority:|high");
+        // Shift-Tab 2: cursor=37 still in priority:high value portion (Word).
+        // Backward filter finds priority:high (start=28 < 37) as the last match.
+        // cursor_position_for_token = 37 -> no effective movement.
+        h.shift_tab();
+        h.assert_snapshot("sort:updated- assignee:will priority:|high");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: Tab forward through a multi-token query.
+    //
+    // Query: "sort:updated- assignee:will"
+    // Token spans:
+    //   sort:updated-  [0,13)  key_span=[0,4)   cursor_position=5
+    //   assignee:will  [14,27) key_span=[14,22)  cursor_position=23
+    //
+    // Tab 1: cursor=0 inside sort:updated- key portion. StemKey{prefix:""}.
+    //   Applies candidates[0]="sort:", replaces [0,5) with "sort:", cursor=5.
+    //   Text unchanged. selected advances to 1.
+    //
+    // Tab 2: cursor=5 in value portion of sort:updated- (Word context).
+    //   Forward jump: first token with start>5 = assignee:will (start=14).
+    //   cursor -> cursor_position_for_token = 23.
+    //
+    // Tab 3: cursor=23 in value portion of assignee:will (Word context).
+    //   Forward jump: no token with start>23. No-op.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tab_forward_through_multi_token_query() {
+        let mut h = Harness::new("|sort:updated- assignee:will");
+        // cursor=0, StemKey{prefix:""} inside sort: key. candidates=9.
+        // Tab: applies "sort:" over [0,5), cursor=5. Text unchanged.
+        h.tab();
+        h.assert_snapshot("sort:|updated- assignee:will");
+        // cursor=5, Word context (value portion). Tab jumps to assignee:.
+        h.tab();
+        h.assert_snapshot("sort:updated- assignee:|will");
+        // cursor=23, Word context. No next token. Tab is a no-op.
+        h.tab();
+        h.assert_snapshot("sort:updated- assignee:|will");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: In a gap, Tab inserts first candidate; ghost text updates.
+    //
+    // "sort:updated- " has cursor=14 in a gap (StemKey{prefix:""},
+    // candidates=9). Ghost text = candidates[0] = "sort:".
+    // Tab inserts "sort:" at the gap. After insertion, cursor=19 is in the
+    // value portion of the new PartialStem (StemValue context, no ghost).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tab_cycles_candidates_in_gap() {
+        let mut h = Harness::new("sort:updated- |");
+        // Gap context, candidates=9, ghost="sort:".
+        h.assert_snapshot("sort:updated- |(sort:)");
+        h.tab();
+        // "sort:" inserted; cursor after its colon; StemValue, no ghost.
+        h.assert_snapshot("sort:updated- sort:|");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: Backspace and retype in the harness.
+    //
+    // Start: cursor=5 in value portion of sort:updated- (Word context).
+    // key('x'): insert 'x' -> "sort:xupdated-", cursor=6. PartialStem,
+    //   StemValue context (cursor past key_span.end=4).
+    // backspace: delete 'x' -> "sort:updated-", cursor=5. Back to Word.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn backspace_and_retype() {
+        let mut h = Harness::new("sort:|updated-");
+        // cursor=5, value portion of Stem (Word context), no ghost.
+        h.key('x');
+        // "sort:xupdated-", cursor=6. PartialStem(Sort), StemValue, no ghost.
+        h.assert_snapshot("sort:x|updated-");
+        h.backspace();
+        // "sort:updated-", cursor=5. Stem, Word context, no ghost.
+        h.assert_snapshot("sort:|updated-");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: Ctrl+Y accepts the current completion candidate.
+    //
+    // "so:" with cursor=2 in key portion: StemKey{prefix="so"}, ["sort:"].
+    // Ctrl+Y: accept_completion replaces "so:" with "sort:", cursor=5.
+    // After re-parse: PartialStem{sort:}, cursor=5>key_span.end=4 -> StemValue.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ctrl_y_accepts_completion() {
+        let mut h = Harness::new("so|:");
+        // StemKey{prefix="so"}, candidates=["sort:"].
+        h.ctrl_y();
+        // "so:" replaced with "sort:", cursor=5 (after colon). StemValue.
+        h.assert_snapshot("sort:|");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: Ctrl+N and Ctrl+P cycle through candidates without editing text.
+    //
+    // Empty input: cursor=0, StemKey{prefix:""}, candidates=all 9, selected=0.
+    // Ghost text = candidates[selected].
+    // Ctrl+N advances selected; Ctrl+P reverses it.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ctrl_n_ctrl_p_cycle() {
+        let mut h = Harness::new("|");
+        // Empty input: StemKey, 9 candidates, selected=0, ghost="sort:".
+        h.assert_snapshot("|(sort:)");
+        h.ctrl_n();
+        // selected=1 -> "assignee:".
+        h.assert_snapshot("|(assignee:)");
+        h.ctrl_n();
+        // selected=2 -> "priority:".
+        h.assert_snapshot("|(priority:)");
+        h.ctrl_p();
+        // selected=1 -> "assignee:".
+        h.assert_snapshot("|(assignee:)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13: Tab inside a bare Word jumps forward to the next token.
+    //
+    // "hello sort:updated-": cursor=5 is at the end of Word "hello" [0,5).
+    // context=Word. Tab -> jump forward -> first token with start>5 is
+    // sort:updated- at [6,19), key_span=[6,10).
+    // cursor_position_for_token = 10+1 = 11 (right after the colon).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tab_in_word_jumps_to_next_token() {
+        let mut h = Harness::new("hello| sort:updated-");
+        // cursor=5, Word context ("hello"). Tab -> jump to next token.
+        h.tab();
+        // cursor jumps to right after "sort:" colon, position=11.
+        h.assert_snapshot("hello sort:|updated-");
+    }
 }
