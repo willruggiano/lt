@@ -14,14 +14,52 @@
 //! The caller must keep the `WorkerGuard` returned by each init function alive
 //! for the duration of the program.  Dropping the guard flushes and closes the
 //! background logging thread.
+//!
+//! ## Log level policy
+//!
+//! External library log events at DEBUG are noisy (e.g. ureq logs raw HTTP
+//! headers with CRLF sequences that produce `^M` in log files).  The default
+//! filter therefore sets DEBUG for the `lt` crate and WARN for everything else.
+//! Pass `RUST_LOG` to override.
 
 use anyhow::{Context, Result};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
-use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{
-    filter::LevelFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
-};
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+
+// -- CR-stripping writer -----------------------------------------------------
+
+/// A `MakeWriter` wrapper whose produced writers strip `\r` bytes before
+/// forwarding output to the inner writer.  This prevents `^M` artifacts caused
+/// by libraries (e.g. ureq) that log raw HTTP/1.1 headers containing CRLF.
+struct StripCrMakeWriter(NonBlocking);
+
+impl<'a> MakeWriter<'a> for StripCrMakeWriter {
+    type Writer = StripCrWriter<<NonBlocking as MakeWriter<'a>>::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        StripCrWriter(self.0.make_writer())
+    }
+}
+
+struct StripCrWriter<W: Write>(W);
+
+impl<W: Write> Write for StripCrWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let stripped: Vec<u8> = buf.iter().copied().filter(|&b| b != b'\r').collect();
+        self.0.write_all(&stripped)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+// -- helpers -----------------------------------------------------------------
 
 /// Returns `~/.local/share/lt/log`, creating the directory if necessary.
 fn log_dir() -> Result<PathBuf> {
@@ -61,6 +99,17 @@ fn prune_old_logs(dir: &PathBuf, days: u64) {
     }
 }
 
+/// Build the default `EnvFilter` for file logging.
+///
+/// External libraries are set to WARN so their verbose DEBUG output (e.g.
+/// ureq HTTP prelude logs) does not clutter the log file.  The `lt` crate
+/// itself is set to DEBUG.  `RUST_LOG` overrides everything.
+fn file_env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,lt=debug"))
+}
+
+// -- public init functions ---------------------------------------------------
+
 /// Initialise logging for **TUI mode**.
 ///
 /// All output goes to the rotating file log; nothing is written to stdout or
@@ -74,14 +123,10 @@ pub fn init_tui() -> Result<WorkerGuard> {
     let file_appender = tracing_appender::rolling::daily(&dir, "lt.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let env_filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::DEBUG.into())
-        .from_env_lossy();
-
     let file_layer = fmt::layer()
         .with_ansi(false)
-        .with_writer(non_blocking)
-        .with_filter(env_filter);
+        .with_writer(StripCrMakeWriter(non_blocking))
+        .with_filter(file_env_filter());
 
     tracing_subscriber::registry().with(file_layer).init();
 
@@ -91,8 +136,8 @@ pub fn init_tui() -> Result<WorkerGuard> {
 /// Initialise logging for **CLI mode**.
 ///
 /// INFO-level (and above) messages are printed to stdout so the user sees
-/// progress feedback.  All messages (DEBUG and above) are also written to the
-/// rotating file log.
+/// progress feedback.  All messages (DEBUG and above for `lt`, WARN for
+/// libraries) are also written to the rotating file log.
 ///
 /// Returns a `WorkerGuard` that must be kept alive for the duration of the
 /// program to ensure all buffered log records are flushed.
@@ -102,25 +147,19 @@ pub fn init_cli() -> Result<WorkerGuard> {
     let file_appender = tracing_appender::rolling::daily(&dir, "lt.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    // File layer: DEBUG and above.
-    let file_env_filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::DEBUG.into())
-        .from_env_lossy();
-
     let file_layer = fmt::layer()
         .with_ansi(false)
-        .with_writer(non_blocking)
-        .with_filter(file_env_filter);
+        .with_writer(StripCrMakeWriter(non_blocking))
+        .with_filter(file_env_filter());
 
     // Stdout layer: INFO and above (unless overridden via RUST_LOG).
-    let stdout_env_filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
+    let stdout_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,lt=info"));
 
     let stdout_layer = fmt::layer()
         .with_ansi(false)
         .with_writer(std::io::stdout)
-        .with_filter(stdout_env_filter);
+        .with_filter(stdout_filter);
 
     tracing_subscriber::registry()
         .with(file_layer)

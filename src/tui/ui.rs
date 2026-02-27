@@ -17,13 +17,14 @@ use crate::linear::types::IssueDetail;
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
     .split(frame.area());
 
     // Expose visible row count to key handlers (subtract table header row).
-    app.viewport_height = chunks[1].height.saturating_sub(1);
+    app.viewport_height = chunks[2].height.saturating_sub(1);
 
     let context = filter_context(&app.args);
     let has_next = app.has_next_page;
@@ -55,21 +56,21 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             // Vertical split: list (~40%) | detail (~60%).
             let split =
                 Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .split(chunks[1]);
+                    .split(chunks[2]);
 
             render_table(frame, split[0], app);
             render_detail(frame, split[1], app);
-            render_detail_footer(frame, chunks[2]);
+            render_detail_footer(frame, chunks[3]);
         }
         _ => {
-            render_table(frame, chunks[1], app);
+            render_table(frame, chunks[2], app);
             if input_mode {
-                render_input(frame, chunks[2], &input_buf);
+                render_input(frame, chunks[3], &input_buf);
             } else if let Some(msg) = &app.footer_msg {
-                frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[2]);
+                frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[3]);
             } else {
                 let sync_label = app.sync_status_label.clone();
-                render_footer(frame, chunks[2], has_next, has_prev, page, &sync_label);
+                render_footer(frame, chunks[3], has_next, has_prev, page, &sync_label);
             }
         }
     }
@@ -803,8 +804,8 @@ fn render_search_overlay(
     overlay: &mut SearchOverlay,
 ) {
     // The search bar is rendered in the header row (chunks[0]) by render().
-    // This function only handles the results in the main content area (chunks[1]).
-    let area = chunks[1];
+    // This function only handles the results in the main content area (chunks[2]).
+    let area = chunks[2];
 
     // When the query is empty, leave the underlying issue table visible (bd-1pe).
     // When FTS is unavailable, show the error but still don't wipe the table.
