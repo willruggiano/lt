@@ -8,7 +8,7 @@ use ratatui::widgets::{
 
 use super::{
     ALL_KEYBINDINGS, App, HelpPopup, Mode, NewIssueField, NewIssueModal, PopupKind, SearchOverlay,
-    Status,
+    Status, TextInput,
 };
 use crate::issues::list::Issue;
 use crate::issues::{IssueArgs, SortField};
@@ -38,15 +38,18 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Mode::Search = app.mode
         && let Some(ref overlay) = app.search_overlay
     {
-        let bar_text = if overlay.fts_unavailable {
-            "Search unavailable: run lt sync first".to_string()
+        if overlay.fts_unavailable {
+            frame.render_widget(
+                Paragraph::new("Search unavailable: run lt sync first")
+                    .style(Style::new().add_modifier(Modifier::BOLD)),
+                chunks[0],
+            );
         } else {
-            format!("/ {}_", overlay.query)
-        };
-        frame.render_widget(
-            Paragraph::new(bar_text).style(Style::new().add_modifier(Modifier::BOLD)),
-            chunks[0],
-        );
+            let prefix = Span::styled("/ ", Style::new().add_modifier(Modifier::BOLD));
+            let mut line = Line::from(vec![prefix]);
+            append_text_input_spans(&mut line, &overlay.query);
+            frame.render_widget(Paragraph::new(line), chunks[0]);
+        }
     } else {
         render_header(frame, chunks[0], &context);
     }
@@ -550,11 +553,12 @@ fn render_new_issue_modal(frame: &mut Frame, area: Rect, modal: &NewIssueModal) 
             label_style_normal
         },
     );
-    let cursor = if title_active { "_" } else { "" };
-    let title_line = Line::from(vec![
-        title_label,
-        Span::raw(format!("  {}{}", modal.title, cursor)),
-    ]);
+    let mut title_line = Line::from(vec![title_label, Span::raw("  ")]);
+    if title_active {
+        append_text_input_spans(&mut title_line, &modal.title);
+    } else {
+        title_line.spans.push(Span::raw(modal.title.value.clone()));
+    }
     frame.render_widget(Paragraph::new(title_line), chunks[0]);
 
     // ---- Team picker ----
@@ -615,8 +619,12 @@ fn render_new_issue_modal(frame: &mut Frame, area: Rect, modal: &NewIssueModal) 
             label_style_normal
         },
     );
-    let desc_cursor = if desc_active { "_" } else { "" };
-    let desc_text = format!("{}{}", modal.description, desc_cursor);
+    // Description cursor is always at end (no cursor tracking for multiline).
+    let desc_text = if desc_active {
+        format!("{}_", modal.description)
+    } else {
+        modal.description.clone()
+    };
     let desc_block = Block::default()
         .title(Line::from(desc_label))
         .borders(Borders::NONE);
@@ -662,7 +670,9 @@ fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
 
     // Search bar.
-    frame.render_widget(Paragraph::new(format!("/ {}_", popup.search)), chunks[0]);
+    let mut search_line = Line::from(vec![Span::raw("/ ")]);
+    append_text_input_spans(&mut search_line, &popup.search);
+    frame.render_widget(Paragraph::new(search_line), chunks[0]);
 
     // Keybinding list.
     let list_height = chunks[1].height as usize;
@@ -815,7 +825,7 @@ fn render_search_overlay(
         return;
     }
 
-    if overlay.query.trim().is_empty() {
+    if overlay.query.value.trim().is_empty() {
         // No query yet -- keep the underlying list visible.
         return;
     }
@@ -894,4 +904,37 @@ fn search_row_cells(issue: &Issue) -> [String; 7] {
         issue.team.name.clone(),
         date(&issue.updated_at).to_string(),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// TextInput rendering helper
+// ---------------------------------------------------------------------------
+
+/// Append spans representing a `TextInput` to an existing `Line`.
+///
+/// The character at the cursor position is rendered with a reversed
+/// (block-cursor) style.  If the cursor is at the end of the string, a
+/// space with reversed style is appended to show the cursor position.
+pub fn append_text_input_spans(line: &mut Line, input: &TextInput) {
+    let (before, ch_at_cursor, after) = input.display_parts();
+    if !before.is_empty() {
+        line.spans.push(Span::raw(before.to_owned()));
+    }
+    match ch_at_cursor {
+        Some(ch) => {
+            // Cursor is on an existing character -- highlight it.
+            let mut s = String::new();
+            s.push(ch);
+            line.spans
+                .push(Span::styled(s, Style::new().add_modifier(Modifier::REVERSED)));
+            if !after.is_empty() {
+                line.spans.push(Span::raw(after.to_owned()));
+            }
+        }
+        None => {
+            // Cursor is past the end -- show a block cursor placeholder.
+            line.spans
+                .push(Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)));
+        }
+    }
 }

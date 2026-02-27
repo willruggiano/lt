@@ -3,6 +3,269 @@ mod ui;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+// ---------------------------------------------------------------------------
+// TextInput -- single-line text field with vim-style editing
+// ---------------------------------------------------------------------------
+
+/// A single-line text input with a byte-offset cursor and vim-style bindings.
+///
+/// Bindings handled in `handle_key`:
+///   Backspace / ctrl+h  -- delete char before cursor
+///   ctrl+w              -- delete word before cursor
+///   ctrl+u              -- delete to start of line
+///   ctrl+k              -- delete to end of line
+///   ctrl+d / Delete     -- delete char under cursor
+///   alt+d               -- delete word after cursor
+///   ctrl+a / Home       -- move to start
+///   ctrl+e / End        -- move to end
+///   ctrl+f / Right      -- move right one char
+///   ctrl+b / Left       -- move left one char
+///   ctrl+Left           -- move left one word
+///   ctrl+Right          -- move right one word
+#[derive(Clone, Default)]
+pub struct TextInput {
+    pub value: String,
+    /// Byte offset of the cursor, always on a char boundary.
+    pub cursor: usize,
+}
+
+impl TextInput {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_string(s: String) -> Self {
+        let cursor = s.len();
+        Self { value: s, cursor }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns `(before_cursor, char_at_cursor_or_none, after_cursor_past_that_char)`.
+    /// Useful for rendering the cursor position.
+    pub fn display_parts(&self) -> (&str, Option<char>, &str) {
+        let before = &self.value[..self.cursor];
+        let rest = &self.value[self.cursor..];
+        let mut chars = rest.chars();
+        let ch = chars.next();
+        (before, ch, chars.as_str())
+    }
+
+    fn prev_char_boundary(&self) -> usize {
+        if self.cursor == 0 {
+            return 0;
+        }
+        let mut i = self.cursor - 1;
+        while !self.value.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+
+    fn next_char_boundary(&self) -> usize {
+        if self.cursor >= self.value.len() {
+            return self.value.len();
+        }
+        let ch = self.value[self.cursor..].chars().next().unwrap();
+        self.cursor + ch.len_utf8()
+    }
+
+    fn prev_word_boundary(&self) -> usize {
+        let before = &self.value[..self.cursor];
+        let trimmed = before.trim_end();
+        match trimmed.rfind(|c: char| c.is_whitespace()) {
+            Some(i) => {
+                let ws_char = trimmed[i..].chars().next().unwrap();
+                i + ws_char.len_utf8()
+            }
+            None => 0,
+        }
+    }
+
+    fn next_word_boundary(&self) -> usize {
+        let rest = &self.value[self.cursor..];
+        let mut chars = rest.char_indices().peekable();
+        // Skip leading whitespace.
+        while let Some(&(_, c)) = chars.peek() {
+            if c.is_whitespace() {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        // Skip word characters.
+        for (i, c) in chars {
+            if c.is_whitespace() {
+                return self.cursor + i;
+            }
+        }
+        self.value.len()
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = self.prev_char_boundary();
+    }
+
+    pub fn move_right(&mut self) {
+        self.cursor = self.next_char_boundary();
+    }
+
+    pub fn move_word_left(&mut self) {
+        self.cursor = self.prev_word_boundary();
+    }
+
+    pub fn move_word_right(&mut self) {
+        self.cursor = self.next_word_boundary();
+    }
+
+    pub fn move_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.value.len();
+    }
+
+    /// Delete char before cursor (backspace).
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            let prev = self.prev_char_boundary();
+            self.value.drain(prev..self.cursor);
+            self.cursor = prev;
+        }
+    }
+
+    /// Delete char at cursor (forward delete).
+    pub fn delete_forward(&mut self) {
+        if self.cursor < self.value.len() {
+            let next = self.next_char_boundary();
+            self.value.drain(self.cursor..next);
+        }
+    }
+
+    /// Delete word before cursor (ctrl+w).
+    pub fn delete_word_before(&mut self) {
+        let start = self.prev_word_boundary();
+        self.value.drain(start..self.cursor);
+        self.cursor = start;
+    }
+
+    /// Delete word after cursor (alt+d).
+    pub fn delete_word_after(&mut self) {
+        let end = self.next_word_boundary();
+        self.value.drain(self.cursor..end);
+    }
+
+    /// Delete from cursor to start of line (ctrl+u).
+    pub fn delete_to_start(&mut self) {
+        self.value.drain(..self.cursor);
+        self.cursor = 0;
+    }
+
+    /// Delete from cursor to end of line (ctrl+k).
+    pub fn delete_to_end(&mut self) {
+        self.value.truncate(self.cursor);
+    }
+
+    /// Insert a char at the cursor.
+    pub fn insert(&mut self, c: char) {
+        self.value.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    /// Handle a key event.  Returns `true` if the value was modified (caller
+    /// may want to trigger re-filtering etc.), `false` if only cursor moved or
+    /// key was not handled.
+    pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        let alt = modifiers.contains(KeyModifiers::ALT);
+        match code {
+            // -- deletion ----------------------------------------------------
+            KeyCode::Backspace => {
+                self.backspace();
+                true
+            }
+            KeyCode::Char('h') if ctrl => {
+                self.backspace();
+                true
+            }
+            KeyCode::Char('w') if ctrl => {
+                self.delete_word_before();
+                true
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.delete_to_start();
+                true
+            }
+            KeyCode::Char('k') if ctrl => {
+                self.delete_to_end();
+                true
+            }
+            KeyCode::Char('d') if ctrl => {
+                self.delete_forward();
+                true
+            }
+            KeyCode::Delete => {
+                self.delete_forward();
+                true
+            }
+            KeyCode::Char('d') if alt => {
+                self.delete_word_after();
+                true
+            }
+            // -- movement ----------------------------------------------------
+            KeyCode::Char('a') if ctrl => {
+                self.move_start();
+                false
+            }
+            KeyCode::Char('e') if ctrl => {
+                self.move_end();
+                false
+            }
+            KeyCode::Char('f') if ctrl => {
+                self.move_right();
+                false
+            }
+            KeyCode::Char('b') if ctrl => {
+                self.move_left();
+                false
+            }
+            KeyCode::Left if ctrl => {
+                self.move_word_left();
+                false
+            }
+            KeyCode::Right if ctrl => {
+                self.move_word_right();
+                false
+            }
+            KeyCode::Left => {
+                self.move_left();
+                false
+            }
+            KeyCode::Right => {
+                self.move_right();
+                false
+            }
+            KeyCode::Home => {
+                self.move_start();
+                false
+            }
+            KeyCode::End => {
+                self.move_end();
+                false
+            }
+            // -- insert ------------------------------------------------------
+            KeyCode::Char(c) if !ctrl && !alt => {
+                self.insert(c);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -177,7 +440,7 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
 /// Mutable state for the help popup.
 pub struct HelpPopup {
     /// Current search query typed by the user.
-    pub search: String,
+    pub search: TextInput,
     /// Indices into ALL_KEYBINDINGS that match the current search.
     pub filtered: Vec<usize>,
     /// Currently highlighted row in the filtered list.
@@ -188,14 +451,14 @@ impl HelpPopup {
     pub fn new() -> Self {
         let filtered = (0..ALL_KEYBINDINGS.len()).collect();
         Self {
-            search: String::new(),
+            search: TextInput::new(),
             filtered,
             selected: 0,
         }
     }
 
     pub fn update_filter(&mut self) {
-        let q = self.search.to_lowercase();
+        let q = self.search.value.to_lowercase();
         self.filtered = ALL_KEYBINDINGS
             .iter()
             .enumerate()
@@ -216,8 +479,8 @@ impl HelpPopup {
 
 /// Mutable state for the FTS search overlay.
 pub struct SearchOverlay {
-    /// Current query string typed by the user.
-    pub query: String,
+    /// Current query typed by the user.
+    pub query: TextInput,
     /// Issues returned by the last FTS query.
     pub results: Vec<crate::issues::list::Issue>,
     /// Table selection state for the results list.
@@ -231,7 +494,7 @@ pub struct SearchOverlay {
 impl SearchOverlay {
     pub fn new() -> Self {
         Self {
-            query: String::new(),
+            query: TextInput::new(),
             results: Vec::new(),
             table_state: TableState::default(),
             last_changed: None,
@@ -242,13 +505,13 @@ impl SearchOverlay {
     /// Run the FTS query and refresh results. Called after debounce fires.
     pub fn run_search(&mut self) {
         self.fts_unavailable = false;
-        if self.query.trim().is_empty() {
+        if self.query.value.trim().is_empty() {
             self.results.clear();
             self.table_state.select(None);
             return;
         }
         // Append '*' for prefix matching so typing "oauth" matches "oauth2" etc.
-        let fts_query = format!("{}*", self.query.trim());
+        let fts_query = format!("{}*", self.query.value.trim());
         match crate::db::open_db().and_then(|conn| crate::db::search_issues(&conn, &fts_query)) {
             Ok(db_issues) => {
                 self.results = db_issues.into_iter().map(db_issue_to_list_issue).collect();
@@ -340,7 +603,7 @@ pub struct NewIssueModal {
     pub focused_field: NewIssueField,
 
     // Text fields
-    pub title: String,
+    pub title: TextInput,
     pub description: String,
 
     // Picker fields -- each holds a list of items + current selection index.
@@ -858,7 +1121,7 @@ impl App {
 
         let mut modal = NewIssueModal {
             focused_field: NewIssueField::Title,
-            title: String::new(),
+            title: TextInput::new(),
             description: String::new(),
             teams: Vec::new(),
             team_selected: 0,
@@ -1033,7 +1296,7 @@ impl App {
             None => return,
         };
 
-        if modal.title.trim().is_empty() {
+        if modal.title.value.trim().is_empty() {
             if let Some(m) = self.new_issue_modal.as_mut() {
                 m.error = "Title is required".to_string();
                 m.focused_field = NewIssueField::Title;
@@ -1056,7 +1319,7 @@ impl App {
         };
 
         let input = crate::linear::mutations::CreateIssueInput {
-            title: modal.title.trim().to_string(),
+            title: modal.title.value.trim().to_string(),
             team_id: team_id.clone(),
             description: if modal.description.trim().is_empty() {
                 None
@@ -1574,8 +1837,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
                 Mode::Popup(_) => handle_popup_key(&mut app, key.code),
                 Mode::Detail => handle_detail_key(&mut app, key.code),
                 Mode::NewIssue => handle_new_issue_key(&mut app, key.code, key.modifiers),
-                Mode::Help => handle_help_key(&mut app, key.code),
-                Mode::Search => handle_search_key(&mut app, key.code),
+                Mode::Help => handle_help_key(&mut app, key.code, key.modifiers),
+                Mode::Search => handle_search_key(&mut app, key.code, key.modifiers),
                 Mode::List => handle_normal_key(&mut app, key.code, key.modifiers),
             }
         }
@@ -1666,15 +1929,9 @@ fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             KeyCode::BackTab => {
                 modal.focused_field = modal.focused_field.prev();
             }
-            KeyCode::Backspace => {
-                modal.title.pop();
+            _ => {
+                modal.title.handle_key(code, modifiers);
             }
-            KeyCode::Char(c) => {
-                if !ctrl {
-                    modal.title.push(c);
-                }
-            }
-            _ => {}
         },
         NewIssueField::Description => match code {
             KeyCode::Tab => {
@@ -1684,16 +1941,29 @@ fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             KeyCode::BackTab => {
                 modal.focused_field = modal.focused_field.prev();
             }
-            KeyCode::Backspace => {
-                modal.description.pop();
-            }
             KeyCode::Enter => {
                 modal.description.push('\n');
             }
-            KeyCode::Char(c) => {
-                if !ctrl {
-                    modal.description.push(c);
-                }
+            // Vim word/line deletion for the description field (cursor always at end).
+            KeyCode::Backspace => {
+                modal.description.pop();
+            }
+            KeyCode::Char('h') if ctrl => {
+                modal.description.pop();
+            }
+            KeyCode::Char('w') if ctrl => {
+                let trimmed = modal.description.trim_end_matches(|c: char| !c.is_whitespace());
+                let new_end = trimmed.trim_end().len();
+                modal.description.truncate(new_end);
+            }
+            KeyCode::Char('u') if ctrl => {
+                modal.description.clear();
+            }
+            KeyCode::Char('k') if ctrl => {
+                // cursor is at end, so ctrl+k is a no-op here
+            }
+            KeyCode::Char(c) if !ctrl => {
+                modal.description.push(c);
             }
             _ => {}
         },
@@ -1829,7 +2099,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('/') => {
             let mut overlay = SearchOverlay::new();
             if let Some(ref q) = app.last_search_query {
-                overlay.query = q.clone();
+                overlay.query = TextInput::from_string(q.clone());
                 overlay.last_changed = Some(Instant::now());
             }
             app.search_overlay = Some(overlay);
@@ -1852,13 +2122,15 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 
 // -- Help popup key handler (bd-5lz) -----------------------------------------
 
-fn handle_help_key(app: &mut App, code: KeyCode) {
+fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Esc => {
             app.mode = Mode::List;
             app.help_popup = None;
         }
-        KeyCode::Down => {
+        // Navigation: j/k/<down>/<up> move the filtered list.
+        KeyCode::Down | KeyCode::Char('j') if !ctrl => {
             if let Some(ref mut popup) = app.help_popup {
                 let max = popup.filtered.len().saturating_sub(1);
                 if popup.selected < max {
@@ -1866,46 +2138,29 @@ fn handle_help_key(app: &mut App, code: KeyCode) {
                 }
             }
         }
-        KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k') if !ctrl => {
             if let Some(ref mut popup) = app.help_popup {
                 popup.selected = popup.selected.saturating_sub(1);
             }
         }
-        KeyCode::Backspace => {
+        // Everything else goes to the TextInput search bar.
+        _ => {
             if let Some(ref mut popup) = app.help_popup {
-                popup.search.pop();
-                popup.update_filter();
-            }
-        }
-        KeyCode::Char('j') => {
-            if let Some(ref mut popup) = app.help_popup {
-                let max = popup.filtered.len().saturating_sub(1);
-                if popup.selected < max {
-                    popup.selected += 1;
+                if popup.search.handle_key(code, modifiers) {
+                    popup.update_filter();
                 }
             }
         }
-        KeyCode::Char('k') => {
-            if let Some(ref mut popup) = app.help_popup {
-                popup.selected = popup.selected.saturating_sub(1);
-            }
-        }
-        KeyCode::Char(c) => {
-            if let Some(ref mut popup) = app.help_popup {
-                popup.search.push(c);
-                popup.update_filter();
-            }
-        }
-        _ => {}
     }
 }
 
 // -- FTS search overlay key handler (bd-2g4) --------------------------------
 
-fn handle_search_key(app: &mut App, code: KeyCode) {
+fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Esc => {
-            // Clear search, return to full list.
+            // Cancel search, return to full list.
             app.mode = Mode::List;
             app.search_overlay = None;
         }
@@ -1915,7 +2170,7 @@ fn handle_search_key(app: &mut App, code: KeyCode) {
             if let Some(ref mut overlay) = app.search_overlay {
                 let results = std::mem::take(&mut overlay.results);
                 let selected = overlay.table_state.selected();
-                app.last_search_query = Some(overlay.query.clone());
+                app.last_search_query = Some(overlay.query.value.clone());
                 app.issues = results;
                 let n = app.issues.len();
                 let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
@@ -1924,29 +2179,25 @@ fn handle_search_key(app: &mut App, code: KeyCode) {
             app.mode = Mode::List;
             app.search_overlay = None;
         }
-        KeyCode::Backspace => {
-            if let Some(ref mut overlay) = app.search_overlay {
-                overlay.query.pop();
-                overlay.last_changed = Some(Instant::now());
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
+        // Result-list navigation: j/k/<down>/<up>.
+        KeyCode::Down | KeyCode::Char('j') if !ctrl => {
             if let Some(ref mut overlay) = app.search_overlay {
                 overlay.move_down();
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up | KeyCode::Char('k') if !ctrl => {
             if let Some(ref mut overlay) = app.search_overlay {
                 overlay.move_up();
             }
         }
-        KeyCode::Char(c) => {
+        // Everything else goes to the TextInput query bar.
+        _ => {
             if let Some(ref mut overlay) = app.search_overlay {
-                overlay.query.push(c);
-                overlay.last_changed = Some(Instant::now());
+                if overlay.query.handle_key(code, modifiers) {
+                    overlay.last_changed = Some(Instant::now());
+                }
             }
         }
-        _ => {}
     }
 }
 
