@@ -630,20 +630,13 @@ impl Completer {
                 self.context = CompletionContext::Word;
             }
             None => {
-                // Cursor is in whitespace or past end of all tokens.
-                // Check whether the cursor is inside a PartialStem that
-                // has no characters yet (empty key prefix at position 0
-                // when input is empty).
-                if ast.tokens.is_empty() {
-                    // Empty input: offer all stem key candidates.
-                    self.candidates = stem_key_candidates("");
-                    self.context = CompletionContext::StemKey {
-                        prefix: String::new(),
-                    };
-                } else {
-                    self.candidates = Vec::new();
-                    self.context = CompletionContext::Gap;
-                }
+                // Cursor is in whitespace or past end of all tokens, or
+                // input is completely empty. In either case offer all stem
+                // key candidates so Tab can cycle through them.
+                self.candidates = stem_key_candidates("");
+                self.context = CompletionContext::StemKey {
+                    prefix: String::new(),
+                };
             }
         }
     }
@@ -731,7 +724,59 @@ impl Completer {
         }
     }
 
+    /// Accept the currently highlighted completion candidate (Ctrl+Y).
+    /// Replaces the prefix with the selected candidate and positions cursor
+    /// after the inserted text. Returns `true` if a completion was applied.
+    pub fn accept_completion(
+        &mut self,
+        input: &mut crate::tui::TextInput,
+        _ast: &QueryAst,
+    ) -> bool {
+        match &self.context {
+            CompletionContext::StemKey { prefix } => {
+                if self.candidates.is_empty() {
+                    return false;
+                }
+                let candidate = self.candidates[self.selected].clone();
+                let replace_start = match &self.active_token {
+                    Some(Token::PartialStem { key_span, .. })
+                    | Some(Token::Stem { key_span, .. }) => key_span.start,
+                    _ => input.cursor.saturating_sub(prefix.len()),
+                };
+                let replace_end = input.cursor;
+                let mut new_value = input.value[..replace_start].to_string();
+                new_value.push_str(&candidate);
+                new_value.push_str(&input.value[replace_end..]);
+                input.value = new_value;
+                input.cursor = replace_start + candidate.len();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Cycle to the next completion candidate (Ctrl+N). Returns true if cycled.
+    pub fn cycle_next(&mut self) -> bool {
+        if self.candidates.is_empty() {
+            return false;
+        }
+        self.selected = (self.selected + 1) % self.candidates.len();
+        true
+    }
+
+    /// Cycle to the previous completion candidate (Ctrl+P). Returns true if cycled.
+    pub fn cycle_prev(&mut self) -> bool {
+        if self.candidates.is_empty() {
+            return false;
+        }
+        let n = self.candidates.len();
+        self.selected = (self.selected + n - 1) % n;
+        true
+    }
+
     /// Jump the cursor to the start of the next or previous token boundary.
+    /// For Stem/PartialStem tokens, position the cursor after the colon
+    /// (i.e. at the value portion) rather than at the very start of the key.
     fn jump_token_boundary(
         &self,
         input: &mut crate::tui::TextInput,
@@ -749,29 +794,27 @@ impl Completer {
             let next = ast
                 .tokens
                 .iter()
-                .find(|t| span_bounds(t).0 > cursor)
-                .map(|t| span_bounds(t).0);
+                .find(|t| span_bounds(t).0 > cursor);
             match next {
-                Some(pos) => input.cursor = pos,
+                Some(t) => input.cursor = cursor_position_for_token(t),
                 None => {
-                    // Wrap: jump to start of first token.
-                    input.cursor = span_bounds(&ast.tokens[0]).0;
+                    // Wrap: jump to first token.
+                    input.cursor = cursor_position_for_token(&ast.tokens[0]);
                 }
             }
         } else {
-            // Shift-Tab: jump to start of prev token (token whose start is
+            // Shift-Tab: jump to prev token (token whose start is
             // strictly less than cursor, taking the last such token).
             let prev = ast
                 .tokens
                 .iter()
                 .filter(|t| span_bounds(t).0 < cursor)
-                .last()
-                .map(|t| span_bounds(t).0);
+                .last();
             match prev {
-                Some(pos) => input.cursor = pos,
+                Some(t) => input.cursor = cursor_position_for_token(t),
                 None => {
-                    // Wrap: jump to start of last token.
-                    input.cursor = span_bounds(ast.tokens.last().unwrap()).0;
+                    // Wrap: jump to last token.
+                    input.cursor = cursor_position_for_token(ast.tokens.last().unwrap());
                 }
             }
         }
@@ -791,6 +834,16 @@ fn span_bounds(token: &Token) -> (usize, usize) {
         | Token::PartialStem { span, .. }
         | Token::Word { span, .. }
         | Token::Unknown { span, .. } => (span.start, span.end),
+    }
+}
+
+/// Return the cursor position to land on when Tab-jumping to a token.
+/// For Stem and PartialStem tokens, position after the colon (at the value
+/// portion). For Word and Unknown, position at the start of the token.
+fn cursor_position_for_token(token: &Token) -> usize {
+    match token {
+        Token::Stem { key_span, .. } | Token::PartialStem { key_span, .. } => key_span.end,
+        Token::Word { span, .. } | Token::Unknown { span, .. } => span.start,
     }
 }
 
