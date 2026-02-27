@@ -680,15 +680,15 @@ impl Completer {
                     return;
                 }
 
-                // Cycle selected index.
+                // Insert the currently selected candidate first, then
+                // advance the index so the *next* Tab shows a different one.
+                let candidate = self.candidates[self.selected].clone();
                 let n = self.candidates.len();
                 if forward {
                     self.selected = (self.selected + 1) % n;
                 } else {
                     self.selected = (self.selected + n - 1) % n;
                 }
-
-                let candidate = self.candidates[self.selected].clone();
 
                 // Determine the replacement range: from key_span.start to cursor.
                 let replace_start = match &self.active_token {
