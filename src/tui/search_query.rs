@@ -37,7 +37,7 @@ use rusqlite::Connection;
 use tracing::warn;
 
 use crate::db::Issue;
-use crate::issues::SortField;
+use crate::issues::{IssueArgs, SortField};
 
 // ---------------------------------------------------------------------------
 // Generated parser (bd-1pl): StemKey, StemKind, parse_query_ast_impl,
@@ -843,6 +843,69 @@ fn stem_key_candidates(prefix: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// args_to_ast / render_filter_context (bd-3nu)
+// ---------------------------------------------------------------------------
+
+/// Convert CLI `IssueArgs` into a `QueryAst` suitable for use as the initial
+/// filter state.
+///
+/// Builds a space-separated query string from the args fields (team, assignee,
+/// state, priority, sort) and passes it through `parse_query_ast()` so the
+/// resulting AST is always structurally valid.
+pub fn args_to_ast(args: &IssueArgs) -> QueryAst {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ref t) = args.team {
+        parts.push(format!("team:{}", t));
+    }
+    if let Some(ref a) = args.assignee {
+        parts.push(format!("assignee:{}", a));
+    }
+    if let Some(ref s) = args.state {
+        parts.push(format!("state:{}", s));
+    }
+    if let Some(ref p) = args.priority {
+        parts.push(format!("priority:{}", p));
+    }
+    let dir = if args.desc { "-" } else { "+" };
+    parts.push(format!("sort:{}{}", args.sort.label(), dir));
+    parse_query_ast(&parts.join(" "))
+}
+
+/// Render a `QueryAst` as a compact filter context string for display in the
+/// TUI header.
+///
+/// Iterates the AST tokens and formats each recognised stem as `key:value`,
+/// joining with two spaces.  `PartialStem` and `Unknown` tokens are skipped
+/// so partially-typed input is not shown in the header.
+pub fn render_filter_context(ast: &QueryAst) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for token in &ast.tokens {
+        match token {
+            Token::Stem { kind, .. } => match kind {
+                StemKind::Sort { field, dir } => {
+                    let d = match dir {
+                        SortDir::Desc => "-",
+                        SortDir::Asc => "+",
+                    };
+                    parts.push(format!("sort:{}{}", field.label(), d));
+                }
+                StemKind::Assignee { value } => parts.push(format!("assignee:{}", value)),
+                StemKind::Priority { value } => parts.push(format!("priority:{}", value)),
+                StemKind::State { value } => parts.push(format!("state:{}", value)),
+                StemKind::Team { value } => parts.push(format!("team:{}", value)),
+                StemKind::Label { value } => parts.push(format!("label:{}", value)),
+                StemKind::Project { value } => parts.push(format!("project:{}", value)),
+                StemKind::Cycle { value } => parts.push(format!("cycle:{}", value)),
+                StemKind::Creator { value } => parts.push(format!("creator:{}", value)),
+            },
+            Token::Word { text, .. } => parts.push(text.clone()),
+            _ => {} // PartialStem/Unknown: skip in header display
+        }
+    }
+    parts.join("  ")
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1334,5 +1397,142 @@ mod tests {
         c.selected = 3; // manually set non-zero
         c.update(&ast, 1);
         assert_eq!(c.selected, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // args_to_ast tests (bd-3nu)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn args_to_ast_default_produces_sort_updated_desc() {
+        let args = IssueArgs::default();
+        // Default has sort=Updated, desc=true.
+        let ast = args_to_ast(&args);
+        assert_eq!(ast.raw, "sort:updated-");
+        assert_eq!(ast.tokens.len(), 1);
+        match &ast.tokens[0] {
+            Token::Stem {
+                kind: StemKind::Sort { field, dir },
+                ..
+            } => {
+                assert!(matches!(field, SortField::Updated));
+                assert_eq!(*dir, SortDir::Desc);
+            }
+            other => panic!("expected Stem(Sort), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn args_to_ast_team_and_assignee() {
+        let args = IssueArgs {
+            team: Some("eng".to_string()),
+            assignee: Some("me".to_string()),
+            ..IssueArgs::default()
+        };
+        let ast = args_to_ast(&args);
+        // Expect team, assignee, and sort stems in that order.
+        assert!(ast.raw.contains("team:eng"));
+        assert!(ast.raw.contains("assignee:me"));
+        assert!(ast.raw.contains("sort:"));
+        // Three tokens: team, assignee, sort.
+        assert_eq!(ast.tokens.len(), 3);
+        match &ast.tokens[0] {
+            Token::Stem {
+                kind: StemKind::Team { value },
+                ..
+            } => assert_eq!(value, "eng"),
+            other => panic!("expected Stem(Team), got {:?}", other),
+        }
+        match &ast.tokens[1] {
+            Token::Stem {
+                kind: StemKind::Assignee { value },
+                ..
+            } => assert_eq!(value, "me"),
+            other => panic!("expected Stem(Assignee), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn args_to_ast_asc_sort() {
+        let args = IssueArgs {
+            sort: SortField::Priority,
+            desc: false,
+            ..IssueArgs::default()
+        };
+        let ast = args_to_ast(&args);
+        assert!(ast.raw.ends_with("sort:priority+"));
+        match &ast.tokens[0] {
+            Token::Stem {
+                kind: StemKind::Sort { field, dir },
+                ..
+            } => {
+                assert!(matches!(field, SortField::Priority));
+                assert_eq!(*dir, SortDir::Asc);
+            }
+            other => panic!("expected Stem(Sort), got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // render_filter_context tests (bd-3nu)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_filter_context_default_query() {
+        let ast = parse_query_ast("sort:updated-");
+        let s = render_filter_context(&ast);
+        assert_eq!(s, "sort:updated-");
+    }
+
+    #[test]
+    fn render_filter_context_multiple_stems() {
+        let ast = parse_query_ast("team:eng assignee:will state:todo sort:updated-");
+        let s = render_filter_context(&ast);
+        // Parts are joined with double-spaces.
+        assert_eq!(s, "team:eng  assignee:will  state:todo  sort:updated-");
+    }
+
+    #[test]
+    fn render_filter_context_includes_words() {
+        let ast = parse_query_ast("sort:updated- oauth crash");
+        let s = render_filter_context(&ast);
+        assert_eq!(s, "sort:updated-  oauth  crash");
+    }
+
+    #[test]
+    fn render_filter_context_skips_partial_stems() {
+        // "sort:" is a PartialStem (empty value) -- should be skipped.
+        let ast = parse_query_ast("sort:");
+        let s = render_filter_context(&ast);
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn render_filter_context_round_trip() {
+        // Build an AST from args and render it; must match expected output.
+        let args = IssueArgs {
+            team: Some("eng".to_string()),
+            assignee: Some("me".to_string()),
+            ..IssueArgs::default()
+        };
+        let ast = args_to_ast(&args);
+        let s = render_filter_context(&ast);
+        assert_eq!(s, "team:eng  assignee:me  sort:updated-");
+    }
+
+    #[test]
+    fn render_filter_context_all_stem_kinds() {
+        let raw = "team:t assignee:a state:s priority:p label:l project:pr cycle:c creator:cr sort:updated-";
+        let ast = parse_query_ast(raw);
+        let s = render_filter_context(&ast);
+        assert!(s.contains("team:t"));
+        assert!(s.contains("assignee:a"));
+        assert!(s.contains("state:s"));
+        assert!(s.contains("priority:p"));
+        assert!(s.contains("label:l"));
+        assert!(s.contains("project:pr"));
+        assert!(s.contains("cycle:c"));
+        assert!(s.contains("creator:cr"));
+        assert!(s.contains("sort:updated-"));
     }
 }
