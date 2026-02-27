@@ -34,6 +34,7 @@
 /// updated issues in descending order.
 use anyhow::Result;
 use rusqlite::Connection;
+use tracing::warn;
 
 use crate::db::Issue;
 use crate::issues::SortField;
@@ -119,7 +120,6 @@ pub struct QueryAst {
     pub tokens: Vec<Token>,
     /// Structured parse errors collected during parsing (e.g. unknown stem keys).
     /// Always empty for well-formed input. Consumed by bd-2gj (TUI highlighting).
-    #[allow(dead_code)]
     pub errors: Vec<ParseError>,
 }
 
@@ -134,6 +134,14 @@ pub struct QueryAst {
 /// any input string yields a valid `QueryAst`.
 pub fn parse_query_ast(raw: &str) -> QueryAst {
     let (tokens, errors) = parse_query_ast_impl(raw);
+    for err in &errors {
+        warn!(
+            span_start = err.span.start,
+            span_end = err.span.end,
+            "search parse error: {}",
+            err.message
+        );
+    }
     QueryAst {
         raw: raw.to_string(),
         tokens,
