@@ -272,7 +272,6 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 
 use crate::issues::IssueArgs;
-use crate::issues::detail::fetch_issue_detail_with_config;
 use crate::issues::list::Issue;
 use crate::linear::types::IssueDetail;
 
@@ -291,6 +290,18 @@ pub enum SyncEvent {
     /// Sync completed successfully; includes the refreshed issue list.
     Done(Vec<Issue>),
     /// Sync encountered an error.
+    Error(String),
+}
+
+// ---------------------------------------------------------------------------
+// Background comment sync events (bd-2mx)
+// ---------------------------------------------------------------------------
+
+/// Events sent from the background comment-sync thread to the TUI event loop.
+pub enum CommentSyncEvent {
+    /// Comments refreshed successfully from the Linear API.
+    Done(Vec<crate::linear::types::Comment>),
+    /// Comment sync error (non-fatal; cached data remains shown).
     Error(String),
 }
 
@@ -688,6 +699,10 @@ pub struct App {
     /// Human-readable description of sync status, shown in footer.
     pub sync_status_label: String,
 
+    // -- background comment sync (bd-2mx) ------------------------------------
+    /// Receiver for background comment-sync events.
+    pub detail_comment_rx: Option<mpsc::Receiver<CommentSyncEvent>>,
+
     // -- help popup (bd-5lz) -------------------------------------------------
     pub help_popup: Option<HelpPopup>,
 
@@ -747,6 +762,7 @@ impl App {
             sync_rx,
             syncing,
             sync_status_label,
+            detail_comment_rx: None,
             help_popup: None,
             search_overlay: None,
             popup_anchor: None,
@@ -890,24 +906,105 @@ impl App {
     // -- Detail pane (bd-2g8) -------------------------------------------------
 
     /// Open the detail pane for the currently selected issue.
+    ///
+    /// The detail is populated instantly from the local SQLite cache so the
+    /// pane appears without any network round-trip.  A background thread then
+    /// calls sync_comments via the Linear API and sends the refreshed comment
+    /// list back through `detail_comment_rx` (bd-2mx).
     fn open_detail(&mut self) {
-        let id = match self.selected_issue() {
-            Some(issue) => issue.identifier.clone(),
+        let issue = match self.selected_issue() {
+            Some(i) => i.clone(),
             None => return,
         };
+
         self.mode = Mode::Detail;
-        self.detail = None;
         self.detail_scroll = 0;
-        self.status = Status::Loading;
-        match fetch_issue_detail_with_config(&id) {
-            Ok(detail) => {
-                self.detail = Some(detail);
-                self.status = Status::Idle;
+        self.detail_comment_rx = None;
+
+        // Build an IssueDetail immediately from cached data.
+        let cached_comments: Vec<crate::linear::types::Comment> =
+            crate::db::open_db()
+                .and_then(|conn| crate::db::query_comments(&conn, &issue.id))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| crate::linear::types::Comment {
+                    body: c.body,
+                    created_at: c.created_at,
+                    user: c.author_name.map(|n| crate::linear::types::CommentUser { name: n }),
+                })
+                .collect();
+
+        self.detail = Some(crate::linear::types::IssueDetail {
+            identifier: issue.identifier.clone(),
+            title: issue.title.clone(),
+            description: issue.description.clone(),
+            priority_label: issue.priority_label.clone(),
+            state: crate::linear::types::IssueDetailState {
+                name: issue.state.name.clone(),
+            },
+            assignee: issue.assignee.as_ref().map(|a| crate::linear::types::IssueDetailUser {
+                name: a.name.clone(),
+            }),
+            team: crate::linear::types::IssueDetailTeam {
+                name: issue.team.name.clone(),
+            },
+            labels: crate::linear::types::LabelConnection {
+                nodes: issue
+                    .labels
+                    .nodes
+                    .iter()
+                    .map(|l| crate::linear::types::Label { name: l.name.clone() })
+                    .collect(),
+            },
+            created_at: issue.created_at.clone(),
+            updated_at: issue.updated_at.clone(),
+            comments: crate::linear::types::CommentConnection {
+                nodes: cached_comments,
+            },
+        });
+        self.status = Status::Idle;
+
+        // Spawn background thread to refresh comments from the Linear API.
+        let issue_id = issue.id.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<CommentSyncEvent>();
+        self.detail_comment_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let token = match crate::config::load_token() {
+                Ok(Some(t)) => t,
+                _ => {
+                    let _ = tx.send(CommentSyncEvent::Error("not logged in".to_string()));
+                    return;
+                }
+            };
+            let conn = match crate::db::open_db() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(CommentSyncEvent::Error(e.to_string()));
+                    return;
+                }
+            };
+            match crate::sync::comments::sync_comments(&conn, &token.access_token, &issue_id) {
+                Ok(()) => {
+                    // Read the freshly-synced comments back from the DB.
+                    let fresh = crate::db::query_comments(&conn, &issue_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|c| crate::linear::types::Comment {
+                            body: c.body,
+                            created_at: c.created_at,
+                            user: c.author_name.map(|n| crate::linear::types::CommentUser {
+                                name: n,
+                            }),
+                        })
+                        .collect();
+                    let _ = tx.send(CommentSyncEvent::Done(fresh));
+                }
+                Err(e) => {
+                    let _ = tx.send(CommentSyncEvent::Error(e.to_string()));
+                }
             }
-            Err(e) => {
-                self.status = Status::Error(e.to_string());
-            }
-        }
+        });
     }
 
     /// Close the detail pane and return to the list.
@@ -916,6 +1013,9 @@ impl App {
         self.detail = None;
         self.detail_scroll = 0;
         self.status = Status::Idle;
+        // Drop the background comment-sync receiver so the thread stops being
+        // polled and will be GC'd once it finishes its network request.
+        self.detail_comment_rx = None;
     }
 
     fn detail_scroll_down(&mut self) {
@@ -1869,6 +1969,9 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         // Poll modal background loader channel (bd-vfi).
         app.poll_modal_events();
 
+        // Poll background comment-sync channel (bd-2mx).
+        poll_detail_comment_events(&mut app);
+
         // Poll FTS search debounce (bd-2g4).
         poll_search_debounce(&mut app);
 
@@ -1893,6 +1996,44 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
                 Mode::List => handle_normal_key(&mut app, key.code, key.modifiers),
             }
         }
+    }
+}
+
+/// Non-blocking poll of the background comment-sync channel (bd-2mx).
+///
+/// When the background thread finishes syncing comments from the Linear API,
+/// the refreshed list replaces the cached comments shown in the detail pane.
+fn poll_detail_comment_events(app: &mut App) {
+    let rx = match app.detail_comment_rx.take() {
+        Some(r) => r,
+        None => return,
+    };
+
+    let mut finished = false;
+    loop {
+        match rx.try_recv() {
+            Ok(CommentSyncEvent::Done(comments)) => {
+                if let Some(ref mut detail) = app.detail {
+                    detail.comments.nodes = comments;
+                }
+                finished = true;
+                break;
+            }
+            Ok(CommentSyncEvent::Error(_msg)) => {
+                // Non-fatal: keep whatever cached comments are already shown.
+                finished = true;
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                finished = true;
+                break;
+            }
+        }
+    }
+
+    if !finished {
+        app.detail_comment_rx = Some(rx);
     }
 }
 
