@@ -1880,6 +1880,13 @@ fn build_sync_status_label(syncing: bool) -> String {
 fn spawn_sync_thread(args: IssueArgs) -> mpsc::Receiver<SyncEvent> {
     let (tx, rx) = mpsc::channel::<SyncEvent>();
     std::thread::spawn(move || {
+        // Skip sync silently when no auth token is stored.
+        match crate::config::load_token() {
+            Ok(None) => return,
+            Err(_) => return,
+            Ok(Some(_)) => {}
+        }
+
         // Run delta sync (falls back to full if no prior sync).
         match crate::sync::delta::run() {
             Ok(()) => {
@@ -1900,7 +1907,11 @@ fn spawn_sync_thread(args: IssueArgs) -> mpsc::Receiver<SyncEvent> {
                 }
             }
             Err(e) => {
-                let _ = tx.send(SyncEvent::Error(e.to_string()));
+                // Surface only the outermost error message to keep the
+                // statusbar readable (the anyhow chain can be very long).
+                let msg = e.to_string();
+                let brief = msg.lines().next().unwrap_or(&msg).to_string();
+                let _ = tx.send(SyncEvent::Error(brief));
             }
         }
     });
