@@ -34,30 +34,19 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let input_mode = app.input_mode;
     let input_buf = app.input_buf.clone();
 
-    // In search mode, show the search bar in the header row instead of the
-    // normal context header (bd-z1a).
+    // Always render the header with user/org context. In search mode, append
+    // the search query inline after a "/" separator so the identity is always
+    // visible (bd-1l9).
     if let Mode::Search = app.mode
         && let Some(ref overlay) = app.search_overlay
     {
-        if overlay.fts_unavailable {
-            frame.render_widget(
-                Paragraph::new("Search unavailable: run lt sync first")
-                    .style(Style::new().add_modifier(Modifier::BOLD)),
-                chunks[0],
-            );
-        } else {
-            let prefix = Span::styled("/ ", Style::new().add_modifier(Modifier::BOLD));
-            let mut line = Line::from(vec![prefix]);
-            append_text_input_spans(&mut line, &overlay.query);
-            // Append inline ghost-text suffix hint (bd-22l).
-            if let Some(suffix) = overlay.completer.hint_suffix() {
-                line.spans.push(Span::styled(
-                    suffix.to_owned(),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            frame.render_widget(Paragraph::new(line), chunks[0]);
-        }
+        render_header_with_search(
+            frame,
+            chunks[0],
+            app.viewer_name.as_deref(),
+            app.org_name.as_deref(),
+            overlay,
+        );
     } else {
         render_header(
             frame,
@@ -154,6 +143,60 @@ fn render_header(
         Paragraph::new(text).style(Style::new().add_modifier(Modifier::BOLD)),
         area,
     );
+}
+
+/// Render the header in search mode: "user  org  / <query input>".
+/// The identity prefix (user/org) remains visible; the query is appended
+/// inline after a bold "/" separator so the user always sees who they are
+/// and what they are searching for (bd-1l9).
+fn render_header_with_search(
+    frame: &mut Frame,
+    area: Rect,
+    viewer_name: Option<&str>,
+    org_name: Option<&str>,
+    overlay: &super::SearchOverlay,
+) {
+    let mut line = Line::default();
+
+    // Build identity prefix spans.
+    let mut identity_parts: Vec<String> = Vec::new();
+    if let Some(u) = viewer_name {
+        identity_parts.push(format!("user:{}", u));
+    }
+    if let Some(o) = org_name {
+        identity_parts.push(format!("org:{}", o));
+    }
+    let identity = identity_parts.join("  ");
+
+    if overlay.fts_unavailable {
+        let prefix = if identity.is_empty() {
+            String::new()
+        } else {
+            format!("{}  ", identity)
+        };
+        line.spans.push(Span::styled(
+            format!("{}Search unavailable: run lt sync first", prefix),
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        if !identity.is_empty() {
+            line.spans.push(Span::styled(
+                format!("{}  ", identity),
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+        }
+        line.spans.push(Span::styled("/ ", Style::new().add_modifier(Modifier::BOLD)));
+        append_text_input_spans(&mut line, &overlay.query);
+        // Append inline ghost-text suffix hint (bd-22l).
+        if let Some(suffix) = overlay.completer.hint_suffix() {
+            line.spans.push(Span::styled(
+                suffix.to_owned(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn filter_context(args: &IssueArgs, last_search_query: Option<&str>) -> String {
