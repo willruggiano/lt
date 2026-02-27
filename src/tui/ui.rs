@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
@@ -49,6 +49,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             let prefix = Span::styled("/ ", Style::new().add_modifier(Modifier::BOLD));
             let mut line = Line::from(vec![prefix]);
             append_text_input_spans(&mut line, &overlay.query);
+            // Append inline ghost-text suffix hint (bd-22l).
+            if let Some(suffix) = overlay.completer.hint_suffix() {
+                line.spans.push(Span::styled(
+                    suffix.to_owned(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
             frame.render_widget(Paragraph::new(line), chunks[0]);
         }
     } else {
