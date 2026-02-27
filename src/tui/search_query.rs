@@ -842,7 +842,7 @@ fn span_bounds(token: &Token) -> (usize, usize) {
 /// portion). For Word and Unknown, position at the start of the token.
 fn cursor_position_for_token(token: &Token) -> usize {
     match token {
-        Token::Stem { key_span, .. } | Token::PartialStem { key_span, .. } => key_span.end,
+        Token::Stem { key_span, .. } | Token::PartialStem { key_span, .. } => key_span.end + 1,
         Token::Word { span, .. } | Token::Unknown { span, .. } => span.start,
     }
 }
