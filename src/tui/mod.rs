@@ -723,6 +723,12 @@ pub struct App {
     pub viewer_name: Option<String>,
     /// Linear organization (workspace) name.
     pub org_name: Option<String>,
+
+    // -- double-esc reset (bd-1jt) --------------------------------------------
+    /// The args as passed at startup; used to restore state on double-esc.
+    pub initial_args: IssueArgs,
+    /// Timestamp of the last Esc keypress (used to detect double-esc).
+    pub last_esc_time: Option<Instant>,
 }
 
 impl App {
@@ -739,6 +745,7 @@ impl App {
         if !issues.is_empty() {
             table_state.select(Some(0));
         }
+        let initial_args = args.clone();
         Self {
             issues,
             table_state,
@@ -769,6 +776,8 @@ impl App {
             last_search_query: None,
             viewer_name: None,
             org_name: None,
+            initial_args,
+            last_esc_time: None,
         }
     }
 
@@ -2265,7 +2274,28 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Char('q') => app.quit = true,
-        KeyCode::Esc => app.do_fetch(true),
+        KeyCode::Esc => {
+            // Double-esc (within 500ms) resets sort, filters, and search query
+            // back to the state the TUI was launched with (bd-1jt).
+            let now = Instant::now();
+            let is_double_esc = app
+                .last_esc_time
+                .map(|t| t.elapsed() < Duration::from_millis(500))
+                .unwrap_or(false);
+            if is_double_esc {
+                // Full reset to initial state.
+                app.args = app.initial_args.clone();
+                app.last_search_query = None;
+                app.cursor_stack.clear();
+                app.current_cursor = None;
+                app.last_esc_time = None;
+                app.do_fetch(true);
+            } else {
+                // First esc: standard refresh.
+                app.last_esc_time = Some(now);
+                app.do_fetch(true);
+            }
+        }
         // Open detail pane (bd-2g8, bd-22j: space opens detail)
         KeyCode::Char(' ') => app.open_detail(),
         KeyCode::Char('j') | KeyCode::Down => app.move_down(),
