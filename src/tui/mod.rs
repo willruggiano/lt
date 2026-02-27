@@ -516,9 +516,12 @@ impl SearchOverlay {
         // Pre-populate the query bar with the default sort stem (bd-7qo).
         let default_q = search_query::DEFAULT_QUERY.to_string();
         let ast = search_query::parse_query_ast(&default_q);
-        let completer = search_query::Completer::new();
+        let query = TextInput::from_string(default_q);
+        let mut completer = search_query::Completer::new();
+        // Initialize completer so ghost text and Tab work immediately (bd-1dt).
+        completer.update(&ast, query.cursor);
         Self {
-            query: TextInput::from_string(default_q),
+            query,
             results: Vec::new(),
             table_state: TableState::default(),
             last_changed: None,
