@@ -748,10 +748,12 @@ pub struct App {
     /// Screen rect of the cell that triggered the popup, used to position it.
     pub popup_anchor: Option<ratatui::layout::Rect>,
 
-    // -- search query memory --------------------------------------------------
-    /// The last confirmed search query.  Preserved when <esc> clears the
-    /// filter so that pressing / again re-populates the search bar.
-    pub last_search_query: Option<String>,
+    // -- active filter AST (bd-rbm) -------------------------------------------
+    /// Single source of truth for the active filter/search state.
+    /// Updated on Enter (confirm search), double-esc (reset), and sort shortcuts.
+    pub active_filter: search_query::QueryAst,
+    /// Snapshot of the filter at startup; used to reset on double-esc.
+    pub initial_filter: search_query::QueryAst,
 
     // -- identity info (bd-185) -----------------------------------------------
     /// Authenticated user's display name.
@@ -781,6 +783,8 @@ impl App {
             table_state.select(Some(0));
         }
         let initial_args = args.clone();
+        let active_filter = search_query::args_to_ast(&args);
+        let initial_filter = active_filter.clone();
         Self {
             issues,
             table_state,
@@ -808,12 +812,40 @@ impl App {
             help_popup: None,
             search_overlay: None,
             popup_anchor: None,
-            last_search_query: None,
+            active_filter,
+            initial_filter,
             viewer_name: None,
             org_name: None,
             initial_args,
             last_esc_time: None,
         }
+    }
+
+    /// Keep app.args.sort/desc in sync with active_filter (bd-rbm).
+    /// Called after active_filter is updated so that do_fetch() and the
+    /// table sort-column marker reflect the confirmed filter state.
+    fn sync_args_from_filter(&mut self) {
+        let parsed = search_query::ParsedQuery::from(&self.active_filter);
+        if let Some((field, dir)) = parsed.sort {
+            self.args.sort = field;
+            self.args.desc = dir == search_query::SortDir::Desc;
+        }
+    }
+
+    /// Produce a new QueryAst with the sort: token replaced to match
+    /// self.args.sort/desc.  Used by cycle_sort and toggle_desc (bd-rbm).
+    fn replace_sort_in_filter(&self) -> search_query::QueryAst {
+        let dir = if self.args.desc { "-" } else { "+" };
+        let new_sort = format!("sort:{}{}", self.args.sort.label(), dir);
+        let mut parts: Vec<String> = self
+            .active_filter
+            .raw
+            .split_whitespace()
+            .filter(|t| !t.to_lowercase().starts_with("sort:"))
+            .map(|s| s.to_string())
+            .collect();
+        parts.push(new_sort);
+        search_query::parse_query_ast(&parts.join(" "))
     }
 
     fn selected_issue(&self) -> Option<&Issue> {
@@ -917,6 +949,7 @@ impl App {
 
     fn cycle_sort(&mut self) {
         self.args.sort = self.args.sort.next();
+        self.active_filter = self.replace_sort_in_filter();
         self.cursor_stack.clear();
         self.current_cursor = None;
         self.do_fetch(true);
@@ -924,6 +957,7 @@ impl App {
 
     fn toggle_desc(&mut self) {
         self.args.desc = !self.args.desc;
+        self.active_filter = self.replace_sort_in_filter();
         self.cursor_stack.clear();
         self.current_cursor = None;
         self.do_fetch(true);
@@ -2379,7 +2413,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             if is_double_esc {
                 // Full reset to initial state.
                 app.args = app.initial_args.clone();
-                app.last_search_query = None;
+                app.active_filter = app.initial_filter.clone();
                 app.cursor_stack.clear();
                 app.current_cursor = None;
                 app.last_esc_time = None;
@@ -2414,12 +2448,12 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('d') => app.toggle_desc(),
         KeyCode::Char('/') => {
             let mut overlay = SearchOverlay::new();
-            // Restore last search query when re-opening, but keep the default
-            // sort:updated- prefix if the last query was just that (bd-7qo).
-            if let Some(ref q) = app.last_search_query
-                && q != search_query::DEFAULT_QUERY
-            {
-                overlay.query = TextInput::from_string(q.clone());
+            // Restore active filter when re-opening, unless it is just the
+            // default sort stem (bd-rbm).
+            if app.active_filter.raw != search_query::DEFAULT_QUERY {
+                overlay.query =
+                    TextInput::from_string(app.active_filter.raw.clone());
+                overlay.ast = app.active_filter.clone();
                 overlay.last_changed = Some(Instant::now());
             }
             app.search_overlay = Some(overlay);
@@ -2497,15 +2531,9 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             if let Some(ref mut overlay) = app.search_overlay {
                 let results = std::mem::take(&mut overlay.results);
                 let selected = overlay.table_state.selected();
-                let raw_query = overlay.query.value.clone();
-                app.last_search_query = Some(raw_query.clone());
-                // Update app.args sort/desc so the header and table column
-                // marker reflect the sort that was actually used (bd-23g).
-                let parsed = search_query::parse_query(&raw_query);
-                if let Some((field, dir)) = parsed.sort {
-                    app.args.sort = field;
-                    app.args.desc = dir == search_query::SortDir::Desc;
-                }
+                // AST is the single source of truth (bd-rbm).
+                app.active_filter = overlay.ast.clone();
+                app.sync_args_from_filter();
                 app.issues = results;
                 let n = app.issues.len();
                 let sel = selected.unwrap_or(0).min(n.saturating_sub(1));

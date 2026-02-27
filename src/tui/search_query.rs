@@ -113,6 +113,7 @@ pub enum Token {
 }
 
 /// A fully-parsed query AST, always constructible from any input string.
+#[derive(Debug, Clone)]
 pub struct QueryAst {
     /// Original input string (owned).
     pub raw: String,
