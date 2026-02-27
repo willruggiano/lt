@@ -690,16 +690,20 @@ impl Completer {
                     self.selected = (self.selected + n - 1) % n;
                 }
 
-                // Determine the replacement range: from key_span.start to cursor.
-                let replace_start = match &self.active_token {
+                // Determine the replacement range: from key_span.start to just
+                // after the colon so that the colon itself is replaced and not
+                // left behind when the candidate (which already contains the
+                // colon) is inserted.
+                let (replace_start, replace_end) = match &self.active_token {
                     Some(Token::PartialStem { key_span, .. })
-                    | Some(Token::Stem { key_span, .. }) => key_span.start,
+                    | Some(Token::Stem { key_span, .. }) => {
+                        (key_span.start, (key_span.end + 1).min(input.value.len()))
+                    }
                     _ => {
                         // Fallback: find start by subtracting prefix length.
-                        input.cursor.saturating_sub(prefix.len())
+                        (input.cursor.saturating_sub(prefix.len()), input.cursor)
                     }
                 };
-                let replace_end = input.cursor;
 
                 // Replace the text in the input.
                 let mut new_value = input.value[..replace_start].to_string();
@@ -738,12 +742,13 @@ impl Completer {
                     return false;
                 }
                 let candidate = self.candidates[self.selected].clone();
-                let replace_start = match &self.active_token {
+                let (replace_start, replace_end) = match &self.active_token {
                     Some(Token::PartialStem { key_span, .. })
-                    | Some(Token::Stem { key_span, .. }) => key_span.start,
-                    _ => input.cursor.saturating_sub(prefix.len()),
+                    | Some(Token::Stem { key_span, .. }) => {
+                        (key_span.start, (key_span.end + 1).min(input.value.len()))
+                    }
+                    _ => (input.cursor.saturating_sub(prefix.len()), input.cursor),
                 };
-                let replace_end = input.cursor;
                 let mut new_value = input.value[..replace_start].to_string();
                 new_value.push_str(&candidate);
                 new_value.push_str(&input.value[replace_end..]);
@@ -797,10 +802,7 @@ impl Completer {
                 .find(|t| span_bounds(t).0 > cursor);
             match next {
                 Some(t) => input.cursor = cursor_position_for_token(t),
-                None => {
-                    // Wrap: jump to first token.
-                    input.cursor = cursor_position_for_token(&ast.tokens[0]);
-                }
+                None => return,
             }
         } else {
             // Shift-Tab: jump to prev token (token whose start is
@@ -812,10 +814,7 @@ impl Completer {
                 .last();
             match prev {
                 Some(t) => input.cursor = cursor_position_for_token(t),
-                None => {
-                    // Wrap: jump to last token.
-                    input.cursor = cursor_position_for_token(ast.tokens.last().unwrap());
-                }
+                None => return,
             }
         }
     }
@@ -842,7 +841,7 @@ fn span_bounds(token: &Token) -> (usize, usize) {
 /// portion). For Word and Unknown, position at the start of the token.
 fn cursor_position_for_token(token: &Token) -> usize {
     match token {
-        Token::Stem { key_span, .. } | Token::PartialStem { key_span, .. } => key_span.end,
+        Token::Stem { key_span, .. } | Token::PartialStem { key_span, .. } => key_span.end + 1,
         Token::Word { span, .. } | Token::Unknown { span, .. } => span.start,
     }
 }
@@ -1335,10 +1334,17 @@ mod tests {
     fn completer_update_gap_between_tokens() {
         // "foo  bar" -- two spaces; cursor at byte 4 (second space, between tokens)
         // "foo" spans [0,3), "bar" spans [5,8).  Byte 4 is not inside either.
+        // Cursor in a gap offers all stem-key candidates so Tab can insert one.
         let ast = parse_query_ast("foo  bar");
         let mut c = Completer::new();
-        c.update(&ast, 4); // byte 4 is the second space, not covered by any token
-        assert_eq!(c.context, CompletionContext::Gap);
+        c.update(&ast, 4);
+        match &c.context {
+            CompletionContext::StemKey { prefix } => {
+                assert_eq!(prefix, "");
+            }
+            other => panic!("expected StemKey with empty prefix, got {:?}", other),
+        }
+        assert_eq!(c.candidates.len(), 9); // all stem keys
     }
 
     #[test]
@@ -1352,10 +1358,17 @@ mod tests {
 
     #[test]
     fn completer_update_gap_past_end() {
+        // Cursor past end of all tokens offers all stem-key candidates.
         let ast = parse_query_ast("foo");
         let mut c = Completer::new();
         c.update(&ast, 5); // past end of "foo" (len=3)
-        assert_eq!(c.context, CompletionContext::Gap);
+        match &c.context {
+            CompletionContext::StemKey { prefix } => {
+                assert_eq!(prefix, "");
+            }
+            other => panic!("expected StemKey with empty prefix, got {:?}", other),
+        }
+        assert_eq!(c.candidates.len(), 9); // all stem keys
     }
 
     #[test]
