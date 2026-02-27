@@ -53,3 +53,30 @@ value_hint = "<name>"
 sql_col    = "label_names"
 sql_op     = "LIKE"
 sql_lower  = true
+
+[[field]]
+key        = "project"
+gql_field  = "project"
+gql_type   = "NullableProjectFilter"
+value_hint = "<name>"
+sql_col    = "project_name"
+sql_op     = "LIKE"
+sql_lower  = true
+
+[[field]]
+key        = "cycle"
+gql_field  = "cycle"
+gql_type   = "NullableCycleFilter"
+value_hint = "<name>"
+sql_col    = "cycle_name"
+sql_op     = "LIKE"
+sql_lower  = true
+
+[[field]]
+key        = "creator"
+gql_field  = "creator"
+gql_type   = "NullableUserFilter"
+value_hint = "<name>"
+sql_col    = "creator_name"
+sql_op     = "LIKE"
+sql_lower  = true

@@ -170,6 +170,12 @@ pub struct ParsedQuery {
     pub team: Option<String>,
     /// Label filter (substring match, lowercased).
     pub label: Option<String>,
+    /// Project filter (substring match, lowercased).
+    pub project: Option<String>,
+    /// Cycle filter (substring match, lowercased).
+    pub cycle: Option<String>,
+    /// Creator filter (substring match, lowercased).
+    pub creator: Option<String>,
     /// Free-text words joined into an FTS5 query.  Empty string means no FTS.
     pub fts_terms: String,
 }
@@ -184,6 +190,9 @@ impl ParsedQuery {
             && self.state.is_none()
             && self.team.is_none()
             && self.label.is_none()
+            && self.project.is_none()
+            && self.cycle.is_none()
+            && self.creator.is_none()
             && self.fts_terms.is_empty()
     }
 }
@@ -203,6 +212,9 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
     let mut state: Option<String> = None;
     let mut team: Option<String> = None;
     let mut label: Option<String> = None;
+    let mut project: Option<String> = None;
+    let mut cycle: Option<String> = None;
+    let mut creator: Option<String> = None;
     let mut fts_words: Vec<String> = Vec::new();
 
     for token in raw.split_whitespace() {
@@ -235,6 +247,18 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
                     label = Some(value.to_lowercase());
                     continue;
                 }
+                "project" if !value.is_empty() => {
+                    project = Some(value.to_lowercase());
+                    continue;
+                }
+                "cycle" if !value.is_empty() => {
+                    cycle = Some(value.to_lowercase());
+                    continue;
+                }
+                "creator" if !value.is_empty() => {
+                    creator = Some(value.to_lowercase());
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -251,6 +275,9 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
         state,
         team,
         label,
+        project,
+        cycle,
+        creator,
         fts_terms,
     }
 }
@@ -380,6 +407,24 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         bind.push(Box::new(format!("%{}%", l)));
     }
 
+    // -- project --
+    if let Some(ref p) = q.project {
+        conditions.push("LOWER(COALESCE(project_name,'')) LIKE ?".to_string());
+        bind.push(Box::new(format!("%{}%", p)));
+    }
+
+    // -- cycle --
+    if let Some(ref c) = q.cycle {
+        conditions.push("LOWER(COALESCE(cycle_name,'')) LIKE ?".to_string());
+        bind.push(Box::new(format!("%{}%", c)));
+    }
+
+    // -- creator --
+    if let Some(ref c) = q.creator {
+        conditions.push("LOWER(COALESCE(creator_name,'')) LIKE ?".to_string());
+        bind.push(Box::new(format!("%{}%", c)));
+    }
+
     // -- ORDER BY --
     let (order_col, order_dir) = match &q.sort {
         Some((field, dir)) => (
@@ -403,7 +448,8 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         format!(
             "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
                     i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
-                    i.synced_at, i.description, i.labels
+                    i.synced_at, i.description, i.labels,
+                    i.project_name, i.cycle_name, i.creator_name
              FROM issues i
              JOIN issues_fts ON issues_fts.rowid = i.rowid
              WHERE issues_fts MATCH ?{extra_cond}
@@ -422,7 +468,7 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         format!(
             "SELECT id, identifier, title, priority_label, state_name,
                     assignee_name, team_name, team_key, created_at, updated_at, synced_at,
-                    description, labels
+                    description, labels, project_name, cycle_name, creator_name
              FROM issues
              {where_clause}
              ORDER BY {col} {dir}
@@ -466,6 +512,9 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
                 synced_at: row.get(10)?,
                 description: row.get(11)?,
                 labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                project_name: row.get(13)?,
+                cycle_name: row.get(14)?,
+                creator_name: row.get(15)?,
             })
         })
         .map_err(|e| anyhow::anyhow!("execute search_query: {}", e))?;
@@ -514,7 +563,10 @@ pub enum CompletionContext {
 }
 
 /// All known stem key strings, in display order.
-const STEM_KEY_STRINGS: &[&str] = &["sort:", "assignee:", "priority:", "state:", "team:"];
+const STEM_KEY_STRINGS: &[&str] = &[
+    "sort:", "assignee:", "priority:", "state:", "team:", "label:", "project:", "cycle:",
+    "creator:",
+];
 
 /// Tab-completion state for the search query bar.
 pub struct Completer {
@@ -1133,7 +1185,10 @@ mod tests {
         assert!(matches!(c.context, CompletionContext::StemKey { .. }));
         assert_eq!(
             c.candidates,
-            vec!["sort:", "assignee:", "priority:", "state:", "team:"]
+            vec![
+                "sort:", "assignee:", "priority:", "state:", "team:", "label:", "project:",
+                "cycle:", "creator:",
+            ]
         );
     }
 

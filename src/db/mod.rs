@@ -103,6 +103,48 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             .context("failed to add labels column")?;
     }
 
+    // Migration: add project_name column if absent.
+    let has_project_name: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='project_name'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_project_name {
+        conn.execute_batch("ALTER TABLE issues ADD COLUMN project_name TEXT;")
+            .context("failed to add project_name column")?;
+    }
+
+    // Migration: add cycle_name column if absent.
+    let has_cycle_name: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='cycle_name'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_cycle_name {
+        conn.execute_batch("ALTER TABLE issues ADD COLUMN cycle_name TEXT;")
+            .context("failed to add cycle_name column")?;
+    }
+
+    // Migration: add creator_name column if absent.
+    let has_creator_name: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='creator_name'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_creator_name {
+        conn.execute_batch("ALTER TABLE issues ADD COLUMN creator_name TEXT;")
+            .context("failed to add creator_name column")?;
+    }
+
     Ok(())
 }
 

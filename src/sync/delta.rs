@@ -23,6 +23,9 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
       assignee { id name }
       team { id name }
       labels { nodes { name } }
+      project { id name }
+      cycle { id name }
+      creator { id name }
       createdAt
       updatedAt
     }
@@ -48,6 +51,16 @@ struct Team {
 }
 
 #[derive(Deserialize)]
+struct Project {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct Cycle {
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct LabelNode {
     name: String,
 }
@@ -69,6 +82,9 @@ struct Issue {
     team: Team,
     description: Option<String>,
     labels: LabelConnection,
+    project: Option<Project>,
+    cycle: Option<Cycle>,
+    creator: Option<User>,
     #[serde(rename = "createdAt")]
     created_at: String,
     #[serde(rename = "updatedAt")]
@@ -109,6 +125,9 @@ fn to_db_issue(src: &Issue) -> db::Issue {
         synced_at: String::new(), // filled by upsert_issues
         description: src.description.clone(),
         labels,
+        project_name: src.project.as_ref().map(|p| p.name.clone()),
+        cycle_name: src.cycle.as_ref().map(|c| c.name.clone()),
+        creator_name: src.creator.as_ref().map(|u| u.name.clone()),
     }
 }
 
