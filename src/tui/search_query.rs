@@ -236,14 +236,13 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
     }
 
     // -- priority --
-    if let Some(ref p) = q.priority {
-        if let Some(label) = normalise_priority(p) {
+    if let Some(ref p) = q.priority
+        && let Some(label) = normalise_priority(p) {
             conditions.push("priority_label = ?".to_string());
             bind.push(Box::new(label.to_string()));
         }
         // Unknown priority string: skip the filter silently so partial typing
         // does not wipe the result list.
-    }
 
     // -- state --
     if let Some(ref s) = q.state {

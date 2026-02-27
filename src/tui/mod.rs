@@ -1995,12 +1995,11 @@ pub fn run(args: IssueArgs) -> Result<()> {
     );
 
     // Fetch viewer identity for header display (bd-185).
-    if let Ok(Some(token)) = crate::config::load_token() {
-        if let Ok(viewer) = fetch_viewer(&token.access_token) {
+    if let Ok(Some(token)) = crate::config::load_token()
+        && let Ok(viewer) = fetch_viewer(&token.access_token) {
             app.viewer_name = Some(viewer.name);
             app.org_name = Some(viewer.org_name);
         }
-    }
 
     let mut terminal = ratatui::init();
     app.status = initial_status;
@@ -2355,12 +2354,11 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             let mut overlay = SearchOverlay::new();
             // Restore last search query when re-opening, but keep the default
             // sort:updated- prefix if the last query was just that (bd-7qo).
-            if let Some(ref q) = app.last_search_query {
-                if q != search_query::DEFAULT_QUERY {
+            if let Some(ref q) = app.last_search_query
+                && q != search_query::DEFAULT_QUERY {
                     overlay.query = TextInput::from_string(q.clone());
                     overlay.last_changed = Some(Instant::now());
                 }
-            }
             app.search_overlay = Some(overlay);
             app.mode = Mode::Search;
         }
@@ -2404,11 +2402,10 @@ fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         }
         // Everything else goes to the TextInput search bar.
         _ => {
-            if let Some(ref mut popup) = app.help_popup {
-                if popup.search.handle_key(code, modifiers) {
+            if let Some(ref mut popup) = app.help_popup
+                && popup.search.handle_key(code, modifiers) {
                     popup.update_filter();
                 }
-            }
         }
     }
 }
@@ -2466,11 +2463,10 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         }
         // Everything else goes to the TextInput query bar.
         _ => {
-            if let Some(ref mut overlay) = app.search_overlay {
-                if overlay.query.handle_key(code, modifiers) {
+            if let Some(ref mut overlay) = app.search_overlay
+                && overlay.query.handle_key(code, modifiers) {
                     overlay.last_changed = Some(Instant::now());
                 }
-            }
         }
     }
 }

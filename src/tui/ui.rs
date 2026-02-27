@@ -181,11 +181,10 @@ fn filter_context(args: &IssueArgs, last_search_query: Option<&str>) -> String {
     if let Some(d) = &args.updated_before {
         parts.push(format!("updated<{}", d));
     }
-    if let Some(q) = last_search_query {
-        if q != super::search_query::DEFAULT_QUERY {
+    if let Some(q) = last_search_query
+        && q != super::search_query::DEFAULT_QUERY {
             parts.push(format!("search:{}", q));
         }
-    }
     let dir = if args.desc { "-" } else { "+" };
     parts.push(format!("sort:{}{}", args.sort.label(), dir));
     parts.join("  ")

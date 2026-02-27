@@ -3,10 +3,10 @@
 //! Two modes are supported:
 //!
 //! - TUI mode  -- all log output goes to the rotating file log only.
-//!                Nothing is printed to stdout/stderr so the TUI is not corrupted.
+//!   Nothing is printed to stdout/stderr so the TUI is not corrupted.
 //!
 //! - CLI mode  -- INFO-level messages are also written to stdout so the user can
-//!                see progress.  Everything (DEBUG and above) goes to the file log.
+//!   see progress.  Everything (DEBUG and above) goes to the file log.
 //!
 //! The log directory is `~/.local/share/lt/log/`.
 //! Log files are rotated daily by `tracing-appender`.
