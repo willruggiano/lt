@@ -756,12 +756,16 @@ fn render_search_overlay(
     frame.render_widget(Paragraph::new(bar_text), search_bar_area);
 
     // Render search results in the main content area (chunks[1]).
+    // Clear the area first so the underlying issue table does not bleed through.
     let area = chunks[1];
 
     if overlay.fts_unavailable || overlay.query.trim().is_empty() {
-        // Nothing to show yet.
+        // Clear the main area to hide the background table while in search mode.
+        frame.render_widget(Clear, area);
         return;
     }
+
+    frame.render_widget(Clear, area);
 
     if overlay.results.is_empty() {
         frame.render_widget(Paragraph::new("No results."), area);
