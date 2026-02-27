@@ -1,3 +1,4 @@
+mod search_query;
 mod ui;
 
 use std::sync::mpsc;
@@ -493,26 +494,41 @@ pub struct SearchOverlay {
 
 impl SearchOverlay {
     pub fn new() -> Self {
+        // Pre-populate the query bar with the default sort stem (bd-7qo).
+        let default_q = search_query::DEFAULT_QUERY.to_string();
         Self {
-            query: TextInput::new(),
+            query: TextInput::from_string(default_q),
             results: Vec::new(),
             table_state: TableState::default(),
-            last_changed: None,
+            last_changed: Some(Instant::now()),
             fts_unavailable: false,
         }
     }
 
-    /// Run the FTS query and refresh results. Called after debounce fires.
+    /// Run the structured search query and refresh results (bd-7qo).
+    ///
+    /// The query string is parsed into stems (sort:, assignee:, priority:,
+    /// state:, team:) plus optional free-text FTS terms.  The default query
+    /// is `sort:updated-` which shows all issues sorted by updated desc.
     pub fn run_search(&mut self) {
         self.fts_unavailable = false;
-        if self.query.value.trim().is_empty() {
+        let raw = self.query.value.trim().to_string();
+
+        // An entirely blank query: show nothing (user cleared the bar).
+        if raw.is_empty() {
             self.results.clear();
             self.table_state.select(None);
             return;
         }
-        // Append '*' for prefix matching so typing "oauth" matches "oauth2" etc.
-        let fts_query = format!("{}*", self.query.value.trim());
-        match crate::db::open_db().and_then(|conn| crate::db::search_issues(&conn, &fts_query)) {
+
+        let parsed = search_query::parse_query(&raw);
+
+        // If the query is just the default sort stem with no other constraints,
+        // run it anyway so the user sees the full list sorted correctly.
+        let limit = 200;
+        match crate::db::open_db()
+            .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
+        {
             Ok(db_issues) => {
                 self.results = db_issues.into_iter().map(db_issue_to_list_issue).collect();
                 if self.results.is_empty() {
@@ -686,6 +702,12 @@ pub struct App {
     /// The last confirmed search query.  Preserved when <esc> clears the
     /// filter so that pressing / again re-populates the search bar.
     pub last_search_query: Option<String>,
+
+    // -- identity info (bd-185) -----------------------------------------------
+    /// Authenticated user's display name.
+    pub viewer_name: Option<String>,
+    /// Linear organization (workspace) name.
+    pub org_name: Option<String>,
 }
 
 impl App {
@@ -729,6 +751,8 @@ impl App {
             search_overlay: None,
             popup_anchor: None,
             last_search_query: None,
+            viewer_name: None,
+            org_name: None,
         }
     }
 
@@ -1454,6 +1478,7 @@ impl App {
 struct ViewerInfo {
     pub id: String,
     pub name: String,
+    pub org_name: String,
 }
 
 fn fetch_viewer(token: &str) -> Result<ViewerInfo> {
@@ -1465,14 +1490,22 @@ query Viewer {
   viewer {
     id
     name
+    organization {
+      name
+    }
   }
 }
 "#;
 
     #[derive(Deserialize)]
+    struct OrgNode {
+        name: String,
+    }
+    #[derive(Deserialize)]
     struct ViewerNode {
         id: String,
         name: String,
+        organization: OrgNode,
     }
     #[derive(Deserialize)]
     struct ViewerData {
@@ -1483,6 +1516,7 @@ query Viewer {
     Ok(ViewerInfo {
         id: data.viewer.id,
         name: data.viewer.name,
+        org_name: data.viewer.organization.name,
     })
 }
 
@@ -1792,7 +1826,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     // Spawn background sync thread.
     let sync_rx = spawn_sync_thread(args.clone());
 
-    let app = App::new(
+    let mut app = App::new(
         issues,
         has_next_page,
         end_cursor,
@@ -1802,8 +1836,15 @@ pub fn run(args: IssueArgs) -> Result<()> {
         sync_status_label,
     );
 
+    // Fetch viewer identity for header display (bd-185).
+    if let Ok(Some(token)) = crate::config::load_token() {
+        if let Ok(viewer) = fetch_viewer(&token.access_token) {
+            app.viewer_name = Some(viewer.name);
+            app.org_name = Some(viewer.org_name);
+        }
+    }
+
     let mut terminal = ratatui::init();
-    let mut app = app;
     app.status = initial_status;
     let result = run_app(&mut terminal, app);
     ratatui::restore();
@@ -2098,9 +2139,13 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('d') => app.toggle_desc(),
         KeyCode::Char('/') => {
             let mut overlay = SearchOverlay::new();
+            // Restore last search query when re-opening, but keep the default
+            // sort:updated- prefix if the last query was just that (bd-7qo).
             if let Some(ref q) = app.last_search_query {
-                overlay.query = TextInput::from_string(q.clone());
-                overlay.last_changed = Some(Instant::now());
+                if q != search_query::DEFAULT_QUERY {
+                    overlay.query = TextInput::from_string(q.clone());
+                    overlay.last_changed = Some(Instant::now());
+                }
             }
             app.search_overlay = Some(overlay);
             app.mode = Mode::Search;

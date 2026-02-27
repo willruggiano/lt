@@ -51,22 +51,23 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             frame.render_widget(Paragraph::new(line), chunks[0]);
         }
     } else {
-        render_header(frame, chunks[0], &context);
+        render_header(
+            frame,
+            chunks[0],
+            &context,
+            app.viewer_name.as_deref(),
+            app.org_name.as_deref(),
+        );
     }
+
+    // Always render the full-width table so column widths never change.
+    render_table(frame, chunks[2], app);
 
     match app.mode {
         Mode::Detail => {
-            // Vertical split: list (~40%) | detail (~60%).
-            let split =
-                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .split(chunks[2]);
-
-            render_table(frame, split[0], app);
-            render_detail(frame, split[1], app);
             render_detail_footer(frame, chunks[3]);
         }
         _ => {
-            render_table(frame, chunks[2], app);
             if input_mode {
                 render_input(frame, chunks[3], &input_buf);
             } else if let Some(msg) = &app.footer_msg {
@@ -76,6 +77,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 render_footer(frame, chunks[3], has_next, has_prev, page, &sync_label);
             }
         }
+    }
+
+    // Render detail overlay on top if active (bd-2ek).
+    if let Mode::Detail = app.mode {
+        render_detail_overlay(frame, chunks[2], app);
     }
 
     // Render popup on top if active.
@@ -114,11 +120,27 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 // -- header ------------------------------------------------------------------
 
-fn render_header(frame: &mut Frame, area: Rect, context: &str) {
+fn render_header(
+    frame: &mut Frame,
+    area: Rect,
+    context: &str,
+    viewer_name: Option<&str>,
+    org_name: Option<&str>,
+) {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(u) = viewer_name {
+        parts.push(format!("user:{}", u));
+    }
+    if let Some(o) = org_name {
+        parts.push(format!("org:{}", o));
+    }
+    let identity = parts.join("  ");
     let text = if context.is_empty() {
-        "lt issues".to_string()
+        identity
+    } else if identity.is_empty() {
+        context.to_string()
     } else {
-        format!("lt issues  {}", context)
+        format!("{}  {}", identity, context)
     };
     frame.render_widget(
         Paragraph::new(text).style(Style::new().add_modifier(Modifier::BOLD)),
@@ -334,6 +356,22 @@ fn sort_col_index(field: &SortField) -> Option<usize> {
         SortField::Updated => Some(6),
         SortField::Created => None,
     }
+}
+
+// -- Detail overlay (bd-2ek) -------------------------------------------------
+
+/// Render the issue detail as a floating overlay over the right ~60% of the
+/// content area. The underlying issue list is drawn at full width first, so
+/// column widths are never affected by opening the detail view.
+fn render_detail_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    // Overlay covers the right 60% of the content area.
+    let overlay_width = area.width * 3 / 5;
+    let overlay_x = area.x + area.width - overlay_width;
+    let overlay_area = Rect::new(overlay_x, area.y, overlay_width, area.height);
+
+    // Clear the background so the list does not bleed through.
+    frame.render_widget(Clear, overlay_area);
+    render_detail(frame, overlay_area, app);
 }
 
 // -- Detail pane (bd-2g8) ----------------------------------------------------
