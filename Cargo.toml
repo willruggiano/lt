@@ -28,3 +28,7 @@ chumsky = "0.9"
 graphql-parser = "0.4"
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
+quote = "1"
+proc-macro2 = "1"
+syn = { version = "2", default-features = false, features = ["full", "parsing"] }
+prettyplease = "0.2"
