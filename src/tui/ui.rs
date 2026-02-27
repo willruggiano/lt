@@ -32,7 +32,23 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let input_mode = app.input_mode;
     let input_buf = app.input_buf.clone();
 
-    render_header(frame, chunks[0], &context);
+    // In search mode, show the search bar in the header row instead of the
+    // normal context header (bd-z1a).
+    if let Mode::Search = app.mode
+        && let Some(ref overlay) = app.search_overlay
+    {
+        let bar_text = if overlay.fts_unavailable {
+            "Search unavailable: run lt sync first".to_string()
+        } else {
+            format!("/ {}_", overlay.query)
+        };
+        frame.render_widget(
+            Paragraph::new(bar_text).style(Style::new().add_modifier(Modifier::BOLD)),
+            chunks[0],
+        );
+    } else {
+        render_header(frame, chunks[0], &context);
+    }
 
     match app.mode {
         Mode::Detail => {
@@ -744,24 +760,20 @@ fn render_search_overlay(
     chunks: std::rc::Rc<[Rect]>,
     overlay: &mut SearchOverlay,
 ) {
-    // Search bar sits in the footer row (chunks[2]).
-    let search_bar_area = chunks[2];
-
-    // Build the search bar text.
-    let bar_text = if overlay.fts_unavailable {
-        "Search unavailable: run lt sync first".to_string()
-    } else {
-        format!("/ {}_", overlay.query)
-    };
-    frame.render_widget(Paragraph::new(bar_text), search_bar_area);
-
-    // Render search results in the main content area (chunks[1]).
-    // Clear the area first so the underlying issue table does not bleed through.
+    // The search bar is rendered in the header row (chunks[0]) by render().
+    // This function only handles the results in the main content area (chunks[1]).
     let area = chunks[1];
 
-    if overlay.fts_unavailable || overlay.query.trim().is_empty() {
-        // Clear the main area to hide the background table while in search mode.
-        frame.render_widget(Clear, area);
+    // When the query is empty, leave the underlying issue table visible (bd-1pe).
+    // When FTS is unavailable, show the error but still don't wipe the table.
+    if overlay.fts_unavailable {
+        // Show an error overlay without hiding the table entirely.
+        frame.render_widget(Paragraph::new("Search unavailable: run lt sync first"), area);
+        return;
+    }
+
+    if overlay.query.trim().is_empty() {
+        // No query yet -- keep the underlying list visible.
         return;
     }
 
