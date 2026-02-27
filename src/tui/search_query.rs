@@ -1335,10 +1335,17 @@ mod tests {
     fn completer_update_gap_between_tokens() {
         // "foo  bar" -- two spaces; cursor at byte 4 (second space, between tokens)
         // "foo" spans [0,3), "bar" spans [5,8).  Byte 4 is not inside either.
+        // Cursor in a gap offers all stem-key candidates so Tab can insert one.
         let ast = parse_query_ast("foo  bar");
         let mut c = Completer::new();
-        c.update(&ast, 4); // byte 4 is the second space, not covered by any token
-        assert_eq!(c.context, CompletionContext::Gap);
+        c.update(&ast, 4);
+        match &c.context {
+            CompletionContext::StemKey { prefix } => {
+                assert_eq!(prefix, "");
+            }
+            other => panic!("expected StemKey with empty prefix, got {:?}", other),
+        }
+        assert_eq!(c.candidates.len(), 9); // all stem keys
     }
 
     #[test]
