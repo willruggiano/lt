@@ -797,10 +797,7 @@ impl Completer {
                 .find(|t| span_bounds(t).0 > cursor);
             match next {
                 Some(t) => input.cursor = cursor_position_for_token(t),
-                None => {
-                    // Wrap: jump to first token.
-                    input.cursor = cursor_position_for_token(&ast.tokens[0]);
-                }
+                None => return,
             }
         } else {
             // Shift-Tab: jump to prev token (token whose start is
@@ -812,10 +809,7 @@ impl Completer {
                 .last();
             match prev {
                 Some(t) => input.cursor = cursor_position_for_token(t),
-                None => {
-                    // Wrap: jump to last token.
-                    input.cursor = cursor_position_for_token(ast.tokens.last().unwrap());
-                }
+                None => return,
             }
         }
     }
