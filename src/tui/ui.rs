@@ -180,8 +180,8 @@ fn filter_context(args: &IssueArgs) -> String {
     if let Some(d) = &args.updated_before {
         parts.push(format!("updated<{}", d));
     }
-    let dir = if args.desc { "desc" } else { "asc" };
-    parts.push(format!("sort:{} ({})", args.sort.label(), dir));
+    let dir = if args.desc { "-" } else { "+" };
+    parts.push(format!("sort:{}{}", args.sort.label(), dir));
     parts.join("  ")
 }
 
@@ -246,7 +246,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let sort_col = sort_col_index(&app.args.sort);
-    let sort_marker = if app.args.desc { "v" } else { "^" };
+    let sort_marker = if app.args.desc { "-" } else { "+" };
     let base_headers: [&str; 7] = [
         "IDENTIFIER",
         "TITLE",
