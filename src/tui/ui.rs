@@ -189,7 +189,7 @@ fn render_header_with_search(
             "/ ",
             Style::new().add_modifier(Modifier::BOLD),
         ));
-        append_text_input_spans(&mut line, &overlay.query);
+        append_text_input_spans(&mut line, &overlay.query, &overlay.ast.errors);
         // Append inline ghost-text suffix hint (bd-22l).
         if let Some(suffix) = overlay.completer.hint_suffix() {
             line.spans.push(Span::styled(
@@ -643,7 +643,7 @@ fn render_new_issue_modal(frame: &mut Frame, area: Rect, modal: &NewIssueModal) 
     );
     let mut title_line = Line::from(vec![title_label, Span::raw("  ")]);
     if title_active {
-        append_text_input_spans(&mut title_line, &modal.title);
+        append_text_input_spans(&mut title_line, &modal.title, &[]);
     } else {
         title_line.spans.push(Span::raw(modal.title.value.clone()));
     }
@@ -759,7 +759,7 @@ fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
 
     // Search bar.
     let mut search_line = Line::from(vec![Span::raw("/ ")]);
-    append_text_input_spans(&mut search_line, &popup.search);
+    append_text_input_spans(&mut search_line, &popup.search, &[]);
     frame.render_widget(Paragraph::new(search_line), chunks[0]);
 
     // Keybinding list.
@@ -1019,27 +1019,104 @@ fn search_row_cells(issue: &Issue) -> [String; 7] {
 // TextInput rendering helper
 // ---------------------------------------------------------------------------
 
+/// Return true when `byte_offset` falls inside any of the given error spans.
+fn byte_in_error(byte_offset: usize, errors: &[super::search_query::ParseError]) -> bool {
+    errors
+        .iter()
+        .any(|e| byte_offset >= e.span.start && byte_offset < e.span.end)
+}
+
+/// Split `text` (whose first byte is at `offset` in the original input string)
+/// into contiguous sub-slices, each tagged with whether it overlaps a parse
+/// error.  Adjacent bytes with the same error status are grouped together.
+///
+/// Returns `Vec<(&str, bool)>` where the bool is `true` when the slice is in
+/// error territory.
+fn error_segments<'a>(
+    text: &'a str,
+    offset: usize,
+    errors: &[super::search_query::ParseError],
+) -> Vec<(&'a str, bool)> {
+    if errors.is_empty() || text.is_empty() {
+        return vec![(text, false)];
+    }
+    let mut result: Vec<(&'a str, bool)> = Vec::new();
+    let mut seg_start = 0usize; // byte index within `text`
+    let mut seg_is_err = byte_in_error(offset, errors);
+
+    for (i, _ch) in text.char_indices().skip(1) {
+        let is_err = byte_in_error(offset + i, errors);
+        if is_err != seg_is_err {
+            result.push((&text[seg_start..i], seg_is_err));
+            seg_start = i;
+            seg_is_err = is_err;
+        }
+    }
+    // Push the final segment.
+    result.push((&text[seg_start..], seg_is_err));
+    result
+}
+
+/// Append styled spans for a non-cursor text segment.
+///
+/// Bytes overlapping a parse-error span are rendered with `Color::Red`; all
+/// other bytes use the default (terminal-inherited) style.
+fn push_text_spans(
+    line: &mut Line,
+    text: &str,
+    offset: usize,
+    errors: &[super::search_query::ParseError],
+) {
+    for (seg, is_err) in error_segments(text, offset, errors) {
+        if seg.is_empty() {
+            continue;
+        }
+        if is_err {
+            line.spans.push(Span::styled(
+                seg.to_owned(),
+                Style::default().fg(Color::Red),
+            ));
+        } else {
+            line.spans.push(Span::raw(seg.to_owned()));
+        }
+    }
+}
+
 /// Append spans representing a `TextInput` to an existing `Line`.
 ///
 /// The character at the cursor position is rendered with a reversed
 /// (block-cursor) style.  If the cursor is at the end of the string, a
 /// space with reversed style is appended to show the cursor position.
-pub fn append_text_input_spans(line: &mut Line, input: &TextInput) {
+///
+/// `errors` is the list of parse errors from the current `QueryAst`.  Any
+/// text whose byte range overlaps an error span is rendered with
+/// `Color::Red` to give the user a visual signal that a stem was not
+/// recognised.  Pass an empty slice when no error highlighting is needed
+/// (e.g. modal title input).
+pub fn append_text_input_spans(
+    line: &mut Line,
+    input: &TextInput,
+    errors: &[super::search_query::ParseError],
+) {
     let (before, ch_at_cursor, after) = input.display_parts();
+    // `before` occupies bytes [0, cursor).
     if !before.is_empty() {
-        line.spans.push(Span::raw(before.to_owned()));
+        push_text_spans(line, before, 0, errors);
     }
     match ch_at_cursor {
         Some(ch) => {
-            // Cursor is on an existing character -- highlight it.
+            // Cursor is on an existing character -- highlight it with REVERSED.
+            // Cursor style takes priority over error colour.
             let mut s = String::new();
             s.push(ch);
             line.spans.push(Span::styled(
                 s,
                 Style::new().add_modifier(Modifier::REVERSED),
             ));
+            // `after` occupies bytes [cursor + ch.len_utf8(), end).
             if !after.is_empty() {
-                line.spans.push(Span::raw(after.to_owned()));
+                let after_offset = input.cursor + ch.len_utf8();
+                push_text_spans(line, after, after_offset, errors);
             }
         }
         None => {
