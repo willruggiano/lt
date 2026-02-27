@@ -914,9 +914,11 @@ fn render_search_overlay(
         return;
     }
 
-    // Search is queued but hasn't fired yet (debounce pending).
-    // Keep the underlying list visible to avoid a flash of empty content.
-    if overlay.results.is_empty() && overlay.last_changed.is_some() {
+    // Keep the underlying list visible when:
+    // - a search is queued but hasn't fired yet (debounce pending), or
+    // - the overlay was just opened and no search has run yet (bd-zjy).
+    // This avoids a flash of empty content or a spurious "No results." on entry.
+    if overlay.results.is_empty() && (overlay.last_changed.is_some() || !overlay.has_searched) {
         return;
     }
 

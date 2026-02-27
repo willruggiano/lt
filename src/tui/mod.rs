@@ -502,6 +502,9 @@ pub struct SearchOverlay {
     pub last_changed: Option<Instant>,
     /// True when FTS index is unavailable (no sync yet).
     pub fts_unavailable: bool,
+    /// True once run_search() has been called at least once (bd-zjy).
+    /// Used by the renderer to distinguish "never searched" from "searched, no results".
+    pub has_searched: bool,
     /// Parsed AST of the current query string (bd-3qb).
     pub ast: search_query::QueryAst,
     /// Tab-completion state (bd-3qb).
@@ -518,8 +521,9 @@ impl SearchOverlay {
             query: TextInput::from_string(default_q),
             results: Vec::new(),
             table_state: TableState::default(),
-            last_changed: Some(Instant::now()),
+            last_changed: None,
             fts_unavailable: false,
+            has_searched: false,
             ast,
             completer,
         }
@@ -537,6 +541,7 @@ impl SearchOverlay {
     /// (bd-2qr).
     pub fn run_search(&mut self, viewport_rows: u16, list_limit: usize) {
         self.fts_unavailable = false;
+        self.has_searched = true;
         let raw = self.query.value.trim().to_string();
 
         // An entirely blank query: show nothing (user cleared the bar).
