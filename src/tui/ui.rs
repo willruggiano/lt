@@ -51,7 +51,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             frame.render_widget(Paragraph::new(line), chunks[0]);
         }
     } else {
-        render_header(frame, chunks[0], &context);
+        render_header(
+            frame,
+            chunks[0],
+            &context,
+            app.viewer_name.as_deref(),
+            app.org_name.as_deref(),
+        );
     }
 
     match app.mode {
@@ -114,11 +120,27 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 // -- header ------------------------------------------------------------------
 
-fn render_header(frame: &mut Frame, area: Rect, context: &str) {
+fn render_header(
+    frame: &mut Frame,
+    area: Rect,
+    context: &str,
+    viewer_name: Option<&str>,
+    org_name: Option<&str>,
+) {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(u) = viewer_name {
+        parts.push(format!("user:{}", u));
+    }
+    if let Some(o) = org_name {
+        parts.push(format!("org:{}", o));
+    }
+    let identity = parts.join("  ");
     let text = if context.is_empty() {
-        "lt issues".to_string()
+        identity
+    } else if identity.is_empty() {
+        context.to_string()
     } else {
-        format!("lt issues  {}", context)
+        format!("{}  {}", identity, context)
     };
     frame.render_widget(
         Paragraph::new(text).style(Style::new().add_modifier(Modifier::BOLD)),

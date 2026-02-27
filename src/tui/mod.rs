@@ -686,6 +686,12 @@ pub struct App {
     /// The last confirmed search query.  Preserved when <esc> clears the
     /// filter so that pressing / again re-populates the search bar.
     pub last_search_query: Option<String>,
+
+    // -- identity info (bd-185) -----------------------------------------------
+    /// Authenticated user's display name.
+    pub viewer_name: Option<String>,
+    /// Linear organization (workspace) name.
+    pub org_name: Option<String>,
 }
 
 impl App {
@@ -729,6 +735,8 @@ impl App {
             search_overlay: None,
             popup_anchor: None,
             last_search_query: None,
+            viewer_name: None,
+            org_name: None,
         }
     }
 
@@ -1454,6 +1462,7 @@ impl App {
 struct ViewerInfo {
     pub id: String,
     pub name: String,
+    pub org_name: String,
 }
 
 fn fetch_viewer(token: &str) -> Result<ViewerInfo> {
@@ -1465,14 +1474,22 @@ query Viewer {
   viewer {
     id
     name
+    organization {
+      name
+    }
   }
 }
 "#;
 
     #[derive(Deserialize)]
+    struct OrgNode {
+        name: String,
+    }
+    #[derive(Deserialize)]
     struct ViewerNode {
         id: String,
         name: String,
+        organization: OrgNode,
     }
     #[derive(Deserialize)]
     struct ViewerData {
@@ -1483,6 +1500,7 @@ query Viewer {
     Ok(ViewerInfo {
         id: data.viewer.id,
         name: data.viewer.name,
+        org_name: data.viewer.organization.name,
     })
 }
 
@@ -1792,7 +1810,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     // Spawn background sync thread.
     let sync_rx = spawn_sync_thread(args.clone());
 
-    let app = App::new(
+    let mut app = App::new(
         issues,
         has_next_page,
         end_cursor,
@@ -1802,8 +1820,15 @@ pub fn run(args: IssueArgs) -> Result<()> {
         sync_status_label,
     );
 
+    // Fetch viewer identity for header display (bd-185).
+    if let Ok(Some(token)) = crate::config::load_token() {
+        if let Ok(viewer) = fetch_viewer(&token.access_token) {
+            app.viewer_name = Some(viewer.name);
+            app.org_name = Some(viewer.org_name);
+        }
+    }
+
     let mut terminal = ratatui::init();
-    let mut app = app;
     app.status = initial_status;
     let result = run_app(&mut terminal, app);
     ratatui::restore();
