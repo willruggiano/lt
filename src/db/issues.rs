@@ -21,6 +21,9 @@ pub struct Issue {
     pub synced_at: String,
     pub description: Option<String>,
     pub labels: String,
+    pub project_name: Option<String>,
+    pub cycle_name: Option<String>,
+    pub creator_name: Option<String>,
 }
 
 /// Insert or replace a slice of issues, setting synced_at to now (UTC).
@@ -31,8 +34,8 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
             "INSERT OR REPLACE INTO issues
              (id, identifier, title, priority_label, state_name,
               assignee_name, team_name, team_key, created_at, updated_at, synced_at,
-              description, labels)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              description, labels, project_name, cycle_name, creator_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )
         .context("failed to prepare upsert statement")?;
 
@@ -51,6 +54,9 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
             synced_at,
             issue.description,
             issue.labels,
+            issue.project_name,
+            issue.cycle_name,
+            issue.creator_name,
         ])
         .context("failed to upsert issue")?;
     }
@@ -92,7 +98,7 @@ pub fn query_issues_page(
     let sql = format!(
         "SELECT id, identifier, title, priority_label, state_name,
                 assignee_name, team_name, team_key, created_at, updated_at, synced_at,
-                description, labels
+                description, labels, project_name, cycle_name, creator_name
          FROM issues
          WHERE 1=1
          ORDER BY {order_col} {direction}
@@ -119,6 +125,9 @@ pub fn query_issues_page(
                 synced_at: row.get(10)?,
                 description: row.get(11)?,
                 labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                project_name: row.get(13)?,
+                cycle_name: row.get(14)?,
+                creator_name: row.get(15)?,
             })
         })
         .context("failed to execute query")?;
@@ -144,7 +153,8 @@ pub fn query_issues_page(
 pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
     let sql = "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
                       i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
-                      i.synced_at, i.description, i.labels
+                      i.synced_at, i.description, i.labels,
+                      i.project_name, i.cycle_name, i.creator_name
                FROM issues i
                JOIN issues_fts ON issues_fts.rowid = i.rowid
                WHERE issues_fts MATCH ?1
@@ -170,6 +180,9 @@ pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
                 synced_at: row.get(10)?,
                 description: row.get(11)?,
                 labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                project_name: row.get(13)?,
+                cycle_name: row.get(14)?,
+                creator_name: row.get(15)?,
             })
         })
         .context("failed to execute search_issues query")?;

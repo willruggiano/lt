@@ -10,46 +10,41 @@
 # hard-coded in build.rs; it is not listed here.
 
 [[field]]
-key        = "assignee"
-gql_field  = "assignee"
-gql_type   = "NullableUserFilter"
-value_hint = "<name>"
-sql_col    = "assignee_name"
-sql_op     = "LIKE"
-sql_lower  = true
+key       = "assignee"
+gql_field = "assignee"
+gql_type  = "NullableUserFilter"
 
 [[field]]
-key        = "priority"
-gql_field  = "priority"
-gql_type   = "NullableNumberComparator"
-value_hint = "urgent|high|normal|low|none"
-sql_col    = "priority_label"
-sql_op     = "="
-sql_lower  = false
+key       = "priority"
+gql_field = "priority"
+gql_type  = "NullableNumberComparator"
 
 [[field]]
-key        = "state"
-gql_field  = "state"
-gql_type   = "WorkflowStateFilter"
-value_hint = "<name>"
-sql_col    = "state_name"
-sql_op     = "LIKE"
-sql_lower  = true
+key       = "state"
+gql_field = "state"
+gql_type  = "WorkflowStateFilter"
 
 [[field]]
-key        = "team"
-gql_field  = "team"
-gql_type   = "TeamFilter"
-value_hint = "<name>"
-sql_col    = "team_name"
-sql_op     = "LIKE"
-sql_lower  = true
+key       = "team"
+gql_field = "team"
+gql_type  = "TeamFilter"
 
 [[field]]
-key        = "label"
-gql_field  = "labels"
-gql_type   = "IssueLabelCollectionFilter"
-value_hint = "<name>"
-sql_col    = "label_names"
-sql_op     = "LIKE"
-sql_lower  = true
+key       = "label"
+gql_field = "labels"
+gql_type  = "IssueLabelCollectionFilter"
+
+[[field]]
+key       = "project"
+gql_field = "project"
+gql_type  = "NullableProjectFilter"
+
+[[field]]
+key       = "cycle"
+gql_field = "cycle"
+gql_type  = "NullableCycleFilter"
+
+[[field]]
+key       = "creator"
+gql_field = "creator"
+gql_type  = "NullableUserFilter"

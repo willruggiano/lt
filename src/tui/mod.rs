@@ -1557,6 +1557,9 @@ impl App {
                     synced_at: chrono::Utc::now().to_rfc3339(),
                     description: None,
                     labels: String::new(),
+                    project_name: None,
+                    cycle_name: None,
+                    creator_name: None,
                 };
                 if let Ok(conn) = crate::db::open_db() {
                     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
@@ -1773,6 +1776,9 @@ fn revert_sqlite(orig: &crate::issues::list::Issue, _kind: &PopupKind) {
             .map(|l| l.name.as_str())
             .collect::<Vec<_>>()
             .join(","),
+        project_name: orig.project.as_ref().map(|p| p.name.clone()),
+        cycle_name: orig.cycle.as_ref().map(|c| c.name.clone()),
+        creator_name: orig.creator.as_ref().map(|u| u.name.clone()),
     };
     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
 }
@@ -1820,6 +1826,9 @@ fn build_db_issue_optimistic(
             .map(|l| l.name.as_str())
             .collect::<Vec<_>>()
             .join(","),
+        project_name: issue.project.as_ref().map(|p| p.name.clone()),
+        cycle_name: issue.cycle.as_ref().map(|c| c.name.clone()),
+        creator_name: issue.creator.as_ref().map(|u| u.name.clone()),
     }
 }
 
@@ -1967,6 +1976,20 @@ fn db_issue_to_list_issue(src: crate::db::Issue) -> Issue {
                 })
                 .collect(),
         },
+        project: src
+            .project_name
+            .map(|n| crate::issues::list::Project {
+                id: String::new(),
+                name: n,
+            }),
+        cycle: src.cycle_name.map(|n| crate::issues::list::Cycle {
+            id: String::new(),
+            name: n,
+        }),
+        creator: src.creator_name.map(|n| crate::issues::list::User {
+            id: String::new(),
+            name: n,
+        }),
     }
 }
 

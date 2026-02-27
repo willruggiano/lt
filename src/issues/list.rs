@@ -31,6 +31,9 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
       assignee { id name }
       team { id name }
       labels { nodes { name } }
+      project { id name }
+      cycle { id name }
+      creator { id name }
       createdAt
       updatedAt
     }
@@ -58,6 +61,18 @@ pub struct Team {
 }
 
 #[derive(Deserialize, Clone)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct Cycle {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Deserialize, Clone)]
 pub struct Issue {
     pub id: String,
     pub identifier: String,
@@ -70,6 +85,9 @@ pub struct Issue {
     pub team: Team,
     pub description: Option<String>,
     pub labels: LabelConnection,
+    pub project: Option<Project>,
+    pub cycle: Option<Cycle>,
+    pub creator: Option<User>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
     #[serde(rename = "updatedAt")]
