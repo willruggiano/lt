@@ -39,6 +39,342 @@ use crate::db::Issue;
 use crate::issues::SortField;
 
 // ---------------------------------------------------------------------------
+// AST types (bd-22c)
+// ---------------------------------------------------------------------------
+
+/// Byte span [start, end) within the original input string.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The key side of a stem token (used for completion context).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StemKey {
+    Sort,
+    Assignee,
+    Priority,
+    State,
+    Team,
+}
+
+/// The fully-parsed meaning of a recognised stem.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StemKind {
+    Sort { field: SortField, dir: SortDir },
+    Assignee { value: String },
+    Priority { value: String },
+    State { value: String },
+    Team { value: String },
+}
+
+/// A single token in the query string, with its location in the source.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Token {
+    /// A recognised stem: `key:value`, e.g. `sort:updated-`.
+    Stem {
+        span: Span,
+        /// Byte span of the key part (before the colon).
+        key_span: Span,
+        /// Byte span of the value part (after the colon).
+        val_span: Span,
+        kind: StemKind,
+    },
+    /// A partially typed stem: the colon is present but the value is empty,
+    /// or the key is a known stem key but the value is not yet valid.
+    PartialStem {
+        span: Span,
+        key_span: Span,
+        val_span: Span,
+        /// The matched stem key, if the key portion is a known stem name.
+        known_key: Option<StemKey>,
+    },
+    /// A bare word (goes to FTS).
+    Word {
+        span: Span,
+        text: String,
+    },
+    /// Anything that could not be classified (e.g. empty string, stray colon).
+    Unknown {
+        span: Span,
+        raw: String,
+    },
+}
+
+/// A fully-parsed query AST, always constructible from any input string.
+pub struct QueryAst {
+    /// Original input string (owned).
+    pub raw: String,
+    /// Ordered list of tokens (whitespace gaps are not represented).
+    pub tokens: Vec<Token>,
+}
+
+// ---------------------------------------------------------------------------
+// parse_query_ast -- single-pass byte scanner (bd-22c)
+// ---------------------------------------------------------------------------
+
+/// Parse a raw query string into a `QueryAst` with full span information.
+///
+/// The parser is a single-pass, left-to-right byte scanner. It never panics;
+/// any input string yields a valid `QueryAst`. Every non-whitespace byte in
+/// `raw` is covered by exactly one token.
+pub fn parse_query_ast(raw: &str) -> QueryAst {
+    let mut tokens = Vec::new();
+    let mut pos = 0;
+    let bytes = raw.as_bytes();
+
+    loop {
+        // Skip ASCII whitespace.
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            break;
+        }
+
+        // Find end of token (next whitespace boundary).
+        let start = pos;
+        while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        let end = pos;
+
+        // Safety: start and end are on ASCII whitespace boundaries, so they
+        // are valid UTF-8 char boundaries.
+        let slice = &raw[start..end];
+
+        let token = classify_token(raw, start, end, slice);
+        tokens.push(token);
+    }
+
+    QueryAst {
+        raw: raw.to_string(),
+        tokens,
+    }
+}
+
+/// Classify a single token slice into the appropriate `Token` variant.
+fn classify_token(raw: &str, start: usize, end: usize, slice: &str) -> Token {
+    let span = Span { start, end };
+
+    if let Some(colon_offset) = slice.find(':') {
+        let key = &slice[..colon_offset];
+        let val = &slice[colon_offset + 1..];
+
+        let key_start = start;
+        let key_end = start + colon_offset;
+        // val_span covers the bytes after the colon (may be empty)
+        let val_start = start + colon_offset + 1;
+        let val_end = end;
+
+        let key_span = Span {
+            start: key_start,
+            end: key_end,
+        };
+        let val_span = Span {
+            start: val_start,
+            end: val_end,
+        };
+
+        // Check if key is a known StemKey.
+        let stem_key = match key.to_lowercase().as_str() {
+            "sort" => Some(StemKey::Sort),
+            "assignee" => Some(StemKey::Assignee),
+            "priority" => Some(StemKey::Priority),
+            "state" => Some(StemKey::State),
+            "team" => Some(StemKey::Team),
+            _ => None,
+        };
+
+        match stem_key {
+            Some(StemKey::Sort) => {
+                if let Some((field, dir)) = parse_sort_value(val) {
+                    Token::Stem {
+                        span,
+                        key_span,
+                        val_span,
+                        kind: StemKind::Sort { field, dir },
+                    }
+                } else {
+                    Token::PartialStem {
+                        span,
+                        key_span,
+                        val_span,
+                        known_key: Some(StemKey::Sort),
+                    }
+                }
+            }
+            Some(StemKey::Assignee) => {
+                if !val.is_empty() {
+                    Token::Stem {
+                        span,
+                        key_span,
+                        val_span,
+                        kind: StemKind::Assignee {
+                            value: val.to_lowercase(),
+                        },
+                    }
+                } else {
+                    Token::PartialStem {
+                        span,
+                        key_span,
+                        val_span,
+                        known_key: Some(StemKey::Assignee),
+                    }
+                }
+            }
+            Some(StemKey::Priority) => {
+                if !val.is_empty() {
+                    Token::Stem {
+                        span,
+                        key_span,
+                        val_span,
+                        kind: StemKind::Priority {
+                            value: val.to_lowercase(),
+                        },
+                    }
+                } else {
+                    Token::PartialStem {
+                        span,
+                        key_span,
+                        val_span,
+                        known_key: Some(StemKey::Priority),
+                    }
+                }
+            }
+            Some(StemKey::State) => {
+                if !val.is_empty() {
+                    Token::Stem {
+                        span,
+                        key_span,
+                        val_span,
+                        kind: StemKind::State {
+                            value: val.to_lowercase(),
+                        },
+                    }
+                } else {
+                    Token::PartialStem {
+                        span,
+                        key_span,
+                        val_span,
+                        known_key: Some(StemKey::State),
+                    }
+                }
+            }
+            Some(StemKey::Team) => {
+                if !val.is_empty() {
+                    Token::Stem {
+                        span,
+                        key_span,
+                        val_span,
+                        kind: StemKind::Team {
+                            value: val.to_string(),
+                        },
+                    }
+                } else {
+                    Token::PartialStem {
+                        span,
+                        key_span,
+                        val_span,
+                        known_key: Some(StemKey::Team),
+                    }
+                }
+            }
+            None => {
+                // Unknown key -- emit PartialStem with no known_key.
+                // The value (if any) is preserved in the span but not parsed.
+                Token::PartialStem {
+                    span,
+                    key_span,
+                    val_span,
+                    known_key: None,
+                }
+            }
+        }
+    } else {
+        // No colon -- bare word.
+        if slice.is_empty() {
+            Token::Unknown {
+                span,
+                raw: raw[start..end].to_string(),
+            }
+        } else {
+            Token::Word {
+                span,
+                text: slice.to_string(),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// From<&QueryAst> for ParsedQuery (bd-22c)
+// ---------------------------------------------------------------------------
+
+impl From<&QueryAst> for ParsedQuery {
+    /// Derive a SQL-ready `ParsedQuery` from the AST.
+    ///
+    /// Produces identical results to `parse_query(ast.raw.trim())` for all
+    /// valid inputs.
+    fn from(ast: &QueryAst) -> Self {
+        let mut sort: Option<(SortField, SortDir)> = None;
+        let mut assignee: Option<String> = None;
+        let mut priority: Option<String> = None;
+        let mut state: Option<String> = None;
+        let mut team: Option<String> = None;
+        let mut fts_words: Vec<String> = Vec::new();
+
+        for token in &ast.tokens {
+            match token {
+                Token::Stem { kind, .. } => match kind {
+                    StemKind::Sort {
+                        field,
+                        dir,
+                    } => {
+                        sort = Some((field.clone(), dir.clone()));
+                    }
+                    StemKind::Assignee { value } => {
+                        assignee = Some(value.clone());
+                    }
+                    StemKind::Priority { value } => {
+                        priority = Some(value.clone());
+                    }
+                    StemKind::State { value } => {
+                        state = Some(value.clone());
+                    }
+                    StemKind::Team { value } => {
+                        team = Some(value.clone());
+                    }
+                },
+                Token::PartialStem { span, .. } => {
+                    // Treat like the existing parse_query: fall through to FTS.
+                    let raw_slice = &ast.raw[span.start..span.end];
+                    fts_words.push(format!("{}*", raw_slice));
+                }
+                Token::Word { text, .. } => {
+                    fts_words.push(format!("{}*", text));
+                }
+                Token::Unknown { raw: raw_slice, .. } => {
+                    if !raw_slice.is_empty() {
+                        fts_words.push(format!("{}*", raw_slice));
+                    }
+                }
+            }
+        }
+
+        ParsedQuery {
+            sort,
+            assignee,
+            priority,
+            state,
+            team,
+            fts_terms: fts_words.join(" "),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ParsedQuery -- result of parsing a raw query string
 // ---------------------------------------------------------------------------
 
@@ -487,5 +823,226 @@ mod tests {
         assert_eq!(normalise_priority("low"), Some("Low"));
         assert_eq!(normalise_priority("none"), Some("No priority"));
         assert_eq!(normalise_priority("bogus"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_query_ast tests (bd-22c)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ast_empty_input() {
+        let ast = parse_query_ast("");
+        assert_eq!(ast.raw, "");
+        assert!(ast.tokens.is_empty());
+    }
+
+    #[test]
+    fn ast_whitespace_only() {
+        let ast = parse_query_ast("   ");
+        assert!(ast.tokens.is_empty());
+    }
+
+    #[test]
+    fn ast_single_word_span() {
+        let ast = parse_query_ast("hello");
+        assert_eq!(ast.tokens.len(), 1);
+        match &ast.tokens[0] {
+            Token::Word { span, text } => {
+                assert_eq!(span.start, 0);
+                assert_eq!(span.end, 5);
+                assert_eq!(text, "hello");
+            }
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ast_two_words_spans() {
+        let ast = parse_query_ast("foo bar");
+        assert_eq!(ast.tokens.len(), 2);
+        // "foo" at [0,3), "bar" at [4,7)
+        match &ast.tokens[0] {
+            Token::Word { span, text } => {
+                assert_eq!((span.start, span.end), (0, 3));
+                assert_eq!(text, "foo");
+            }
+            other => panic!("expected Word, got {:?}", other),
+        }
+        match &ast.tokens[1] {
+            Token::Word { span, text } => {
+                assert_eq!((span.start, span.end), (4, 7));
+                assert_eq!(text, "bar");
+            }
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ast_valid_sort_stem() {
+        let ast = parse_query_ast("sort:updated-");
+        assert_eq!(ast.tokens.len(), 1);
+        match &ast.tokens[0] {
+            Token::Stem {
+                span,
+                key_span,
+                val_span,
+                kind: StemKind::Sort { field, dir },
+            } => {
+                assert_eq!((span.start, span.end), (0, 13));
+                assert_eq!((key_span.start, key_span.end), (0, 4));
+                assert_eq!((val_span.start, val_span.end), (5, 13));
+                assert!(matches!(field, SortField::Updated));
+                assert_eq!(*dir, SortDir::Desc);
+            }
+            other => panic!("expected Stem(Sort), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ast_partial_sort_empty_value() {
+        // "sort:" -- known key, empty value
+        let ast = parse_query_ast("sort:");
+        assert_eq!(ast.tokens.len(), 1);
+        match &ast.tokens[0] {
+            Token::PartialStem {
+                span,
+                key_span,
+                val_span,
+                known_key,
+            } => {
+                assert_eq!((span.start, span.end), (0, 5));
+                assert_eq!((key_span.start, key_span.end), (0, 4));
+                // val_span is empty: start == end == 5
+                assert_eq!((val_span.start, val_span.end), (5, 5));
+                assert_eq!(*known_key, Some(StemKey::Sort));
+            }
+            other => panic!("expected PartialStem, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ast_partial_sort_invalid_value() {
+        let ast = parse_query_ast("sort:bogus");
+        assert_eq!(ast.tokens.len(), 1);
+        match &ast.tokens[0] {
+            Token::PartialStem { known_key, .. } => {
+                assert_eq!(*known_key, Some(StemKey::Sort));
+            }
+            other => panic!("expected PartialStem, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ast_unknown_key_partial_stem() {
+        let ast = parse_query_ast("foo:bar");
+        assert_eq!(ast.tokens.len(), 1);
+        match &ast.tokens[0] {
+            Token::PartialStem { known_key, .. } => {
+                assert_eq!(*known_key, None);
+            }
+            other => panic!("expected PartialStem(known_key=None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ast_spans_cover_all_non_whitespace() {
+        let raw = "  sort:updated-  foo  ";
+        let ast = parse_query_ast(raw);
+        // Every token span should point into raw correctly.
+        for token in &ast.tokens {
+            let (start, end) = match token {
+                Token::Stem { span, .. }
+                | Token::PartialStem { span, .. }
+                | Token::Word { span, .. }
+                | Token::Unknown { span, .. } => (span.start, span.end),
+            };
+            // Bounds check.
+            assert!(end <= raw.len(), "end={} > raw.len()={}", end, raw.len());
+            // Must be valid UTF-8 boundaries.
+            assert!(raw.is_char_boundary(start));
+            assert!(raw.is_char_boundary(end));
+            // The slice must not contain ASCII whitespace.
+            let slice = &raw[start..end];
+            assert!(
+                !slice.contains(|c: char| c.is_ascii_whitespace()),
+                "token span contains whitespace: {:?}",
+                slice
+            );
+        }
+    }
+
+    #[test]
+    fn ast_assignee_stem() {
+        let ast = parse_query_ast("assignee:me");
+        assert_eq!(ast.tokens.len(), 1);
+        match &ast.tokens[0] {
+            Token::Stem {
+                kind: StemKind::Assignee { value },
+                ..
+            } => {
+                assert_eq!(value, "me");
+            }
+            other => panic!("expected Stem(Assignee), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ast_partial_assignee_empty() {
+        let ast = parse_query_ast("assignee:");
+        match &ast.tokens[0] {
+            Token::PartialStem { known_key, .. } => {
+                assert_eq!(*known_key, Some(StemKey::Assignee));
+            }
+            other => panic!("expected PartialStem, got {:?}", other),
+        }
+    }
+
+    // Parity tests: From<&QueryAst> must produce identical results to parse_query.
+
+    #[test]
+    fn from_ast_parity_empty() {
+        let raw = "";
+        let q1 = parse_query(raw);
+        let ast = parse_query_ast(raw);
+        let q2 = ParsedQuery::from(&ast);
+        assert_eq!(q1.sort, q2.sort);
+        assert_eq!(q1.assignee, q2.assignee);
+        assert_eq!(q1.priority, q2.priority);
+        assert_eq!(q1.state, q2.state);
+        assert_eq!(q1.team, q2.team);
+        assert_eq!(q1.fts_terms, q2.fts_terms);
+    }
+
+    #[test]
+    fn from_ast_parity_full_query() {
+        let raw = "sort:updated- assignee:me priority:urgent state:todo oauth crash";
+        let q1 = parse_query(raw);
+        let ast = parse_query_ast(raw);
+        let q2 = ParsedQuery::from(&ast);
+        assert_eq!(q1.sort, q2.sort);
+        assert_eq!(q1.assignee, q2.assignee);
+        assert_eq!(q1.priority, q2.priority);
+        assert_eq!(q1.state, q2.state);
+        assert_eq!(q1.team, q2.team);
+        assert_eq!(q1.fts_terms, q2.fts_terms);
+    }
+
+    #[test]
+    fn from_ast_parity_unknown_sort_field() {
+        let raw = "sort:bogus";
+        let q1 = parse_query(raw);
+        let ast = parse_query_ast(raw);
+        let q2 = ParsedQuery::from(&ast);
+        assert_eq!(q1.sort, q2.sort);
+        assert_eq!(q1.fts_terms, q2.fts_terms);
+    }
+
+    #[test]
+    fn from_ast_parity_unknown_stem() {
+        let raw = "foo:bar baz";
+        let q1 = parse_query(raw);
+        let ast = parse_query_ast(raw);
+        let q2 = ParsedQuery::from(&ast);
+        assert_eq!(q1.fts_terms, q2.fts_terms);
     }
 }
