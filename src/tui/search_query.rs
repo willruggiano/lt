@@ -337,6 +337,20 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
     // or by boxing.  We use Box<dyn rusqlite::types::ToSql> for flexibility.
     let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
+    // Per-field SQL mapping (the knowledge formerly kept in TOML metadata).
+    //
+    // Each filter stem maps to one or more SQLite conditions:
+    //   assignee: LOWER(COALESCE(assignee_name,'')) LIKE '%<val>%'
+    //             Special case: value "me" -> LOWER(assignee_name) = 'me'
+    //   priority: priority_label = <normalised-label>
+    //             Value is normalised via normalise_priority() before binding;
+    //             unrecognised values are silently skipped.
+    //   state:    LOWER(state_name) LIKE '%<val>%'
+    //   team:     LOWER(team_name) LIKE '%<val>%'
+    //             OR LOWER(COALESCE(team_key,'')) LIKE '%<val>%'
+    //   label:    LOWER(COALESCE(labels,'')) LIKE '%<val>%'
+    //             (column is 'labels', not 'label_names')
+    //
     // -- assignee --
     if let Some(ref a) = q.assignee {
         if a == "me" {

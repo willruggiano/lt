@@ -28,18 +28,6 @@ struct FieldSpec {
     gql_field: String,
     /// Expected base GraphQL type name (schema-validated).
     gql_type: String,
-    /// Human-readable value placeholder for error messages.
-    #[allow(dead_code)]
-    value_hint: String,
-    /// SQLite column to match against.
-    #[allow(dead_code)]
-    sql_col: String,
-    /// SQL operator: "LIKE" or "=".
-    #[allow(dead_code)]
-    sql_op: String,
-    /// Whether to wrap both sides in LOWER().
-    #[allow(dead_code)]
-    sql_lower: bool,
 }
 
 // ---------------------------------------------------------------------------
