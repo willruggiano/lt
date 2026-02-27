@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Expose visible row count to key handlers (subtract table header row).
     app.viewport_height = chunks[2].height.saturating_sub(1);
 
-    let context = filter_context(&app.args);
+    let context = filter_context(&app.args, app.last_search_query.as_deref());
     let has_next = app.has_next_page;
     let has_prev = !app.cursor_stack.is_empty();
     let page = app.cursor_stack.len() + 1;
@@ -148,7 +148,7 @@ fn render_header(
     );
 }
 
-fn filter_context(args: &IssueArgs) -> String {
+fn filter_context(args: &IssueArgs, last_search_query: Option<&str>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(t) = &args.team {
         parts.push(format!("team:{}", t));
@@ -179,6 +179,11 @@ fn filter_context(args: &IssueArgs) -> String {
     }
     if let Some(d) = &args.updated_before {
         parts.push(format!("updated<{}", d));
+    }
+    if let Some(q) = last_search_query {
+        if q != super::search_query::DEFAULT_QUERY {
+            parts.push(format!("search:{}", q));
+        }
     }
     let dir = if args.desc { "-" } else { "+" };
     parts.push(format!("sort:{}{}", args.sort.label(), dir));
@@ -304,11 +309,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
             super::PopupKind::Assignee => 4,
         };
         // Compute x offset of the target column (each column is widths[i] + 2 spacing).
-        let col_x: u16 = widths[..col_idx]
-            .iter()
-            .map(|w| *w as u16 + 2)
-            .sum::<u16>()
-            + area.x;
+        let col_x: u16 = widths[..col_idx].iter().map(|w| *w as u16 + 2).sum::<u16>() + area.x;
         let col_w = widths[col_idx] as u16;
         // Row y: area.y + 1 (header) + selected index + 1 (below row).
         let sel = app.table_state.selected().unwrap_or(0) as u16;
@@ -859,7 +860,10 @@ fn render_search_overlay(
     // When FTS is unavailable, show the error but still don't wipe the table.
     if overlay.fts_unavailable {
         // Show an error overlay without hiding the table entirely.
-        frame.render_widget(Paragraph::new("Search unavailable: run lt sync first"), area);
+        frame.render_widget(
+            Paragraph::new("Search unavailable: run lt sync first"),
+            area,
+        );
         return;
     }
 
@@ -963,16 +967,20 @@ pub fn append_text_input_spans(line: &mut Line, input: &TextInput) {
             // Cursor is on an existing character -- highlight it.
             let mut s = String::new();
             s.push(ch);
-            line.spans
-                .push(Span::styled(s, Style::new().add_modifier(Modifier::REVERSED)));
+            line.spans.push(Span::styled(
+                s,
+                Style::new().add_modifier(Modifier::REVERSED),
+            ));
             if !after.is_empty() {
                 line.spans.push(Span::raw(after.to_owned()));
             }
         }
         None => {
             // Cursor is past the end -- show a block cursor placeholder.
-            line.spans
-                .push(Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)));
+            line.spans.push(Span::styled(
+                " ",
+                Style::new().add_modifier(Modifier::REVERSED),
+            ));
         }
     }
 }

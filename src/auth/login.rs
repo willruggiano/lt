@@ -67,9 +67,7 @@ fn resolve_credentials() -> Result<(String, String)> {
 
     // 3. Interactive prompt.
     info!("No Linear OAuth credentials found.");
-    info!(
-        "Register an application at: https://linear.app/settings/api/applications"
-    );
+    info!("Register an application at: https://linear.app/settings/api/applications");
     info!(
         "Set the redirect URI to: http://localhost:{}/callback",
         CALLBACK_PORT

@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 // -- CR-stripping writer -----------------------------------------------------
 
@@ -153,8 +153,8 @@ pub fn init_cli() -> Result<WorkerGuard> {
         .with_filter(file_env_filter());
 
     // Stdout layer: INFO and above (unless overridden via RUST_LOG).
-    let stdout_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn,lt=info"));
+    let stdout_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,lt=info"));
 
     let stdout_layer = fmt::layer()
         .with_ansi(false)

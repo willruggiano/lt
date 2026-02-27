@@ -521,7 +521,12 @@ impl SearchOverlay {
     /// The query string is parsed into stems (sort:, assignee:, priority:,
     /// state:, team:) plus optional free-text FTS terms.  The default query
     /// is `sort:updated-` which shows all issues sorted by updated desc.
-    pub fn run_search(&mut self) {
+    ///
+    /// `viewport_rows` is the number of visible rows in the content area
+    /// (excluding the table header).  The result set is capped at this value
+    /// so that the search overlay never grows taller than the normal list
+    /// (bd-2qr).
+    pub fn run_search(&mut self, viewport_rows: u16) {
         self.fts_unavailable = false;
         let raw = self.query.value.trim().to_string();
 
@@ -534,12 +539,15 @@ impl SearchOverlay {
 
         let parsed = search_query::parse_query(&raw);
 
-        // If the query is just the default sort stem with no other constraints,
-        // run it anyway so the user sees the full list sorted correctly.
-        let limit = 200;
-        match crate::db::open_db()
-            .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
-        {
+        // Cap the result set to the visible viewport so the overlay never
+        // spans more rows than the default issue list does.  Fall back to 50
+        // (the default list limit) when the viewport height is not yet known.
+        let limit = if viewport_rows > 0 {
+            viewport_rows as usize
+        } else {
+            50
+        };
+        match crate::db::open_db().and_then(|conn| search_query::run_query(&conn, &parsed, limit)) {
             Ok(db_issues) => {
                 self.results = db_issues.into_iter().map(db_issue_to_list_issue).collect();
                 if self.results.is_empty() {
@@ -931,17 +939,18 @@ impl App {
         self.detail_comment_rx = None;
 
         // Build an IssueDetail immediately from cached data.
-        let cached_comments: Vec<crate::linear::types::Comment> =
-            crate::db::open_db()
-                .and_then(|conn| crate::db::query_comments(&conn, &issue.id))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|c| crate::linear::types::Comment {
-                    body: c.body,
-                    created_at: c.created_at,
-                    user: c.author_name.map(|n| crate::linear::types::CommentUser { name: n }),
-                })
-                .collect();
+        let cached_comments: Vec<crate::linear::types::Comment> = crate::db::open_db()
+            .and_then(|conn| crate::db::query_comments(&conn, &issue.id))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| crate::linear::types::Comment {
+                body: c.body,
+                created_at: c.created_at,
+                user: c
+                    .author_name
+                    .map(|n| crate::linear::types::CommentUser { name: n }),
+            })
+            .collect();
 
         self.detail = Some(crate::linear::types::IssueDetail {
             identifier: issue.identifier.clone(),
@@ -951,9 +960,12 @@ impl App {
             state: crate::linear::types::IssueDetailState {
                 name: issue.state.name.clone(),
             },
-            assignee: issue.assignee.as_ref().map(|a| crate::linear::types::IssueDetailUser {
-                name: a.name.clone(),
-            }),
+            assignee: issue
+                .assignee
+                .as_ref()
+                .map(|a| crate::linear::types::IssueDetailUser {
+                    name: a.name.clone(),
+                }),
             team: crate::linear::types::IssueDetailTeam {
                 name: issue.team.name.clone(),
             },
@@ -962,7 +974,9 @@ impl App {
                     .labels
                     .nodes
                     .iter()
-                    .map(|l| crate::linear::types::Label { name: l.name.clone() })
+                    .map(|l| crate::linear::types::Label {
+                        name: l.name.clone(),
+                    })
                     .collect(),
             },
             created_at: issue.created_at.clone(),
@@ -1002,9 +1016,9 @@ impl App {
                         .map(|c| crate::linear::types::Comment {
                             body: c.body,
                             created_at: c.created_at,
-                            user: c.author_name.map(|n| crate::linear::types::CommentUser {
-                                name: n,
-                            }),
+                            user: c
+                                .author_name
+                                .map(|n| crate::linear::types::CommentUser { name: n }),
                         })
                         .collect();
                     let _ = tx.send(CommentSyncEvent::Done(fresh));
@@ -1725,7 +1739,13 @@ fn revert_sqlite(orig: &crate::issues::list::Issue, _kind: &PopupKind) {
         updated_at: orig.updated_at.clone(),
         synced_at: chrono::Utc::now().to_rfc3339(),
         description: orig.description.clone(),
-        labels: orig.labels.nodes.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(","),
+        labels: orig
+            .labels
+            .nodes
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
     };
     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
 }
@@ -1766,7 +1786,13 @@ fn build_db_issue_optimistic(
         updated_at: issue.updated_at.clone(),
         synced_at: chrono::Utc::now().to_rfc3339(),
         description: issue.description.clone(),
-        labels: issue.labels.nodes.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(","),
+        labels: issue
+            .labels
+            .nodes
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
     }
 }
 
@@ -1894,7 +1920,14 @@ fn db_issue_to_list_issue(src: crate::db::Issue) -> Issue {
         updated_at: src.updated_at,
         description: src.description,
         labels: crate::issues::list::LabelConnection {
-            nodes: src.labels.split(',').filter(|s| !s.is_empty()).map(|n| crate::issues::list::LabelNode { name: n.to_string() }).collect(),
+            nodes: src
+                .labels
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|n| crate::issues::list::LabelNode {
+                    name: n.to_string(),
+                })
+                .collect(),
         },
     }
 }
@@ -1935,7 +1968,13 @@ pub fn run(args: IssueArgs) -> Result<()> {
 
     // Determine whether to show "Syncing..." overlay (no cache yet).
     let (issues, has_next_page, end_cursor, syncing, initial_status) = if have_cache {
-        (cached_issues, initial_has_next_page, initial_end_cursor, true, Status::Idle)
+        (
+            cached_issues,
+            initial_has_next_page,
+            initial_end_cursor,
+            true,
+            Status::Idle,
+        )
     } else {
         (Vec::new(), false, None, true, Status::Loading)
     };
@@ -2018,28 +2057,20 @@ fn poll_detail_comment_events(app: &mut App) {
         None => return,
     };
 
-    let mut finished = false;
-    loop {
-        match rx.try_recv() {
-            Ok(CommentSyncEvent::Done(comments)) => {
-                if let Some(ref mut detail) = app.detail {
-                    detail.comments.nodes = comments;
-                }
-                finished = true;
-                break;
+    let finished = match rx.try_recv() {
+        Ok(CommentSyncEvent::Done(comments)) => {
+            if let Some(ref mut detail) = app.detail {
+                detail.comments.nodes = comments;
             }
-            Ok(CommentSyncEvent::Error(_msg)) => {
-                // Non-fatal: keep whatever cached comments are already shown.
-                finished = true;
-                break;
-            }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                finished = true;
-                break;
-            }
+            true
         }
-    }
+        Ok(CommentSyncEvent::Error(_msg)) => {
+            // Non-fatal: keep whatever cached comments are already shown.
+            true
+        }
+        Err(mpsc::TryRecvError::Empty) => false,
+        Err(mpsc::TryRecvError::Disconnected) => true,
+    };
 
     if !finished {
         app.detail_comment_rx = Some(rx);
@@ -2153,7 +2184,9 @@ fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 modal.description.pop();
             }
             KeyCode::Char('w') if ctrl => {
-                let trimmed = modal.description.trim_end_matches(|c: char| !c.is_whitespace());
+                let trimmed = modal
+                    .description
+                    .trim_end_matches(|c: char| !c.is_whitespace());
                 let new_end = trimmed.trim_end().len();
                 modal.description.truncate(new_end);
             }
@@ -2386,7 +2419,16 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Esc => {
-            // Cancel search, return to full list.
+            // Reset the search query back to the default (bd-1ug).
+            // This mirrors how <esc> "clears" state elsewhere without
+            // closing the overlay entirely.
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.query = TextInput::from_string(search_query::DEFAULT_QUERY.to_string());
+                overlay.last_changed = Some(Instant::now());
+            }
+        }
+        KeyCode::Char('c') if ctrl => {
+            // Ctrl+C cancels the search overlay and returns to the full list.
             app.mode = Mode::List;
             app.search_overlay = None;
         }
@@ -2396,7 +2438,15 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             if let Some(ref mut overlay) = app.search_overlay {
                 let results = std::mem::take(&mut overlay.results);
                 let selected = overlay.table_state.selected();
-                app.last_search_query = Some(overlay.query.value.clone());
+                let raw_query = overlay.query.value.clone();
+                app.last_search_query = Some(raw_query.clone());
+                // Update app.args sort/desc so the header and table column
+                // marker reflect the sort that was actually used (bd-23g).
+                let parsed = search_query::parse_query(&raw_query);
+                if let Some((field, dir)) = parsed.sort {
+                    app.args.sort = field;
+                    app.args.desc = dir == search_query::SortDir::Desc;
+                }
                 app.issues = results;
                 let n = app.issues.len();
                 let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
@@ -2438,6 +2488,6 @@ fn poll_search_debounce(app: &mut App) {
     };
     if should_search && let Some(ref mut overlay) = app.search_overlay {
         overlay.last_changed = None;
-        overlay.run_search();
+        overlay.run_search(app.viewport_height);
     }
 }

@@ -32,7 +32,6 @@
 /// When the user presses `/`, the search bar is pre-populated with
 /// `sort:updated-` so the first thing they see is the most recently
 /// updated issues in descending order.
-
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -254,7 +253,8 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
 
     // -- team --
     if let Some(ref t) = q.team {
-        conditions.push("(LOWER(team_name) LIKE ? OR LOWER(COALESCE(team_key,'')) LIKE ?)".to_string());
+        conditions
+            .push("(LOWER(team_name) LIKE ? OR LOWER(COALESCE(team_key,'')) LIKE ?)".to_string());
         let pat = format!("%{}%", t.to_lowercase());
         bind.push(Box::new(pat.clone()));
         bind.push(Box::new(pat));
@@ -316,8 +316,7 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
 
     // Build the final param list: for FTS queries the FTS term goes first.
     let all_params: Vec<Box<dyn rusqlite::types::ToSql>> = if has_fts {
-        let mut v: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(q.fts_terms.clone())];
+        let mut v: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(q.fts_terms.clone())];
         v.extend(bind);
         v
     } else {
