@@ -14,7 +14,8 @@
   },
   "permissions": {
     "allow": [
-      "Bash"
+      "Bash",
+      "WebSearch"
     ],
     "ask": [],
     "deny": [
