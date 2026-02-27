@@ -60,6 +60,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Always render the full-width table so column widths never change.
     render_table(frame, chunks[2], app);
 
+    // Render the spacer row between the issue table and the statusbar so the
+    // terminal cell buffer is explicitly cleared (chunk[3]).
+    frame.render_widget(Paragraph::new(""), chunks[3]);
+
     match app.mode {
         Mode::Detail => {
             render_detail_footer(frame, chunks[4]);
