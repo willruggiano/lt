@@ -81,8 +81,12 @@ pub struct HelpEntry {
 /// All keybindings shown in the help popup.
 pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
     HelpEntry {
-        key: "q / <esc>",
-        description: "quit (list view; help: <esc> only)",
+        key: "q",
+        description: "quit",
+    },
+    HelpEntry {
+        key: "<esc>",
+        description: "clear search filter / reset list",
     },
     HelpEntry {
         key: "j / <down>",
@@ -414,6 +418,11 @@ pub struct App {
     // -- popup anchor (bd-116) ------------------------------------------------
     /// Screen rect of the cell that triggered the popup, used to position it.
     pub popup_anchor: Option<ratatui::layout::Rect>,
+
+    // -- search query memory --------------------------------------------------
+    /// The last confirmed search query.  Preserved when <esc> clears the
+    /// filter so that pressing / again re-populates the search bar.
+    pub last_search_query: Option<String>,
 }
 
 impl App {
@@ -456,6 +465,7 @@ impl App {
             help_popup: None,
             search_overlay: None,
             popup_anchor: None,
+            last_search_query: None,
         }
     }
 
@@ -1792,7 +1802,8 @@ fn handle_detail_key(app: &mut App, code: KeyCode) {
 fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
+        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Esc => app.do_fetch(true),
         // Open detail pane (bd-2g8, bd-22j: space opens detail)
         KeyCode::Char(' ') => app.open_detail(),
         KeyCode::Char('j') | KeyCode::Down => app.move_down(),
@@ -1816,7 +1827,12 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('S') => app.cycle_sort(),
         KeyCode::Char('d') => app.toggle_desc(),
         KeyCode::Char('/') => {
-            app.search_overlay = Some(SearchOverlay::new());
+            let mut overlay = SearchOverlay::new();
+            if let Some(ref q) = app.last_search_query {
+                overlay.query = q.clone();
+                overlay.last_changed = Some(Instant::now());
+            }
+            app.search_overlay = Some(overlay);
             app.mode = Mode::Search;
         }
         // Write op keybindings (bd-3dz)
@@ -1899,6 +1915,7 @@ fn handle_search_key(app: &mut App, code: KeyCode) {
             if let Some(ref mut overlay) = app.search_overlay {
                 let results = std::mem::take(&mut overlay.results);
                 let selected = overlay.table_state.selected();
+                app.last_search_query = Some(overlay.query.clone());
                 app.issues = results;
                 let n = app.issues.len();
                 let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
