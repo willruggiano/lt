@@ -502,6 +502,9 @@ pub struct SearchOverlay {
     pub last_changed: Option<Instant>,
     /// True when FTS index is unavailable (no sync yet).
     pub fts_unavailable: bool,
+    /// True once run_search() has been called at least once (bd-zjy).
+    /// Used by the renderer to distinguish "never searched" from "searched, no results".
+    pub has_searched: bool,
     /// Parsed AST of the current query string (bd-3qb).
     pub ast: search_query::QueryAst,
     /// Tab-completion state (bd-3qb).
@@ -518,8 +521,9 @@ impl SearchOverlay {
             query: TextInput::from_string(default_q),
             results: Vec::new(),
             table_state: TableState::default(),
-            last_changed: Some(Instant::now()),
+            last_changed: None,
             fts_unavailable: false,
+            has_searched: false,
             ast,
             completer,
         }
@@ -537,6 +541,7 @@ impl SearchOverlay {
     /// (bd-2qr).
     pub fn run_search(&mut self, viewport_rows: u16, list_limit: usize) {
         self.fts_unavailable = false;
+        self.has_searched = true;
         let raw = self.query.value.trim().to_string();
 
         // An entirely blank query: show nothing (user cleared the bar).
@@ -567,9 +572,20 @@ impl SearchOverlay {
                     self.table_state.select(Some(0));
                 }
             }
-            Err(_) => {
-                // FTS index unavailable (table missing or no sync done yet).
-                self.fts_unavailable = true;
+            Err(e) => {
+                // Only mark FTS as unavailable when the error is genuinely
+                // about the FTS index or the issues table being missing (i.e.
+                // no sync has been done yet).  A query-syntax error caused by
+                // an incomplete stem token must NOT set fts_unavailable -- that
+                // would show the misleading "run lt sync first" banner while
+                // the user is still typing (bd-3q0).
+                let msg = e.to_string().to_lowercase();
+                let is_missing = msg.contains("issues_fts")
+                    || msg.contains("no such table")
+                    || msg.contains("could not open database");
+                if is_missing {
+                    self.fts_unavailable = true;
+                }
                 self.results.clear();
                 self.table_state.select(None);
             }
@@ -2018,10 +2034,11 @@ pub fn run(args: IssueArgs) -> Result<()> {
 
     // Fetch viewer identity for header display (bd-185).
     if let Ok(Some(token)) = crate::config::load_token()
-        && let Ok(viewer) = fetch_viewer(&token.access_token) {
-            app.viewer_name = Some(viewer.name);
-            app.org_name = Some(viewer.org_name);
-        }
+        && let Ok(viewer) = fetch_viewer(&token.access_token)
+    {
+        app.viewer_name = Some(viewer.name);
+        app.org_name = Some(viewer.org_name);
+    }
 
     let mut terminal = ratatui::init();
     app.status = initial_status;
@@ -2377,10 +2394,11 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             // Restore last search query when re-opening, but keep the default
             // sort:updated- prefix if the last query was just that (bd-7qo).
             if let Some(ref q) = app.last_search_query
-                && q != search_query::DEFAULT_QUERY {
-                    overlay.query = TextInput::from_string(q.clone());
-                    overlay.last_changed = Some(Instant::now());
-                }
+                && q != search_query::DEFAULT_QUERY
+            {
+                overlay.query = TextInput::from_string(q.clone());
+                overlay.last_changed = Some(Instant::now());
+            }
             app.search_overlay = Some(overlay);
             app.mode = Mode::Search;
         }
@@ -2425,9 +2443,10 @@ fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         // Everything else goes to the TextInput search bar.
         _ => {
             if let Some(ref mut popup) = app.help_popup
-                && popup.search.handle_key(code, modifiers) {
-                    popup.update_filter();
-                }
+                && popup.search.handle_key(code, modifiers)
+            {
+                popup.update_filter();
+            }
         }
     }
 }
@@ -2488,7 +2507,9 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Tab => {
             if let Some(ref mut overlay) = app.search_overlay {
                 let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
-                overlay.completer.apply_tab(&mut overlay.query, &ast_snapshot, true);
+                overlay
+                    .completer
+                    .apply_tab(&mut overlay.query, &ast_snapshot, true);
                 let new_raw = overlay.query.value.clone();
                 overlay.ast = search_query::parse_query_ast(&new_raw);
                 overlay.completer.update(&overlay.ast, overlay.query.cursor);
@@ -2498,7 +2519,9 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::BackTab => {
             if let Some(ref mut overlay) = app.search_overlay {
                 let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
-                overlay.completer.apply_tab(&mut overlay.query, &ast_snapshot, false);
+                overlay
+                    .completer
+                    .apply_tab(&mut overlay.query, &ast_snapshot, false);
                 let new_raw = overlay.query.value.clone();
                 overlay.ast = search_query::parse_query_ast(&new_raw);
                 overlay.completer.update(&overlay.ast, overlay.query.cursor);
@@ -2508,9 +2531,10 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         // Everything else goes to the TextInput query bar.
         _ => {
             if let Some(ref mut overlay) = app.search_overlay
-                && overlay.query.handle_key(code, modifiers) {
-                    overlay.last_changed = Some(Instant::now());
-                }
+                && overlay.query.handle_key(code, modifiers)
+            {
+                overlay.last_changed = Some(Instant::now());
+            }
         }
     }
 }

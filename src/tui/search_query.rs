@@ -91,15 +91,9 @@ pub enum Token {
         known_key: Option<StemKey>,
     },
     /// A bare word (goes to FTS).
-    Word {
-        span: Span,
-        text: String,
-    },
+    Word { span: Span, text: String },
     /// Anything that could not be classified (e.g. empty string, stray colon).
-    Unknown {
-        span: Span,
-        raw: String,
-    },
+    Unknown { span: Span, raw: String },
 }
 
 /// A fully-parsed query AST, always constructible from any input string.
@@ -328,10 +322,7 @@ impl From<&QueryAst> for ParsedQuery {
         for token in &ast.tokens {
             match token {
                 Token::Stem { kind, .. } => match kind {
-                    StemKind::Sort {
-                        field,
-                        dir,
-                    } => {
+                    StemKind::Sort { field, dir } => {
                         sort = Some((field.clone(), dir.clone()));
                     }
                     StemKind::Assignee { value } => {
@@ -573,12 +564,13 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
 
     // -- priority --
     if let Some(ref p) = q.priority
-        && let Some(label) = normalise_priority(p) {
-            conditions.push("priority_label = ?".to_string());
-            bind.push(Box::new(label.to_string()));
-        }
-        // Unknown priority string: skip the filter silently so partial typing
-        // does not wipe the result list.
+        && let Some(label) = normalise_priority(p)
+    {
+        conditions.push("priority_label = ?".to_string());
+        bind.push(Box::new(label.to_string()));
+    }
+    // Unknown priority string: skip the filter silently so partial typing
+    // does not wipe the result list.
 
     // -- state --
     if let Some(ref s) = q.state {
@@ -850,10 +842,7 @@ impl Completer {
         };
         // Case-insensitive prefix match: verify, then return the suffix of
         // the candidate (using original casing) after `prefix.len()` bytes.
-        if candidate
-            .to_lowercase()
-            .starts_with(&prefix.to_lowercase())
-        {
+        if candidate.to_lowercase().starts_with(&prefix.to_lowercase()) {
             Some(&candidate[prefix.len()..])
         } else {
             None
