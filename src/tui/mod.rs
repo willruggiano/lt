@@ -2386,7 +2386,17 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Esc => {
-            // Cancel search, return to full list.
+            // Reset the search query back to the default (bd-1ug).
+            // This mirrors how <esc> "clears" state elsewhere without
+            // closing the overlay entirely.
+            if let Some(ref mut overlay) = app.search_overlay {
+                overlay.query =
+                    TextInput::from_string(search_query::DEFAULT_QUERY.to_string());
+                overlay.last_changed = Some(Instant::now());
+            }
+        }
+        KeyCode::Char('c') if ctrl => {
+            // Ctrl+C cancels the search overlay and returns to the full list.
             app.mode = Mode::List;
             app.search_overlay = None;
         }
