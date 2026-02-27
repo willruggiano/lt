@@ -526,7 +526,7 @@ impl SearchOverlay {
     /// (excluding the table header).  The result set is capped at this value
     /// so that the search overlay never grows taller than the normal list
     /// (bd-2qr).
-    pub fn run_search(&mut self, viewport_rows: u16) {
+    pub fn run_search(&mut self, viewport_rows: u16, list_limit: usize) {
         self.fts_unavailable = false;
         let raw = self.query.value.trim().to_string();
 
@@ -539,13 +539,13 @@ impl SearchOverlay {
 
         let parsed = search_query::parse_query(&raw);
 
-        // Cap the result set to the visible viewport so the overlay never
-        // spans more rows than the default issue list does.  Fall back to 50
-        // (the default list limit) when the viewport height is not yet known.
+        // Use the same limit as the normal issue list so both views show the
+        // same number of results.  Cap to viewport height so we never render
+        // more rows than fit on screen.
         let limit = if viewport_rows > 0 {
-            viewport_rows as usize
+            list_limit.min(viewport_rows as usize)
         } else {
-            50
+            list_limit
         };
         match crate::db::open_db().and_then(|conn| search_query::run_query(&conn, &parsed, limit)) {
             Ok(db_issues) => {
@@ -2486,6 +2486,6 @@ fn poll_search_debounce(app: &mut App) {
     };
     if should_search && let Some(ref mut overlay) = app.search_overlay {
         overlay.last_changed = None;
-        overlay.run_search(app.viewport_height);
+        overlay.run_search(app.viewport_height, app.args.limit as usize);
     }
 }
