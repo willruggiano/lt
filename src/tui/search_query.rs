@@ -710,6 +710,289 @@ pub fn resolve_me(q: &mut ParsedQuery, viewer_name: Option<&str>) {
 pub const DEFAULT_QUERY: &str = "sort:updated-";
 
 // ---------------------------------------------------------------------------
+// Completer (bd-35l)
+// ---------------------------------------------------------------------------
+
+/// The completion context derived from the cursor position in the query.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompletionContext {
+    /// Cursor is inside the key portion of a partial stem (or at an empty
+    /// input with no characters typed yet).
+    StemKey { prefix: String },
+    /// Cursor is inside the value portion of a known stem (Phase 2 stub).
+    StemValue { key: StemKey, prefix: String },
+    /// Cursor is inside a bare word: no structured completion.
+    Word,
+    /// Cursor is in whitespace between tokens or past the end.
+    Gap,
+}
+
+/// All known stem key strings, in display order.
+const STEM_KEY_STRINGS: &[&str] = &["sort:", "assignee:", "priority:", "state:", "team:"];
+
+/// Tab-completion state for the search query bar.
+pub struct Completer {
+    /// The token the cursor is currently inside, if any.
+    pub active_token: Option<Token>,
+    /// Current completion context derived from the active token.
+    pub context: CompletionContext,
+    /// Completion candidates for the current context.
+    pub candidates: Vec<String>,
+    /// Index of the currently highlighted candidate (cycles on Tab).
+    pub selected: usize,
+    /// True when candidate list is being populated asynchronously (Phase 2).
+    pub candidates_pending: bool,
+}
+
+impl Completer {
+    /// Create a new `Completer` with `Gap` context and empty candidates.
+    pub fn new() -> Self {
+        Completer {
+            active_token: None,
+            context: CompletionContext::Gap,
+            candidates: Vec::new(),
+            selected: 0,
+            candidates_pending: false,
+        }
+    }
+
+    /// Recompute `active_token`, `context`, `candidates`, and reset
+    /// `selected` to 0 based on the current AST and cursor byte offset.
+    pub fn update(&mut self, ast: &QueryAst, cursor: usize) {
+        // Find the token the cursor is inside (inclusive: start <= cursor <= end).
+        let active = ast.tokens.iter().find(|t| {
+            let (s, e) = span_bounds(t);
+            s <= cursor && cursor <= e
+        });
+
+        self.active_token = active.cloned();
+        self.selected = 0;
+
+        match active {
+            Some(Token::PartialStem {
+                key_span,
+                known_key,
+                ..
+            }) => {
+                // If the cursor is at or before the end of the key span,
+                // we are completing a stem key.
+                if cursor <= key_span.end {
+                    let prefix = ast.raw[key_span.start..cursor].to_string();
+                    self.candidates = stem_key_candidates(&prefix);
+                    self.context = CompletionContext::StemKey { prefix };
+                } else if let Some(key) = known_key {
+                    // Cursor is in the value portion -- Phase 2 stub.
+                    self.candidates = Vec::new();
+                    self.context = CompletionContext::StemValue {
+                        key: key.clone(),
+                        prefix: String::new(),
+                    };
+                } else {
+                    // Unknown key, value portion: treat as Word.
+                    self.candidates = Vec::new();
+                    self.context = CompletionContext::Word;
+                }
+            }
+            Some(Token::Stem { key_span, .. }) => {
+                // A fully valid stem: cursor is inside -- treat as Word
+                // unless cursor is still within the key portion.
+                if cursor <= key_span.end {
+                    let prefix = ast.raw[key_span.start..cursor].to_string();
+                    self.candidates = stem_key_candidates(&prefix);
+                    self.context = CompletionContext::StemKey { prefix };
+                } else {
+                    self.candidates = Vec::new();
+                    self.context = CompletionContext::Word;
+                }
+            }
+            Some(Token::Word { .. }) => {
+                self.candidates = Vec::new();
+                self.context = CompletionContext::Word;
+            }
+            Some(Token::Unknown { .. }) => {
+                self.candidates = Vec::new();
+                self.context = CompletionContext::Word;
+            }
+            None => {
+                // Cursor is in whitespace or past end of all tokens.
+                // Check whether the cursor is inside a PartialStem that
+                // has no characters yet (empty key prefix at position 0
+                // when input is empty).
+                if ast.tokens.is_empty() {
+                    // Empty input: offer all stem key candidates.
+                    self.candidates = stem_key_candidates("");
+                    self.context = CompletionContext::StemKey {
+                        prefix: String::new(),
+                    };
+                } else {
+                    self.candidates = Vec::new();
+                    self.context = CompletionContext::Gap;
+                }
+            }
+        }
+    }
+
+    /// Return the untyped suffix of `candidates[selected]` relative to the
+    /// already-typed prefix, for inline ghost-text rendering.
+    ///
+    /// Returns `None` if there are no candidates or the selected candidate
+    /// does not start with the current prefix.
+    pub fn hint_suffix(&self) -> Option<&str> {
+        if self.candidates.is_empty() {
+            return None;
+        }
+        let candidate = self.candidates.get(self.selected)?;
+        let prefix = match &self.context {
+            CompletionContext::StemKey { prefix } => prefix.as_str(),
+            _ => return None,
+        };
+        // Case-insensitive prefix match: verify, then return the suffix of
+        // the candidate (using original casing) after `prefix.len()` bytes.
+        if candidate
+            .to_lowercase()
+            .starts_with(&prefix.to_lowercase())
+        {
+            Some(&candidate[prefix.len()..])
+        } else {
+            None
+        }
+    }
+
+    /// Apply one Tab press (or Shift-Tab when `forward = false`).
+    ///
+    /// - If context is `StemKey` and candidates are non-empty: cycle
+    ///   `selected` (+1 or -1 with wrap) then replace the key portion of
+    ///   `input` with the selected candidate and move the cursor to just
+    ///   after the inserted colon.
+    /// - Otherwise: jump the cursor to the start of the next (or previous)
+    ///   token boundary.  Wraps around when no further token exists.
+    pub fn apply_tab(&mut self, input: &mut crate::tui::TextInput, ast: &QueryAst, forward: bool) {
+        match &self.context {
+            CompletionContext::StemKey { prefix } => {
+                if self.candidates.is_empty() {
+                    self.jump_token_boundary(input, ast, forward);
+                    return;
+                }
+
+                // Cycle selected index.
+                let n = self.candidates.len();
+                if forward {
+                    self.selected = (self.selected + 1) % n;
+                } else {
+                    self.selected = (self.selected + n - 1) % n;
+                }
+
+                let candidate = self.candidates[self.selected].clone();
+
+                // Determine the replacement range: from key_span.start to cursor.
+                let replace_start = match &self.active_token {
+                    Some(Token::PartialStem { key_span, .. })
+                    | Some(Token::Stem { key_span, .. }) => key_span.start,
+                    _ => {
+                        // Fallback: find start by subtracting prefix length.
+                        input.cursor.saturating_sub(prefix.len())
+                    }
+                };
+                let replace_end = input.cursor;
+
+                // Replace the text in the input.
+                let mut new_value = input.value[..replace_start].to_string();
+                new_value.push_str(&candidate);
+                new_value.push_str(&input.value[replace_end..]);
+                input.value = new_value;
+
+                // Move cursor to just after the colon in the candidate
+                // (the colon is always the last character of a stem key string
+                // such as "sort:").
+                input.cursor = replace_start + candidate.len();
+
+                // Update the context prefix to reflect the newly inserted text
+                // so hint_suffix stays consistent until the next update() call.
+                self.context = CompletionContext::StemKey {
+                    prefix: candidate[..candidate.len().saturating_sub(1)].to_string(),
+                };
+            }
+            _ => {
+                self.jump_token_boundary(input, ast, forward);
+            }
+        }
+    }
+
+    /// Jump the cursor to the start of the next or previous token boundary.
+    fn jump_token_boundary(
+        &self,
+        input: &mut crate::tui::TextInput,
+        ast: &QueryAst,
+        forward: bool,
+    ) {
+        if ast.tokens.is_empty() {
+            return;
+        }
+
+        let cursor = input.cursor;
+
+        if forward {
+            // Find the first token that starts strictly after the current cursor.
+            let next = ast
+                .tokens
+                .iter()
+                .find(|t| span_bounds(t).0 > cursor)
+                .map(|t| span_bounds(t).0);
+            match next {
+                Some(pos) => input.cursor = pos,
+                None => {
+                    // Wrap: jump to start of first token.
+                    input.cursor = span_bounds(&ast.tokens[0]).0;
+                }
+            }
+        } else {
+            // Shift-Tab: jump to start of prev token (token whose start is
+            // strictly less than cursor, taking the last such token).
+            let prev = ast
+                .tokens
+                .iter()
+                .filter(|t| span_bounds(t).0 < cursor)
+                .last()
+                .map(|t| span_bounds(t).0);
+            match prev {
+                Some(pos) => input.cursor = pos,
+                None => {
+                    // Wrap: jump to start of last token.
+                    input.cursor = span_bounds(ast.tokens.last().unwrap()).0;
+                }
+            }
+        }
+    }
+}
+
+impl Default for Completer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Extract the (start, end) byte positions of a token's outer span.
+fn span_bounds(token: &Token) -> (usize, usize) {
+    match token {
+        Token::Stem { span, .. }
+        | Token::PartialStem { span, .. }
+        | Token::Word { span, .. }
+        | Token::Unknown { span, .. } => (span.start, span.end),
+    }
+}
+
+/// Return the list of stem-key candidates that case-insensitively start with
+/// `prefix`.  The colon is included in each candidate string.
+fn stem_key_candidates(prefix: &str) -> Vec<String> {
+    let lower = prefix.to_lowercase();
+    STEM_KEY_STRINGS
+        .iter()
+        .filter(|s| s.to_lowercase().starts_with(lower.as_str()))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1044,5 +1327,160 @@ mod tests {
         let ast = parse_query_ast(raw);
         let q2 = ParsedQuery::from(&ast);
         assert_eq!(q1.fts_terms, q2.fts_terms);
+    }
+
+    // -----------------------------------------------------------------------
+    // Completer tests (bd-35l)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn completer_new_is_gap() {
+        let c = Completer::new();
+        assert_eq!(c.context, CompletionContext::Gap);
+        assert!(c.candidates.is_empty());
+        assert_eq!(c.selected, 0);
+        assert!(!c.candidates_pending);
+    }
+
+    #[test]
+    fn completer_update_empty_input_offers_all_stems() {
+        let ast = parse_query_ast("");
+        let mut c = Completer::new();
+        c.update(&ast, 0);
+        assert!(matches!(c.context, CompletionContext::StemKey { .. }));
+        assert_eq!(
+            c.candidates,
+            vec!["sort:", "assignee:", "priority:", "state:", "team:"]
+        );
+    }
+
+    #[test]
+    fn completer_update_partial_key_prefix_s() {
+        // User has typed "s" -- should match "sort:" and "state:"
+        let ast = parse_query_ast("s");
+        let mut c = Completer::new();
+        // cursor is at byte 1 (after "s"), which is within the Word token [0,1)
+        // but "s" has no colon so it is a Word token, not StemKey.
+        // According to the spec, Word context -> no completion.
+        c.update(&ast, 1);
+        assert_eq!(c.context, CompletionContext::Word);
+        assert!(c.candidates.is_empty());
+    }
+
+    #[test]
+    fn completer_update_partial_stem_key_cursor_in_key() {
+        // "so:" -- partial stem with unknown sort value; cursor=2 is in key portion
+        let ast = parse_query_ast("so:");
+        let mut c = Completer::new();
+        // cursor=2 is <= key_span.end=2
+        c.update(&ast, 2);
+        match &c.context {
+            CompletionContext::StemKey { prefix } => {
+                assert_eq!(prefix, "so");
+            }
+            other => panic!("expected StemKey, got {:?}", other),
+        }
+        // Only "sort:" starts with "so"
+        assert_eq!(c.candidates, vec!["sort:"]);
+    }
+
+    #[test]
+    fn completer_update_partial_stem_key_empty_prefix() {
+        // ":" has no colon-before, but "a:" does
+        let ast = parse_query_ast("a:");
+        let mut c = Completer::new();
+        // cursor=1 is inside key portion (key_span [0,1))
+        c.update(&ast, 1);
+        match &c.context {
+            CompletionContext::StemKey { prefix } => {
+                assert_eq!(prefix, "a");
+            }
+            other => panic!("expected StemKey, got {:?}", other),
+        }
+        assert_eq!(c.candidates, vec!["assignee:"]);
+    }
+
+    #[test]
+    fn completer_update_gap_between_tokens() {
+        // "foo  bar" -- two spaces; cursor at byte 4 (second space, between tokens)
+        // "foo" spans [0,3), "bar" spans [5,8).  Byte 4 is not inside either.
+        let ast = parse_query_ast("foo  bar");
+        let mut c = Completer::new();
+        c.update(&ast, 4); // byte 4 is the second space, not covered by any token
+        assert_eq!(c.context, CompletionContext::Gap);
+    }
+
+    #[test]
+    fn completer_update_word_context() {
+        let ast = parse_query_ast("hello");
+        let mut c = Completer::new();
+        c.update(&ast, 3); // inside "hello"
+        assert_eq!(c.context, CompletionContext::Word);
+        assert!(c.candidates.is_empty());
+    }
+
+    #[test]
+    fn completer_update_gap_past_end() {
+        let ast = parse_query_ast("foo");
+        let mut c = Completer::new();
+        c.update(&ast, 5); // past end of "foo" (len=3)
+        assert_eq!(c.context, CompletionContext::Gap);
+    }
+
+    #[test]
+    fn hint_suffix_basic() {
+        let ast = parse_query_ast("so:");
+        let mut c = Completer::new();
+        c.update(&ast, 2); // cursor at end of "so"
+        // candidates should be ["sort:"], prefix="so"
+        let suffix = c.hint_suffix();
+        assert_eq!(suffix, Some("rt:"));
+    }
+
+    #[test]
+    fn hint_suffix_no_candidates() {
+        let ast = parse_query_ast("hello");
+        let mut c = Completer::new();
+        c.update(&ast, 3);
+        assert_eq!(c.hint_suffix(), None);
+    }
+
+    #[test]
+    fn hint_suffix_full_key_typed() {
+        // "sort:" is fully typed; cursor is at key_span.end=4
+        let ast = parse_query_ast("sort:");
+        let mut c = Completer::new();
+        c.update(&ast, 4); // cursor at end of "sort", before ":"
+        match &c.context {
+            CompletionContext::StemKey { prefix } => {
+                assert_eq!(prefix, "sort");
+            }
+            other => panic!("expected StemKey, got {:?}", other),
+        }
+        assert_eq!(c.candidates, vec!["sort:"]);
+        // The suffix relative to "sort" in "sort:" is ":"
+        assert_eq!(c.hint_suffix(), Some(":"));
+    }
+
+    #[test]
+    fn hint_suffix_case_insensitive_prefix() {
+        // Prefix "SO" should still match "sort:"
+        let ast = parse_query_ast("SO:");
+        let mut c = Completer::new();
+        c.update(&ast, 2); // cursor at end of "SO"
+        assert_eq!(c.candidates, vec!["sort:"]);
+        // hint_suffix: "sort:" starts with "so" (lowercased "SO"), suffix = "rt:"
+        // But candidate is "sort:", prefix length is 2.
+        assert_eq!(c.hint_suffix(), Some("rt:"));
+    }
+
+    #[test]
+    fn completer_update_resets_selected_to_zero() {
+        let ast = parse_query_ast("s:");
+        let mut c = Completer::new();
+        c.update(&ast, 1);
+        c.selected = 3; // manually set non-zero
+        c.update(&ast, 1);
+        assert_eq!(c.selected, 0);
     }
 }
