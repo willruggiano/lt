@@ -111,7 +111,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Mode::Search = app.mode
         && let Some(ref mut overlay) = app.search_overlay
     {
-        render_search_overlay(frame, chunks, overlay);
+        render_search_overlay(frame, chunks, overlay, &app.args.sort, app.args.desc);
     }
 }
 
@@ -893,6 +893,8 @@ fn render_search_overlay(
     frame: &mut Frame,
     chunks: std::rc::Rc<[Rect]>,
     overlay: &mut SearchOverlay,
+    sort_field: &SortField,
+    sort_desc: bool,
 ) {
     // The search bar is rendered in the header row (chunks[0]) by render().
     // This function only handles the results in the main content area (chunks[2]).
@@ -928,6 +930,8 @@ fn render_search_overlay(
     }
 
     // Render results as a table identical in style to the main list.
+    let sort_col = sort_col_index(sort_field);
+    let sort_marker = if sort_desc { "-" } else { "+" };
     let base_headers: [&str; 7] = [
         "IDENTIFIER",
         "TITLE",
@@ -937,7 +941,13 @@ fn render_search_overlay(
         "TEAM",
         "UPDATED",
     ];
-    let headers: [String; 7] = std::array::from_fn(|i| base_headers[i].to_string());
+    let headers: [String; 7] = std::array::from_fn(|i| {
+        if Some(i) == sort_col {
+            format!("{} {}", base_headers[i], sort_marker)
+        } else {
+            base_headers[i].to_string()
+        }
+    });
 
     let mut widths: [usize; 7] = headers.each_ref().map(|h| h.len());
     for issue in &overlay.results {
