@@ -81,15 +81,15 @@ pub struct HelpEntry {
 /// All keybindings shown in the help popup.
 pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
     HelpEntry {
-        key: "q / Esc",
-        description: "quit (list view; help: Esc only)",
+        key: "q / <esc>",
+        description: "quit (list view; help: <esc> only)",
     },
     HelpEntry {
-        key: "j / Down",
+        key: "j / <down>",
         description: "move down",
     },
     HelpEntry {
-        key: "k / Up",
+        key: "k / <up>",
         description: "move up",
     },
     HelpEntry {
@@ -101,23 +101,23 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
         description: "go to bottom",
     },
     HelpEntry {
-        key: "Ctrl-d",
+        key: "ctrl+d",
         description: "half page down",
     },
     HelpEntry {
-        key: "Ctrl-u",
+        key: "ctrl+u",
         description: "half page up",
     },
     HelpEntry {
-        key: "PageDown",
+        key: "<page down>",
         description: "page down",
     },
     HelpEntry {
-        key: "PageUp",
+        key: "<page up>",
         description: "page up",
     },
     HelpEntry {
-        key: "Enter",
+        key: "<space>",
         description: "open detail pane",
     },
     HelpEntry {
@@ -161,11 +161,11 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
         description: "toggle sort direction",
     },
     HelpEntry {
-        key: "Ctrl-n",
+        key: "ctrl+n",
         description: "next page",
     },
     HelpEntry {
-        key: "Ctrl-p",
+        key: "ctrl+p",
         description: "previous page",
     },
 ];
@@ -410,6 +410,10 @@ pub struct App {
 
     // -- FTS search overlay (bd-2g4) -------------------------------------------
     pub search_overlay: Option<SearchOverlay>,
+
+    // -- popup anchor (bd-116) ------------------------------------------------
+    /// Screen rect of the cell that triggered the popup, used to position it.
+    pub popup_anchor: Option<ratatui::layout::Rect>,
 }
 
 impl App {
@@ -451,6 +455,7 @@ impl App {
             sync_status_label,
             help_popup: None,
             search_overlay: None,
+            popup_anchor: None,
         }
     }
 
@@ -819,10 +824,12 @@ impl App {
         });
 
         self.mode = Mode::List;
+        self.popup_anchor = None;
     }
 
     fn popup_cancel(&mut self) {
         self.mode = Mode::List;
+        self.popup_anchor = None;
     }
 
     // -- New-issue modal (bd-l6r) --------------------------------------------
@@ -1786,8 +1793,8 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
-        // Open detail pane (bd-2g8)
-        KeyCode::Enter => app.open_detail(),
+        // Open detail pane (bd-2g8, bd-22j: space opens detail)
+        KeyCode::Char(' ') => app.open_detail(),
         KeyCode::Char('j') | KeyCode::Down => app.move_down(),
         KeyCode::Char('k') | KeyCode::Up => app.move_up(),
         KeyCode::Char('g') => app.move_top(),

@@ -32,7 +32,23 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let input_mode = app.input_mode;
     let input_buf = app.input_buf.clone();
 
-    render_header(frame, chunks[0], &context);
+    // In search mode, show the search bar in the header row instead of the
+    // normal context header (bd-z1a).
+    if let Mode::Search = app.mode
+        && let Some(ref overlay) = app.search_overlay
+    {
+        let bar_text = if overlay.fts_unavailable {
+            "Search unavailable: run lt sync first".to_string()
+        } else {
+            format!("/ {}_", overlay.query)
+        };
+        frame.render_widget(
+            Paragraph::new(bar_text).style(Style::new().add_modifier(Modifier::BOLD)),
+            chunks[0],
+        );
+    } else {
+        render_header(frame, chunks[0], &context);
+    }
 
     match app.mode {
         Mode::Detail => {
@@ -63,6 +79,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_popup(
             frame,
             frame.area(),
+            app.popup_anchor,
             kind,
             &app.popup_items,
             app.popup_selected,
@@ -157,14 +174,14 @@ fn render_footer(
         "/ filter",
         "? help",
         "j/k nav",
-        "Enter detail",
+        "<space> detail",
         "n new",
     ];
     if has_prev {
-        parts.push("Ctrl-p prev");
+        parts.push("ctrl+p prev");
     }
     if has_next {
-        parts.push("Ctrl-n next");
+        parts.push("ctrl+n next");
     }
 
     let page_str = format!("[{}]", page);
@@ -250,6 +267,28 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         .column_spacing(2);
 
     frame.render_stateful_widget(table, area, &mut app.table_state);
+
+    // Compute anchor rect for the popup (bd-116).
+    // Column mapping: 2=State, 3=Priority, 4=Assignee.
+    // We position the anchor below the selected row at the relevant column x.
+    if let super::Mode::Popup(ref kind) = app.mode {
+        let col_idx: usize = match kind {
+            super::PopupKind::State => 2,
+            super::PopupKind::Priority => 3,
+            super::PopupKind::Assignee => 4,
+        };
+        // Compute x offset of the target column (each column is widths[i] + 2 spacing).
+        let col_x: u16 = widths[..col_idx]
+            .iter()
+            .map(|w| *w as u16 + 2)
+            .sum::<u16>()
+            + area.x;
+        let col_w = widths[col_idx] as u16;
+        // Row y: area.y + 1 (header) + selected index + 1 (below row).
+        let sel = app.table_state.selected().unwrap_or(0) as u16;
+        let row_y = area.y + 1 + sel + 1;
+        app.popup_anchor = Some(ratatui::layout::Rect::new(col_x, row_y, col_w, 1));
+    }
 }
 
 fn row_cells(issue: &Issue) -> [String; 7] {
@@ -402,6 +441,7 @@ fn render_detail_footer(frame: &mut Frame, area: Rect) {
 fn render_popup(
     frame: &mut Frame,
     area: Rect,
+    anchor: Option<Rect>,
     kind: &PopupKind,
     items: &[super::PopupItem],
     selected: usize,
@@ -412,15 +452,33 @@ fn render_popup(
         PopupKind::Assignee => " Reassign ",
     };
 
-    // Centre a box that is wide enough for the items.
+    // Size the popup to fit its contents.
     let max_label = items.iter().map(|i| i.label.len()).max().unwrap_or(10);
     let width = (max_label + 4)
         .max(title.len() + 2)
         .min(area.width as usize) as u16;
     let height = (items.len() + 2).min(area.height as usize) as u16;
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
+
+    // Position: if we have an anchor, open directly below the cell; otherwise centre.
+    let (x, y) = if let Some(anch) = anchor {
+        // Prefer opening below the anchor row, clamp so the popup stays on screen.
+        let px = anch.x.min(area.x + area.width.saturating_sub(width));
+        let py = if anch.y + height <= area.y + area.height {
+            anch.y
+        } else {
+            // Not enough space below -- open above the anchor row instead.
+            anch.y.saturating_sub(height + 1)
+        };
+        (px, py)
+    } else {
+        let px = area.x + area.width.saturating_sub(width) / 2;
+        let py = area.y + area.height.saturating_sub(height) / 2;
+        (px, py)
+    };
     let popup_area = Rect::new(x, y, width, height);
+
+    // Clear the area under the popup to prevent the list from bleeding through.
+    frame.render_widget(Clear, popup_area);
 
     let list_items: Vec<ListItem> = items
         .iter()
@@ -744,24 +802,20 @@ fn render_search_overlay(
     chunks: std::rc::Rc<[Rect]>,
     overlay: &mut SearchOverlay,
 ) {
-    // Search bar sits in the footer row (chunks[2]).
-    let search_bar_area = chunks[2];
-
-    // Build the search bar text.
-    let bar_text = if overlay.fts_unavailable {
-        "Search unavailable: run lt sync first".to_string()
-    } else {
-        format!("/ {}_", overlay.query)
-    };
-    frame.render_widget(Paragraph::new(bar_text), search_bar_area);
-
-    // Render search results in the main content area (chunks[1]).
-    // Clear the area first so the underlying issue table does not bleed through.
+    // The search bar is rendered in the header row (chunks[0]) by render().
+    // This function only handles the results in the main content area (chunks[1]).
     let area = chunks[1];
 
-    if overlay.fts_unavailable || overlay.query.trim().is_empty() {
-        // Clear the main area to hide the background table while in search mode.
-        frame.render_widget(Clear, area);
+    // When the query is empty, leave the underlying issue table visible (bd-1pe).
+    // When FTS is unavailable, show the error but still don't wipe the table.
+    if overlay.fts_unavailable {
+        // Show an error overlay without hiding the table entirely.
+        frame.render_widget(Paragraph::new("Search unavailable: run lt sync first"), area);
+        return;
+    }
+
+    if overlay.query.trim().is_empty() {
+        // No query yet -- keep the underlying list visible.
         return;
     }
 
