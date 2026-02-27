@@ -521,7 +521,12 @@ impl SearchOverlay {
     /// The query string is parsed into stems (sort:, assignee:, priority:,
     /// state:, team:) plus optional free-text FTS terms.  The default query
     /// is `sort:updated-` which shows all issues sorted by updated desc.
-    pub fn run_search(&mut self) {
+    ///
+    /// `viewport_rows` is the number of visible rows in the content area
+    /// (excluding the table header).  The result set is capped at this value
+    /// so that the search overlay never grows taller than the normal list
+    /// (bd-2qr).
+    pub fn run_search(&mut self, viewport_rows: u16) {
         self.fts_unavailable = false;
         let raw = self.query.value.trim().to_string();
 
@@ -534,9 +539,14 @@ impl SearchOverlay {
 
         let parsed = search_query::parse_query(&raw);
 
-        // If the query is just the default sort stem with no other constraints,
-        // run it anyway so the user sees the full list sorted correctly.
-        let limit = 200;
+        // Cap the result set to the visible viewport so the overlay never
+        // spans more rows than the default issue list does.  Fall back to 50
+        // (the default list limit) when the viewport height is not yet known.
+        let limit = if viewport_rows > 0 {
+            viewport_rows as usize
+        } else {
+            50
+        };
         match crate::db::open_db()
             .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
         {
@@ -2438,6 +2448,6 @@ fn poll_search_debounce(app: &mut App) {
     };
     if should_search && let Some(ref mut overlay) = app.search_overlay {
         overlay.last_changed = None;
-        overlay.run_search();
+        overlay.run_search(app.viewport_height);
     }
 }
