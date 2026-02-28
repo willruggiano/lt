@@ -683,9 +683,23 @@ impl Completer {
     /// - Otherwise: jump the cursor to the start of the next (or previous)
     ///   token boundary.  Wraps around when no further token exists.
     pub fn apply_tab(&mut self, input: &mut crate::tui::TextInput, ast: &QueryAst, forward: bool) {
-        // If a selection is active, accept it (move cursor to end, clear sel).
+        // If a selection is active, accept it then jump in the requested direction.
+        //
+        // For Tab (forward): advance cursor to selection_end so the current
+        // token is "behind" us, then jump to the next token.
+        //
+        // For Shift-Tab (backward): leave cursor where it is (start of the
+        // selection, i.e. just after the colon). The current token's
+        // cursor_position_for_token equals cursor exactly, so it does NOT
+        // satisfy cursor_position_for_token < cursor and is excluded from the
+        // backward search -- we land on the genuinely previous token.
         if let Some(end) = input.selection_end.take() {
-            input.cursor = end;
+            if forward {
+                input.cursor = end;
+            }
+            let new_ast = parse_query_ast(&input.value);
+            self.update(&new_ast, input.cursor);
+            self.jump_token_boundary(input, &new_ast, forward);
             return;
         }
 
@@ -1904,21 +1918,18 @@ mod tests {
     //   assignee:will  [14,27) key_span=[14,22)  cursor_position=23 val_span=[23,27)
     //   priority:high  [28,41) key_span=[28,36)  cursor_position=37 val_span=[37,41)
     //
-    // Shift-Tab 1: cursor=41, Word context. Jump to priority:high ->
-    //   cursor=37, selection_end=41 (selects "high").
+    // Shift-Tab 1: cursor=41, no selection. Jump backward to priority:high
+    //   (cursor_position=37 < 41) -> cursor=37, selection_end=41.
     //
-    // Shift-Tab 2: selection active (37..41). Accept it -> cursor=41, cleared.
+    // Shift-Tab 2: selection active (37..41). Keep cursor=37, clear sel.
+    //   Jump backward from 37: priority:high excluded (cursor_position=37
+    //   NOT < 37). Next prev is assignee:will (cursor_position=23 < 37).
+    //   cursor=23, selection_end=27 (selects "will").
     //
-    // Shift-Tab 3: cursor=41, Word context. Jump to priority:high again ->
-    //   cursor=37, selection_end=41.
-    //   Wait -- the filter is cursor_position_for_token < cursor, so
-    //   priority:high (37) < 41, qualifies. cursor -> 37, selection "high".
-    //   ... hmm this would loop. Let's reconsider the test structure.
-    //
-    // Actually Shift-Tab 2 accepts (cursor=41) and then a third Shift-Tab
-    // would jump right back to priority:high again.  The test should instead
-    // demonstrate the natural usage: jump, type (replaces selection), jump again.
-    // We keep a simpler test here focused on the jump + accept cycle.
+    // Shift-Tab 3: selection active (23..27). Keep cursor=23, clear sel.
+    //   Jump backward from 23: assignee:will excluded (23 NOT < 23).
+    //   Next prev is sort:updated- (cursor_position=5 < 23).
+    //   cursor=5, selection_end=13 (selects "updated-").
     // -----------------------------------------------------------------------
     #[test]
     fn shift_tab_through_multi_token_query() {
@@ -1926,14 +1937,14 @@ mod tests {
         // Shift-Tab 1: from end, lands after priority: colon with "high" selected.
         h.shift_tab();
         h.assert_snapshot("sort:updated- assignee:will priority:|[high]");
-        // Shift-Tab 2: selection active -- accepts it (cursor moves to end of
-        // "high", selection cleared).
+        // Shift-Tab 2: selection active -- accepts (cursor stays at 37) then
+        // jumps backward past priority:high to assignee:will, selects "will".
         h.shift_tab();
-        h.assert_snapshot("sort:updated- assignee:will priority:high|");
-        // Shift-Tab 3: no selection, cursor=41, Word context. Jumps to
-        // priority:high again (cursor_position=37 < 41). Selects "high".
+        h.assert_snapshot("sort:updated- assignee:|[will] priority:high");
+        // Shift-Tab 3: selection active -- accepts (cursor stays at 23) then
+        // jumps backward past assignee:will to sort:updated-, selects "updated-".
         h.shift_tab();
-        h.assert_snapshot("sort:updated- assignee:will priority:|[high]");
+        h.assert_snapshot("sort:|[updated-] assignee:will priority:high");
     }
 
     // -----------------------------------------------------------------------
