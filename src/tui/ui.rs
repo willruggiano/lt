@@ -135,11 +135,15 @@ fn render_header(
     if let Some(o) = org_name {
         parts.push(format!("org:{}", o));
     }
-    let identity = parts.join("  ");
+    // When no identity info is available the user is not authenticated.
+    // Show a clear placeholder so the header is never silently blank.
+    let identity = if parts.is_empty() {
+        "(not authenticated)".to_string()
+    } else {
+        parts.join("  ")
+    };
     let text = if context.is_empty() {
         identity
-    } else if identity.is_empty() {
-        context.to_string()
     } else {
         format!("{}  {}", identity, context)
     };
@@ -166,25 +170,24 @@ fn render_header_with_search(
     if let Some(o) = org_name {
         identity_parts.push(format!("org:{}", o));
     }
-    let identity = identity_parts.join("  ");
+    // When no identity info is available, show the unauthenticated placeholder.
+    let identity = if identity_parts.is_empty() {
+        "(not authenticated)".to_string()
+    } else {
+        identity_parts.join("  ")
+    };
 
     if overlay.fts_unavailable {
-        let prefix = if identity.is_empty() {
-            String::new()
-        } else {
-            format!("{}  ", identity)
-        };
+        let prefix = format!("{}  ", identity);
         line.spans.push(Span::styled(
             format!("{}Search unavailable: run lt sync first", prefix),
             Style::new().add_modifier(Modifier::BOLD),
         ));
     } else {
-        if !identity.is_empty() {
-            line.spans.push(Span::styled(
-                format!("{}  ", identity),
-                Style::new().add_modifier(Modifier::BOLD),
-            ));
-        }
+        line.spans.push(Span::styled(
+            format!("{}  ", identity),
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
         line.spans.push(Span::styled(
             "/ ",
             Style::new().add_modifier(Modifier::BOLD),

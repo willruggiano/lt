@@ -322,6 +322,8 @@ pub enum SyncEvent {
     Done(Vec<Issue>),
     /// Sync encountered an error.
     Error(String),
+    /// No auth token found -- sync was skipped.
+    NotAuthenticated,
 }
 
 // ---------------------------------------------------------------------------
@@ -1972,10 +1974,16 @@ fn build_sync_status_label(syncing: bool) -> String {
 fn spawn_sync_thread(args: IssueArgs) -> mpsc::Receiver<SyncEvent> {
     let (tx, rx) = mpsc::channel::<SyncEvent>();
     std::thread::spawn(move || {
-        // Skip sync silently when no auth token is stored.
+        // Skip sync when no auth token is stored; notify the TUI.
         match crate::config::load_token() {
-            Ok(None) => return,
-            Err(_) => return,
+            Ok(None) => {
+                let _ = tx.send(SyncEvent::NotAuthenticated);
+                return;
+            }
+            Err(_) => {
+                let _ = tx.send(SyncEvent::NotAuthenticated);
+                return;
+            }
             Ok(Some(_)) => {}
         }
 
@@ -2231,6 +2239,14 @@ fn poll_sync_events(app: &mut App) {
             Ok(SyncEvent::Error(msg)) => {
                 app.syncing = false;
                 app.sync_status_label = format!("sync error: {}", msg);
+                if matches!(app.status, Status::Loading) {
+                    app.status = Status::Idle;
+                }
+                got_event = true;
+            }
+            Ok(SyncEvent::NotAuthenticated) => {
+                app.syncing = false;
+                app.sync_status_label = "not authenticated - local only".to_string();
                 if matches!(app.status, Status::Loading) {
                     app.status = Status::Idle;
                 }
