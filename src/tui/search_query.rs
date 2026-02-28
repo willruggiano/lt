@@ -809,12 +809,17 @@ impl Completer {
                 None => return,
             }
         } else {
-            // Shift-Tab: jump to prev token (token whose start is
-            // strictly less than cursor, taking the last such token).
+            // Shift-Tab: jump to prev token.  We exclude the token the cursor
+            // is already sitting at by comparing against cursor_position_for_token
+            // rather than the raw token start.  This prevents getting stuck when
+            // the cursor is exactly at cursor_position_for_token(t): the old
+            // span_bounds(t).0 < cursor check would still match the current token
+            // (its start is before the cursor), so cursor_position_for_token would
+            // return the same position and the jump would be a no-op.
             let prev = ast
                 .tokens
                 .iter()
-                .filter(|t| span_bounds(t).0 < cursor)
+                .filter(|t| cursor_position_for_token(t) < cursor)
                 .last();
             match prev {
                 Some(t) => input.cursor = cursor_position_for_token(t),
@@ -1828,15 +1833,23 @@ mod tests {
     //   priority:high  [28,41) key_span=[28,36)  cursor_position=37
     //
     // Shift-Tab 1: cursor=41 in value portion of priority:high (Word context).
-    //   backward filter: last token with start<41 = priority:high (start=28).
-    //   cursor -> cursor_position_for_token = 37.
+    //   backward filter: last token with cursor_position_for_token<41
+    //   = priority:high (cursor_position=37).
+    //   cursor -> 37.
     //
-    // Shift-Tab 2: cursor=37 still in value portion of priority:high (Word).
-    //   backward filter: last token with start<37 = priority:high (start=28).
-    //   cursor_position_for_token = 37 again. Effectively a no-op.
-    //   This is a known limitation: the backward filter uses token.start, not
-    //   cursor_position_for_token, so it cannot advance past the current token
-    //   once the cursor is at cursor_position_for_token.
+    // Shift-Tab 2: cursor=37 in value portion of priority:high (Word context).
+    //   backward filter: last token with cursor_position_for_token<37
+    //   = assignee:will (cursor_position=23).
+    //   cursor -> 23.  No longer stuck thanks to the cursor_position_for_token
+    //   comparison instead of span start comparison.
+    //
+    // Shift-Tab 3: cursor=23 in value portion of assignee:will (Word context).
+    //   backward filter: last token with cursor_position_for_token<23
+    //   = sort:updated- (cursor_position=5).
+    //   cursor -> 5.
+    //
+    // Shift-Tab 4: cursor=5 in value portion of sort:updated- (Word context).
+    //   backward filter: no token with cursor_position_for_token<5. No-op.
     // -----------------------------------------------------------------------
     #[test]
     fn shift_tab_through_multi_token_query() {
@@ -1844,11 +1857,15 @@ mod tests {
         // Shift-Tab 1: from end, lands after priority: colon.
         h.shift_tab();
         h.assert_snapshot("sort:updated- assignee:will priority:|high");
-        // Shift-Tab 2: cursor=37 still in priority:high value portion (Word).
-        // Backward filter finds priority:high (start=28 < 37) as the last match.
-        // cursor_position_for_token = 37 -> no effective movement.
+        // Shift-Tab 2: cursor=37, advances to assignee: (no longer stuck).
         h.shift_tab();
-        h.assert_snapshot("sort:updated- assignee:will priority:|high");
+        h.assert_snapshot("sort:updated- assignee:|will priority:high");
+        // Shift-Tab 3: cursor=23, advances to sort:.
+        h.shift_tab();
+        h.assert_snapshot("sort:|updated- assignee:will priority:high");
+        // Shift-Tab 4: cursor=5, no previous token -> no-op.
+        h.shift_tab();
+        h.assert_snapshot("sort:|updated- assignee:will priority:high");
     }
 
     // -----------------------------------------------------------------------
