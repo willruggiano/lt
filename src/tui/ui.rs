@@ -10,8 +10,8 @@ use super::{
     ALL_KEYBINDINGS, App, HelpPopup, Mode, NewIssueField, NewIssueModal, PopupKind, SearchOverlay,
     Status, TextInput,
 };
-use crate::issues::list::Issue;
 use crate::issues::SortField;
+use crate::issues::list::Issue;
 use crate::linear::types::IssueDetail;
 
 pub fn render(frame: &mut Frame, app: &mut App) {

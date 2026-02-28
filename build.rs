@@ -110,9 +110,7 @@ fn to_pascal_case(s: &str) -> String {
             let mut chars = word.chars();
             match chars.next() {
                 None => String::new(),
-                Some(first) => {
-                    first.to_uppercase().collect::<String>() + chars.as_str()
-                }
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
             }
         })
         .collect()
@@ -169,10 +167,8 @@ fn gen_from_ast(fields: &[FieldSpec]) -> TokenStream {
         .map(|f| format_ident!("{}", to_pascal_case(&f.key)))
         .collect();
 
-    let field_idents: Vec<proc_macro2::Ident> = fields
-        .iter()
-        .map(|f| format_ident!("{}", f.key))
-        .collect();
+    let field_idents: Vec<proc_macro2::Ident> =
+        fields.iter().map(|f| format_ident!("{}", f.key)).collect();
 
     // let mut <field>: Option<String> = None; declarations
     let field_decls = field_idents.iter().map(|id| {
@@ -180,13 +176,16 @@ fn gen_from_ast(fields: &[FieldSpec]) -> TokenStream {
     });
 
     // StemKind::<Variant> { value } => { <field> = Some(value.clone()); }
-    let stem_arms = variants.iter().zip(field_idents.iter()).map(|(variant, field_id)| {
-        quote! {
-            StemKind::#variant { value } => {
-                #field_id = Some(value.clone());
+    let stem_arms = variants
+        .iter()
+        .zip(field_idents.iter())
+        .map(|(variant, field_id)| {
+            quote! {
+                StemKind::#variant { value } => {
+                    #field_id = Some(value.clone());
+                }
             }
-        }
-    });
+        });
 
     // ParsedQuery { <field>, ... } struct literal fields
     let struct_fields = field_idents.iter().map(|id| {
@@ -543,11 +542,7 @@ fn gen_parse_sort_value(sort_fields: &[SortFieldSpec]) -> TokenStream {
     // Build doc comment listing accepted forms.
     let doc_lines: Vec<String> = sort_fields
         .iter()
-        .flat_map(|f| {
-            vec![
-                format!("  `{0}-`   `{0}+`   `{0}`", f.key),
-            ]
-        })
+        .flat_map(|f| vec![format!("  `{0}-`   `{0}+`   `{0}`", f.key)])
         .collect();
     let doc_str = format!(
         "Parse the value portion of a `sort:` stem.\n\nAccepted forms:\n{}",
@@ -645,9 +640,7 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
-        manifest
-            .join("build/search_filter_fields.toml")
-            .display()
+        manifest.join("build/search_filter_fields.toml").display()
     );
     println!("cargo:rerun-if-changed=build.rs");
 
@@ -655,12 +648,8 @@ fn main() {
     // Load the allowlist
     // -----------------------------------------------------------------------
     let toml_path = manifest.join("build/search_filter_fields.toml");
-    let toml_src = fs::read_to_string(&toml_path).unwrap_or_else(|e| {
-        panic!(
-            "Cannot read allowlist at {}: {e}",
-            toml_path.display()
-        )
-    });
+    let toml_src = fs::read_to_string(&toml_path)
+        .unwrap_or_else(|e| panic!("Cannot read allowlist at {}: {e}", toml_path.display()));
     let config: AllowlistConfig = toml::from_str(&toml_src).unwrap_or_else(|e| {
         panic!(
             "Failed to parse allowlist TOML at {}: {e}",
