@@ -28,6 +28,10 @@ pub struct TextInput {
     pub value: String,
     /// Byte offset of the cursor, always on a char boundary.
     pub cursor: usize,
+    /// If set, the range cursor..selection_end is "selected" (highlighted).
+    /// selection_end is always >= cursor and always on a char boundary.
+    /// Typing a character replaces the selection; movement keys clear it.
+    pub selection_end: Option<usize>,
 }
 
 impl TextInput {
@@ -37,7 +41,11 @@ impl TextInput {
 
     pub fn from_string(s: String) -> Self {
         let cursor = s.len();
-        Self { value: s, cursor }
+        Self {
+            value: s,
+            cursor,
+            selection_end: None,
+        }
     }
 
     #[allow(dead_code)]
@@ -107,32 +115,41 @@ impl TextInput {
     }
 
     pub fn move_left(&mut self) {
+        self.selection_end = None;
         self.cursor = self.prev_char_boundary();
     }
 
     pub fn move_right(&mut self) {
+        self.selection_end = None;
         self.cursor = self.next_char_boundary();
     }
 
     pub fn move_word_left(&mut self) {
+        self.selection_end = None;
         self.cursor = self.prev_word_boundary();
     }
 
     pub fn move_word_right(&mut self) {
+        self.selection_end = None;
         self.cursor = self.next_word_boundary();
     }
 
     pub fn move_start(&mut self) {
+        self.selection_end = None;
         self.cursor = 0;
     }
 
     pub fn move_end(&mut self) {
+        self.selection_end = None;
         self.cursor = self.value.len();
     }
 
     /// Delete char before cursor (backspace).
+    /// If a selection is active, deletes the selection range instead.
     pub fn backspace(&mut self) {
-        if self.cursor > 0 {
+        if let Some(end) = self.selection_end.take() {
+            self.value.drain(self.cursor..end);
+        } else if self.cursor > 0 {
             let prev = self.prev_char_boundary();
             self.value.drain(prev..self.cursor);
             self.cursor = prev;
@@ -140,8 +157,11 @@ impl TextInput {
     }
 
     /// Delete char at cursor (forward delete).
+    /// If a selection is active, deletes the selection range instead.
     pub fn delete_forward(&mut self) {
-        if self.cursor < self.value.len() {
+        if let Some(end) = self.selection_end.take() {
+            self.value.drain(self.cursor..end);
+        } else if self.cursor < self.value.len() {
             let next = self.next_char_boundary();
             self.value.drain(self.cursor..next);
         }
@@ -149,6 +169,7 @@ impl TextInput {
 
     /// Delete word before cursor (ctrl+w).
     pub fn delete_word_before(&mut self) {
+        self.selection_end = None;
         let start = self.prev_word_boundary();
         self.value.drain(start..self.cursor);
         self.cursor = start;
@@ -156,23 +177,32 @@ impl TextInput {
 
     /// Delete word after cursor (alt+d).
     pub fn delete_word_after(&mut self) {
+        self.selection_end = None;
         let end = self.next_word_boundary();
         self.value.drain(self.cursor..end);
     }
 
     /// Delete from cursor to start of line (ctrl+u).
     pub fn delete_to_start(&mut self) {
+        self.selection_end = None;
         self.value.drain(..self.cursor);
         self.cursor = 0;
     }
 
     /// Delete from cursor to end of line (ctrl+k).
     pub fn delete_to_end(&mut self) {
+        self.selection_end = None;
         self.value.truncate(self.cursor);
     }
 
     /// Insert a char at the cursor.
+    /// If a selection is active (selection_end is set), the selected range is
+    /// deleted first so that typing replaces the selection.
     pub fn insert(&mut self, c: char) {
+        if let Some(end) = self.selection_end.take() {
+            // Delete the selected range cursor..end before inserting.
+            self.value.drain(self.cursor..end);
+        }
         self.value.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }

@@ -1051,6 +1051,9 @@ fn push_text_spans(
 /// (block-cursor) style.  If the cursor is at the end of the string, a
 /// space with reversed style is appended to show the cursor position.
 ///
+/// When `input.selection_end` is set, the range cursor..selection_end is
+/// rendered with UNDERLINED style (in addition to the block cursor char).
+///
 /// `errors` is the list of parse errors from the current `QueryAst`.  Any
 /// text whose byte range overlaps an error span is rendered with
 /// `Color::Red` to give the user a visual signal that a stem was not
@@ -1079,7 +1082,31 @@ pub fn append_text_input_spans(
             // `after` occupies bytes [cursor + ch.len_utf8(), end).
             if !after.is_empty() {
                 let after_offset = input.cursor + ch.len_utf8();
-                push_text_spans(line, after, after_offset, errors);
+                // If there is an active selection, render cursor..selection_end
+                // with UNDERLINED style and the remainder normally.
+                if let Some(sel_end) = input.selection_end {
+                    let sel_end = sel_end.min(input.value.len());
+                    let cursor_end = input.cursor + ch.len_utf8();
+                    if sel_end > cursor_end {
+                        // Selected portion: [cursor+ch_len, sel_end)
+                        let sel_text = &input.value[cursor_end..sel_end];
+                        if !sel_text.is_empty() {
+                            line.spans.push(Span::styled(
+                                sel_text.to_owned(),
+                                Style::new().add_modifier(Modifier::UNDERLINED),
+                            ));
+                        }
+                        // Rest: [sel_end, end)
+                        let rest = &input.value[sel_end..];
+                        if !rest.is_empty() {
+                            push_text_spans(line, rest, sel_end, errors);
+                        }
+                    } else {
+                        push_text_spans(line, after, after_offset, errors);
+                    }
+                } else {
+                    push_text_spans(line, after, after_offset, errors);
+                }
             }
         }
         None => {
