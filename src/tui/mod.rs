@@ -2575,6 +2575,12 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             // Confirm: leave search mode with filtered results visible.
             // Transfer results into app.issues so normal keybindings work.
             if let Some(ref mut overlay) = app.search_overlay {
+                // Flush any pending debounce so the AST and results reflect
+                // every character the user typed before hitting Enter (bd-3r1).
+                if overlay.last_changed.is_some() {
+                    overlay.last_changed = None;
+                    overlay.run_search(app.viewport_height, app.args.limit as usize);
+                }
                 let results = std::mem::take(&mut overlay.results);
                 let selected = overlay.table_state.selected();
                 // AST is the single source of truth (bd-rbm).

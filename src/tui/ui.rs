@@ -35,8 +35,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let input_buf = app.input_buf.clone();
 
     // Always render the header with user/org context. In search mode, append
-    // the search query inline after a "/" separator so the identity is always
-    // visible (bd-1l9).
+    // the search query inline so the identity is always visible (bd-1l9).
     if let Mode::Search = app.mode
         && let Some(ref overlay) = app.search_overlay
     {
@@ -186,10 +185,6 @@ fn render_header_with_search(
     } else {
         line.spans.push(Span::styled(
             format!("{}  ", identity),
-            Style::new().add_modifier(Modifier::BOLD),
-        ));
-        line.spans.push(Span::styled(
-            "/ ",
             Style::new().add_modifier(Modifier::BOLD),
         ));
         append_text_input_spans(&mut line, &overlay.query, &overlay.ast.errors);
