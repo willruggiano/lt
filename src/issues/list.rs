@@ -1,10 +1,9 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info};
 
-use crate::config;
 use crate::db;
 use crate::linear::client::graphql_query;
 use crate::linear::types::PageInfo;
@@ -117,8 +116,7 @@ struct IssuesData {
 }
 
 pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool, Option<String>)> {
-    let token = config::load_token()?
-        .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
+    let token = crate::auth::refresh::load_or_refresh_token()?;
 
     let limit = args.limit.min(250);
     let filter = build_filter(args)?;
