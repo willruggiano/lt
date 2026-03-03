@@ -339,6 +339,18 @@ pub enum CommentSyncEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Background login events
+// ---------------------------------------------------------------------------
+
+/// Events sent from the background login thread to the TUI event loop.
+pub enum LoginEvent {
+    /// OAuth login completed successfully.
+    Success,
+    /// Login failed with an error message.
+    Error(String),
+}
+
+// ---------------------------------------------------------------------------
 // Popup support (bd-3dz)
 // ---------------------------------------------------------------------------
 
@@ -807,9 +819,8 @@ pub struct App {
     pub last_esc_time: Option<Instant>,
 
     // -- re-auth (bd-vhp) -----------------------------------------------------
-    /// Set to true by the 'L' keybinding; the main loop suspends the TUI,
-    /// runs the OAuth login flow, then resumes.
-    pub reauth_requested: bool,
+    /// Receiver for the background login thread, if one is in progress.
+    pub login_rx: Option<mpsc::Receiver<LoginEvent>>,
     /// True when the last sync reported NotAuthenticated (no token stored).
     pub not_authenticated: bool,
 }
@@ -864,7 +875,7 @@ impl App {
             org_name: None,
             initial_args,
             last_esc_time: None,
-            reauth_requested: false,
+            login_rx: None,
             not_authenticated: false,
         }
     }
@@ -2060,6 +2071,53 @@ fn spawn_sync_thread(args: IssueArgs) -> mpsc::Receiver<SyncEvent> {
     rx
 }
 
+/// Spawn a background thread that runs the non-interactive OAuth login flow.
+fn spawn_login_thread() -> mpsc::Receiver<LoginEvent> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || match crate::auth::login_non_interactive() {
+        Ok(()) => {
+            let _ = tx.send(LoginEvent::Success);
+        }
+        Err(e) => {
+            let _ = tx.send(LoginEvent::Error(e.to_string()));
+        }
+    });
+    rx
+}
+
+/// Poll the background login channel and update app state on completion.
+fn poll_login_events(app: &mut App) {
+    let rx = match app.login_rx.as_ref() {
+        Some(rx) => rx,
+        None => return,
+    };
+    match rx.try_recv() {
+        Ok(LoginEvent::Success) => {
+            app.login_rx = None;
+            // Refresh viewer identity after successful login.
+            if let Ok(Some(token)) = crate::config::load_token()
+                && let Ok(viewer) = fetch_viewer(&token.access_token)
+            {
+                app.viewer_name = Some(viewer.name);
+                app.org_name = Some(viewer.org_name);
+            }
+            app.not_authenticated = false;
+            app.syncing = true;
+            app.sync_status_label = build_sync_status_label(true);
+            app.sync_rx = Some(spawn_sync_thread(app.args.clone()));
+        }
+        Ok(LoginEvent::Error(msg)) => {
+            app.login_rx = None;
+            app.footer_msg = Some(format!("Login failed: {}", msg));
+            app.sync_status_label = "not authenticated -- press L to log in".to_string();
+        }
+        Err(mpsc::TryRecvError::Empty) => {} // still waiting
+        Err(mpsc::TryRecvError::Disconnected) => {
+            app.login_rx = None;
+        }
+    }
+}
+
 /// Convert a `crate::db::Issue` row to a `crate::issues::list::Issue` for TUI display.
 fn db_issue_to_list_issue(src: crate::db::Issue) -> Issue {
     Issue {
@@ -2199,34 +2257,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         // Poll FTS search debounce (bd-2g4).
         poll_search_debounce(&mut app);
 
-        // Re-auth flow (bd-vhp): suspend TUI, run OAuth login, resume.
-        if app.reauth_requested {
-            app.reauth_requested = false;
-            ratatui::restore();
-            let login_result = crate::auth::login();
-            *terminal = ratatui::init();
-            match login_result {
-                Ok(()) => {
-                    // Refresh viewer identity after successful login.
-                    if let Ok(Some(token)) = crate::config::load_token()
-                        && let Ok(viewer) = fetch_viewer(&token.access_token)
-                    {
-                        app.viewer_name = Some(viewer.name);
-                        app.org_name = Some(viewer.org_name);
-                    }
-                    // Re-spawn the sync thread so fresh data is fetched.
-                    app.not_authenticated = false;
-                    app.syncing = true;
-                    app.sync_status_label = build_sync_status_label(true);
-                    let sync_rx = spawn_sync_thread(app.args.clone());
-                    app.sync_rx = Some(sync_rx);
-                }
-                Err(e) => {
-                    app.footer_msg = Some(format!("Login failed: {}", e));
-                }
-            }
-            continue;
-        }
+        // Poll background login channel (bd-vhp).
+        poll_login_events(&mut app);
 
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
@@ -2318,8 +2350,7 @@ fn poll_sync_events(app: &mut App) {
             Ok(SyncEvent::NotAuthenticated) => {
                 app.syncing = false;
                 app.not_authenticated = true;
-                app.sync_status_label =
-                    "not authenticated -- press L to log in".to_string();
+                app.sync_status_label = "not authenticated -- press L to log in".to_string();
                 if matches!(app.status, Status::Loading) {
                     app.status = Status::Idle;
                 }
@@ -2606,9 +2637,13 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             app.help_popup = Some(HelpPopup::new());
             app.mode = Mode::Help;
         }
-        // Re-authenticate (bd-vhp): suspend TUI, run OAuth login, then resume.
+        // Re-authenticate (bd-vhp): background OAuth login.
         KeyCode::Char('L') => {
-            app.reauth_requested = true;
+            if app.login_rx.is_none() {
+                app.login_rx = Some(spawn_login_thread());
+                app.sync_status_label =
+                    "logging in -- complete authorization in browser".to_string();
+            }
         }
         _ => {}
     }

@@ -24,7 +24,9 @@ pub fn run(cmd: AuthCommands) -> Result<()> {
     }
 }
 
-/// Run the OAuth2 login flow (used by the TUI re-auth path, bd-vhp).
-pub fn login() -> Result<()> {
-    login::run()
+/// Non-interactive OAuth2 login -- errors instead of prompting when
+/// credentials are missing. Safe to call from a background thread
+/// (used by the TUI re-auth path, bd-vhp).
+pub fn login_non_interactive() -> Result<()> {
+    login::run_non_interactive()
 }

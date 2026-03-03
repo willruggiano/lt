@@ -12,9 +12,20 @@ const CALLBACK_PORT: u16 = 7342;
 const AUTH_URL: &str = "https://linear.app/oauth/authorize";
 const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 
+/// Non-interactive login: identical to `run()` but errors instead of prompting
+/// when OAuth credentials are missing. Safe to call from a background thread
+/// while the TUI owns the terminal.
+pub fn run_non_interactive() -> Result<()> {
+    let (client_id, client_secret) = resolve_credentials_non_interactive()?;
+    run_with_credentials(client_id, client_secret)
+}
+
 pub fn run() -> Result<()> {
     let (client_id, client_secret) = resolve_credentials()?;
+    run_with_credentials(client_id, client_secret)
+}
 
+fn run_with_credentials(client_id: String, client_secret: String) -> Result<()> {
     let (code_verifier, code_challenge) = generate_pkce();
     let state = random_base64(16);
     let redirect_uri = format!("http://localhost:{}/callback", CALLBACK_PORT);
@@ -41,7 +52,7 @@ pub fn run() -> Result<()> {
     .context("exchanging authorization code for token")?;
 
     config::save_token(&token)?;
-    println!("Logged in to Linear.");
+    info!("Logged in to Linear.");
 
     Ok(())
 }
@@ -49,6 +60,29 @@ pub fn run() -> Result<()> {
 // ---------------------------------------------------------------------------
 // Credential resolution
 // ---------------------------------------------------------------------------
+
+/// Resolve credentials without interactive prompting. Checks env vars and
+/// config file only; returns an error if neither source has credentials.
+fn resolve_credentials_non_interactive() -> Result<(String, String)> {
+    // 1. Environment variables take precedence.
+    if let (Ok(id), Ok(secret)) = (
+        std::env::var("LINEAR_CLIENT_ID"),
+        std::env::var("LINEAR_CLIENT_SECRET"),
+    ) {
+        return Ok((id, secret));
+    }
+
+    // 2. Stored config file.
+    let cfg = config::load_config()?;
+    if let (Some(id), Some(secret)) = (cfg.client_id, cfg.client_secret) {
+        return Ok((id, secret));
+    }
+
+    Err(anyhow!(
+        "no OAuth credentials configured -- set LINEAR_CLIENT_ID and \
+         LINEAR_CLIENT_SECRET env vars or run `lt auth login` from the terminal"
+    ))
+}
 
 fn resolve_credentials() -> Result<(String, String)> {
     // 1. Environment variables take precedence.
