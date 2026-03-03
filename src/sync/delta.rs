@@ -3,7 +3,6 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config;
 use crate::db;
 use crate::linear::client::graphql_query;
 use crate::linear::types::PageInfo;
@@ -179,8 +178,7 @@ pub fn run() -> Result<()> {
         Some(ts) => ts,
     };
 
-    let token = config::load_token()?
-        .ok_or_else(|| anyhow::anyhow!("not logged in -- run `lt auth login` first"))?;
+    let token = crate::auth::refresh::load_or_refresh_token()?;
 
     let mut cursor: Option<String> = None;
 

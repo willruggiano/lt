@@ -480,6 +480,10 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
         key: "ctrl+p",
         description: "previous page",
     },
+    HelpEntry {
+        key: "L",
+        description: "log in / re-authenticate",
+    },
 ];
 
 /// Mutable state for the help popup.
@@ -801,6 +805,13 @@ pub struct App {
     pub initial_args: IssueArgs,
     /// Timestamp of the last Esc keypress (used to detect double-esc).
     pub last_esc_time: Option<Instant>,
+
+    // -- re-auth (bd-vhp) -----------------------------------------------------
+    /// Set to true by the 'L' keybinding; the main loop suspends the TUI,
+    /// runs the OAuth login flow, then resumes.
+    pub reauth_requested: bool,
+    /// True when the last sync reported NotAuthenticated (no token stored).
+    pub not_authenticated: bool,
 }
 
 impl App {
@@ -853,6 +864,8 @@ impl App {
             org_name: None,
             initial_args,
             last_esc_time: None,
+            reauth_requested: false,
+            not_authenticated: false,
         }
     }
 
@@ -1143,6 +1156,35 @@ impl App {
 
     fn detail_scroll_up(&mut self) {
         self.detail_scroll = self.detail_scroll.saturating_sub(1);
+    }
+
+    fn detail_scroll_to_top(&mut self) {
+        self.detail_scroll = 0;
+    }
+
+    fn detail_scroll_to_bottom(&mut self) {
+        // Ratatui clamps scroll to content length; use a large sentinel.
+        self.detail_scroll = u16::MAX;
+    }
+
+    fn detail_scroll_half_page_down(&mut self) {
+        let step = (self.viewport_height / 2).max(1);
+        self.detail_scroll = self.detail_scroll.saturating_add(step);
+    }
+
+    fn detail_scroll_half_page_up(&mut self) {
+        let step = (self.viewport_height / 2).max(1);
+        self.detail_scroll = self.detail_scroll.saturating_sub(step);
+    }
+
+    fn detail_scroll_page_down(&mut self) {
+        let step = self.viewport_height.max(1);
+        self.detail_scroll = self.detail_scroll.saturating_add(step);
+    }
+
+    fn detail_scroll_page_up(&mut self) {
+        let step = self.viewport_height.max(1);
+        self.detail_scroll = self.detail_scroll.saturating_sub(step);
     }
 
     // -- Popup helpers (bd-3dz) -----------------------------------------------
@@ -2157,6 +2199,35 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         // Poll FTS search debounce (bd-2g4).
         poll_search_debounce(&mut app);
 
+        // Re-auth flow (bd-vhp): suspend TUI, run OAuth login, resume.
+        if app.reauth_requested {
+            app.reauth_requested = false;
+            ratatui::restore();
+            let login_result = crate::auth::login();
+            *terminal = ratatui::init();
+            match login_result {
+                Ok(()) => {
+                    // Refresh viewer identity after successful login.
+                    if let Ok(Some(token)) = crate::config::load_token()
+                        && let Ok(viewer) = fetch_viewer(&token.access_token)
+                    {
+                        app.viewer_name = Some(viewer.name);
+                        app.org_name = Some(viewer.org_name);
+                    }
+                    // Re-spawn the sync thread so fresh data is fetched.
+                    app.not_authenticated = false;
+                    app.syncing = true;
+                    app.sync_status_label = build_sync_status_label(true);
+                    let sync_rx = spawn_sync_thread(app.args.clone());
+                    app.sync_rx = Some(sync_rx);
+                }
+                Err(e) => {
+                    app.footer_msg = Some(format!("Login failed: {}", e));
+                }
+            }
+            continue;
+        }
+
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         if app.quit {
@@ -2171,7 +2242,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
             }
             match app.mode {
                 Mode::Popup(_) => handle_popup_key(&mut app, key.code),
-                Mode::Detail => handle_detail_key(&mut app, key.code),
+                Mode::Detail => handle_detail_key(&mut app, key.code, key.modifiers),
                 Mode::NewIssue => handle_new_issue_key(&mut app, key.code, key.modifiers),
                 Mode::Help => handle_help_key(&mut app, key.code, key.modifiers),
                 Mode::Search => handle_search_key(&mut app, key.code, key.modifiers),
@@ -2246,7 +2317,9 @@ fn poll_sync_events(app: &mut App) {
             }
             Ok(SyncEvent::NotAuthenticated) => {
                 app.syncing = false;
-                app.sync_status_label = "not authenticated - local only".to_string();
+                app.not_authenticated = true;
+                app.sync_status_label =
+                    "not authenticated -- press L to log in".to_string();
                 if matches!(app.status, Status::Loading) {
                     app.status = Status::Idle;
                 }
@@ -2426,13 +2499,30 @@ fn handle_popup_key(app: &mut App, code: KeyCode) {
     }
 }
 
-// -- Detail pane keybindings (bd-2g8) ----------------------------------------
+// -- Detail pane keybindings (bd-2g8, bd-1wz) --------------------------------
+//
+// Vim-like scrolling bindings:
+//   j / Down        -- scroll down one line
+//   k / Up          -- scroll up one line
+//   g               -- scroll to top
+//   G               -- scroll to bottom
+//   Ctrl+d          -- scroll down half page
+//   Ctrl+u          -- scroll up half page
+//   PageDown        -- scroll down one page
+//   PageUp          -- scroll up one page
 
-fn handle_detail_key(app: &mut App, code: KeyCode) {
+fn handle_detail_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Esc | KeyCode::Char('q') => app.close_detail(),
         KeyCode::Char('j') | KeyCode::Down => app.detail_scroll_down(),
         KeyCode::Char('k') | KeyCode::Up => app.detail_scroll_up(),
+        KeyCode::Char('g') => app.detail_scroll_to_top(),
+        KeyCode::Char('G') => app.detail_scroll_to_bottom(),
+        KeyCode::Char('d') if ctrl => app.detail_scroll_half_page_down(),
+        KeyCode::Char('u') if ctrl => app.detail_scroll_half_page_up(),
+        KeyCode::PageDown => app.detail_scroll_page_down(),
+        KeyCode::PageUp => app.detail_scroll_page_up(),
         KeyCode::Char('o') => {
             if let Some(detail) = &app.detail {
                 let url = format!("https://linear.app/issue/{}", detail.identifier);
@@ -2515,6 +2605,10 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('?') => {
             app.help_popup = Some(HelpPopup::new());
             app.mode = Mode::Help;
+        }
+        // Re-authenticate (bd-vhp): suspend TUI, run OAuth login, then resume.
+        KeyCode::Char('L') => {
+            app.reauth_requested = true;
         }
         _ => {}
     }

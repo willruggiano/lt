@@ -1,5 +1,6 @@
 mod login;
 mod logout;
+pub mod refresh;
 mod status;
 
 use anyhow::Result;
@@ -21,4 +22,9 @@ pub fn run(cmd: AuthCommands) -> Result<()> {
         AuthCommands::Status => status::run(),
         AuthCommands::Logout => logout::run(),
     }
+}
+
+/// Run the OAuth2 login flow (used by the TUI re-auth path, bd-vhp).
+pub fn login() -> Result<()> {
+    login::run()
 }
