@@ -1145,6 +1145,35 @@ impl App {
         self.detail_scroll = self.detail_scroll.saturating_sub(1);
     }
 
+    fn detail_scroll_to_top(&mut self) {
+        self.detail_scroll = 0;
+    }
+
+    fn detail_scroll_to_bottom(&mut self) {
+        // Ratatui clamps scroll to content length; use a large sentinel.
+        self.detail_scroll = u16::MAX;
+    }
+
+    fn detail_scroll_half_page_down(&mut self) {
+        let step = (self.viewport_height / 2).max(1);
+        self.detail_scroll = self.detail_scroll.saturating_add(step);
+    }
+
+    fn detail_scroll_half_page_up(&mut self) {
+        let step = (self.viewport_height / 2).max(1);
+        self.detail_scroll = self.detail_scroll.saturating_sub(step);
+    }
+
+    fn detail_scroll_page_down(&mut self) {
+        let step = self.viewport_height.max(1);
+        self.detail_scroll = self.detail_scroll.saturating_add(step);
+    }
+
+    fn detail_scroll_page_up(&mut self) {
+        let step = self.viewport_height.max(1);
+        self.detail_scroll = self.detail_scroll.saturating_sub(step);
+    }
+
     // -- Popup helpers (bd-3dz) -----------------------------------------------
 
     fn open_state_popup(&mut self) {
@@ -2171,7 +2200,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
             }
             match app.mode {
                 Mode::Popup(_) => handle_popup_key(&mut app, key.code),
-                Mode::Detail => handle_detail_key(&mut app, key.code),
+                Mode::Detail => handle_detail_key(&mut app, key.code, key.modifiers),
                 Mode::NewIssue => handle_new_issue_key(&mut app, key.code, key.modifiers),
                 Mode::Help => handle_help_key(&mut app, key.code, key.modifiers),
                 Mode::Search => handle_search_key(&mut app, key.code, key.modifiers),
@@ -2426,13 +2455,30 @@ fn handle_popup_key(app: &mut App, code: KeyCode) {
     }
 }
 
-// -- Detail pane keybindings (bd-2g8) ----------------------------------------
+// -- Detail pane keybindings (bd-2g8, bd-1wz) --------------------------------
+//
+// Vim-like scrolling bindings:
+//   j / Down        -- scroll down one line
+//   k / Up          -- scroll up one line
+//   g               -- scroll to top
+//   G               -- scroll to bottom
+//   Ctrl+d          -- scroll down half page
+//   Ctrl+u          -- scroll up half page
+//   PageDown        -- scroll down one page
+//   PageUp          -- scroll up one page
 
-fn handle_detail_key(app: &mut App, code: KeyCode) {
+fn handle_detail_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Esc | KeyCode::Char('q') => app.close_detail(),
         KeyCode::Char('j') | KeyCode::Down => app.detail_scroll_down(),
         KeyCode::Char('k') | KeyCode::Up => app.detail_scroll_up(),
+        KeyCode::Char('g') => app.detail_scroll_to_top(),
+        KeyCode::Char('G') => app.detail_scroll_to_bottom(),
+        KeyCode::Char('d') if ctrl => app.detail_scroll_half_page_down(),
+        KeyCode::Char('u') if ctrl => app.detail_scroll_half_page_up(),
+        KeyCode::PageDown => app.detail_scroll_page_down(),
+        KeyCode::PageUp => app.detail_scroll_page_up(),
         KeyCode::Char('o') => {
             if let Some(detail) = &app.detail {
                 let url = format!("https://linear.app/issue/{}", detail.identifier);
