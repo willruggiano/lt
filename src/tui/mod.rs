@@ -480,6 +480,10 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
         key: "ctrl+p",
         description: "previous page",
     },
+    HelpEntry {
+        key: "L",
+        description: "log in / re-authenticate",
+    },
 ];
 
 /// Mutable state for the help popup.
@@ -801,6 +805,13 @@ pub struct App {
     pub initial_args: IssueArgs,
     /// Timestamp of the last Esc keypress (used to detect double-esc).
     pub last_esc_time: Option<Instant>,
+
+    // -- re-auth (bd-vhp) -----------------------------------------------------
+    /// Set to true by the 'L' keybinding; the main loop suspends the TUI,
+    /// runs the OAuth login flow, then resumes.
+    pub reauth_requested: bool,
+    /// True when the last sync reported NotAuthenticated (no token stored).
+    pub not_authenticated: bool,
 }
 
 impl App {
@@ -853,6 +864,8 @@ impl App {
             org_name: None,
             initial_args,
             last_esc_time: None,
+            reauth_requested: false,
+            not_authenticated: false,
         }
     }
 
@@ -2157,6 +2170,35 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         // Poll FTS search debounce (bd-2g4).
         poll_search_debounce(&mut app);
 
+        // Re-auth flow (bd-vhp): suspend TUI, run OAuth login, resume.
+        if app.reauth_requested {
+            app.reauth_requested = false;
+            ratatui::restore();
+            let login_result = crate::auth::login();
+            *terminal = ratatui::init();
+            match login_result {
+                Ok(()) => {
+                    // Refresh viewer identity after successful login.
+                    if let Ok(Some(token)) = crate::config::load_token()
+                        && let Ok(viewer) = fetch_viewer(&token.access_token)
+                    {
+                        app.viewer_name = Some(viewer.name);
+                        app.org_name = Some(viewer.org_name);
+                    }
+                    // Re-spawn the sync thread so fresh data is fetched.
+                    app.not_authenticated = false;
+                    app.syncing = true;
+                    app.sync_status_label = build_sync_status_label(true);
+                    let sync_rx = spawn_sync_thread(app.args.clone());
+                    app.sync_rx = Some(sync_rx);
+                }
+                Err(e) => {
+                    app.footer_msg = Some(format!("Login failed: {}", e));
+                }
+            }
+            continue;
+        }
+
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         if app.quit {
@@ -2246,7 +2288,9 @@ fn poll_sync_events(app: &mut App) {
             }
             Ok(SyncEvent::NotAuthenticated) => {
                 app.syncing = false;
-                app.sync_status_label = "not authenticated - local only".to_string();
+                app.not_authenticated = true;
+                app.sync_status_label =
+                    "not authenticated -- press L to log in".to_string();
                 if matches!(app.status, Status::Loading) {
                     app.status = Status::Idle;
                 }
@@ -2515,6 +2559,10 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('?') => {
             app.help_popup = Some(HelpPopup::new());
             app.mode = Mode::Help;
+        }
+        // Re-authenticate (bd-vhp): suspend TUI, run OAuth login, then resume.
+        KeyCode::Char('L') => {
+            app.reauth_requested = true;
         }
         _ => {}
     }

@@ -22,3 +22,8 @@ pub fn run(cmd: AuthCommands) -> Result<()> {
         AuthCommands::Logout => logout::run(),
     }
 }
+
+/// Run the OAuth2 login flow (used by the TUI re-auth path, bd-vhp).
+pub fn login() -> Result<()> {
+    login::run()
+}
