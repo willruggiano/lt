@@ -8,7 +8,7 @@
 //! - CLI mode  -- INFO-level messages are also written to stdout so the user can
 //!   see progress.  Everything (DEBUG and above) goes to the file log.
 //!
-//! The log directory is `~/.local/share/lt/log/`.
+//! The log directory is `~/.local/state/lt/logs/`.
 //! Log files are rotated daily by `tracing-appender`.
 //!
 //! The caller must keep the `WorkerGuard` returned by each init function alive
@@ -22,9 +22,8 @@
 //! filter therefore sets DEBUG for the `lt` crate and WARN for everything else.
 //! Pass `RUST_LOG` to override.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::io::{self, Write};
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::fmt::MakeWriter;
@@ -61,21 +60,12 @@ impl<W: Write> Write for StripCrWriter<W> {
 
 // -- helpers -----------------------------------------------------------------
 
-/// Returns `~/.local/share/lt/log`, creating the directory if necessary.
-fn log_dir() -> Result<PathBuf> {
-    let dir = dirs::data_local_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine local data directory"))?
-        .join("lt")
-        .join("log");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating log directory {}", dir.display()))?;
-    Ok(dir)
-}
+use crate::config;
 
 /// Removes log files from `dir` whose modification time is older than `days` days.
 ///
 /// All errors are silently ignored -- this is a best-effort cleanup step.
-fn prune_old_logs(dir: &PathBuf, days: u64) {
+fn prune_old_logs(dir: &std::path::Path, days: u64) {
     let threshold = match SystemTime::now().checked_sub(Duration::from_secs(days * 24 * 60 * 60)) {
         Some(t) => t,
         None => return,
@@ -118,7 +108,7 @@ fn file_env_filter() -> EnvFilter {
 /// Returns a `WorkerGuard` that must be kept alive for the duration of the
 /// program to ensure all buffered log records are flushed.
 pub fn init_tui() -> Result<WorkerGuard> {
-    let dir = log_dir()?;
+    let dir = config::log_dir()?;
     prune_old_logs(&dir, 7);
     let file_appender = tracing_appender::rolling::daily(&dir, "lt.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
@@ -142,7 +132,7 @@ pub fn init_tui() -> Result<WorkerGuard> {
 /// Returns a `WorkerGuard` that must be kept alive for the duration of the
 /// program to ensure all buffered log records are flushed.
 pub fn init_cli() -> Result<WorkerGuard> {
-    let dir = log_dir()?;
+    let dir = config::log_dir()?;
     prune_old_logs(&dir, 7);
     let file_appender = tracing_appender::rolling::daily(&dir, "lt.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);

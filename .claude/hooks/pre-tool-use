@@ -32,17 +32,7 @@ def main() -> None:
             "remove it and try again... :)"
         )
 
-    # Steer the agent towards jj.
-    if has("git"):
-        print(
-            blocked("use `jj` instead"),
-            surprise("git"),
-            file=sys.stderr,
-            sep="\n",
-        )
-        sys.exit(2)
-
-    if not has("jj"):
+    if not has("jj") and not has("git"):
         return
 
     # --force is almost always the wrong choice.

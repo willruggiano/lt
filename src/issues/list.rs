@@ -61,12 +61,14 @@ pub struct Team {
 
 #[derive(Deserialize, Clone)]
 pub struct Project {
+    #[allow(unused)]
     pub id: String,
     pub name: String,
 }
 
 #[derive(Deserialize, Clone)]
 pub struct Cycle {
+    #[allow(unused)]
     pub id: String,
     pub name: String,
 }

@@ -47,8 +47,24 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+pub fn log_dir() -> Result<PathBuf> {
+    let dir = state_dir()?.join("logs");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating log directory {}", dir.display()))?;
+    Ok(dir)
+}
+
+pub fn state_dir() -> Result<PathBuf> {
+    let dir = dirs::state_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine state directory"))?
+        .join("lt");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating state directory {}", dir.display()))?;
+    Ok(dir)
+}
+
 fn token_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("auth.json"))
+    Ok(state_dir()?.join("auth.json"))
 }
 
 fn config_path() -> Result<PathBuf> {

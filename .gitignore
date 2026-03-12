@@ -1,6 +1,9 @@
 .direnv/
+.envrc
 .jj/
 .envrc
+result/
+target/
 
 
 # Added by cargo
