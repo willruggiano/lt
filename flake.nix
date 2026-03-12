@@ -113,7 +113,7 @@
             (try-fwd-env "GEMINI_API_KEY")
             (try-fwd-env "OPENAI_API_KEY")
             # application state
-            (readonly (noescape "~/.local/share/lt"))
+            (readonly (noescape "~/.local/state/lt"))
             # toolchain
             (add-pkg-deps (
               with pkgs;
@@ -140,10 +140,11 @@
           cargo = pkgs.toolchain;
           rustc = pkgs.toolchain;
         };
+        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       in
-        rustPlatform.buildRustPackage (finalAttrs: {
-          pname = "lt";
-          version = "0.0.0";
+        rustPlatform.buildRustPackage {
+          pname = cargoToml.package.name;
+          inherit (cargoToml.package) version;
           src = lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = with pkgs; [
@@ -153,15 +154,12 @@
             openssl
             pkg-config
           ];
-          postPatch = ''
-            sed -i 's/^version = "0\.0\.0"$/version = "${finalAttrs.version}"/' Cargo.toml
-          '';
           meta = {
-            description = "lt: a Linear tui for power users";
+            inherit (cargoToml.package) description homepage;
             license = with lib.licenses; [mit];
             mainProgram = "lt";
           };
-        });
+        };
 
       agent-tools = pkgs.buildEnv {
         name = "agent-tools";
