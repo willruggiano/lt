@@ -1,5 +1,7 @@
 mod auth;
 mod config;
+mod issues;
+mod linear;
 mod sync;
 
 use anyhow::Result;
@@ -23,6 +25,11 @@ enum Commands {
         #[command(subcommand)]
         command: auth::AuthCommands,
     },
+    /// List Linear issues
+    Issues {
+        #[command(flatten)]
+        args: issues::IssueArgs,
+    },
     /// Sync API diagnostics
     Sync {
         #[command(subcommand)]
@@ -34,6 +41,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Auth { command } => auth::run(command)?,
+        Commands::Issues { args } => issues::run(args)?,
         Commands::Sync { command } => sync::run(command)?,
     }
     Ok(())
