@@ -196,6 +196,19 @@ impl ParsedQuery {
             && self.creator.is_none()
             && self.fts_terms.is_empty()
     }
+
+    /// Return `true` when any filter constraint (beyond sort) is active.
+    pub fn has_filters(&self) -> bool {
+        self.assignee.is_some()
+            || self.priority.is_some()
+            || self.state.is_some()
+            || self.team.is_some()
+            || self.label.is_some()
+            || self.project.is_some()
+            || self.cycle.is_some()
+            || self.creator.is_some()
+            || !self.fts_terms.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------

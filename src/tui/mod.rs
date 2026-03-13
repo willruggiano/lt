@@ -954,40 +954,73 @@ impl App {
 
     fn do_fetch(&mut self, reset_selection: bool) {
         self.status = Status::Loading;
-        // Use the SQLite cache for pagination instead of hitting the API.
-        let offset: i64 = self
-            .current_cursor
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        match crate::db::open_db()
-            .and_then(|conn| crate::db::query_issues_page(&conn, &self.args, offset))
-        {
-            Ok((issues, has_next_page)) => {
-                self.issues = issues.into_iter().map(db_issue_to_list_issue).collect();
-                self.has_next_page = has_next_page;
-                // end_cursor holds the offset of the *next* page as a string.
-                let limit = self.args.limit.min(250) as i64;
-                self.end_cursor = if has_next_page {
-                    Some((offset + limit).to_string())
-                } else {
-                    None
-                };
-                let n = self.issues.len();
-                let sel = if reset_selection {
-                    0
-                } else {
+        let mut parsed = search_query::ParsedQuery::from(&self.active_filter);
+        // Resolve "me" to actual viewer name for assignee filter.
+        search_query::resolve_me(&mut parsed, self.viewer_name.as_deref());
+
+        if parsed.has_filters() {
+            // Active filter has constraints beyond sort -- use run_query to
+            // preserve them (bd-2i0).
+            let limit = self.args.limit.min(250) as usize;
+            match crate::db::open_db()
+                .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
+            {
+                Ok(db_issues) => {
+                    self.issues = db_issues.into_iter().map(db_issue_to_list_issue).collect();
+                    self.has_next_page = false; // run_query has no pagination
+                    self.end_cursor = None;
+                    let n = self.issues.len();
+                    let sel = if reset_selection {
+                        0
+                    } else {
+                        self.table_state
+                            .selected()
+                            .unwrap_or(0)
+                            .min(n.saturating_sub(1))
+                    };
                     self.table_state
-                        .selected()
-                        .unwrap_or(0)
-                        .min(n.saturating_sub(1))
-                };
-                self.table_state
-                    .select(if n > 0 { Some(sel) } else { None });
-                self.status = Status::Idle;
+                        .select(if n > 0 { Some(sel) } else { None });
+                    self.status = Status::Idle;
+                }
+                Err(e) => {
+                    self.status = Status::Error(e.to_string());
+                }
             }
-            Err(e) => {
-                self.status = Status::Error(e.to_string());
+        } else {
+            // No active filters -- use paginated query as before.
+            let offset: i64 = self
+                .current_cursor
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            match crate::db::open_db()
+                .and_then(|conn| crate::db::query_issues_page(&conn, &self.args, offset))
+            {
+                Ok((issues, has_next_page)) => {
+                    self.issues = issues.into_iter().map(db_issue_to_list_issue).collect();
+                    self.has_next_page = has_next_page;
+                    let limit = self.args.limit.min(250) as i64;
+                    self.end_cursor = if has_next_page {
+                        Some((offset + limit).to_string())
+                    } else {
+                        None
+                    };
+                    let n = self.issues.len();
+                    let sel = if reset_selection {
+                        0
+                    } else {
+                        self.table_state
+                            .selected()
+                            .unwrap_or(0)
+                            .min(n.saturating_sub(1))
+                    };
+                    self.table_state
+                        .select(if n > 0 { Some(sel) } else { None });
+                    self.status = Status::Idle;
+                }
+                Err(e) => {
+                    self.status = Status::Error(e.to_string());
+                }
             }
         }
     }
