@@ -787,6 +787,8 @@ pub struct App {
     pub syncing: bool,
     /// Human-readable description of sync status, shown in footer.
     pub sync_status_label: String,
+    /// When to fire the next periodic delta sync (30s cadence).
+    pub next_sync_at: Option<Instant>,
 
     // -- background comment sync (bd-2mx) ------------------------------------
     /// Receiver for background comment-sync events.
@@ -868,6 +870,7 @@ impl App {
             sync_rx,
             syncing,
             sync_status_label,
+            next_sync_at: None,
             detail_comment_rx: None,
             help_popup: None,
             search_overlay: None,
@@ -1040,11 +1043,12 @@ impl App {
 
     fn refresh(&mut self) {
         self.do_fetch(false); // immediate cache read for responsiveness
-        // Also trigger a background delta sync to pick up remote changes.
+        // Manual refresh triggers a full sync (not delta) to pick up all
+        // remote changes, including any the delta window might miss.
         if !self.syncing {
             self.syncing = true;
-            self.sync_status_label = build_sync_status_label(true);
-            self.sync_rx = Some(spawn_sync_thread(self.args.clone()));
+            self.sync_status_label = "full sync...".to_string();
+            self.sync_rx = Some(spawn_sync_thread(self.args.clone(), true));
         }
     }
 
@@ -2111,8 +2115,11 @@ fn build_sync_status_label(syncing: bool) -> String {
     }
 }
 
-/// Spawn the background delta sync thread and return the receiver (bd-25j).
-fn spawn_sync_thread(args: IssueArgs) -> mpsc::Receiver<SyncEvent> {
+/// Spawn a background sync thread and return the receiver (bd-25j).
+///
+/// When `full` is true the thread runs a full sync (re-fetches every issue);
+/// otherwise it runs a delta sync (only issues updated since last sync).
+fn spawn_sync_thread(args: IssueArgs, full: bool) -> mpsc::Receiver<SyncEvent> {
     let (tx, rx) = mpsc::channel::<SyncEvent>();
     std::thread::spawn(move || {
         // Skip sync when no auth token is stored; notify the TUI.
@@ -2128,8 +2135,13 @@ fn spawn_sync_thread(args: IssueArgs) -> mpsc::Receiver<SyncEvent> {
             Ok(Some(_)) => {}
         }
 
-        // Run delta sync (falls back to full if no prior sync).
-        match crate::sync::delta::run() {
+        // Run the requested sync variant.
+        let result = if full {
+            crate::sync::full::run()
+        } else {
+            crate::sync::delta::run()
+        };
+        match result {
             Ok(()) => {
                 // Re-query SQLite for a fresh issue list to send to TUI.
                 let issues = (|| -> Result<Vec<Issue>> {
@@ -2199,7 +2211,7 @@ fn poll_login_events(app: &mut App) {
             app.not_authenticated = false;
             app.syncing = true;
             app.sync_status_label = build_sync_status_label(true);
-            app.sync_rx = Some(spawn_sync_thread(app.args.clone()));
+            app.sync_rx = Some(spawn_sync_thread(app.args.clone(), false));
         }
         Ok(LoginEvent::Error(msg)) => {
             app.login_rx = None;
@@ -2315,7 +2327,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     let sync_status_label = build_sync_status_label(syncing);
 
     // Spawn background sync thread.
-    let sync_rx = spawn_sync_thread(args.clone());
+    let sync_rx = spawn_sync_thread(args.clone(), false);
 
     let mut app = App::new(
         issues,
@@ -2346,6 +2358,18 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
     loop {
         // Poll background sync channel (bd-25j).
         poll_sync_events(&mut app);
+
+        // Periodic delta sync: fire every 30s when authenticated.
+        if !app.syncing && !app.not_authenticated {
+            if let Some(t) = app.next_sync_at {
+                if Instant::now() >= t {
+                    app.syncing = true;
+                    app.sync_status_label = build_sync_status_label(true);
+                    app.sync_rx = Some(spawn_sync_thread(app.args.clone(), false));
+                    app.next_sync_at = None;
+                }
+            }
+        }
 
         // Poll modal background loader channel (bd-vfi).
         app.poll_modal_events();
@@ -2436,6 +2460,8 @@ fn poll_sync_events(app: &mut App) {
                 }
                 app.syncing = false;
                 app.sync_status_label = build_sync_status_label(false);
+                // Schedule next periodic delta sync in 30s.
+                app.next_sync_at = Some(Instant::now() + Duration::from_secs(30));
                 got_event = true;
             }
             Ok(SyncEvent::Error(msg)) => {
@@ -2444,6 +2470,8 @@ fn poll_sync_events(app: &mut App) {
                 if matches!(app.status, Status::Loading) {
                     app.status = Status::Idle;
                 }
+                // Retry periodic sync in 30s even after errors.
+                app.next_sync_at = Some(Instant::now() + Duration::from_secs(30));
                 got_event = true;
             }
             Ok(SyncEvent::NotAuthenticated) => {
@@ -2453,6 +2481,8 @@ fn poll_sync_events(app: &mut App) {
                 if matches!(app.status, Status::Loading) {
                     app.status = Status::Idle;
                 }
+                // Don't schedule periodic sync when not authenticated.
+                app.next_sync_at = None;
                 got_event = true;
             }
             Err(mpsc::TryRecvError::Empty) => break,
