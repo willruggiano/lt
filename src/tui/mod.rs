@@ -1003,7 +1003,13 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        self.do_fetch(false);
+        self.do_fetch(false); // immediate cache read for responsiveness
+        // Also trigger a background delta sync to pick up remote changes.
+        if !self.syncing {
+            self.syncing = true;
+            self.sync_status_label = build_sync_status_label(true);
+            self.sync_rx = Some(spawn_sync_thread(self.args.clone()));
+        }
     }
 
     fn cycle_sort(&mut self) {
