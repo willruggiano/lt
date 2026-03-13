@@ -345,7 +345,10 @@ pub enum CommentSyncEvent {
 /// Events sent from the background login thread to the TUI event loop.
 pub enum LoginEvent {
     /// OAuth login completed successfully.
-    Success,
+    Success {
+        viewer_name: Option<String>,
+        org_name: Option<String>,
+    },
     /// Login failed with an error message.
     Error(String),
 }
@@ -2076,7 +2079,15 @@ fn spawn_login_thread() -> mpsc::Receiver<LoginEvent> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || match crate::auth::login_non_interactive() {
         Ok(()) => {
-            let _ = tx.send(LoginEvent::Success);
+            // Fetch viewer identity while the token is fresh (bd-3jl).
+            let viewer = crate::config::load_token()
+                .ok()
+                .flatten()
+                .and_then(|t| fetch_viewer(&t.access_token).ok());
+            let _ = tx.send(LoginEvent::Success {
+                viewer_name: viewer.as_ref().map(|v| v.name.clone()),
+                org_name: viewer.as_ref().map(|v| v.org_name.clone()),
+            });
         }
         Err(e) => {
             let _ = tx.send(LoginEvent::Error(e.to_string()));
@@ -2092,14 +2103,13 @@ fn poll_login_events(app: &mut App) {
         None => return,
     };
     match rx.try_recv() {
-        Ok(LoginEvent::Success) => {
+        Ok(LoginEvent::Success { viewer_name, org_name }) => {
             app.login_rx = None;
-            // Refresh viewer identity after successful login.
-            if let Ok(Some(token)) = crate::config::load_token()
-                && let Ok(viewer) = fetch_viewer(&token.access_token)
-            {
-                app.viewer_name = Some(viewer.name);
-                app.org_name = Some(viewer.org_name);
+            if let Some(name) = viewer_name {
+                app.viewer_name = Some(name);
+            }
+            if let Some(org) = org_name {
+                app.org_name = Some(org);
             }
             app.not_authenticated = false;
             app.syncing = true;
