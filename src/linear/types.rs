@@ -48,6 +48,13 @@ pub struct Label {
     pub name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct IssueRef {
+    pub identifier: String,
+    pub title: String,
+    pub state_name: String,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct IssueDetail {
     pub identifier: String,
@@ -64,6 +71,10 @@ pub struct IssueDetail {
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
     pub comments: CommentConnection,
+    #[serde(skip)]
+    pub parent: Option<IssueRef>,
+    #[serde(skip)]
+    pub children: Vec<IssueRef>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

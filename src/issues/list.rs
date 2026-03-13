@@ -33,6 +33,7 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
       project { id name }
       cycle { id name }
       creator { id name }
+      parent { id identifier }
       createdAt
       updatedAt
     }
@@ -40,6 +41,12 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
   }
 }
 "#;
+
+#[derive(Deserialize, Clone)]
+pub struct Parent {
+    pub id: String,
+    pub identifier: String,
+}
 
 #[derive(Deserialize, Clone)]
 pub struct State {
@@ -89,6 +96,7 @@ pub struct Issue {
     pub project: Option<Project>,
     pub cycle: Option<Cycle>,
     pub creator: Option<User>,
+    pub parent: Option<Parent>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
     #[serde(rename = "updatedAt")]

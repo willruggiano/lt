@@ -4,7 +4,8 @@ pub mod issues;
 
 pub use comments::{Comment, delete_comments_for_issue, query_comments, upsert_comments};
 pub use issues::{
-    Issue, get_meta, query_issues, query_issues_page, search_issues, set_meta, upsert_issues,
+    Issue, get_meta, query_children, query_issues, query_issues_page, search_issues, set_meta,
+    upsert_issues,
 };
 
 use anyhow::{Context, Result};
@@ -143,6 +144,34 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if !has_creator_name {
         conn.execute_batch("ALTER TABLE issues ADD COLUMN creator_name TEXT;")
             .context("failed to add creator_name column")?;
+    }
+
+    // Migration: add parent_id column if absent.
+    let has_parent_id: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='parent_id'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_parent_id {
+        conn.execute_batch("ALTER TABLE issues ADD COLUMN parent_id TEXT;")
+            .context("failed to add parent_id column")?;
+    }
+
+    // Migration: add parent_identifier column if absent.
+    let has_parent_identifier: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='parent_identifier'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_parent_identifier {
+        conn.execute_batch("ALTER TABLE issues ADD COLUMN parent_identifier TEXT;")
+            .context("failed to add parent_identifier column")?;
     }
 
     Ok(())

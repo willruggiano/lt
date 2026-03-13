@@ -345,7 +345,10 @@ pub enum CommentSyncEvent {
 /// Events sent from the background login thread to the TUI event loop.
 pub enum LoginEvent {
     /// OAuth login completed successfully.
-    Success,
+    Success {
+        viewer_name: Option<String>,
+        org_name: Option<String>,
+    },
     /// Login failed with an error message.
     Error(String),
 }
@@ -954,40 +957,73 @@ impl App {
 
     fn do_fetch(&mut self, reset_selection: bool) {
         self.status = Status::Loading;
-        // Use the SQLite cache for pagination instead of hitting the API.
-        let offset: i64 = self
-            .current_cursor
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        match crate::db::open_db()
-            .and_then(|conn| crate::db::query_issues_page(&conn, &self.args, offset))
-        {
-            Ok((issues, has_next_page)) => {
-                self.issues = issues.into_iter().map(db_issue_to_list_issue).collect();
-                self.has_next_page = has_next_page;
-                // end_cursor holds the offset of the *next* page as a string.
-                let limit = self.args.limit.min(250) as i64;
-                self.end_cursor = if has_next_page {
-                    Some((offset + limit).to_string())
-                } else {
-                    None
-                };
-                let n = self.issues.len();
-                let sel = if reset_selection {
-                    0
-                } else {
+        let mut parsed = search_query::ParsedQuery::from(&self.active_filter);
+        // Resolve "me" to actual viewer name for assignee filter.
+        search_query::resolve_me(&mut parsed, self.viewer_name.as_deref());
+
+        if parsed.has_filters() {
+            // Active filter has constraints beyond sort -- use run_query to
+            // preserve them (bd-2i0).
+            let limit = self.args.limit.min(250) as usize;
+            match crate::db::open_db()
+                .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
+            {
+                Ok(db_issues) => {
+                    self.issues = db_issues.into_iter().map(db_issue_to_list_issue).collect();
+                    self.has_next_page = false; // run_query has no pagination
+                    self.end_cursor = None;
+                    let n = self.issues.len();
+                    let sel = if reset_selection {
+                        0
+                    } else {
+                        self.table_state
+                            .selected()
+                            .unwrap_or(0)
+                            .min(n.saturating_sub(1))
+                    };
                     self.table_state
-                        .selected()
-                        .unwrap_or(0)
-                        .min(n.saturating_sub(1))
-                };
-                self.table_state
-                    .select(if n > 0 { Some(sel) } else { None });
-                self.status = Status::Idle;
+                        .select(if n > 0 { Some(sel) } else { None });
+                    self.status = Status::Idle;
+                }
+                Err(e) => {
+                    self.status = Status::Error(e.to_string());
+                }
             }
-            Err(e) => {
-                self.status = Status::Error(e.to_string());
+        } else {
+            // No active filters -- use paginated query as before.
+            let offset: i64 = self
+                .current_cursor
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            match crate::db::open_db()
+                .and_then(|conn| crate::db::query_issues_page(&conn, &self.args, offset))
+            {
+                Ok((issues, has_next_page)) => {
+                    self.issues = issues.into_iter().map(db_issue_to_list_issue).collect();
+                    self.has_next_page = has_next_page;
+                    let limit = self.args.limit.min(250) as i64;
+                    self.end_cursor = if has_next_page {
+                        Some((offset + limit).to_string())
+                    } else {
+                        None
+                    };
+                    let n = self.issues.len();
+                    let sel = if reset_selection {
+                        0
+                    } else {
+                        self.table_state
+                            .selected()
+                            .unwrap_or(0)
+                            .min(n.saturating_sub(1))
+                    };
+                    self.table_state
+                        .select(if n > 0 { Some(sel) } else { None });
+                    self.status = Status::Idle;
+                }
+                Err(e) => {
+                    self.status = Status::Error(e.to_string());
+                }
             }
         }
     }
@@ -1110,7 +1146,47 @@ impl App {
             comments: crate::linear::types::CommentConnection {
                 nodes: cached_comments,
             },
+            parent: None,
+            children: Vec::new(),
         });
+
+        // Populate parent and children from the local DB cache.
+        if let Ok(conn) = crate::db::open_db() {
+            // Look up children.
+            if let Ok(children) = crate::db::query_children(&conn, &issue.id) {
+                if let Some(ref mut detail) = self.detail {
+                    detail.children = children
+                        .into_iter()
+                        .map(|c| crate::linear::types::IssueRef {
+                            identifier: c.identifier,
+                            title: c.title,
+                            state_name: c.state_name,
+                        })
+                        .collect();
+                }
+            }
+            // Look up parent.
+            if let Some(ref parent) = issue.parent {
+                let parent_sql = "SELECT identifier, title, state_name FROM issues WHERE id = ?1";
+                if let Ok(mut stmt) = conn.prepare(parent_sql) {
+                    if let Ok(row) = stmt.query_row(
+                        rusqlite::params![parent.id],
+                        |row| {
+                            Ok(crate::linear::types::IssueRef {
+                                identifier: row.get(0)?,
+                                title: row.get(1)?,
+                                state_name: row.get(2)?,
+                            })
+                        },
+                    ) {
+                        if let Some(ref mut detail) = self.detail {
+                            detail.parent = Some(row);
+                        }
+                    }
+                }
+            }
+        }
+
         self.status = Status::Idle;
 
         // Spawn background thread to refresh comments from the Linear API.
@@ -1688,6 +1764,8 @@ impl App {
                     project_name: None,
                     cycle_name: None,
                     creator_name: None,
+                    parent_id: None,
+                    parent_identifier: None,
                 };
                 if let Ok(conn) = crate::db::open_db() {
                     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
@@ -1907,6 +1985,8 @@ fn revert_sqlite(orig: &crate::issues::list::Issue, _kind: &PopupKind) {
         project_name: orig.project.as_ref().map(|p| p.name.clone()),
         cycle_name: orig.cycle.as_ref().map(|c| c.name.clone()),
         creator_name: orig.creator.as_ref().map(|u| u.name.clone()),
+        parent_id: orig.parent.as_ref().map(|p| p.id.clone()),
+        parent_identifier: orig.parent.as_ref().map(|p| p.identifier.clone()),
     };
     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
 }
@@ -1957,6 +2037,8 @@ fn build_db_issue_optimistic(
         project_name: issue.project.as_ref().map(|p| p.name.clone()),
         cycle_name: issue.cycle.as_ref().map(|c| c.name.clone()),
         creator_name: issue.creator.as_ref().map(|u| u.name.clone()),
+        parent_id: issue.parent.as_ref().map(|p| p.id.clone()),
+        parent_identifier: issue.parent.as_ref().map(|p| p.identifier.clone()),
     }
 }
 
@@ -2082,7 +2164,15 @@ fn spawn_login_thread() -> mpsc::Receiver<LoginEvent> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || match crate::auth::login_non_interactive() {
         Ok(()) => {
-            let _ = tx.send(LoginEvent::Success);
+            // Fetch viewer identity while the token is fresh (bd-3jl).
+            let viewer = crate::config::load_token()
+                .ok()
+                .flatten()
+                .and_then(|t| fetch_viewer(&t.access_token).ok());
+            let _ = tx.send(LoginEvent::Success {
+                viewer_name: viewer.as_ref().map(|v| v.name.clone()),
+                org_name: viewer.as_ref().map(|v| v.org_name.clone()),
+            });
         }
         Err(e) => {
             let _ = tx.send(LoginEvent::Error(e.to_string()));
@@ -2098,14 +2188,13 @@ fn poll_login_events(app: &mut App) {
         None => return,
     };
     match rx.try_recv() {
-        Ok(LoginEvent::Success) => {
+        Ok(LoginEvent::Success { viewer_name, org_name }) => {
             app.login_rx = None;
-            // Refresh viewer identity after successful login.
-            if let Ok(Some(token)) = crate::config::load_token()
-                && let Ok(viewer) = fetch_viewer(&token.access_token)
-            {
-                app.viewer_name = Some(viewer.name);
-                app.org_name = Some(viewer.org_name);
+            if let Some(name) = viewer_name {
+                app.viewer_name = Some(name);
+            }
+            if let Some(org) = org_name {
+                app.org_name = Some(org);
             }
             app.not_authenticated = false;
             app.syncing = true;
@@ -2168,6 +2257,10 @@ fn db_issue_to_list_issue(src: crate::db::Issue) -> Issue {
         creator: src.creator_name.map(|n| crate::issues::list::User {
             id: String::new(),
             name: n,
+        }),
+        parent: src.parent_id.map(|id| crate::issues::list::Parent {
+            id,
+            identifier: src.parent_identifier.unwrap_or_default(),
         }),
     }
 }

@@ -196,6 +196,19 @@ impl ParsedQuery {
             && self.creator.is_none()
             && self.fts_terms.is_empty()
     }
+
+    /// Return `true` when any filter constraint (beyond sort) is active.
+    pub fn has_filters(&self) -> bool {
+        self.assignee.is_some()
+            || self.priority.is_some()
+            || self.state.is_some()
+            || self.team.is_some()
+            || self.label.is_some()
+            || self.project.is_some()
+            || self.cycle.is_some()
+            || self.creator.is_some()
+            || !self.fts_terms.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +439,8 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
             "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
                     i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
                     i.synced_at, i.description, i.labels,
-                    i.project_name, i.cycle_name, i.creator_name
+                    i.project_name, i.cycle_name, i.creator_name,
+                    i.parent_id, i.parent_identifier
              FROM issues i
              JOIN issues_fts ON issues_fts.rowid = i.rowid
              WHERE issues_fts MATCH ?{extra_cond}
@@ -445,7 +459,8 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         format!(
             "SELECT id, identifier, title, priority_label, state_name,
                     assignee_name, team_name, team_key, created_at, updated_at, synced_at,
-                    description, labels, project_name, cycle_name, creator_name
+                    description, labels, project_name, cycle_name, creator_name,
+                    parent_id, parent_identifier
              FROM issues
              {where_clause}
              ORDER BY {col} {dir}
@@ -492,6 +507,8 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
                 project_name: row.get(13)?,
                 cycle_name: row.get(14)?,
                 creator_name: row.get(15)?,
+                parent_id: row.get(16)?,
+                parent_identifier: row.get(17)?,
             })
         })
         .map_err(|e| anyhow::anyhow!("execute search_query: {}", e))?;
