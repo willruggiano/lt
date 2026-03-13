@@ -24,6 +24,8 @@ pub struct Issue {
     pub project_name: Option<String>,
     pub cycle_name: Option<String>,
     pub creator_name: Option<String>,
+    pub parent_id: Option<String>,
+    pub parent_identifier: Option<String>,
 }
 
 /// Insert or replace a slice of issues, setting synced_at to now (UTC).
@@ -34,8 +36,9 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
             "INSERT OR REPLACE INTO issues
              (id, identifier, title, priority_label, state_name,
               assignee_name, team_name, team_key, created_at, updated_at, synced_at,
-              description, labels, project_name, cycle_name, creator_name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+              description, labels, project_name, cycle_name, creator_name,
+              parent_id, parent_identifier)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         )
         .context("failed to prepare upsert statement")?;
 
@@ -57,6 +60,8 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
             issue.project_name,
             issue.cycle_name,
             issue.creator_name,
+            issue.parent_id,
+            issue.parent_identifier,
         ])
         .context("failed to upsert issue")?;
     }
@@ -98,7 +103,8 @@ pub fn query_issues_page(
     let sql = format!(
         "SELECT id, identifier, title, priority_label, state_name,
                 assignee_name, team_name, team_key, created_at, updated_at, synced_at,
-                description, labels, project_name, cycle_name, creator_name
+                description, labels, project_name, cycle_name, creator_name,
+                parent_id, parent_identifier
          FROM issues
          WHERE 1=1
          ORDER BY {order_col} {direction}
@@ -128,6 +134,8 @@ pub fn query_issues_page(
                 project_name: row.get(13)?,
                 cycle_name: row.get(14)?,
                 creator_name: row.get(15)?,
+                parent_id: row.get(16)?,
+                parent_identifier: row.get(17)?,
             })
         })
         .context("failed to execute query")?;
@@ -154,7 +162,8 @@ pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
     let sql = "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
                       i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
                       i.synced_at, i.description, i.labels,
-                      i.project_name, i.cycle_name, i.creator_name
+                      i.project_name, i.cycle_name, i.creator_name,
+                      i.parent_id, i.parent_identifier
                FROM issues i
                JOIN issues_fts ON issues_fts.rowid = i.rowid
                WHERE issues_fts MATCH ?1
@@ -183,6 +192,8 @@ pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
                 project_name: row.get(13)?,
                 cycle_name: row.get(14)?,
                 creator_name: row.get(15)?,
+                parent_id: row.get(16)?,
+                parent_identifier: row.get(17)?,
             })
         })
         .context("failed to execute search_issues query")?;
@@ -210,6 +221,52 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
     } else {
         Ok(None)
     }
+}
+
+/// Query child issues of a given parent issue.
+pub fn query_children(conn: &Connection, parent_id: &str) -> Result<Vec<Issue>> {
+    let sql = "SELECT id, identifier, title, priority_label, state_name,
+                      assignee_name, team_name, team_key, created_at, updated_at, synced_at,
+                      description, labels, project_name, cycle_name, creator_name,
+                      parent_id, parent_identifier
+               FROM issues
+               WHERE parent_id = ?1
+               ORDER BY identifier ASC";
+
+    let mut stmt = conn
+        .prepare(sql)
+        .context("failed to prepare query_children statement")?;
+
+    let rows = stmt
+        .query_map(params![parent_id], |row| {
+            Ok(Issue {
+                id: row.get(0)?,
+                identifier: row.get(1)?,
+                title: row.get(2)?,
+                priority_label: row.get(3)?,
+                state_name: row.get(4)?,
+                assignee_name: row.get(5)?,
+                team_name: row.get(6)?,
+                team_key: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+                synced_at: row.get(10)?,
+                description: row.get(11)?,
+                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                project_name: row.get(13)?,
+                cycle_name: row.get(14)?,
+                creator_name: row.get(15)?,
+                parent_id: row.get(16)?,
+                parent_identifier: row.get(17)?,
+            })
+        })
+        .context("failed to execute query_children query")?;
+
+    let mut issues = Vec::new();
+    for row in rows {
+        issues.push(row.context("failed to read child issue row")?);
+    }
+    Ok(issues)
 }
 
 /// Insert or replace a key/value pair in the sync_meta table.

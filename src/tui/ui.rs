@@ -437,6 +437,29 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
         d.state.name, d.priority_label, assignee, d.team.name
     )));
 
+    // Parent issue reference
+    if let Some(ref parent) = d.parent {
+        lines.push(Line::from(format!(
+            "Parent: {} - {}",
+            parent.identifier, parent.title
+        )));
+    }
+
+    // Sub-issues
+    if !d.children.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Sub-issues",
+            Style::new().add_modifier(Modifier::UNDERLINED),
+        )));
+        for child in &d.children {
+            lines.push(Line::from(format!(
+                "  [{}] {} - {}",
+                child.state_name, child.identifier, child.title
+            )));
+        }
+    }
+
     lines.push(Line::from(""));
 
     // Description

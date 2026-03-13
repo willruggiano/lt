@@ -51,7 +51,8 @@ pub fn run(args: SearchArgs) -> Result<()> {
         let sql = format!(
             "SELECT id, identifier, title, priority_label, state_name,
                     assignee_name, team_name, team_key, created_at, updated_at, synced_at,
-                    description, labels, project_name, cycle_name, creator_name
+                    description, labels, project_name, cycle_name, creator_name,
+                    parent_id, parent_identifier
              FROM issues
              WHERE title LIKE ?1
              LIMIT {}",
@@ -79,6 +80,8 @@ pub fn run(args: SearchArgs) -> Result<()> {
                     project_name: row.get(13)?,
                     cycle_name: row.get(14)?,
                     creator_name: row.get(15)?,
+                    parent_id: row.get(16)?,
+                    parent_identifier: row.get(17)?,
                 })
             })
             .context("failed to execute fallback search")?;

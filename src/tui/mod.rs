@@ -1104,7 +1104,47 @@ impl App {
             comments: crate::linear::types::CommentConnection {
                 nodes: cached_comments,
             },
+            parent: None,
+            children: Vec::new(),
         });
+
+        // Populate parent and children from the local DB cache.
+        if let Ok(conn) = crate::db::open_db() {
+            // Look up children.
+            if let Ok(children) = crate::db::query_children(&conn, &issue.id) {
+                if let Some(ref mut detail) = self.detail {
+                    detail.children = children
+                        .into_iter()
+                        .map(|c| crate::linear::types::IssueRef {
+                            identifier: c.identifier,
+                            title: c.title,
+                            state_name: c.state_name,
+                        })
+                        .collect();
+                }
+            }
+            // Look up parent.
+            if let Some(ref parent) = issue.parent {
+                let parent_sql = "SELECT identifier, title, state_name FROM issues WHERE id = ?1";
+                if let Ok(mut stmt) = conn.prepare(parent_sql) {
+                    if let Ok(row) = stmt.query_row(
+                        rusqlite::params![parent.id],
+                        |row| {
+                            Ok(crate::linear::types::IssueRef {
+                                identifier: row.get(0)?,
+                                title: row.get(1)?,
+                                state_name: row.get(2)?,
+                            })
+                        },
+                    ) {
+                        if let Some(ref mut detail) = self.detail {
+                            detail.parent = Some(row);
+                        }
+                    }
+                }
+            }
+        }
+
         self.status = Status::Idle;
 
         // Spawn background thread to refresh comments from the Linear API.
@@ -1682,6 +1722,8 @@ impl App {
                     project_name: None,
                     cycle_name: None,
                     creator_name: None,
+                    parent_id: None,
+                    parent_identifier: None,
                 };
                 if let Ok(conn) = crate::db::open_db() {
                     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
@@ -1901,6 +1943,8 @@ fn revert_sqlite(orig: &crate::issues::list::Issue, _kind: &PopupKind) {
         project_name: orig.project.as_ref().map(|p| p.name.clone()),
         cycle_name: orig.cycle.as_ref().map(|c| c.name.clone()),
         creator_name: orig.creator.as_ref().map(|u| u.name.clone()),
+        parent_id: orig.parent.as_ref().map(|p| p.id.clone()),
+        parent_identifier: orig.parent.as_ref().map(|p| p.identifier.clone()),
     };
     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
 }
@@ -1951,6 +1995,8 @@ fn build_db_issue_optimistic(
         project_name: issue.project.as_ref().map(|p| p.name.clone()),
         cycle_name: issue.cycle.as_ref().map(|c| c.name.clone()),
         creator_name: issue.creator.as_ref().map(|u| u.name.clone()),
+        parent_id: issue.parent.as_ref().map(|p| p.id.clone()),
+        parent_identifier: issue.parent.as_ref().map(|p| p.identifier.clone()),
     }
 }
 
@@ -2162,6 +2208,10 @@ fn db_issue_to_list_issue(src: crate::db::Issue) -> Issue {
         creator: src.creator_name.map(|n| crate::issues::list::User {
             id: String::new(),
             name: n,
+        }),
+        parent: src.parent_id.map(|id| crate::issues::list::Parent {
+            id,
+            identifier: src.parent_identifier.unwrap_or_default(),
         }),
     }
 }
