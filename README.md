@@ -28,7 +28,7 @@ words become prefix-matched full-text search terms.
 
 | Stem        | Example           | Notes                               |
 | ----------- | ----------------- | ----------------------------------- |
-| `assignee:` | `assignee:me`     | filter by assignee name             |
+| `assignee:` | `assignee:will`   | filter by assignee name             |
 | `priority:` | `priority:urgent` | urgent / high / normal / low / none |
 | `state:`    | `state:todo`      | workflow state name                 |
 | `team:`     | `team:backend`    | team name                           |
@@ -43,15 +43,6 @@ Unknown keys get a "did you mean?" suggestion via edit distance.
 
 ## Install
 
-### Nix (recommended)
-
-```bash
-# run directly
-nix run github:willruggiano/lt
-```
-
-or by adding `github:willruggiano/lt` as an input to your own Nix flake.
-
 ### Cargo
 
 Requires a nightly Rust toolchain (edition 2024).
@@ -59,6 +50,15 @@ Requires a nightly Rust toolchain (edition 2024).
 ```bash
 cargo install -git https://github.com/willruggiano/lt
 ```
+
+### Nix
+
+```bash
+# run directly
+nix run github:willruggiano/lt
+```
+
+or by adding `github:willruggiano/lt` as an input to your own Nix flake.
 
 ## Usage
 
