@@ -2,6 +2,8 @@
 
 A local-first [Linear] TUI for terminal power users.
 
+<img width="1921" height="1081" alt="It's not much... but it's mine :)" src="https://github.com/user-attachments/assets/bb8c14df-b1b2-45d5-a366-85f21a2a0d3f" />
+
 Reads are instant; queries use a local SQLite cache, not the network.
 
 Writes are optimistic and queued offline.
