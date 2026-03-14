@@ -145,7 +145,16 @@
         rustPlatform.buildRustPackage {
           pname = cargoToml.package.name;
           inherit (cargoToml.package) version;
-          src = lib.cleanSource ./.;
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.lock
+              ./Cargo.toml
+              ./build
+              ./docs
+              ./src
+            ];
+          };
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = with pkgs; [
             cmake

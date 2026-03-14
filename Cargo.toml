@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "A local-first Linear TUI for terminal power users"
 license = "MIT"
-repository = "https://github.com/willruggiano/lt"
 homepage = "https://github.com/willruggiano/lt"
+repository = "https://github.com/willruggiano/lt"
 
 [dependencies]
 anyhow = "1"
