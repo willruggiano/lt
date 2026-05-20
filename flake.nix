@@ -123,6 +123,7 @@
               ./Cargo.lock
               ./Cargo.toml
               ./build
+              ./build.rs
               ./docs
               ./src
             ];
