@@ -1,44 +1,77 @@
-# lt
+# lt - instructions for coding agents
 
-Dear coding agent,
+## Communication Guidelines
 
-Be so kind and use **only ASCII** in generated text.
-Do not use em-dashes.
-Do not use unicode arrows, carots, etc.
-Draw diagrams and tables in either markdown (tables), mermaid (diagrams),
-or ascii (tables or diagrams).
+- Do not make unsolicited recommendations
+- Use only ASCII characters in your output
+  - Use hyphens not em-dashes
+  - Use standard quotes not curly quotes
+  - Use standard apostrophes not curly apostrophes
+  - Do not use emojis or unicode symbols like checkmarks, x-marks, arrows, etc.
+- Use ASCII diagrams to explain flow and/or relationships
+- Prefer diagrams to natural language
 
-Please use [beads-rust](./docs/agents/beads.md) for tracking issues.
-Read the instructions file for a beads quickstart.
-Use it liberally.
-Use it in planning mode.
-Use it to create TODOs while you are working on a change.
-Use it as the _source of truth_ for the development roadmap.
+## Behavioral Guidelines
 
-Your Human counterparts use [Nix] for declarative development environments
-_which includes_ sandboxing you, the coding agent, by restricting what files you
-may read, write, and execute. Do not waste time trying to debug why a tool or
-executable is not available to you. If you suspect your environment is
-insufficient, ask a human for guidance (you may propose a fix if you have one,
-eg. adding a package to the Nix developer shell).
+### 1. Think Before Coding
 
-When spawning sub-agents, give them their own `jj workspace` in:
-.beads/workspaces/<bead-id>
-Read the [jj quickstart](./docs/agents/jj.md) for more guidance.
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
 
-Each workspace contains its own `.beads/` database. Sub-agents must:
+Before implementing:
 
-- Run `br` from **inside their workspace**, never from the project root
-- Close **only their assigned bead** - not beads belonging to other agents
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
 
-After all workspaces are merged, use `scripts/resolve-beads-merge.py` to
-resolve `.beads/issues.jsonl` conflicts. See [beads docs](./docs/agents/beads.md)
-for the full merge integration workflow.
+### 2. Simplicity First
 
-Please be advised that you already, as you read this, exist in a carefully
-curated sandbox environment. If you find that a tool you need to do your job is
-not available, first think about whether you truly need that tool - perhaps the
-user has explicitly chosen to withold it from you - and failing that you may ask
-the user to fix the situation (provide a [Nix]-specific recommendation if applicable).
+**Minimum code that solves the problem. Nothing speculative.**
 
-[Nix]: ./docs/agents/nix.md
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes,
+simplify.
+
+### 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it
+work") require constant clarification.
