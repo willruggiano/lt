@@ -34,12 +34,12 @@ Value completion is explicitly out of scope for this iteration.
 
 ### Options Considered
 
-| Option                | Pros                                                        | Cons                                                              |
-|-----------------------|-------------------------------------------------------------|-------------------------------------------------------------------|
-| Keep hand-rolled      | Zero new deps, already works                                | No error recovery; ~30 keys adds repetitive match arms            |
-| pest (PEG)            | Declarative grammar file, easy to generate from build.rs    | Error messages need manual formatting; no built-in suggestions    |
-| chumsky combinators   | First-class error recovery; Rich errors with suggestions;   | New dependency                                                    |
-|                       | composable per-key value parsers                            |                                                                   |
+| Option              | Pros                                                      | Cons                                                           |
+| ------------------- | --------------------------------------------------------- | -------------------------------------------------------------- |
+| Keep hand-rolled    | Zero new deps, already works                              | No error recovery; ~30 keys adds repetitive match arms         |
+| pest (PEG)          | Declarative grammar file, easy to generate from build.rs  | Error messages need manual formatting; no built-in suggestions |
+| chumsky combinators | First-class error recovery; Rich errors with suggestions; | New dependency                                                 |
+|                     | composable per-key value parsers                          |                                                                |
 
 ### Decision
 
@@ -58,7 +58,7 @@ complexity for this grammar size.
 
 ### Rationale
 
-`build.rs` reads `docs/reference/linear-schema-definition.graphql` at compile
+`build.rs` reads `build/linear-schema-definition.graphql` at compile
 time, validates that every key in the allowlist corresponds to a real
 `IssueFilter` field, and generates the Rust source for the parser. If a field
 in the allowlist is removed from the upstream schema, the build fails loudly,
@@ -91,7 +91,7 @@ include!(concat!(env!("OUT_DIR"), "/search_stems.rs"));
 ### Build Pipeline
 
 ```
-docs/reference/linear-schema-definition.graphql
+build/linear-schema-definition.graphql
 build/search_filter_fields.toml
               |
               v
@@ -187,15 +187,15 @@ hard-coded in `build.rs` and is not represented in the TOML.
 
 ### Field Spec Semantics
 
-| Field      | Required | Description                                                     |
-|------------|----------|-----------------------------------------------------------------|
-| key        | yes      | Stem key string as typed by the user                            |
-| gql_field  | yes      | Field name in `IssueFilter`; validated against parsed schema    |
-| gql_type   | yes      | Expected GraphQL type name; validated against parsed schema     |
-| value_hint | yes      | Human-readable value placeholder for error messages             |
-| sql_col    | yes      | SQLite column in the `issues` table                             |
-| sql_op     | yes      | `LIKE` (substring) or `=` (exact after normalization)           |
-| sql_lower  | yes      | If true, wraps both sides in `LOWER()`                          |
+| Field      | Required | Description                                                  |
+| ---------- | -------- | ------------------------------------------------------------ |
+| key        | yes      | Stem key string as typed by the user                         |
+| gql_field  | yes      | Field name in `IssueFilter`; validated against parsed schema |
+| gql_type   | yes      | Expected GraphQL type name; validated against parsed schema  |
+| value_hint | yes      | Human-readable value placeholder for error messages          |
+| sql_col    | yes      | SQLite column in the `issues` table                          |
+| sql_op     | yes      | `LIKE` (substring) or `=` (exact after normalization)        |
+| sql_lower  | yes      | If true, wraps both sides in `LOWER()`                       |
 
 ---
 

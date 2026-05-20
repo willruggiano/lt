@@ -19,7 +19,7 @@ Linear's GraphQL schema, so filter keys stay in sync with the API automatically.
 - **Local-first**: GraphQL polling + SQLite cache. Instant reads, optimistic writes, offline queue.
 - **Structured search**: `assignee:me priority:urgent sort:updated-` and
   free-text, parsed by a [Chumsky]-based parser generated from Linear's
-  [canonical GraphQL schema](./docs/reference/linear-schema-definition.graphql) at `cargo build` time.
+  [canonical GraphQL schema](./build/linear-schema-definition.graphql) at `cargo build` time.
 - **Vim-style keybindings**
 - **Built with Rust** - [ratatui], [rusqlite], [ureq].
 
@@ -93,9 +93,8 @@ cache), writes are optimistic, and remote changes arrive on the next poll cycle.
 
 ## Reference
 
-- [./docs/reference/linear-schema-definition.graphql]
 - <https://linear.app/developers/graphql>
-- [wzhudev/reverse-linear-sync-engine]
+- <https://studio.apollographql.com/public/Linear-API/variant/current/home>
 
 [Chumsky]: https://github.com/zesterer/chumsky
 [Linear]: https://linear.app

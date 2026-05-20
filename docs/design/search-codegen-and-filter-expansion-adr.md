@@ -42,14 +42,14 @@ These TOML fields create a false impression that they drive behavior.
 
 ### Options Considered
 
-| Option | Readability | Schema validation | Build caching | Compile cost | Error quality | Handles complex fn |
-|---|---|---|---|---|---|---|
-| `push_str` (current) | Poor | Yes | Good | Minimal | OK | Yes |
-| `quote` + `prettyplease` | Good | Yes | Good | Low (+3 deps) | Better | Yes |
-| Proc macro (separate crate) | Good | Awkward | None | Medium | Worse | Yes |
-| `macro_rules!` | Poor | No | N/A | None | N/A | No |
-| `codegen` crate (builder API) | OK | Yes | Good | Low | OK | No |
-| Template engine (askama/tera) | OK | Yes | Good | Low | Worse | Awkward |
+| Option                        | Readability | Schema validation | Build caching | Compile cost  | Error quality | Handles complex fn |
+| ----------------------------- | ----------- | ----------------- | ------------- | ------------- | ------------- | ------------------ |
+| `push_str` (current)          | Poor        | Yes               | Good          | Minimal       | OK            | Yes                |
+| `quote` + `prettyplease`      | Good        | Yes               | Good          | Low (+3 deps) | Better        | Yes                |
+| Proc macro (separate crate)   | Good        | Awkward           | None          | Medium        | Worse         | Yes                |
+| `macro_rules!`                | Poor        | No                | N/A           | None          | N/A           | No                 |
+| `codegen` crate (builder API) | OK          | Yes               | Good          | Low           | OK            | No                 |
+| Template engine (askama/tera) | OK          | Yes               | Good          | Low           | Worse         | Awkward            |
 
 ### Analysis
 
@@ -288,13 +288,13 @@ reference.
 
 ### Current Allowlist
 
-| Key | gql_field | gql_type |
-|---|---|---|
-| `assignee` | `assignee` | `NullableUserFilter` |
-| `priority` | `priority` | `NullableNumberComparator` |
-| `state` | `state` | `WorkflowStateFilter` |
-| `team` | `team` | `TeamFilter` |
-| `label` | `labels` | `IssueLabelCollectionFilter` |
+| Key        | gql_field  | gql_type                     |
+| ---------- | ---------- | ---------------------------- |
+| `assignee` | `assignee` | `NullableUserFilter`         |
+| `priority` | `priority` | `NullableNumberComparator`   |
+| `state`    | `state`    | `WorkflowStateFilter`        |
+| `team`     | `team`     | `TeamFilter`                 |
+| `label`    | `labels`   | `IssueLabelCollectionFilter` |
 
 Plus hard-coded `sort`.
 
@@ -309,25 +309,25 @@ These are simple entity filters with the same `key:value` pattern as existing
 stems. They map to columns likely already present in the local SQLite database
 (or easily added during sync).
 
-| Key | gql_field | gql_type | Rationale |
-|---|---|---|---|
+| Key       | gql_field | gql_type                | Rationale                   |
+| --------- | --------- | ----------------------- | --------------------------- |
 | `project` | `project` | `NullableProjectFilter` | Very common workflow filter |
-| `cycle` | `cycle` | `NullableCycleFilter` | Filter by sprint/cycle |
-| `creator` | `creator` | `NullableUserFilter` | "Who filed this?" |
+| `cycle`   | `cycle`   | `NullableCycleFilter`   | Filter by sprint/cycle      |
+| `creator` | `creator` | `NullableUserFilter`    | "Who filed this?"           |
 
 #### Tier 2 -- Useful for power users
 
 These are relationally useful but may require schema changes to the local
 SQLite tables or more complex SQL.
 
-| Key | gql_field | gql_type | Rationale |
-|---|---|---|---|
-| `milestone` | `projectMilestone` | `NullableProjectMilestoneFilter` | Filter by project milestone |
-| `parent` | `parent` | `NullableIssueFilter` | Find sub-issues of a parent |
-| `blocked` | `hasBlockedByRelations` | `RelationExistsComparator` | Find blocked issues |
-| `blocking` | `hasBlockingRelations` | `RelationExistsComparator` | Find issues blocking others |
-| `sla` | `slaStatus` | `SlaStatusComparator` | Find SLA-breached issues |
-| `subscriber` | `subscribers` | `UserCollectionFilter` | "Am I watching this?" |
+| Key          | gql_field               | gql_type                         | Rationale                   |
+| ------------ | ----------------------- | -------------------------------- | --------------------------- |
+| `milestone`  | `projectMilestone`      | `NullableProjectMilestoneFilter` | Filter by project milestone |
+| `parent`     | `parent`                | `NullableIssueFilter`            | Find sub-issues of a parent |
+| `blocked`    | `hasBlockedByRelations` | `RelationExistsComparator`       | Find blocked issues         |
+| `blocking`   | `hasBlockingRelations`  | `RelationExistsComparator`       | Find issues blocking others |
+| `sla`        | `slaStatus`             | `SlaStatusComparator`            | Find SLA-breached issues    |
+| `subscriber` | `subscribers`           | `UserCollectionFilter`           | "Am I watching this?"       |
 
 #### Tier 3 -- Date/number comparators (requires parser extension)
 
@@ -335,22 +335,22 @@ These fields use date or number comparators. The current parser only supports
 `key:value` (string equality/LIKE). Supporting these would require extending
 the grammar to handle operators like `due:>2024-01-01` or `estimate:>=3`.
 
-| Key | gql_field | gql_type | Rationale |
-|---|---|---|---|
-| `due` | `dueDate` | `NullableTimelessDateComparator` | Find overdue/upcoming issues |
-| `estimate` | `estimate` | `EstimateComparator` | Filter by story points |
-| `created` | `createdAt` | `DateComparator` | Date range filtering |
-| `updated` | `updatedAt` | `DateComparator` | Recently touched issues |
-| `completed` | `completedAt` | `NullableDateComparator` | Completion date filtering |
+| Key         | gql_field     | gql_type                         | Rationale                    |
+| ----------- | ------------- | -------------------------------- | ---------------------------- |
+| `due`       | `dueDate`     | `NullableTimelessDateComparator` | Find overdue/upcoming issues |
+| `estimate`  | `estimate`    | `EstimateComparator`             | Filter by story points       |
+| `created`   | `createdAt`   | `DateComparator`                 | Date range filtering         |
+| `updated`   | `updatedAt`   | `DateComparator`                 | Recently touched issues      |
+| `completed` | `completedAt` | `NullableDateComparator`         | Completion date filtering    |
 
 #### Tier 3 -- Niche
 
-| Key | gql_field | gql_type | Rationale |
-|---|---|---|---|
-| `archived` | `archivedAt` | `NullableDateComparator` | Find archived issues |
-| `description` | `description` | `NullableStringComparator` | Text search on body |
-| `number` | `number` | `NumberComparator` | Filter by issue number |
-| `delegate` | `delegate` | `NullableUserFilter` | AI agent assignments |
+| Key           | gql_field     | gql_type                   | Rationale              |
+| ------------- | ------------- | -------------------------- | ---------------------- |
+| `archived`    | `archivedAt`  | `NullableDateComparator`   | Find archived issues   |
+| `description` | `description` | `NullableStringComparator` | Text search on body    |
+| `number`      | `number`      | `NumberComparator`         | Filter by issue number |
+| `delegate`    | `delegate`    | `NullableUserFilter`       | AI agent assignments   |
 
 ### Dependencies
 
@@ -435,14 +435,14 @@ enum CompletionContext {
 
 ### Key Files
 
-| File | Role |
-|---|---|
-| `build.rs` | Validate TOML against schema, generate search_stems.rs |
-| `build/search_filter_fields.toml` | Allowlist of exposed filter stems |
-| `src/tui/search_query.rs` | Parsing, AST, ParsedQuery, Completer, run_query |
-| `src/tui/mod.rs` | SearchOverlay, Tab key handler, debounce |
-| `src/tui/ui.rs` | Ghost text rendering |
-| `docs/reference/linear-schema-definition.graphql` | Schema for build-time validation |
+| File                                     | Role                                                   |
+| ---------------------------------------- | ------------------------------------------------------ |
+| `build.rs`                               | Validate TOML against schema, generate search_stems.rs |
+| `build/search_filter_fields.toml`        | Allowlist of exposed filter stems                      |
+| `src/tui/search_query.rs`                | Parsing, AST, ParsedQuery, Completer, run_query        |
+| `src/tui/mod.rs`                         | SearchOverlay, Tab key handler, debounce               |
+| `src/tui/ui.rs`                          | Ghost text rendering                                   |
+| `build/linear-schema-definition.graphql` | Schema for build-time validation                       |
 
 ### Phase 2 Stubs (Not Yet Implemented)
 

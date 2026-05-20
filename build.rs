@@ -630,14 +630,10 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
     let manifest = Path::new(&manifest_dir);
+    let schema_path = manifest.join("build/linear-schema-definition.graphql");
 
     // Tell cargo to re-run this script when these files change.
-    println!(
-        "cargo:rerun-if-changed={}",
-        manifest
-            .join("docs/reference/linear-schema-definition.graphql")
-            .display()
-    );
+    println!("cargo:rerun-if-changed={}", schema_path.display());
     println!(
         "cargo:rerun-if-changed={}",
         manifest.join("build/search_filter_fields.toml").display()
@@ -660,7 +656,6 @@ fn main() {
     // -----------------------------------------------------------------------
     // Load and parse the GraphQL schema
     // -----------------------------------------------------------------------
-    let schema_path = manifest.join("docs/reference/linear-schema-definition.graphql");
     let schema_src = fs::read_to_string(&schema_path).unwrap_or_else(|e| {
         panic!(
             "Cannot read GraphQL schema at {}: {e}",
