@@ -12,13 +12,16 @@ pub fn graphql_query<T: DeserializeOwned>(token: &str, query: &str, variables: V
         "variables": variables,
     });
 
-    let response = ureq::post(GRAPHQL_URL)
-        .set("Authorization", &format!("Bearer {}", token))
-        .set("Content-Type", "application/json")
+    let mut response = ureq::post(GRAPHQL_URL)
+        .header("Authorization", &format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
         .send_json(&body)
         .context("querying Linear GraphQL API")?;
 
-    let parsed: GraphqlResponse<T> = response.into_json().context("parsing GraphQL response")?;
+    let parsed: GraphqlResponse<T> = response
+        .body_mut()
+        .read_json()
+        .context("parsing GraphQL response")?;
 
     if let Some(errors) = parsed.errors {
         let msgs: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();

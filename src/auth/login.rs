@@ -142,9 +142,9 @@ fn generate_pkce() -> (String, String) {
 
 /// Generate `n` random bytes, base64url-encoded (no padding).
 fn random_base64(n: usize) -> String {
-    use rand::RngCore as _;
+    use rand::Rng as _;
     let mut bytes = vec![0u8; n];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(&bytes)
 }
 
@@ -272,7 +272,7 @@ fn exchange_code(
     redirect_uri: &str,
     code_verifier: &str,
 ) -> Result<AuthToken> {
-    let params: &[(&str, &str)] = &[
+    let params = [
         ("grant_type", "authorization_code"),
         ("client_id", client_id),
         ("client_secret", client_secret),
@@ -281,13 +281,26 @@ fn exchange_code(
         ("code_verifier", code_verifier),
     ];
 
-    match ureq::post(TOKEN_URL).send_form(params) {
-        Ok(resp) => Ok(resp
-            .into_json::<AuthToken>()
-            .context("parsing token response")?),
-        Err(ureq::Error::Status(code, resp)) => {
-            let body = resp.into_string().unwrap_or_default();
-            Err(anyhow!("token exchange failed (HTTP {}): {}", code, body))
+    let result = ureq::post(TOKEN_URL)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send_form(params);
+
+    match result {
+        Ok(mut resp) => {
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.body_mut().read_to_string().unwrap_or_default();
+                return Err(anyhow!(
+                    "token exchange failed (HTTP {}): {}",
+                    status.as_u16(),
+                    body
+                ));
+            }
+            resp.body_mut()
+                .read_json::<AuthToken>()
+                .context("parsing token response")
         }
         Err(e) => Err(anyhow::Error::from(e)),
     }

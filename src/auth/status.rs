@@ -42,14 +42,16 @@ pub fn run() -> Result<()> {
         "query": "{ viewer { id name email organization { name urlKey } } }"
     });
 
-    let response = ureq::post("https://api.linear.app/graphql")
-        .set("Authorization", &format!("Bearer {}", token.access_token))
-        .set("Content-Type", "application/json")
+    let mut response = ureq::post("https://api.linear.app/graphql")
+        .header("Authorization", &format!("Bearer {}", token.access_token))
+        .header("Content-Type", "application/json")
         .send_json(&body)
         .context("querying Linear API")?;
 
-    let parsed: GraphqlResponse<ViewerData> =
-        response.into_json().context("parsing API response")?;
+    let parsed: GraphqlResponse<ViewerData> = response
+        .body_mut()
+        .read_json()
+        .context("parsing API response")?;
 
     if let Some(errors) = parsed.errors {
         let msgs: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
