@@ -388,7 +388,7 @@ fn render_detail_overlay(frame: &mut Frame, area: Rect, app: &App) {
 // -- Detail pane (bd-2g8) ----------------------------------------------------
 
 fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::LEFT).title(" Detail ");
+    let block = Block::default().borders(Borders::LEFT);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
