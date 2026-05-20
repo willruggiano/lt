@@ -30,12 +30,6 @@
       };
     };
 
-    apps.claude-code = {
-      type = "app";
-      program = pkgs.lib.getExe config.packages.claude-code;
-      meta.description = config.packages.claude-code.name;
-    };
-
     packages = {
       claude-code = let
         drv = config.jail.programs.claude.build.wrapped;
