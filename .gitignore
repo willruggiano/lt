@@ -3,9 +3,4 @@
 .jj/
 .envrc
 result/
-target/
-
-
-# Added by cargo
-
 /target
