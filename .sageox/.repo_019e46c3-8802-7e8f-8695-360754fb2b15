@@ -1,0 +1,36 @@
+{
+  "repo_id": "repo_019e46c3-8802-7e8f-8695-360754fb2b15",
+  "type": "git",
+  "init_at": "2026-05-20T19:01:20Z",
+  "init_by_email": "mix.spend.dough@usecloaked.com",
+  "init_by_name": "Will Ruggiano",
+  "repo_salt": "05fa18e058835366aae92f342b6a801acb9c4614",
+  "endpoint": "https://sageox.ai",
+  "fingerprint": {
+    "first_commit": "05fa18e058835366aae92f342b6a801acb9c4614",
+    "monthly_checkpoints": {
+      "2026-02": "05fa18e058835366aae92f342b6a801acb9c4614",
+      "2026-03": "2d1bcb831d22a003793f358543b2d1652a79cf3f",
+      "2026-05": "93bf5872d763223be42f422533ca33e67c4c7c0d"
+    },
+    "ancestry_samples": [
+      "05fa18e058835366aae92f342b6a801acb9c4614",
+      "fdc3d961317902ccbbc6a1bee55a0824e7d7da1f",
+      "018c438abe21ff21db0de2e6c51bcdb9f41d8da6",
+      "dd8ab9ccbce2065c0e4647a61ed2d89005b91cec",
+      "4dcd8cd3bf5382192f122ec8b721be57c5ae0d1e",
+      "b7060622c0603c94bb45b93359b1bc3945a1f02e",
+      "9b7901db931be0ac11d9a59e1e989c849f943ef1",
+      "b0dddae4b07a20adcfcfb93bb0c78e4b63f2a7dc"
+    ],
+    "remote_hashes": [
+      "sha256:3a276ea6a00ca06a589f91747ba2597b9ff3d838f68318bdd0f38baf570c0816"
+    ]
+  },
+  "team_urls": {
+    "willruggiano": "https://git.sageox.ai/sageox-team_za3wzci09d/team-context.git"
+  },
+  "urls_cached_at": "2026-05-20T20:46:57Z",
+  "version": "0.8.1",
+  "updated_at": "2026-05-20T20:46:57Z"
+}

@@ -151,12 +151,29 @@
         "type": "github"
       }
     },
+    "nixpkgs_3": {
+      "locked": {
+        "lastModified": 1778443072,
+        "narHash": "sha256-zi7/fsqM/kFdNuED//4WOCUtezGtKKqRNORjMvfwjnA=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "da5ad661ba4e5ef59ba743f0d112cbc30e474f32",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "jail": "jail",
         "llm-agents": "llm-agents",
         "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
+        "rust-overlay": "rust-overlay",
+        "sageox": "sageox"
       }
     },
     "rust-overlay": {
@@ -174,6 +191,24 @@
       "original": {
         "owner": "oxalica",
         "repo": "rust-overlay",
+        "type": "github"
+      }
+    },
+    "sageox": {
+      "inputs": {
+        "nixpkgs": "nixpkgs_3"
+      },
+      "locked": {
+        "lastModified": 1779303444,
+        "narHash": "sha256-zqNK8ItxhfBOAGWLaQ6t41XqbL8Ap86FrXfrkXPF3x4=",
+        "owner": "willruggiano",
+        "repo": "ox",
+        "rev": "f3b0a45f9bda5e145681d48b1fe19e5e5503f597",
+        "type": "github"
+      },
+      "original": {
+        "owner": "willruggiano",
+        "repo": "ox",
         "type": "github"
       }
     },

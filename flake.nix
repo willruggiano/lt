@@ -7,6 +7,7 @@
     };
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixpkgs-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
+    sageox.url = "github:willruggiano/ox";
   };
 
   outputs = {
@@ -23,6 +24,9 @@
         overlays = [
           inputs.rust-overlay.overlays.default
           self.overlays.dev
+          (final: prev: {
+            ox = inputs.sageox.packages.${system}.default;
+          })
         ];
       });
   in {
@@ -36,6 +40,7 @@
           cargo-nextest
           ccusage
           claude-code-wrapped
+          ox
           python3
           ruff
           ty
@@ -93,8 +98,9 @@
             (try-fwd-env "ANTHROPIC_API_KEY")
             (try-fwd-env "GEMINI_API_KEY")
             (try-fwd-env "OPENAI_API_KEY")
-            # application state
-            (readonly (noescape "~/.local/state/lt"))
+            # sageox
+            (readonly (noescape "~/.config/sageox"))
+            (readwrite (noescape "~/.local/share/sageox"))
             # toolchain
             (add-pkg-deps (
               with pkgs;
@@ -162,6 +168,7 @@
           jq
           jujutsu
           less
+          ox
           patch
           python3
           python3.pkgs.ddgs # web search tool
