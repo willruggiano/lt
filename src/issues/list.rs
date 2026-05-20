@@ -77,7 +77,8 @@ pub struct Project {
 pub struct Cycle {
     #[allow(unused)]
     pub id: String,
-    pub name: String,
+    // Nullable in Linear's schema -- unnamed cycles identify by number.
+    pub name: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]

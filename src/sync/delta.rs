@@ -63,7 +63,8 @@ struct Project {
 
 #[derive(Deserialize)]
 struct Cycle {
-    name: String,
+    // Nullable in Linear's schema -- unnamed cycles identify by number.
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -133,7 +134,7 @@ fn to_db_issue(src: &Issue) -> db::Issue {
         description: src.description.clone(),
         labels,
         project_name: src.project.as_ref().map(|p| p.name.clone()),
-        cycle_name: src.cycle.as_ref().map(|c| c.name.clone()),
+        cycle_name: src.cycle.as_ref().and_then(|c| c.name.clone()),
         creator_name: src.creator.as_ref().map(|u| u.name.clone()),
         parent_id: src.parent.as_ref().map(|p| p.id.clone()),
         parent_identifier: src.parent.as_ref().map(|p| p.identifier.clone()),

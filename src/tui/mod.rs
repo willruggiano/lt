@@ -1987,7 +1987,7 @@ fn revert_sqlite(orig: &crate::issues::list::Issue, _kind: &PopupKind) {
             .collect::<Vec<_>>()
             .join(","),
         project_name: orig.project.as_ref().map(|p| p.name.clone()),
-        cycle_name: orig.cycle.as_ref().map(|c| c.name.clone()),
+        cycle_name: orig.cycle.as_ref().and_then(|c| c.name.clone()),
         creator_name: orig.creator.as_ref().map(|u| u.name.clone()),
         parent_id: orig.parent.as_ref().map(|p| p.id.clone()),
         parent_identifier: orig.parent.as_ref().map(|p| p.identifier.clone()),
@@ -2039,7 +2039,7 @@ fn build_db_issue_optimistic(
             .collect::<Vec<_>>()
             .join(","),
         project_name: issue.project.as_ref().map(|p| p.name.clone()),
-        cycle_name: issue.cycle.as_ref().map(|c| c.name.clone()),
+        cycle_name: issue.cycle.as_ref().and_then(|c| c.name.clone()),
         creator_name: issue.creator.as_ref().map(|u| u.name.clone()),
         parent_id: issue.parent.as_ref().map(|p| p.id.clone()),
         parent_identifier: issue.parent.as_ref().map(|p| p.identifier.clone()),
@@ -2264,7 +2264,7 @@ fn db_issue_to_list_issue(src: crate::db::Issue) -> Issue {
         }),
         cycle: src.cycle_name.map(|n| crate::issues::list::Cycle {
             id: String::new(),
-            name: n,
+            name: Some(n),
         }),
         creator: src.creator_name.map(|n| crate::issues::list::User {
             id: String::new(),
