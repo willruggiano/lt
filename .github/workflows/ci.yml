@@ -28,3 +28,5 @@ jobs:
           extra_nix_config: |
             accept-flake-config = true
       - run: nix build .#lt
+      - run: nix develop .#lt --command cargo check
+      - run: nix develop .#lt --command cargo test
