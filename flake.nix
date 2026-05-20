@@ -1,9 +1,5 @@
 {
   inputs = {
-    codex = {
-      url = "github:openai/codex/rust-v0.105.0";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     jail.url = "sourcehut:~alexdavid/jail.nix";
     llm-agents = {
       url = "github:numtide/llm-agents.nix";
@@ -37,14 +33,9 @@
         name = "lt";
         inputsFrom = [self.packages.${system}.lt];
         packages = with pkgs; [
-          beads-primer
-          beads-rust
           cargo-nextest
           ccusage
-          ccusage-pi
           claude-code-wrapped
-          opencode-wrapped
-          pi-wrapped
           python3
           ruff
           ty
@@ -61,25 +52,15 @@
       dev = final: prev: let
         inherit (prev.stdenv.hostPlatform) system;
       in {
-        inherit (inputs.codex.packages.${system}) codex-rs;
         inherit
           (inputs.llm-agents.packages.${system})
-          beads-rust
           claude-code
           ccusage
-          ccusage-codex
-          ccusage-pi
-          opencode
-          pi
           ;
         inherit
           (self.packages.${system})
           agent-tools
-          beads-docs
-          beads-primer
           claude-code-wrapped
-          opencode-wrapped
-          pi-wrapped
           jail
           ;
 
@@ -123,17 +104,8 @@
             ))
             (readwrite (noescape "~/.cargo"))
             (set-env "SHELL" "${lib.getExe pkgs.bash}")
-            (try-fwd-env "BR_OUTPUT_FORMAT")
           ];
       };
-
-      mkVcsConfig = agent: reply-to:
-        (pkgs.formats.toml {}).generate "jj-config.toml" {
-          user = {
-            email = reply-to;
-            name = agent.name;
-          };
-        };
     in {
       lt = let
         rustPlatform = pkgs.makeRustPlatform {
@@ -174,8 +146,6 @@
         name = "agent-tools";
         paths = with pkgs; [
           bash
-          beads-primer
-          beads-rust
           coreutils
           curl
           diffutils
@@ -183,6 +153,7 @@
           file
           findutils
           gawk
+          git
           gnugrep
           gnused
           gnutar
@@ -203,86 +174,18 @@
         ];
       };
 
-      beads-primer = pkgs.writeShellApplication {
-        name = "bp";
-        runtimeInputs = [pkgs.beads-rust];
-        text = ''
-          arg="''${1:---all}"
-          if [ "$arg" = "--help" ]; then
-              echo "prime the context window with current bead state"
-              echo "usage:"
-              echo "# prime the context for the *entire workspace*"
-              echo "bp"
-              echo "# prime the context for *a specific bead*"
-              echo "bp bd-xxx"
-          fi
-
-          echo "beads quickstart: $PWD/docs/agents/beads.md"
-          echo "all beads docs: ${pkgs.beads-docs}"
-          echo "(use your grep, ls, and/or read tools to read the docs)"
-          echo
-
-          br graph "$arg" 2>/dev/null
-          if [ "$arg" != "--all" ]; then
-            br ready -r --no-auto-flush --parent="$arg"
-          else
-            br ready --no-auto-flush
-          fi 2>/dev/null
-
-          printf "\n\n$ jj log -n10\n"
-          jj log -n10
-
-          printf "\n\n$ jj status\n"
-          jj status
-        '';
-      };
-
-      beads-docs = pkgs.runCommand "beads-docs" {} ''
-        cp -r ${pkgs.beads-rust.src}/docs $out
-      '';
-
       claude-code-wrapped = jail "claude" pkgs.claude-code (cs:
-        with cs; let
-          vcs-config = mkVcsConfig pkgs.claude-code "noreply@anthropic.com";
-        in [
-          (readonly vcs-config)
+        with cs; [
+          (add-pkg-deps [pkgs.sox])
           (readwrite (noescape "~/.claude"))
           (readwrite (noescape "~/.claude.json"))
-          (set-env "BD_ACTOR" pkgs.claude-code.name)
+          (set-env "CLAUDE_CODE_EFFORT_LEVEL" "max")
           (set-env "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" "1")
-          (set-env "JJ_CONFIG" "${vcs-config}")
-          ## readonly mount into the sandbox so claude can't hack around problems
-          ## (esp. in auto-approve mode) by modifying its own settings/tools :)
-          (defer (try-ro-bind (noescape ''"$PWD/.claude"'') (noescape ''"$PWD/.claude"'')))
-        ]);
-
-      opencode-wrapped = jail "opencode" pkgs.opencode (cs:
-        with cs; let
-          vcs-config = mkVcsConfig pkgs.opencode "noreply@opencode.ai";
-        in [
-          (readonly vcs-config)
-          (readwrite (noescape "~/.config/opencode"))
-          (readwrite (noescape "~/.cache/opencode"))
-          (readwrite (noescape "~/.local/share/opencode"))
-          (readwrite (noescape "~/.local/state/opencode"))
-          (set-env "BD_ACTOR" pkgs.opencode.name)
-          (set-env "JJ_CONFIG" "${vcs-config}")
-          ## readonly mount into the sandbox so opencode can't hack around problems
-          ## (esp. in auto-approve mode) by modifying its own settings/tools :)
-          (defer (try-ro-bind (noescape ''"$PWD/.opencode"'') (noescape ''"$PWD/.opencode"'')))
-        ]);
-
-      pi-wrapped = jail "pi" pkgs.pi (cs:
-        with cs; let
-          vcs-config = mkVcsConfig pkgs.pi "noreply@pi.dev";
-        in [
-          (readonly vcs-config)
-          (readwrite (noescape "~/.pi"))
-          (set-env "BD_ACTOR" pkgs.pi.name)
-          (set-env "JJ_CONFIG" "${vcs-config}")
-          ## readonly mount into the sandbox so pi can't hack around problems
-          ## (esp. in auto-approve mode) by modifying its own settings/tools :)
-          (defer (try-ro-bind (noescape ''"$PWD/.pi"'') (noescape ''"$PWD/.pi"'')))
+          (wrap-entry (entry: ''
+            # The program is already sandboxed. For this reason we opt to
+            # start in this mode to facilitate rapid iteration.
+            ${entry} --allow-dangerously-skip-permissions
+          ''))
         ]);
     });
   };
