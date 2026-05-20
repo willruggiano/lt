@@ -68,10 +68,7 @@
     ]
   },
   "permissions": {
-    "allow": [
-      "Bash",
-      "WebFetch"
-    ],
+    "allow": ["Bash", "WebFetch"],
     "ask": [],
     "deny": [
       "Edit(.claude/hooks/*)",

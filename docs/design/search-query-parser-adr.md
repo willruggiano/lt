@@ -7,19 +7,19 @@ Proposed
 ## Context
 
 The current `src/tui/search_query.rs` uses `str::split_whitespace` plus
-`split_once(':')` to detect stems and values. This works for the happy path
-but has several limitations:
+`split_once(':')` to detect stems and values. This works for the happy path but
+has several limitations:
 
-- No span information: the parser does not know *where* in the input string
-  each token lives, so cursor navigation cannot jump between token boundaries.
+- No span information: the parser does not know _where_ in the input string each
+  token lives, so cursor navigation cannot jump between token boundaries.
 - No error recovery model: partial input (e.g. `sort:`) silently falls through
   to FTS words; the behaviour is accidental rather than designed.
 - No completion hook: nothing exposes what token the cursor is currently inside.
 - Hard to extend: adding a new stem or a new value type requires editing
   multiple match arms scattered through the function.
 
-This document records the decisions for the next iteration of the parser and
-the tab-completion subsystem.
+This document records the decisions for the next iteration of the parser and the
+tab-completion subsystem.
 
 ---
 
@@ -28,8 +28,8 @@ the tab-completion subsystem.
 1. Parser / AST / Grammar with token spans.
 2. Token-aware cursor navigation (Tab jumps between token boundaries).
 3. Stem auto-complete (Tab cycles through known stem names at a partial stem).
-4. Stem-value auto-complete (follow-up, out-of-scope for the implementation
-   bead that follows this design).
+4. Stem-value auto-complete (follow-up, out-of-scope for the implementation bead
+   that follows this design).
 
 ---
 
@@ -37,34 +37,34 @@ the tab-completion subsystem.
 
 ### Options Considered
 
-| Option               | Pros                                    | Cons                                          |
-|----------------------|-----------------------------------------|-----------------------------------------------|
-| pest (PEG)           | Declarative grammar file, fast          | Extra build dep, grammar file not in .rs,     |
-|                      |                                         | error recovery requires custom handling       |
-| nom combinators      | Composable, in-tree, good span support  | Verbose for simple grammars, steep learning   |
-|                      |                                         | curve for contributors unfamiliar with nom    |
-| peg crate (macro)    | Compact grammar in a proc-macro         | Older API, less maintained, no span support   |
-|                      |                                         | out of the box                                |
-| Hand-rolled descent  | Zero new deps, trivial span tracking,   | More lines of code; grammar must be kept in   |
-|                      | full control over error recovery,       | sync with docs manually                       |
-|                      | easy to add incremental / partial rules |                                               |
+| Option              | Pros                                    | Cons                                        |
+| ------------------- | --------------------------------------- | ------------------------------------------- |
+| pest (PEG)          | Declarative grammar file, fast          | Extra build dep, grammar file not in .rs,   |
+|                     |                                         | error recovery requires custom handling     |
+| nom combinators     | Composable, in-tree, good span support  | Verbose for simple grammars, steep learning |
+|                     |                                         | curve for contributors unfamiliar with nom  |
+| peg crate (macro)   | Compact grammar in a proc-macro         | Older API, less maintained, no span support |
+|                     |                                         | out of the box                              |
+| Hand-rolled descent | Zero new deps, trivial span tracking,   | More lines of code; grammar must be kept in |
+|                     | full control over error recovery,       | sync with docs manually                     |
+|                     | easy to add incremental / partial rules |                                             |
 
 ### Decision
 
-Use a **hand-rolled recursive descent parser** with explicit byte-span
-tracking. The query grammar is deliberately simple (tokens separated by ASCII
-whitespace; each token is either `key:value` or a bare word). A PEG or nom
-parser would add complexity without a proportional benefit for this grammar
-size. The span tracking cost is just carrying an offset counter, which is
-trivial in a hand-rolled approach.
+Use a **hand-rolled recursive descent parser** with explicit byte-span tracking.
+The query grammar is deliberately simple (tokens separated by ASCII whitespace;
+each token is either `key:value` or a bare word). A PEG or nom parser would add
+complexity without a proportional benefit for this grammar size. The span
+tracking cost is just carrying an offset counter, which is trivial in a
+hand-rolled approach.
 
 ---
 
 ## Decision 2: AST Design
 
 The AST represents one fully-parsed query. It is designed to be
-always-constructible from any input string, including partial / malformed
-input (error recovery via the `Unknown` token variant).
+always-constructible from any input string, including partial / malformed input
+(error recovery via the `Unknown` token variant).
 
 ### Span
 
@@ -151,9 +151,9 @@ pub struct QueryAst {
 
 ### Derived ParsedQuery
 
-The existing `ParsedQuery` struct and `run_query` function are kept unchanged.
-A `From<&QueryAst> for ParsedQuery` impl derives the SQL-ready form from the
-AST, replacing the current `parse_query` free function.
+The existing `ParsedQuery` struct and `run_query` function are kept unchanged. A
+`From<&QueryAst> for ParsedQuery` impl derives the SQL-ready form from the AST,
+replacing the current `parse_query` free function.
 
 ---
 
@@ -189,14 +189,14 @@ fn parse_query_ast(raw: &str) -> QueryAst {
 ```
 
 `classify_token` checks whether the slice contains `:`:
+
 - If yes, split at the first `:`. Check if key is a known `StemKey`.
-  - If the key is known and the value is a valid value for that stem:
-    produce `Token::Stem`.
-  - If the key is known but the value is empty or not yet valid:
-    produce `Token::PartialStem { known_key: Some(...) }`.
-  - If the key is unrecognised:
-    produce `Token::PartialStem { known_key: None }` (falls through to FTS in
-    the derived `ParsedQuery`).
+  - If the key is known and the value is a valid value for that stem: produce
+    `Token::Stem`.
+  - If the key is known but the value is empty or not yet valid: produce
+    `Token::PartialStem { known_key: Some(...) }`.
+  - If the key is unrecognised: produce `Token::PartialStem { known_key: None }`
+    (falls through to FTS in the derived `ParsedQuery`).
 - If no `:`, produce `Token::Word`.
 
 ### Invariants
@@ -253,8 +253,8 @@ candidates are filtered to those that start with the typed prefix
 
 ### Stem Value Candidates (Phase 2)
 
-- `sort:` -> static: `updated-  updated+  created-  created+  priority-
-  priority+  title-  title+  assignee-  assignee+  state-  state+  team-  team+`
+- `sort:` -> static:
+  `updated-  updated+  created-  created+  priority- priority+  title-  title+  assignee-  assignee+  state-  state+  team-  team+`
 - `priority:` -> static: `urgent  high  normal  low  none`
 - `state:`, `assignee:`, `team:` -> async DB query, results cached.
 
@@ -289,6 +289,7 @@ Shift-Tab reverses the direction for both cycling and boundary jumping.
 ### Inline Insertion
 
 When Tab completes a stem key, the text replacement is:
+
 1. Remove characters from `key_span.start` to the cursor (the partial key).
 2. Insert the full candidate string (e.g. `priority:`).
 3. Move cursor to just after the inserted colon.
@@ -305,6 +306,7 @@ candidate in a dimmed style after the cursor. Pressing Tab accepts or cycles.
 **Popup list**: a small floating box below the search bar lists all candidates.
 
 Decision: use **inline suffix hint** for the initial implementation because:
+
 - The ratatui rendering in `ui.rs` already produces custom span sequences for
   the cursor (see `append_text_input_spans`). Adding a dim suffix span is a
   one-line change.
@@ -312,8 +314,8 @@ Decision: use **inline suffix hint** for the initial implementation because:
 - The candidate list for stem keys is short (5 items); cycling is fast.
 - A popup can be added later without changing the `Completer` API.
 
-The inline hint is produced by `Completer::hint_suffix() -> Option<&str>`,
-which returns the untyped suffix of `candidates[selected]` relative to the
+The inline hint is produced by `Completer::hint_suffix() -> Option<&str>`, which
+returns the untyped suffix of `candidates[selected]` relative to the
 already-typed prefix.
 
 ---
@@ -337,9 +339,9 @@ pub struct SearchOverlay {
 `SearchOverlay::on_key` handles Tab / Shift-Tab by calling
 `Completer::apply_tab(&mut self, input: &mut TextInput, forward: bool)`.
 
-`SearchOverlay::run_search` is called after every keystroke (already
-debounced). It re-parses the AST, calls `Completer::update`, and then derives
-`ParsedQuery` from the AST for the SQL query.
+`SearchOverlay::run_search` is called after every keystroke (already debounced).
+It re-parses the AST, calls `Completer::update`, and then derives `ParsedQuery`
+from the AST for the SQL query.
 
 ---
 
@@ -386,20 +388,20 @@ Completer::apply_tab(&mut input, forward)
 
 ### Retrofitting spans onto the existing split-based parser
 
-`str::split_whitespace` does not expose byte offsets. `str::match_indices`
-could be used but produces messier code than a dedicated parser with an explicit
-`pos` counter.
+`str::split_whitespace` does not expose byte offsets. `str::match_indices` could
+be used but produces messier code than a dedicated parser with an explicit `pos`
+counter.
 
 ### Using `nom`
 
-nom is well-suited for binary protocols and more complex grammars. For a
-grammar this small, the combinator overhead (type gymnastics, `IResult`,
-lifetime parameters) is not justified.
+nom is well-suited for binary protocols and more complex grammars. For a grammar
+this small, the combinator overhead (type gymnastics, `IResult`, lifetime
+parameters) is not justified.
 
 ### Storing completion state in `App`
 
-`App` already has many responsibilities. `SearchOverlay` is the natural owner
-of all search-related state, including completion.
+`App` already has many responsibilities. `SearchOverlay` is the natural owner of
+all search-related state, including completion.
 
 ---
 
@@ -420,9 +422,9 @@ of all search-related state, including completion.
 4. **Ctrl+Right / Ctrl+Left conflict**: These keys are currently used for
    word-level navigation inside `TextInput`. Token boundaries may differ from
    word boundaries (e.g. inside `sort:updated-`, the colon is not a word
-   boundary but is a token-internal boundary). Resolution: keep
-   Ctrl+Right/Left as word-level navigation; use Tab/Shift-Tab exclusively for
-   token-level jumping and stem completion.
+   boundary but is a token-internal boundary). Resolution: keep Ctrl+Right/Left
+   as word-level navigation; use Tab/Shift-Tab exclusively for token-level
+   jumping and stem completion.
 
 ---
 

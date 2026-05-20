@@ -1,7 +1,8 @@
 # Nix - Agent Instructions
 
-This project uses **Nix flakes** to manage the development environment.
-All tools (compiler, linters, etc.) are provided by Nix - do not install packages with system package managers (apt, brew, etc.).
+This project uses **Nix flakes** to manage the development environment. All
+tools (compiler, linters, etc.) are provided by Nix - do not install packages
+with system package managers (apt, brew, etc.).
 
 ## DO NOT CHANGE NIX FILES
 

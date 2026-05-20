@@ -27,6 +27,7 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
           extra_nix_config: |
             accept-flake-config = true
+      - run: nix flake check
       - run: nix build .#lt
       - run: nix develop .#lt --command cargo check
       - run: nix develop .#lt --command cargo test

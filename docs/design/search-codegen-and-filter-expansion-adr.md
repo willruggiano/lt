@@ -7,9 +7,9 @@ Proposed
 ## Context
 
 `build.rs` generates `search_stems.rs` from a TOML allowlist
-(`build/search_filter_fields.toml`) validated against the Linear GraphQL
-schema. The generated file is consumed via `include!` in
-`src/tui/search_query.rs` and provides:
+(`build/search_filter_fields.toml`) validated against the Linear GraphQL schema.
+The generated file is consumed via `include!` in `src/tui/search_query.rs` and
+provides:
 
 - `StemKey` enum (one variant per TOML field plus hard-coded `Sort`)
 - `StemKind` enum (`Sort` with struct fields; others carry `{ value: String }`)
@@ -22,17 +22,17 @@ Two problems motivate this ADR:
    raw `push_str` / `format!` string concatenation to emit Rust source. Every
    `{` and `}` in the generated code must be escaped as `{{` / `}}`. The
    `gen_parser_fn` function alone is ~250 lines of interleaved string fragments
-   and format arguments. The result is difficult to read, review, or modify
-   with confidence.
+   and format arguments. The result is difficult to read, review, or modify with
+   confidence.
 
 2. **Only 5 of ~50 IssueFilter fields are exposed.** The current allowlist
    covers `assignee`, `priority`, `state`, `team`, and `label`. The Linear
    GraphQL schema offers many more fields that would be practically useful for
    search.
 
-Additionally, the TOML fields `sql_col`, `sql_op`, and `sql_lower` are
-annotated `#[allow(dead_code)]` in the build script's deserialization structs
-and are **never consumed by code generation**. The actual SQL query building in
+Additionally, the TOML fields `sql_col`, `sql_op`, and `sql_lower` are annotated
+`#[allow(dead_code)]` in the build script's deserialization structs and are
+**never consumed by code generation**. The actual SQL query building in
 `run_query()` (search_query.rs:332-478) is entirely hand-written per field.
 These TOML fields create a false impression that they drive behavior.
 
@@ -54,14 +54,13 @@ These TOML fields create a false impression that they drive behavior.
 ### Analysis
 
 **`quote` + `proc-macro2` + `prettyplease` in the existing build.rs** is the
-clear winner. This is the idiomatic Rust approach for structured code
-generation in build scripts.
+clear winner. This is the idiomatic Rust approach for structured code generation
+in build scripts.
 
-`quote` (by dtolnay) is the foundation of virtually every proc macro in the
-Rust ecosystem. It works perfectly fine outside of proc macros via
-`proc-macro2`. The `format_ident!` macro constructs identifiers from runtime
-strings. Repetition syntax (`#( #variants ),*`) replaces manual loops that
-append match arms.
+`quote` (by dtolnay) is the foundation of virtually every proc macro in the Rust
+ecosystem. It works perfectly fine outside of proc macros via `proc-macro2`. The
+`format_ident!` macro constructs identifiers from runtime strings. Repetition
+syntax (`#( #variants ),*`) replaces manual loops that append match arms.
 
 Example of what the transformation looks like:
 
@@ -104,9 +103,9 @@ The final output pipeline pipes all `TokenStream` fragments through
 `prettyplease` before writing, so `OUT_DIR/search_stems.rs` becomes
 human-readable for debugging.
 
-**Why not proc macros?** Despite Rust's reputation for proc macros, they are
-the wrong tool here. Proc macros transform Rust source tokens. Our input is
-TOML + GraphQL files. Specific issues:
+**Why not proc macros?** Despite Rust's reputation for proc macros, they are the
+wrong tool here. Proc macros transform Rust source tokens. Our input is TOML +
+GraphQL files. Specific issues:
 
 - Proc macros must live in a separate crate (`proc-macro = true`).
 - File I/O inside proc macros is problematic -- paths resolve relative to the
@@ -114,18 +113,18 @@ TOML + GraphQL files. Specific issues:
   `rerun-if-changed`.
 - Proc macro expansion re-runs on every compilation, unlike build.rs which
   respects `rerun-if-changed`.
-- Error messages for file I/O failures surface as proc macro panics with
-  limited span information.
+- Error messages for file I/O failures surface as proc macro panics with limited
+  span information.
 
 **Why not `macro_rules!`?** Declarative macros cannot read files, cannot do
 string transformations (e.g. snake_case to PascalCase), and cannot use captured
 fragments in match arm patterns (rust-lang/rust#64400). The complex parser
 function with Chumsky integration would be extremely difficult to express.
 
-**Why not a template engine?** No syntax checking of template content at
-compile time. The complex parser function would still be painful to template
-correctly. Mixing templates and string generation would be worse than using
-`quote!` consistently.
+**Why not a template engine?** No syntax checking of template content at compile
+time. The complex parser function would still be painful to template correctly.
+Mixing templates and string generation would be worse than using `quote!`
+consistently.
 
 ### New build dependencies
 
@@ -163,11 +162,11 @@ architecture; replace only the string concatenation technique.
 
 ### Problem
 
-The TOML allowlist contains `sql_col`, `sql_op`, `sql_lower`, and
-`value_hint` fields that are deserialized but never used by code generation.
-They are annotated `#[allow(dead_code)]` in build.rs. Meanwhile, the actual
-SQL construction in `run_query()` is hand-written with per-field logic (e.g.
-`team` matches against both `team_name` and `team_key` with an OR).
+The TOML allowlist contains `sql_col`, `sql_op`, `sql_lower`, and `value_hint`
+fields that are deserialized but never used by code generation. They are
+annotated `#[allow(dead_code)]` in build.rs. Meanwhile, the actual SQL
+construction in `run_query()` is hand-written with per-field logic (e.g. `team`
+matches against both `team_name` and `team_key` with an OR).
 
 ### Options
 
@@ -182,17 +181,17 @@ SQL construction in `run_query()` is hand-written with per-field logic (e.g.
 Option 2 is appealing in theory but breaks down for field-specific SQL logic.
 The `team` filter ORs across two columns. The `priority` filter requires
 `normalise_priority()`. The `assignee` filter has `resolve_me()` special
-handling. Encoding all of this in TOML metadata would require a mini-DSL that
-is harder to maintain than the hand-written Rust.
+handling. Encoding all of this in TOML metadata would require a mini-DSL that is
+harder to maintain than the hand-written Rust.
 
-Option 1 is the cleanest. If the fields are not driving behavior, they create
-a false contract. Developers reading the TOML expect `sql_col = "team_name"`
-to mean something, but changing it has no effect.
+Option 1 is the cleanest. If the fields are not driving behavior, they create a
+false contract. Developers reading the TOML expect `sql_col = "team_name"` to
+mean something, but changing it has no effect.
 
 ### Decision
 
-**Remove `sql_col`, `sql_op`, `sql_lower`, and `value_hint` from the TOML.**
-The allowlist should declare stem keys, their GraphQL mapping (for schema
+**Remove `sql_col`, `sql_op`, `sql_lower`, and `value_hint` from the TOML.** The
+allowlist should declare stem keys, their GraphQL mapping (for schema
 validation), and nothing else. Document the SQL mapping in comments in
 `run_query()` where it actually lives.
 
@@ -231,10 +230,9 @@ label:
   sql_lower = true             (TOML says "label_names", actual col is "labels")
 ```
 
-Three of five fields need capabilities the metadata cannot express:
-multi-column OR (team), value transforms (priority), special branches
-(assignee), COALESCE wrapping (assignee, team, label). Only `state` is a clean
-match.
+Three of five fields need capabilities the metadata cannot express: multi-column
+OR (team), value transforms (priority), special branches (assignee), COALESCE
+wrapping (assignee, team, label). Only `state` is a clean match.
 
 A richer TOML schema could support generated SQL. Sketch:
 
@@ -278,9 +276,8 @@ skip_if_transform_returns_none = true
 
 This becomes worthwhile at ~15+ filter stems where the hand-written approach
 gets repetitive. The `quote` rewrite (Decision 1) is a prerequisite since
-generating SQL-building Rust via `push_str` would be even worse than what
-exists today. Not in scope for this sprint -- captured here for future
-reference.
+generating SQL-building Rust via `push_str` would be even worse than what exists
+today. Not in scope for this sprint -- captured here for future reference.
 
 ---
 
@@ -317,8 +314,8 @@ stems. They map to columns likely already present in the local SQLite database
 
 #### Tier 2 -- Useful for power users
 
-These are relationally useful but may require schema changes to the local
-SQLite tables or more complex SQL.
+These are relationally useful but may require schema changes to the local SQLite
+tables or more complex SQL.
 
 | Key          | gql_field               | gql_type                         | Rationale                   |
 | ------------ | ----------------------- | -------------------------------- | --------------------------- |
@@ -332,8 +329,8 @@ SQLite tables or more complex SQL.
 #### Tier 3 -- Date/number comparators (requires parser extension)
 
 These fields use date or number comparators. The current parser only supports
-`key:value` (string equality/LIKE). Supporting these would require extending
-the grammar to handle operators like `due:>2024-01-01` or `estimate:>=3`.
+`key:value` (string equality/LIKE). Supporting these would require extending the
+grammar to handle operators like `due:>2024-01-01` or `estimate:>=3`.
 
 | Key         | gql_field     | gql_type                         | Rationale                    |
 | ----------- | ------------- | -------------------------------- | ---------------------------- |
@@ -364,16 +361,16 @@ Adding Tier 1 stems requires:
 
 Adding Tier 3 date/number stems requires:
 
-- Parser grammar extension (new `StemKind` variants carrying structured
-  values instead of raw strings).
+- Parser grammar extension (new `StemKind` variants carrying structured values
+  instead of raw strings).
 - Operator-aware SQL generation.
 - This is a separate body of work and should be its own ADR.
 
 ### Decision
 
-**Add Tier 1 fields (`project`, `cycle`, `creator`) in the same change as
-the codegen overhaul.** Defer Tier 2 and Tier 3 fields until the local
-database schema supports them or until operator syntax is designed.
+**Add Tier 1 fields (`project`, `cycle`, `creator`) in the same change as the
+codegen overhaul.** Defer Tier 2 and Tier 3 fields until the local database
+schema supports them or until operator syntax is designed.
 
 ---
 

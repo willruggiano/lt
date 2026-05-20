@@ -1,5 +1,7 @@
 <!-- ox:prime-check -->
-**BLOCKING**: Run `ox agent prime` NOW before ANY other action. Do NOT respond to the user first. Enables SageOx queries.
+
+**BLOCKING**: Run `ox agent prime` NOW before ANY other action. Do NOT respond
+to the user first. Enables SageOx queries.
 
 # lt - instructions for coding agents
 

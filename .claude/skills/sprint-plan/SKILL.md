@@ -1,6 +1,8 @@
 ---
 name: sprint-plan
-description: Sprint Plan - prime beads context then create an agent team to produce design documents for ready tasks in parallel
+description:
+  Sprint Plan - prime beads context then create an agent team to produce design
+  documents for ready tasks in parallel
 argument-hint: [model]
 user-invocable: true
 ---
@@ -18,11 +20,11 @@ documents for ready tasks in parallel.
 
 1.  Run `br ready --type=design` to load the current design tasks into context.
 
-2.  Parse the "Ready work" section to identify unblocked bead IDs.
-    Do **not** gather additional context -- proceed immediately.
+2.  Parse the "Ready work" section to identify unblocked bead IDs. Do **not**
+    gather additional context -- proceed immediately.
 
-3.  Claim all ready beads in the default workspace (before creating any
-    isolated workspaces):
+3.  Claim all ready beads in the default workspace (before creating any isolated
+    workspaces):
 
     ```bash
     br update <id1> --claim
@@ -31,8 +33,8 @@ documents for ready tasks in parallel.
     ```
 
     This records the in-progress state in the default workspace's working copy.
-    Sub-agents will inherit this state and must NOT run `br update` or `br close`
-    themselves -- the team lead owns all bead mutations.
+    Sub-agents will inherit this state and must NOT run `br update` or
+    `br close` themselves -- the team lead owns all bead mutations.
 
 4.  For each ready bead ID, create a jj workspace:
 
@@ -46,15 +48,14 @@ documents for ready tasks in parallel.
         incomplete state. Run `br show <id>` and explore to find where they left off.
         Avoid redundant re-work. If the state looks broken, report back.
 
-5.  Spawn a teammate using model **$0** (or opus if unspecified) per bead:
-    (set working directory to the isolated jj workspace)
+5.  Spawn a teammate using model **$0** (or opus if unspecified) per bead: (set
+    working directory to the isolated jj workspace)
 
     <prompt_template>
 
-    You are a design agent working on bead `<id>`.
-    Your isolated workspace is: /path/to/isolated/workspace
-    **You may not modify files outside of your isolated workspace.**
-    **Do not leave your workspace.**
+    You are a design agent working on bead `<id>`. Your isolated workspace is:
+    /path/to/isolated/workspace **You may not modify files outside of your
+    isolated workspace.** **Do not leave your workspace.**
 
     **Step 1 -- Load the task:**
 
@@ -62,13 +63,13 @@ documents for ready tasks in parallel.
     br show <id>
     ```
 
-    Read the output carefully. This is your complete specification.
-    Your bead is already claimed -- do NOT run `br update` or `br close`.
-    The team lead manages all bead state.
+    Read the output carefully. This is your complete specification. Your bead is
+    already claimed -- do NOT run `br update` or `br close`. The team lead
+    manages all bead state.
 
-    **Step 2 -- Produce a design document:**
-    Write at least one markdown design document to a sensible path such as
-    `docs/plans/<id>.md`. Create additional files only if the task requires it.
+    **Step 2 -- Produce a design document:** Write at least one markdown design
+    document to a sensible path such as `docs/plans/<id>.md`. Create additional
+    files only if the task requires it.
 
     **Step 3 -- Commit and signal completion:**
 
@@ -94,7 +95,8 @@ documents for ready tasks in parallel.
 
 6.  Run all sub-agents in parallel.
 
-7.  After all agents complete, merge their workspaces into the default workspace:
+7.  After all agents complete, merge their workspaces into the default
+    workspace:
 
     ```bash
     # List the heads, including up to two commits for each head.

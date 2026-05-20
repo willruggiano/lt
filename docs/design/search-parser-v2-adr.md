@@ -8,16 +8,16 @@ Proposed
 
 The existing search parser (`src/tui/search_query.rs`, designed in
 `search-query-parser-adr.md`) uses a hand-rolled byte scanner with five
-hard-coded stem keys: `sort`, `assignee`, `priority`, `state`, `team`. It
-serves the happy path well but has two limitations that motivate a second
-design iteration:
+hard-coded stem keys: `sort`, `assignee`, `priority`, `state`, `team`. It serves
+the happy path well but has two limitations that motivate a second design
+iteration:
 
 1. **Limited filter coverage.** The Linear `IssueFilter` GraphQL type exposes
    ~30 filterable fields. Expanding the stem key set by hand is a maintenance
    burden that drifts out of sync with the API over time.
 
-2. **No error feedback.** Misspelled keys (`priorty:high`) silently fall
-   through to FTS. Users get no indication that a stem was not recognized.
+2. **No error feedback.** Misspelled keys (`priorty:high`) silently fall through
+   to FTS. Users get no indication that a stem was not recognized.
 
 The goals of this iteration are:
 
@@ -58,11 +58,11 @@ complexity for this grammar size.
 
 ### Rationale
 
-`build.rs` reads `build/linear-schema-definition.graphql` at compile
-time, validates that every key in the allowlist corresponds to a real
-`IssueFilter` field, and generates the Rust source for the parser. If a field
-in the allowlist is removed from the upstream schema, the build fails loudly,
-preventing silent drift.
+`build.rs` reads `build/linear-schema-definition.graphql` at compile time,
+validates that every key in the allowlist corresponds to a real `IssueFilter`
+field, and generates the Rust source for the parser. If a field in the allowlist
+is removed from the upstream schema, the build fails loudly, preventing silent
+drift.
 
 ### Build Dependencies
 
@@ -71,8 +71,8 @@ preventing silent drift.
 graphql-parser = "0.4"   # lightweight pure-Rust GraphQL schema parser
 ```
 
-Code generation uses simple string templating (no `quote` / `proc-macro2`
-needed given the small output size).
+Code generation uses simple string templating (no `quote` / `proc-macro2` needed
+given the small output size).
 
 ### Generated Artifacts
 
@@ -132,8 +132,8 @@ All value semantics are hand-specified per allowlist entry.
 
 ## Decision 4: Allowlist Config Format
 
-The allowlist lives at `build/search_filter_fields.toml`. Each `[[field]]`
-entry specifies one generated stem key:
+The allowlist lives at `build/search_filter_fields.toml`. Each `[[field]]` entry
+specifies one generated stem key:
 
 ```toml
 [[field]]
@@ -182,8 +182,8 @@ sql_op     = "LIKE"
 sql_lower  = true
 ```
 
-The `sort:` stem is a UI concept with no `IssueFilter` backing. It is
-hard-coded in `build.rs` and is not represented in the TOML.
+The `sort:` stem is a UI concept with no `IssueFilter` backing. It is hard-coded
+in `build.rs` and is not represented in the TOML.
 
 ### Field Spec Semantics
 
@@ -216,9 +216,9 @@ user types:   assignee:
 parse error:  expected <name> after 'assignee:'
 ```
 
-Errors are stored on `QueryAst` (see Decision 6) and rendered in the TUI
-below the search bar. The result list continues to update on every keystroke
-because the parser always emits a best-effort AST regardless of errors.
+Errors are stored on `QueryAst` (see Decision 6) and rendered in the TUI below
+the search bar. The result list continues to update on every keystroke because
+the parser always emits a best-effort AST regardless of errors.
 
 ---
 
@@ -250,17 +250,17 @@ pub struct ParseError {
 }
 ```
 
-The `StemKey` and `StemKind` enums are **generated** by `build.rs` from the
-TOML allowlist instead of being hand-written. Their shape is otherwise
-identical to the previous design.
+The `StemKey` and `StemKind` enums are **generated** by `build.rs` from the TOML
+allowlist instead of being hand-written. Their shape is otherwise identical to
+the previous design.
 
 ---
 
 ## Decision 7: SQL Translation
 
 `ParsedQuery` and `run_query` are preserved. `From<&QueryAst> for ParsedQuery`
-is regenerated from the TOML config: each field entry emits one match arm.
-The `sort:` arm remains hand-written.
+is regenerated from the TOML config: each field entry emits one match arm. The
+`sort:` arm remains hand-written.
 
 Generated translation for a `LIKE` field looks like:
 
@@ -272,9 +272,9 @@ StemKind::Assignee { value } => {
 }
 ```
 
-The `priority` stem retains the existing `normalise_priority` mapping
-(user strings to DB labels) as a special case, since that mapping is semantic
-and cannot be derived from the schema.
+The `priority` stem retains the existing `normalise_priority` mapping (user
+strings to DB labels) as a special case, since that mapping is semantic and
+cannot be derived from the schema.
 
 ---
 
@@ -282,17 +282,17 @@ and cannot be derived from the schema.
 
 ### Fully auto-deriving everything from the schema (no allowlist)
 
-`IssueFilter` has ~30 fields, many of which are internal (`[Internal]`
-doc annotation), specialized (`slaStatus`, `sharedWith`), or have opaque
-nested types with no obvious single-column SQL translation. Auto-generating
-all of them would expose incomplete SQL support and confusing key names. The
-allowlist is the right control point for curation.
+`IssueFilter` has ~30 fields, many of which are internal (`[Internal]` doc
+annotation), specialized (`slaStatus`, `sharedWith`), or have opaque nested
+types with no obvious single-column SQL translation. Auto-generating all of them
+would expose incomplete SQL support and confusing key names. The allowlist is
+the right control point for curation.
 
 ### Keeping the hand-rolled scanner with more match arms
 
 This works but provides no error recovery or "did you mean?", which are the
-primary UX goals of this iteration. It also does not scale cleanly as the
-key count grows.
+primary UX goals of this iteration. It also does not scale cleanly as the key
+count grows.
 
 ### Pest with a generated grammar file
 
@@ -301,25 +301,25 @@ quality that `chumsky::error::Rich` provides out of the box.
 
 ### Embedding the allowlist as a Rust literal inside build.rs
 
-Reduces file count but makes the config harder to read and diff independently
-of the build script logic. A separate TOML file is preferred for clarity.
+Reduces file count but makes the config harder to read and diff independently of
+the build script logic. A separate TOML file is preferred for clarity.
 
 ---
 
 ## Open Questions
 
 1. **Error display location.** Where in the TUI does the parse error appear?
-   Options: a status line below the search bar; an inline annotation span
-   next to the offending token. TBD in implementation.
+   Options: a status line below the search bar; an inline annotation span next
+   to the offending token. TBD in implementation.
 
 2. **`sort:` stem maintenance.** The `sort:` stem is hard-coded in `build.rs`.
    If the set of sortable fields should also be config-driven in the future, a
    second `[[sort_field]]` config section would be needed.
 
-3. **Priority normalization.** The `priority` stem maps user strings
-   (`urgent`, `high`, ...) to DB labels (`Urgent`, `High`, ...). This mapping
-   is currently a hand-written function. It could be moved into the TOML config
-   as a `[field.value_map]` table if other stems need similar normalization.
+3. **Priority normalization.** The `priority` stem maps user strings (`urgent`,
+   `high`, ...) to DB labels (`Urgent`, `High`, ...). This mapping is currently
+   a hand-written function. It could be moved into the TOML config as a
+   `[field.value_map]` table if other stems need similar normalization.
 
 ---
 

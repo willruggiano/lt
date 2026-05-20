@@ -4,13 +4,12 @@
 
 The TUI header shows stale/default filters after confirming a search because
 filter state is fragmented across `IssueArgs`, `SearchOverlay.query`,
-`ParsedQuery`, and `last_search_query`. When Enter confirms a search, only
-the sort field transfers back to `app.args` -- other stems are silently
-dropped.
+`ParsedQuery`, and `last_search_query`. When Enter confirms a search, only the
+sort field transfers back to `app.args` -- other stems are silently dropped.
 
 The fix: store a `QueryAst` on App as the single source of truth. The header,
-search bar, sort shortcuts, and double-esc all read/write from this AST.
-The raw string shown to the user is just a rendered view of it.
+search bar, sort shortcuts, and double-esc all read/write from this AST. The raw
+string shown to the user is just a rendered view of it.
 
 ## Why QueryAst, not a raw string
 
@@ -19,18 +18,18 @@ The raw string shown to the user is just a rendered view of it.
 - `ParsedQuery` (used for SQL execution) is derived from it via
   `From<&QueryAst>` -- no re-parsing needed
 - The header can be rendered by iterating tokens -- no string parsing
-- The AST always carries its `.raw` string, so populating the search bar
-  on `/` is just `active_filter.raw.clone()`
+- The AST always carries its `.raw` string, so populating the search bar on `/`
+  is just `active_filter.raw.clone()`
 - Consistency is guaranteed: every `QueryAst` is produced by
   `parse_query_ast()`, so `.raw` and `.tokens` are always in sync
 
 ## Scope (3 files, ~70 lines added, ~50 removed)
 
-| File | Changes |
-|------|---------|
-| `src/tui/search_query.rs` | Add `args_to_ast()`, `render_filter_context()` |
-| `src/tui/mod.rs` | Add `active_filter`/`initial_filter` to App; update Enter, `/`, double-esc, cycle_sort, toggle_desc; remove `last_search_query` |
-| `src/tui/ui.rs` | Replace `filter_context(&app.args)` call; delete old `filter_context()` |
+| File                      | Changes                                                                                                                         |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `src/tui/search_query.rs` | Add `args_to_ast()`, `render_filter_context()`                                                                                  |
+| `src/tui/mod.rs`          | Add `active_filter`/`initial_filter` to App; update Enter, `/`, double-esc, cycle_sort, toggle_desc; remove `last_search_query` |
+| `src/tui/ui.rs`           | Replace `filter_context(&app.args)` call; delete old `filter_context()`                                                         |
 
 ---
 
@@ -38,9 +37,8 @@ The raw string shown to the user is just a rendered view of it.
 
 ### Step 1: Add `args_to_ast()` to `search_query.rs`
 
-Converts CLI `IssueArgs` into a `QueryAst` at startup. Goes through the
-string path so the AST is always structurally valid (produced by the Chumsky
-parser).
+Converts CLI `IssueArgs` into a `QueryAst` at startup. Goes through the string
+path so the AST is always structurally valid (produced by the Chumsky parser).
 
 ```rust
 pub fn args_to_ast(args: &IssueArgs) -> QueryAst {
@@ -57,8 +55,8 @@ pub fn args_to_ast(args: &IssueArgs) -> QueryAst {
 
 ### Step 2: Add `render_filter_context()` to `search_query.rs`
 
-Replaces `filter_context(&IssueArgs)` in `ui.rs`. Iterates AST tokens
-directly -- no parsing, no string splitting.
+Replaces `filter_context(&IssueArgs)` in `ui.rs`. Iterates AST tokens directly
+-- no parsing, no string splitting.
 
 ```rust
 pub fn render_filter_context(ast: &QueryAst) -> String {
@@ -96,19 +94,18 @@ pub active_filter: search_query::QueryAst,   // single source of truth
 pub initial_filter: search_query::QueryAst,   // for double-esc reset
 ```
 
-Remove `last_search_query: Option<String>` -- subsumed by
-`active_filter.raw`.
+Remove `last_search_query: Option<String>` -- subsumed by `active_filter.raw`.
 
 In `App::new()`: initialize both via `search_query::args_to_ast(&args)`.
 
 Keep `args: IssueArgs` and `initial_args: IssueArgs` -- still needed for
-`do_fetch()` (sort, limit, offset) and operational params. Sort/desc are
-kept in sync via `sync_args_from_filter()`.
+`do_fetch()` (sort, limit, offset) and operational params. Sort/desc are kept in
+sync via `sync_args_from_filter()`.
 
 ### Step 4: Add two helpers on App impl
 
-**`sync_args_from_filter()`** -- keeps `app.args.sort`/`desc` in sync with
-the AST (needed for table column sort marker and `do_fetch`):
+**`sync_args_from_filter()`** -- keeps `app.args.sort`/`desc` in sync with the
+AST (needed for table column sort marker and `do_fetch`):
 
 ```rust
 fn sync_args_from_filter(&mut self) {
@@ -120,9 +117,9 @@ fn sync_args_from_filter(&mut self) {
 }
 ```
 
-**`replace_sort_in_filter()`** -- produces a new QueryAst with the sort
-token replaced (for `cycle_sort`/`toggle_desc`). Reconstructs via string
-to keep AST consistent:
+**`replace_sort_in_filter()`** -- produces a new QueryAst with the sort token
+replaced (for `cycle_sort`/`toggle_desc`). Reconstructs via string to keep AST
+consistent:
 
 ```rust
 fn replace_sort_in_filter(&self) -> search_query::QueryAst {
@@ -213,13 +210,13 @@ fn toggle_desc(&mut self) {
 
 ## Key types reference
 
-| Type | File | Role |
-|------|------|------|
-| `QueryAst` | `search_query.rs:116` | Tokens + raw string + errors |
-| `Token::Stem { kind: StemKind }` | `search_query.rs:89` | Typed filter stem |
-| `StemKind` | generated `search_stems.rs` | Sort/Assignee/Team/State/... |
-| `ParsedQuery` | `search_query.rs:160` | SQL-ready flat struct, derived via `From<&QueryAst>` |
-| `IssueArgs` | `issues/mod.rs:48` | CLI args (clap), operational params |
+| Type                             | File                        | Role                                                 |
+| -------------------------------- | --------------------------- | ---------------------------------------------------- |
+| `QueryAst`                       | `search_query.rs:116`       | Tokens + raw string + errors                         |
+| `Token::Stem { kind: StemKind }` | `search_query.rs:89`        | Typed filter stem                                    |
+| `StemKind`                       | generated `search_stems.rs` | Sort/Assignee/Team/State/...                         |
+| `ParsedQuery`                    | `search_query.rs:160`       | SQL-ready flat struct, derived via `From<&QueryAst>` |
+| `IssueArgs`                      | `issues/mod.rs:48`          | CLI args (clap), operational params                  |
 
 ## Verification
 
@@ -229,8 +226,8 @@ fn toggle_desc(&mut self) {
    - Launch `lt tui` -- header shows `sort:updated-`
    - Launch `lt tui --team eng --assignee me` -- header shows
      `team:eng  assignee:me  sort:updated-`
-   - Press `/`, type `assignee:will team:eng state:todo`, press Enter --
-     header shows `team:eng  assignee:will  state:todo  sort:updated-`
+   - Press `/`, type `assignee:will team:eng state:todo`, press Enter -- header
+     shows `team:eng  assignee:will  state:todo  sort:updated-`
    - Press `/` again -- search bar pre-populated with confirmed query
    - Press `S` to cycle sort -- header sort stem updates
    - Double-esc -- header resets to initial CLI filters

@@ -1,15 +1,17 @@
 ---
 name: sprint
-description: Sprint - prime beads context then create an agent team to implement ready tasks in parallel
+description:
+  Sprint - prime beads context then create an agent team to implement ready
+  tasks in parallel
 argument-hint: [model, guidance]
 user-invocable: true
 ---
 
 # Sprint
 
-Create an agent team to implement all currently ready beads in parallel.
-One teammate per ready bead. Use **$0** (default: sonnet if not specified) for
-each teammate.
+Create an agent team to implement all currently ready beads in parallel. One
+teammate per ready bead. Use **$0** (default: sonnet if not specified) for each
+teammate.
 
 Guidance (may be empty): $1
 
@@ -17,8 +19,8 @@ Guidance (may be empty): $1
 
 ## Assemble the team
 
-1.  Run `bp` (beads prime) to load the current issue graph into context.
-    The output will look something like this:
+1.  Run `bp` (beads prime) to load the current issue graph into context. The
+    output will look something like this:
 
     ```
     beads quickstart: /path/to/docs/agents/beads.md
@@ -53,11 +55,11 @@ Guidance (may be empty): $1
     Parent commit (@-): nlsmrurv 2793421e main | chore: add design beads for biscuit/jj integration
     ```
 
-2.  The "Ready work" section identifies the available beads.
-    Do **not** gather additional context -- proceed immediately.
+2.  The "Ready work" section identifies the available beads. Do **not** gather
+    additional context -- proceed immediately.
 
-3.  Claim all ready beads in the default workspace (before creating any
-    isolated workspaces):
+3.  Claim all ready beads in the default workspace (before creating any isolated
+    workspaces):
 
     ```bash
     br update <id1> --claim
@@ -66,8 +68,8 @@ Guidance (may be empty): $1
     ```
 
     This records the in-progress state in the default workspace's working copy.
-    Sub-agents will inherit this state and must NOT run `br update` or `br close`
-    themselves -- the team lead owns all bead mutations.
+    Sub-agents will inherit this state and must NOT run `br update` or
+    `br close` themselves -- the team lead owns all bead mutations.
 
 4.  For each ready bead, create a jj workspace:
 
@@ -81,15 +83,14 @@ Guidance (may be empty): $1
         incomplete state. Continue from where they left off, avoiding redundant
         work. **If the state looks broken, stop immediately and report back.**
 
-5.  Spawn **one teammate per bead**, using model **$0** (or "sonnet" if unspecified):
-    (set working directory to the isolated jj workspace)
+5.  Spawn **one teammate per bead**, using model **$0** (or "sonnet" if
+    unspecified): (set working directory to the isolated jj workspace)
 
     <prompt_template>
 
-    You are a coding agent working on bead `<id>`.
-    Your isolated workspace is: /path/to/isolated/workspace
-    **You may not modify files outside of your isolated workspace.**
-    **Do not leave your workspace.**
+    You are a coding agent working on bead `<id>`. Your isolated workspace is:
+    /path/to/isolated/workspace **You may not modify files outside of your
+    isolated workspace.** **Do not leave your workspace.**
 
     **Step 1 -- Prime context:**
 
@@ -98,12 +99,12 @@ Guidance (may be empty): $1
     ```
 
     Read the output carefully. Your bead is already claimed -- do NOT run
-    `br update` or `br close`. The team lead manages all bead state.
-    Read all referenced files in the bead description.
+    `br update` or `br close`. The team lead manages all bead state. Read all
+    referenced files in the bead description.
 
-    **Step 2 -- Implement the task:**
-    Write the code, tests, or other artifacts required to satisfy the bead.
-    Stick to exactly what the bead asks for -- no extra features or refactoring.
+    **Step 2 -- Implement the task:** Write the code, tests, or other artifacts
+    required to satisfy the bead. Stick to exactly what the bead asks for -- no
+    extra features or refactoring.
 
     **Step 3 -- Commit and signal completion:**
 
@@ -130,7 +131,8 @@ Guidance (may be empty): $1
 
 6.  Run all sub-agents in parallel.
 
-7.  After all agents complete, merge their workspaces into the default workspace:
+7.  After all agents complete, merge their workspaces into the default
+    workspace:
 
     ```bash
     # List the heads, including up to two commits for each head.

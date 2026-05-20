@@ -13,8 +13,8 @@ in stem tokens (e.g. `sort:`, `assignee:`) is handled by two functions:
 
 ### Observed Symptoms
 
-Reproduced from the bd-zsj bug report (notation: `|` = cursor, `(text)` =
-ghost text):
+Reproduced from the bd-zsj bug report (notation: `|` = cursor, `(text)` = ghost
+text):
 
 ```
 Initial:   sort:updated-|
@@ -40,8 +40,8 @@ Shift-Tab: sort:updated- assignee:will priority:|:high <-- double colon
 
 ### Span Semantics
 
-`key_span` on Stem/PartialStem tokens is half-open `[start, end)`, covering
-only the key text. For `sort:updated-`:
+`key_span` on Stem/PartialStem tokens is half-open `[start, end)`, covering only
+the key text. For `sort:updated-`:
 
 ```
 byte:       0  1  2  3  4  5  6  ...  12
@@ -58,7 +58,7 @@ char:       s  o  r  t  :  u  p  ...  -
 Token::Stem { key_span, .. } => key_span.end,  // returns 4 = colon position
 ```
 
-Cursor at byte 4 is visually *before* the colon. The intent is to land the
+Cursor at byte 4 is visually _before_ the colon. The intent is to land the
 cursor in the value portion (after the colon). Should return `key_span.end + 1`.
 
 ### Bug 2: `apply_tab()` replacement does not include the colon
@@ -105,15 +105,15 @@ so that insertion semantics are preserved.
 ## Decision 3: Remove wraparound from `jump_token_boundary()`
 
 When there is no next token (forward) or no previous token (backward), do
-nothing -- return early. The cursor stays where it is. This avoids the
-confusion of landing on a distant token and leaving stale completions behind.
+nothing -- return early. The cursor stays where it is. This avoids the confusion
+of landing on a distant token and leaving stale completions behind.
 
 ## Decision 4: Initialize completer in `SearchOverlay::new()`
 
 Call `completer.update(&ast, query.cursor)` in the SearchOverlay constructor so
 the completer has correct context from the first frame. Currently
-`Completer::new()` sets context = Gap with no candidates, so the first Tab
-press uses stale state.
+`Completer::new()` sets context = Gap with no candidates, so the first Tab press
+uses stale state.
 
 ## Decision 5: Snapshot-based completion test harness
 
@@ -138,6 +138,7 @@ h.assert("sort:|updated-")           // assert snapshot matches
 ```
 
 Internally, each action:
+
 1. Applies the operation to `TextInput` / `Completer`
 2. Re-parses the query text into a fresh AST
 3. Calls `completer.update()` to keep context in sync
@@ -148,17 +149,17 @@ This simulates the real event loop where the debounce has already fired.
 
 The existing test asserts `CompletionContext::Gap` but the `None` branch in
 `update()` sets `StemKey { prefix: "" }`. The test predates a change that made
-the Gap branch offer all stem candidates. Update the test assertion to match
-the current code.
+the Gap branch offer all stem candidates. Update the test assertion to match the
+current code.
 
 ---
 
 ## Files Modified
 
-| File | Change |
-|------|--------|
+| File                      | Change                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------- |
 | `src/tui/search_query.rs` | Fix `cursor_position_for_token`, fix `apply_tab`, remove wrap, add test harness |
-| `src/tui/mod.rs` | Initialize completer in `SearchOverlay::new()` |
+| `src/tui/mod.rs`          | Initialize completer in `SearchOverlay::new()`                                  |
 
 ## Verification
 

@@ -8,18 +8,21 @@ Reads are instant; queries use a local SQLite cache, not the network.
 
 Writes are optimistic and queued offline.
 
-The search bar speaks a structured query language whose parser is **generated at build time** from
-Linear's GraphQL schema, so filter keys stay in sync with the API automatically.
+The search bar speaks a structured query language whose parser is **generated at
+build time** from Linear's GraphQL schema, so filter keys stay in sync with the
+API automatically.
 
-> [!WARNING]
-> This is a side project. I started it as a means of experimenting with coding agents. Expect rough edges!
+> [!WARNING] This is a side project. I started it as a means of experimenting
+> with coding agents. Expect rough edges!
 
 ## Features
 
-- **Local-first**: GraphQL polling + SQLite cache. Instant reads, optimistic writes, offline queue.
+- **Local-first**: GraphQL polling + SQLite cache. Instant reads, optimistic
+  writes, offline queue.
 - **Structured search**: `assignee:me priority:urgent sort:updated-` and
   free-text, parsed by a [Chumsky]-based parser generated from Linear's
-  [canonical GraphQL schema](./build/linear-schema-definition.graphql) at `cargo build` time.
+  [canonical GraphQL schema](./build/linear-schema-definition.graphql) at
+  `cargo build` time.
 - **Vim-style keybindings**
 - **Built with Rust** - [ratatui], [rusqlite], [ureq].
 
@@ -101,4 +104,5 @@ cache), writes are optimistic, and remote changes arrive on the next poll cycle.
 [ratatui]: https://github.com/ratatui/ratatui
 [rusqlite]: https://github.com/rusqlite/rusqlite
 [ureq]: https://github.com/algesten/ureq
-[wzhudev/reverse-linear-sync-engine]: https://github.com/wzhudev/reverse-linear-sync-engine
+[wzhudev/reverse-linear-sync-engine]:
+  https://github.com/wzhudev/reverse-linear-sync-engine
