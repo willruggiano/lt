@@ -7,6 +7,7 @@ mod linear;
 mod logging;
 mod search;
 mod sync;
+mod text;
 mod tui;
 
 use anyhow::Result;

@@ -13,6 +13,7 @@ use super::{
 use crate::issues::SortField;
 use crate::issues::list::Issue;
 use crate::linear::types::IssueDetail;
+use crate::text;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -331,7 +332,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
 fn row_cells(issue: &Issue) -> [String; 7] {
     [
         issue.identifier.clone(),
-        truncate(&issue.title, 40),
+        text::truncate(&issue.title, 40),
         issue.state.name.clone(),
         issue.priority_label.clone(),
         issue
@@ -342,14 +343,6 @@ fn row_cells(issue: &Issue) -> [String; 7] {
         issue.team.name.clone(),
         date(&issue.updated_at).to_string(),
     ]
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
 }
 
 fn date(s: &str) -> &str {
@@ -974,19 +967,12 @@ fn render_search_overlay(
 }
 
 fn search_row_cells(issue: &Issue) -> [String; 7] {
-    fn truncate(s: &str, max: usize) -> String {
-        if s.len() <= max {
-            s.to_string()
-        } else {
-            format!("{}...", &s[..max.saturating_sub(3)])
-        }
-    }
     fn date(s: &str) -> &str {
         if s.len() >= 10 { &s[..10] } else { s }
     }
     [
         issue.identifier.clone(),
-        truncate(&issue.title, 40),
+        text::truncate(&issue.title, 40),
         issue.state.name.clone(),
         issue.priority_label.clone(),
         issue

@@ -1,16 +1,9 @@
 use crate::db;
+use crate::text;
 
 use super::list::Issue;
 
 const MAX_TITLE: usize = 40;
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
 
 fn date(s: &str) -> &str {
     if s.len() >= 10 { &s[..10] } else { s }
@@ -28,7 +21,7 @@ pub fn print_table_cached(issues: &[db::Issue], note: &str) {
         .map(|i| {
             [
                 i.identifier.clone(),
-                truncate(&i.title, MAX_TITLE),
+                text::truncate(&i.title, MAX_TITLE),
                 i.state_name.clone(),
                 i.priority_label.clone(),
                 i.assignee_name.as_deref().unwrap_or("-").to_string(),
@@ -102,7 +95,7 @@ pub fn print_table(issues: &[Issue]) {
         .map(|i| {
             [
                 i.identifier.clone(),
-                truncate(&i.title, MAX_TITLE),
+                text::truncate(&i.title, MAX_TITLE),
                 i.state.name.clone(),
                 i.priority_label.clone(),
                 i.assignee

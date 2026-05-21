@@ -16,7 +16,13 @@
       ];
     };
 
-    devshells.default.packages = [config.packages.toolchain];
+    # devshells.default.packages = [config.packages.toolchain];
+    devshells.default.packagesFrom = [config.packages.lt];
+
+    jail.additionalCombinators = cs:
+      with cs; [
+        (add-pkg-deps [config.packages.toolchain])
+      ];
 
     packages = {
       default = config.packages.lt;
@@ -42,6 +48,7 @@
               ../../../src
             ];
           };
+          auditable = false; # devshell error: conflicting paths between toolchain and cargo-auditable
           cargoLock.lockFile = ../../../Cargo.lock;
           nativeBuildInputs = with pkgs; [
             cmake
@@ -59,7 +66,7 @@
 
       toolchain = pkgs.rust-bin.selectLatestNightlyWith (toolchain:
         toolchain.default.override {
-          extensions = ["rust-src"];
+          extensions = ["rust-analyzer" "rust-src"];
         });
     };
   };

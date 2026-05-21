@@ -1,4 +1,5 @@
 use crate::linear::notifications::Notification;
+use crate::text;
 
 /// Format an ISO-8601 timestamp as a relative age string like '5m ago', '2h ago', '3d ago'.
 /// Falls back to the raw string if parsing fails.
@@ -124,11 +125,7 @@ pub fn print_table(notifications: &[Notification]) {
             .unwrap_or("-");
         let raw_title = n.issue.as_ref().map(|i| i.title.as_str()).unwrap_or("-");
         // Truncate title if needed
-        let title: String = if raw_title.len() > title_w {
-            format!("{}...", &raw_title[..title_w.saturating_sub(3)])
-        } else {
-            raw_title.to_string()
-        };
+        let title = text::truncate(raw_title, title_w);
         let actor = n.actor.as_ref().map(|a| a.name.as_str()).unwrap_or("-");
         let age = relative_age(&n.created_at);
 
