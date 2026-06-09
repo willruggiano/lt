@@ -1,6 +1,42 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+// ---------------------------------------------------------------------------
+// Profiles -- separate auth + database per account/workspace
+// ---------------------------------------------------------------------------
+
+static PROFILE: OnceLock<String> = OnceLock::new();
+
+/// Select the active profile for this process.  Must be called once at
+/// startup, before any path helper is used.  `None` selects the profile
+/// named "default".
+pub fn set_profile(name: Option<String>) -> Result<()> {
+    if let Some(ref n) = name {
+        if n.is_empty()
+            || !n
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            anyhow::bail!(
+                "invalid profile name {:?}: use only letters, digits, '-' and '_'",
+                n
+            );
+        }
+    }
+    let _ = PROFILE.set(name.unwrap_or_else(|| "default".to_string()));
+    Ok(())
+}
+
+fn profile() -> &'static str {
+    PROFILE.get().map(String::as_str).unwrap_or("default")
+}
+
+/// Append the per-profile subdirectory to a base `lt` directory.
+pub fn profile_dir(base: PathBuf) -> PathBuf {
+    base.join("profiles").join(profile())
+}
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -55,9 +91,11 @@ pub fn log_dir() -> Result<PathBuf> {
 }
 
 pub fn state_dir() -> Result<PathBuf> {
-    let dir = dirs::state_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not determine state directory"))?
-        .join("lt");
+    let dir = profile_dir(
+        dirs::state_dir()
+            .ok_or_else(|| anyhow::anyhow!("could not determine state directory"))?
+            .join("lt"),
+    );
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating state directory {}", dir.display()))?;
     Ok(dir)

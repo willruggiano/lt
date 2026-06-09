@@ -16,6 +16,12 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "lt", about = "Linear TUI for terminal power users", version)]
 struct Cli {
+    /// Profile to use: each profile has its own credentials and local
+    /// database (one account/workspace per profile). Defaults to $LT_PROFILE
+    /// or "default".
+    #[arg(long, global = true)]
+    profile: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -58,6 +64,13 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Select the profile before anything touches auth, logs, or the DB.
+    let profile = cli
+        .profile
+        .clone()
+        .or_else(|| std::env::var("LT_PROFILE").ok().filter(|s| !s.is_empty()));
+    config::set_profile(profile)?;
 
     // Determine whether we are entering TUI mode so we can choose the right
     // logging subscriber before any other code runs.

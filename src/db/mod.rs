@@ -15,7 +15,9 @@ use std::path::PathBuf;
 
 fn db_path() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir().context("could not determine local data directory")?;
-    let lt_dir = data_dir.join("lt");
+    // Each profile gets its own database so accounts/workspaces never share
+    // state and can run concurrently.
+    let lt_dir = crate::config::profile_dir(data_dir.join("lt"));
     fs::create_dir_all(&lt_dir)
         .with_context(|| format!("could not create directory: {}", lt_dir.display()))?;
     Ok(lt_dir.join("lt.db"))

@@ -77,10 +77,26 @@ export LINEAR_CLIENT_ID=
 export LINEAR_CLIENT_SECRET=
 ```
 
-Application state is kept in XDG_STATE_HOME/lt (`~/.local/state/lt` on Linux):
+Application state is kept per profile in XDG_STATE_HOME/lt/profiles/\<name\>
+(`~/.local/state/lt/profiles/default` on Linux when no profile is selected):
 
 - `auth.json` contains OAuth credentials (0600 permissions)
 - logs are timestamped in the `logs/` sub-directory
+
+### Profiles (multiple accounts / workspaces)
+
+Each profile has its own credentials and local database, so different accounts
+or workspaces never share state and can run side by side:
+
+```bash
+lt --profile work auth login   # authenticate the "work" profile
+lt --profile work              # TUI for the work account
+LT_PROFILE=personal lt         # env var alternative
+```
+
+When no profile is given, the profile named `default` is used. The OAuth
+application credentials (`LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET` or the stored
+config file) are shared across profiles.
 
 ## Why not Linear's sync protocol?
 
