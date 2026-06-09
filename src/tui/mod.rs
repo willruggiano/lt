@@ -807,6 +807,11 @@ pub struct App {
     /// description field).
     pub comment_input: Option<String>,
 
+    /// Whether the terminal supports the kitty keyboard protocol. Without it,
+    /// Ctrl-Enter is indistinguishable from Enter, so submit hints show
+    /// Alt-Enter instead (which legacy terminals can encode).
+    pub keyboard_enhanced: bool,
+
     // -- help popup (bd-5lz) -------------------------------------------------
     pub help_popup: Option<HelpPopup>,
 
@@ -886,6 +891,7 @@ impl App {
             next_sync_at: None,
             detail_comment_rx: None,
             comment_input: None,
+            keyboard_enhanced: false,
             help_popup: None,
             search_overlay: None,
             popup_anchor: None,
@@ -2424,8 +2430,25 @@ pub fn run(args: IssueArgs) -> Result<()> {
     }
 
     let mut terminal = ratatui::init();
+    // Without the kitty keyboard protocol, terminals encode Ctrl-Enter and
+    // Enter as the same byte, so the Ctrl-Enter submit binding never fires.
+    // Enable it where supported; elsewhere the UI falls back to Alt-Enter.
+    let keyboard_enhanced =
+        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if keyboard_enhanced {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            event::PushKeyboardEnhancementFlags(
+                event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        );
+    }
+    app.keyboard_enhanced = keyboard_enhanced;
     app.status = initial_status;
     let result = run_app(&mut terminal, app);
+    if keyboard_enhanced {
+        let _ = crossterm::execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
+    }
     ratatui::restore();
     result
 }
@@ -2609,9 +2632,11 @@ fn poll_sync_events(app: &mut App) {
 fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
+    let alt = modifiers.contains(KeyModifiers::ALT);
 
-    // Ctrl-Enter submits the form.
-    if ctrl && code == KeyCode::Enter {
+    // Ctrl-Enter submits the form (Alt-Enter on terminals that cannot
+    // distinguish Ctrl-Enter from Enter).
+    if (ctrl || alt) && code == KeyCode::Enter {
         app.new_issue_submit();
         return;
     }
@@ -2810,9 +2835,11 @@ fn handle_detail_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 /// new-issue description field: cursor always at the end).
 fn handle_comment_input_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let alt = modifiers.contains(KeyModifiers::ALT);
 
-    // Ctrl-Enter submits.
-    if ctrl && code == KeyCode::Enter {
+    // Ctrl-Enter submits (Alt-Enter on terminals that cannot distinguish
+    // Ctrl-Enter from Enter).
+    if (ctrl || alt) && code == KeyCode::Enter {
         app.submit_comment();
         return;
     }

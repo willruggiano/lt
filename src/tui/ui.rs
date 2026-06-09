@@ -68,7 +68,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Detail => {
             if app.comment_input.is_some() {
                 frame.render_widget(
-                    Paragraph::new("Enter newline  Ctrl-Enter submit  Esc cancel"),
+                    Paragraph::new(format!(
+                        "Enter newline  {} submit  Esc cancel",
+                        submit_key_label(app.keyboard_enhanced)
+                    )),
                     chunks[4],
                 );
             } else if let Some(msg) = &app.footer_msg {
@@ -110,7 +113,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Mode::NewIssue = app.mode
         && let Some(ref modal) = app.new_issue_modal
     {
-        render_new_issue_modal(frame, frame.area(), modal);
+        render_new_issue_modal(frame, frame.area(), modal, app.keyboard_enhanced);
     }
 
     // Render help popup on top if active (bd-5lz).
@@ -619,7 +622,22 @@ fn render_popup(
 
 // -- New-issue modal (bd-l6r) ------------------------------------------------
 
-fn render_new_issue_modal(frame: &mut Frame, area: Rect, modal: &NewIssueModal) {
+/// Submit-key hint: Ctrl-Enter needs the kitty keyboard protocol; legacy
+/// terminals can only encode Alt-Enter.
+fn submit_key_label(keyboard_enhanced: bool) -> &'static str {
+    if keyboard_enhanced {
+        "Ctrl-Enter"
+    } else {
+        "Alt-Enter"
+    }
+}
+
+fn render_new_issue_modal(
+    frame: &mut Frame,
+    area: Rect,
+    modal: &NewIssueModal,
+    keyboard_enhanced: bool,
+) {
     // Modal dimensions: 70% wide, 22 rows tall, centred.
     let width = (area.width as f32 * 0.70) as u16;
     let height = 22_u16.min(area.height.saturating_sub(2));
@@ -631,7 +649,10 @@ fn render_new_issue_modal(frame: &mut Frame, area: Rect, modal: &NewIssueModal) 
     frame.render_widget(Clear, modal_area);
 
     let block = Block::default()
-        .title(" New Issue  [Tab next]  [Shift-Tab prev]  [Ctrl-Enter submit]  [Esc cancel] ")
+        .title(format!(
+            " New Issue  [Tab next]  [Shift-Tab prev]  [{} submit]  [Esc cancel] ",
+            submit_key_label(keyboard_enhanced)
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
     let inner = block.inner(modal_area);
