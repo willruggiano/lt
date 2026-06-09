@@ -3031,13 +3031,14 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             app.mode = Mode::List;
             app.search_overlay = None;
         }
-        // Result-list navigation: j/k/<down>/<up>.
-        KeyCode::Down | KeyCode::Char('j') if !ctrl => {
+        // Result-list navigation: <down>/<up> only. Plain j/k must fall
+        // through to the query bar so they can be typed as filter text.
+        KeyCode::Down => {
             if let Some(ref mut overlay) = app.search_overlay {
                 overlay.move_down();
             }
         }
-        KeyCode::Up | KeyCode::Char('k') if !ctrl => {
+        KeyCode::Up => {
             if let Some(ref mut overlay) = app.search_overlay {
                 overlay.move_up();
             }

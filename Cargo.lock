@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "lt"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "base64",
