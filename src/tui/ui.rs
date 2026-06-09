@@ -66,7 +66,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     match app.mode {
         Mode::Detail => {
-            render_detail_footer(frame, chunks[4]);
+            if app.comment_input.is_some() {
+                frame.render_widget(
+                    Paragraph::new("Enter newline  Ctrl-Enter submit  Esc cancel"),
+                    chunks[4],
+                );
+            } else if let Some(msg) = &app.footer_msg {
+                frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[4]);
+            } else {
+                render_detail_footer(frame, chunks[4]);
+            }
         }
         _ => {
             if input_mode {
@@ -398,12 +407,35 @@ fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
         Status::Idle => {}
     }
 
+    // Reserve the bottom rows for the comment input box when it is open.
+    let (content_area, comment_area) = if app.comment_input.is_some() {
+        let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(6)]).split(inner);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (inner, None)
+    };
+
     if let Some(detail) = &app.detail {
         let lines = build_detail_lines(detail);
         let para = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((app.detail_scroll, 0));
-        frame.render_widget(para, inner);
+        frame.render_widget(para, content_area);
+    }
+
+    if let (Some(buf), Some(area)) = (&app.comment_input, comment_area) {
+        let block = Block::default()
+            .title(" New Comment ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded);
+        let box_inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        // Cursor is always at the end (same model as the description field).
+        frame.render_widget(
+            Paragraph::new(format!("{}_", buf)).wrap(Wrap { trim: false }),
+            box_inner,
+        );
     }
 }
 
@@ -516,7 +548,7 @@ fn strip_markdown(s: &str) -> String {
 
 fn render_detail_footer(frame: &mut Frame, area: Rect) {
     frame.render_widget(
-        Paragraph::new("j/k scroll  o open in browser  Esc/q close"),
+        Paragraph::new("j/k scroll  c comment  o open in browser  Esc/q close"),
         area,
     );
 }

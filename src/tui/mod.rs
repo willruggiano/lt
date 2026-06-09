@@ -337,6 +337,8 @@ pub enum CommentSyncEvent {
     Done(Vec<crate::linear::types::Comment>),
     /// Comment sync error (non-fatal; cached data remains shown).
     Error(String),
+    /// Posting a new comment failed; the optimistic comment must be dropped.
+    PostError(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +477,10 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
     HelpEntry {
         key: "o",
         description: "open in browser",
+    },
+    HelpEntry {
+        key: "c",
+        description: "comment on issue (in detail pane)",
     },
     HelpEntry {
         key: "r",
@@ -795,6 +801,12 @@ pub struct App {
     /// Receiver for background comment-sync events.
     pub detail_comment_rx: Option<mpsc::Receiver<CommentSyncEvent>>,
 
+    // -- comment input --------------------------------------------------------
+    /// Multiline buffer for a new comment, open in the detail pane.
+    /// The cursor is always at the end (same model as the new-issue
+    /// description field).
+    pub comment_input: Option<String>,
+
     // -- help popup (bd-5lz) -------------------------------------------------
     pub help_popup: Option<HelpPopup>,
 
@@ -873,6 +885,7 @@ impl App {
             sync_status_label,
             next_sync_at: None,
             detail_comment_rx: None,
+            comment_input: None,
             help_popup: None,
             search_overlay: None,
             popup_anchor: None,
@@ -1246,6 +1259,7 @@ impl App {
         self.mode = Mode::List;
         self.detail = None;
         self.detail_scroll = 0;
+        self.comment_input = None;
         self.status = Status::Idle;
         // Drop the background comment-sync receiver so the thread stops being
         // polled and will be GC'd once it finishes its network request.
@@ -1287,6 +1301,72 @@ impl App {
     fn detail_scroll_page_up(&mut self) {
         let step = self.viewport_height.max(1);
         self.detail_scroll = self.detail_scroll.saturating_sub(step);
+    }
+
+    // -- Comment input ---------------------------------------------------------
+
+    /// Submit the comment buffer to the Linear API.
+    ///
+    /// The comment is appended to the detail pane optimistically; a background
+    /// thread runs the commentCreate mutation, re-syncs the issue's comments,
+    /// and delivers the authoritative list via `detail_comment_rx`.  On error
+    /// the optimistic comment is dropped (see poll_detail_comment_events).
+    fn submit_comment(&mut self) {
+        let body = match self.comment_input.as_ref() {
+            Some(b) => b.trim().to_string(),
+            None => return,
+        };
+        if body.is_empty() {
+            self.comment_input = None;
+            return;
+        }
+        let issue_id = match self.selected_issue() {
+            Some(i) => i.id.clone(),
+            None => return,
+        };
+        let token = match crate::config::load_token() {
+            Ok(Some(t)) => t,
+            _ => {
+                self.footer_msg = Some("Not logged in".to_string());
+                return;
+            }
+        };
+        self.comment_input = None;
+
+        // Optimistic: show the comment immediately.
+        if let Some(ref mut detail) = self.detail {
+            detail.comments.nodes.push(crate::linear::types::Comment {
+                body: body.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                user: self
+                    .viewer_name
+                    .clone()
+                    .map(|name| crate::linear::types::CommentUser { name }),
+            });
+        }
+
+        let (tx, rx) = mpsc::channel::<CommentSyncEvent>();
+        self.detail_comment_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = (|| -> Result<Vec<crate::linear::types::Comment>> {
+                crate::linear::mutations::create_comment(&token.access_token, &issue_id, &body)?;
+                let conn = crate::db::open_db()?;
+                crate::sync::comments::sync_comments(&conn, &token.access_token, &issue_id)?;
+                Ok(crate::db::query_comments(&conn, &issue_id)?
+                    .into_iter()
+                    .map(db_comment_to_api)
+                    .collect())
+            })();
+            match result {
+                Ok(fresh) => {
+                    let _ = tx.send(CommentSyncEvent::Done(fresh));
+                }
+                Err(e) => {
+                    let _ = tx.send(CommentSyncEvent::PostError(e.to_string()));
+                }
+            }
+        });
     }
 
     // -- Popup helpers (bd-3dz) -----------------------------------------------
@@ -2204,6 +2284,18 @@ fn poll_login_events(app: &mut App) {
     }
 }
 
+/// Convert a `crate::db::Comment` row to the API comment type shown in the
+/// detail pane.
+fn db_comment_to_api(c: crate::db::Comment) -> crate::linear::types::Comment {
+    crate::linear::types::Comment {
+        body: c.body,
+        created_at: c.created_at,
+        user: c
+            .author_name
+            .map(|name| crate::linear::types::CommentUser { name }),
+    }
+}
+
 /// Convert a `crate::db::Issue` row to a `crate::issues::list::Issue` for TUI display.
 fn db_issue_to_list_issue(src: crate::db::Issue) -> Issue {
     Issue {
@@ -2414,6 +2506,20 @@ fn poll_detail_comment_events(app: &mut App) {
         }
         Ok(CommentSyncEvent::Error(_msg)) => {
             // Non-fatal: keep whatever cached comments are already shown.
+            true
+        }
+        Ok(CommentSyncEvent::PostError(msg)) => {
+            // Posting failed: drop the optimistic comment by reloading the
+            // cached set, and surface the error in the footer.
+            let cached = app.selected_issue().map(|i| i.id.clone()).and_then(|id| {
+                crate::db::open_db()
+                    .and_then(|conn| crate::db::query_comments(&conn, &id))
+                    .ok()
+            });
+            if let (Some(detail), Some(comments)) = (app.detail.as_mut(), cached) {
+                detail.comments.nodes = comments.into_iter().map(db_comment_to_api).collect();
+            }
+            app.footer_msg = Some(format!("Failed to post comment: {}", msg));
             true
         }
         Err(mpsc::TryRecvError::Empty) => false,
@@ -2668,8 +2774,20 @@ fn handle_popup_key(app: &mut App, code: KeyCode) {
 
 fn handle_detail_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+
+    // When the comment input is open, all keys go to it.
+    if app.comment_input.is_some() {
+        handle_comment_input_key(app, code, modifiers);
+        return;
+    }
+
     match code {
         KeyCode::Esc | KeyCode::Char('q') => app.close_detail(),
+        // Open the comment input.
+        KeyCode::Char('c') => {
+            app.comment_input = Some(String::new());
+            app.footer_msg = None;
+        }
         KeyCode::Char('j') | KeyCode::Down => app.detail_scroll_down(),
         KeyCode::Char('k') | KeyCode::Up => app.detail_scroll_up(),
         KeyCode::Char('g') => app.detail_scroll_to_top(),
@@ -2684,6 +2802,45 @@ fn handle_detail_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 let _ = open::that(url);
             }
         }
+        _ => {}
+    }
+}
+
+/// Key handling for the comment input box (same editing model as the
+/// new-issue description field: cursor always at the end).
+fn handle_comment_input_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+
+    // Ctrl-Enter submits.
+    if ctrl && code == KeyCode::Enter {
+        app.submit_comment();
+        return;
+    }
+    // Esc cancels.
+    if code == KeyCode::Esc {
+        app.comment_input = None;
+        return;
+    }
+
+    let buf = match app.comment_input.as_mut() {
+        Some(b) => b,
+        None => return,
+    };
+    match code {
+        KeyCode::Enter => buf.push('\n'),
+        KeyCode::Backspace => {
+            buf.pop();
+        }
+        KeyCode::Char('h') if ctrl => {
+            buf.pop();
+        }
+        KeyCode::Char('w') if ctrl => {
+            let trimmed = buf.trim_end_matches(|c: char| !c.is_whitespace());
+            let new_end = trimmed.trim_end().len();
+            buf.truncate(new_end);
+        }
+        KeyCode::Char('u') if ctrl => buf.clear(),
+        KeyCode::Char(c) if !ctrl => buf.push(c),
         _ => {}
     }
 }

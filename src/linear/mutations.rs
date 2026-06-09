@@ -38,6 +38,14 @@ mutation IssueCreate($input: IssueCreateInput!) {
 }
 "#;
 
+const COMMENT_CREATE_MUTATION: &str = r#"
+mutation CommentCreate($input: CommentCreateInput!) {
+  commentCreate(input: $input) {
+    success
+  }
+}
+"#;
+
 const TEAMS_QUERY: &str = r#"
 query Teams {
   teams {
@@ -208,6 +216,27 @@ pub fn fetch_workflow_states(token: &str, team_id: &str) -> Result<Vec<WorkflowS
 pub fn fetch_teams(token: &str) -> Result<Vec<Team>> {
     let data: TeamsData = graphql_query(token, TEAMS_QUERY, json!({}))?;
     Ok(data.teams.nodes)
+}
+
+pub fn create_comment(token: &str, issue_id: &str, body: &str) -> Result<()> {
+    #[derive(Deserialize)]
+    struct CommentCreatePayload {
+        success: bool,
+    }
+    #[derive(Deserialize)]
+    struct CommentCreateData {
+        #[serde(rename = "commentCreate")]
+        comment_create: CommentCreatePayload,
+    }
+
+    let variables = json!({
+        "input": { "issueId": issue_id, "body": body },
+    });
+    let data: CommentCreateData = graphql_query(token, COMMENT_CREATE_MUTATION, variables)?;
+    if !data.comment_create.success {
+        anyhow::bail!("commentCreate returned success=false");
+    }
+    Ok(())
 }
 
 pub fn create_issue(token: &str, input: CreateIssueInput) -> Result<CreatedIssue> {
