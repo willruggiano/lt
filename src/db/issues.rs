@@ -68,13 +68,72 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
     Ok(())
 }
 
-/// Query issues from the local DB, applying ORDER BY from IssueArgs.
+/// Query issues from the local DB, applying the WHERE clause built from the
+/// IssueArgs filter fields (bd-2km) and ORDER BY from the sort fields.
 ///
-/// Filtering is intentionally minimal here.
-/// TODO(bd-2km): replace with build_sql_filter(args) for the WHERE clause.
+/// An `--assignee=me` filter must be resolved to the viewer's name by the
+/// caller before calling this (see issues::list::resolve_me).
 pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
-    let (issues, _) = query_issues_page(conn, args, 0)?;
+    let (where_clause, mut bind) = crate::db::filters::build_sql_filter(args)?;
+    let order = crate::db::filters::build_sql_order(args);
+    let where_sql = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {where_clause} ")
+    };
+    let limit = args.limit.min(250) as i64;
+    bind.push(Box::new(limit));
+
+    let sql = format!(
+        "SELECT id, identifier, title, priority_label, state_name,
+                assignee_name, team_name, team_key, created_at, updated_at, synced_at,
+                description, labels, project_name, cycle_name, creator_name,
+                parent_id, parent_identifier
+         FROM issues
+         {where_sql}ORDER BY {order}
+         LIMIT ?"
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .context("failed to prepare query_issues statement")?;
+
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(bind.iter().map(|p| p.as_ref())),
+            issue_from_row,
+        )
+        .context("failed to execute query_issues")?;
+
+    let mut issues = Vec::new();
+    for row in rows {
+        issues.push(row.context("failed to read issue row")?);
+    }
     Ok(issues)
+}
+
+/// Map a row in the canonical issues column order to an Issue.
+fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
+    Ok(Issue {
+        id: row.get(0)?,
+        identifier: row.get(1)?,
+        title: row.get(2)?,
+        priority_label: row.get(3)?,
+        state_name: row.get(4)?,
+        assignee_name: row.get(5)?,
+        team_name: row.get(6)?,
+        team_key: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        synced_at: row.get(10)?,
+        description: row.get(11)?,
+        labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+        project_name: row.get(13)?,
+        cycle_name: row.get(14)?,
+        creator_name: row.get(15)?,
+        parent_id: row.get(16)?,
+        parent_identifier: row.get(17)?,
+    })
 }
 
 /// Query issues with an explicit row offset for pagination.
@@ -277,4 +336,88 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     )
     .context("failed to set sync_meta")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_issue(id: &str, assignee: Option<&str>, state: &str) -> Issue {
+        Issue {
+            id: id.to_string(),
+            identifier: format!("ENG-{id}"),
+            title: format!("issue {id}"),
+            priority_label: "Medium".to_string(),
+            state_name: state.to_string(),
+            assignee_name: assignee.map(|s| s.to_string()),
+            team_name: "Engineering".to_string(),
+            team_key: Some("ENG".to_string()),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+            synced_at: String::new(),
+            description: None,
+            labels: String::new(),
+            project_name: None,
+            cycle_name: None,
+            creator_name: None,
+            parent_id: None,
+            parent_identifier: None,
+        }
+    }
+
+    fn test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        upsert_issues(
+            &conn,
+            &[
+                test_issue("1", Some("Alice"), "Todo"),
+                test_issue("2", Some("Bob"), "In Progress"),
+                test_issue("3", None, "Todo"),
+            ],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn query_issues_applies_assignee_filter() {
+        let conn = test_db();
+        let mut args = crate::issues::IssueArgs::default();
+        args.assignee = Some("alice".to_string());
+        let issues = query_issues(&conn, &args).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].assignee_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn query_issues_applies_no_assignee_filter() {
+        let conn = test_db();
+        let mut args = crate::issues::IssueArgs::default();
+        args.no_assignee = true;
+        let issues = query_issues(&conn, &args).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id, "3");
+    }
+
+    #[test]
+    fn query_issues_applies_state_filter_and_limit() {
+        let conn = test_db();
+        let mut args = crate::issues::IssueArgs::default();
+        args.state = Some("todo".to_string());
+        let issues = query_issues(&conn, &args).unwrap();
+        assert_eq!(issues.len(), 2);
+
+        args.limit = 1;
+        let issues = query_issues(&conn, &args).unwrap();
+        assert_eq!(issues.len(), 1);
+    }
+
+    #[test]
+    fn query_issues_without_filters_returns_all() {
+        let conn = test_db();
+        let args = crate::issues::IssueArgs::default();
+        let issues = query_issues(&conn, &args).unwrap();
+        assert_eq!(issues.len(), 3);
+    }
 }

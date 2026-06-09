@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{Result, anyhow};
 use rusqlite::types::ToSql;
 

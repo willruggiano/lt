@@ -150,7 +150,31 @@ pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool,
     ))
 }
 
-pub fn run(args: IssueArgs) -> Result<()> {
+/// Resolve `--assignee=me` to the viewer's actual name so the SQL filter can
+/// match the cached `assignee_name` column.  Uses the identity cached in
+/// sync_meta when available, otherwise asks the Linear API and caches it.
+fn resolve_me(conn: &rusqlite::Connection, args: &mut IssueArgs) -> Result<()> {
+    let is_me = args
+        .assignee
+        .as_deref()
+        .is_some_and(|a| a.eq_ignore_ascii_case("me"));
+    if !is_me {
+        return Ok(());
+    }
+    let name = match db::get_meta(conn, "viewer_name")? {
+        Some(n) => n,
+        None => {
+            let token = crate::auth::refresh::load_or_refresh_token()?;
+            let viewer = crate::linear::viewer::fetch_viewer(&token.access_token)?;
+            db::set_meta(conn, "viewer_name", &viewer.name)?;
+            viewer.name
+        }
+    };
+    args.assignee = Some(name);
+    Ok(())
+}
+
+pub fn run(mut args: IssueArgs) -> Result<()> {
     // --live: bypass cache entirely.
     if args.live {
         let (issues, has_next_page, _) = fetch(&args, None)?;
@@ -162,6 +186,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     }
 
     let conn = db::open_db()?;
+    resolve_me(&conn, &mut args)?;
 
     // Check last_synced_at from sync_meta.
     let last_synced_at = db::get_meta(&conn, "last_synced_at")?;
