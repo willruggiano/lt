@@ -70,6 +70,8 @@ or by adding `github:willruggiano/lt` as an input to your own Nix flake.
 You will need to create a Linear OAuth application following Linear's official
 documentation: <https://linear.app/developers/oauth-2-0-authentication>
 
+The redirect URI is: http://localhost:7342/callback
+
 Then configure the relevant environment variables:
 
 ```bash
@@ -77,7 +79,7 @@ export LINEAR_CLIENT_ID=
 export LINEAR_CLIENT_SECRET=
 ```
 
-Application state is kept per profile in XDG_STATE_HOME/lt/profiles/\<name\>
+Application state is kept per profile in `$XDG_STATE_HOME/lt/profiles/<name>`
 (`~/.local/state/lt/profiles/default` on Linux when no profile is selected):
 
 - `auth.json` contains OAuth credentials (0600 permissions)
