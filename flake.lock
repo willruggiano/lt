@@ -203,6 +203,26 @@
         "type": "github"
       }
     },
+    "globset": {
+      "inputs": {
+        "nixpkgs-lib": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1756146523,
+        "narHash": "sha256-dn8WNgwVQe0xBJ/d4CiRRcEVSgNclG6WSbqFEf6V024=",
+        "owner": "pdtpartners",
+        "repo": "globset",
+        "rev": "62da8904981f01dc7c97f56c3ea4f131a8393411",
+        "type": "github"
+      },
+      "original": {
+        "owner": "pdtpartners",
+        "repo": "globset",
+        "type": "github"
+      }
+    },
     "jail": {
       "locked": {
         "lastModified": 1772137954,
@@ -256,6 +276,7 @@
         "devshell": "devshell",
         "flake-parts": "flake-parts_2",
         "git-hooks": "git-hooks",
+        "globset": "globset",
         "jail": "jail",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay",

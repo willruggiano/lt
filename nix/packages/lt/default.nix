@@ -16,7 +16,6 @@
       ];
     };
 
-    # devshells.default.packages = [config.packages.toolchain];
     devshells.default.packagesFrom = [config.packages.lt];
 
     jail.additionalCombinators = cs:
@@ -39,13 +38,12 @@
           inherit (cargoToml.package) version;
           src = lib.fileset.toSource {
             root = ../../..;
-            fileset = lib.fileset.unions [
-              ../../../Cargo.lock
-              ../../../Cargo.toml
-              ../../../build
-              ../../../build.rs
-              ../../../docs
-              ../../../src
+            fileset = inputs.globset.lib.globs ../../.. [
+              "**/*.rs"
+              "build/*.graphql"
+              "build/*.toml"
+              "Cargo.lock"
+              "Cargo.toml"
             ];
           };
           auditable = false; # devshell error: conflicting paths between toolchain and cargo-auditable

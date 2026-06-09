@@ -11,16 +11,10 @@
       programs.claude = {
         additionalCombinators = cs:
           with cs; [
-            (add-pkg-deps [
-              pkgs.sox
-            ])
+            (add-pkg-deps [pkgs.sox])
             (readwrite (noescape "~/.claude"))
             (readwrite (noescape "~/.claude.json"))
-            (set-env "CLAUDE_CODE_EFFORT_LEVEL" "max")
             (set-env "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" "1")
-            (wrap-entry (entry: ''
-              ${entry} --allow-dangerously-skip-permissions
-            ''))
           ];
         git = {
           user.email = "noreply@anthropic.com";
