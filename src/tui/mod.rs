@@ -318,8 +318,9 @@ pub enum Status {
 
 /// Events sent from the background sync thread to the TUI event loop.
 pub enum SyncEvent {
-    /// Sync completed successfully; includes the refreshed issue list.
-    Done(Vec<Issue>),
+    /// Sync completed successfully; includes the refreshed issue list and,
+    /// when requested, the authenticated identity for the header (bd-185).
+    Done(Vec<Issue>, Option<crate::linear::viewer::Viewer>),
     /// Sync encountered an error.
     Error(String),
     /// No auth token found -- sync was skipped.
@@ -1048,7 +1049,11 @@ impl App {
         if !self.syncing {
             self.syncing = true;
             self.sync_status_label = "full sync...".to_string();
-            self.sync_rx = Some(spawn_sync_thread(self.args.clone(), true));
+            self.sync_rx = Some(spawn_sync_thread(
+                self.args.clone(),
+                true,
+                self.viewer_name.is_none(),
+            ));
         }
     }
 
@@ -1836,54 +1841,7 @@ impl App {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Viewer query helper (bd-1fz)
-// ---------------------------------------------------------------------------
-
-struct ViewerInfo {
-    pub id: String,
-    pub name: String,
-    pub org_name: String,
-}
-
-fn fetch_viewer(token: &str) -> Result<ViewerInfo> {
-    use serde::Deserialize;
-    use serde_json::json;
-
-    const VIEWER_QUERY: &str = r#"
-query Viewer {
-  viewer {
-    id
-    name
-    organization {
-      name
-    }
-  }
-}
-"#;
-
-    #[derive(Deserialize)]
-    struct OrgNode {
-        name: String,
-    }
-    #[derive(Deserialize)]
-    struct ViewerNode {
-        id: String,
-        name: String,
-        organization: OrgNode,
-    }
-    #[derive(Deserialize)]
-    struct ViewerData {
-        viewer: ViewerNode,
-    }
-
-    let data: ViewerData = crate::linear::client::graphql_query(token, VIEWER_QUERY, json!({}))?;
-    Ok(ViewerInfo {
-        id: data.viewer.id,
-        name: data.viewer.name,
-        org_name: data.viewer.organization.name,
-    })
-}
+use crate::linear::viewer::fetch_viewer;
 
 // ---------------------------------------------------------------------------
 // Team member fetch (used by assignee popup)
@@ -2119,7 +2077,13 @@ fn build_sync_status_label(syncing: bool) -> String {
 ///
 /// When `full` is true the thread runs a full sync (re-fetches every issue);
 /// otherwise it runs a delta sync (only issues updated since last sync).
-fn spawn_sync_thread(args: IssueArgs, full: bool) -> mpsc::Receiver<SyncEvent> {
+///
+/// When `fetch_identity` is true the thread also fetches the viewer identity
+/// after a successful sync and includes it in `SyncEvent::Done`.  This keeps
+/// the header current when authentication happened outside the TUI's own
+/// login flow -- e.g. the sync's automatic re-auth, or `lt auth login` run in
+/// another terminal.
+fn spawn_sync_thread(args: IssueArgs, full: bool, fetch_identity: bool) -> mpsc::Receiver<SyncEvent> {
     let (tx, rx) = mpsc::channel::<SyncEvent>();
     std::thread::spawn(move || {
         // Skip sync when no auth token is stored; notify the TUI.
@@ -2150,9 +2114,20 @@ fn spawn_sync_thread(args: IssueArgs, full: bool) -> mpsc::Receiver<SyncEvent> {
                     // Convert db::Issue -> issues::list::Issue.
                     Ok(db_issues.into_iter().map(db_issue_to_list_issue).collect())
                 })();
+                // A successful sync implies a valid token, so the identity
+                // fetch is expected to succeed; failures leave the header
+                // unchanged and the next sync retries.
+                let viewer = if fetch_identity {
+                    crate::config::load_token()
+                        .ok()
+                        .flatten()
+                        .and_then(|t| fetch_viewer(&t.access_token).ok())
+                } else {
+                    None
+                };
                 match issues {
                     Ok(list) => {
-                        let _ = tx.send(SyncEvent::Done(list));
+                        let _ = tx.send(SyncEvent::Done(list, viewer));
                     }
                     Err(e) => {
                         let _ = tx.send(SyncEvent::Error(e.to_string()));
@@ -2211,7 +2186,11 @@ fn poll_login_events(app: &mut App) {
             app.not_authenticated = false;
             app.syncing = true;
             app.sync_status_label = build_sync_status_label(true);
-            app.sync_rx = Some(spawn_sync_thread(app.args.clone(), false));
+            app.sync_rx = Some(spawn_sync_thread(
+                app.args.clone(),
+                false,
+                app.viewer_name.is_none(),
+            ));
         }
         Ok(LoginEvent::Error(msg)) => {
             app.login_rx = None;
@@ -2326,8 +2305,16 @@ pub fn run(args: IssueArgs) -> Result<()> {
 
     let sync_status_label = build_sync_status_label(syncing);
 
-    // Spawn background sync thread.
-    let sync_rx = spawn_sync_thread(args.clone(), false);
+    // Fetch viewer identity for header display (bd-185).
+    let viewer = crate::config::load_token()
+        .ok()
+        .flatten()
+        .and_then(|token| fetch_viewer(&token.access_token).ok());
+
+    // Spawn background sync thread. When the identity fetch above failed
+    // (no token yet, or an expired one), ask the sync thread to deliver it
+    // once authentication succeeds so the header gets updated.
+    let sync_rx = spawn_sync_thread(args.clone(), false, viewer.is_none());
 
     let mut app = App::new(
         issues,
@@ -2339,10 +2326,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
         sync_status_label,
     );
 
-    // Fetch viewer identity for header display (bd-185).
-    if let Ok(Some(token)) = crate::config::load_token()
-        && let Ok(viewer) = fetch_viewer(&token.access_token)
-    {
+    if let Some(viewer) = viewer {
         app.viewer_name = Some(viewer.name);
         app.org_name = Some(viewer.org_name);
     }
@@ -2365,7 +2349,11 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
                 if Instant::now() >= t {
                     app.syncing = true;
                     app.sync_status_label = build_sync_status_label(true);
-                    app.sync_rx = Some(spawn_sync_thread(app.args.clone(), false));
+                    app.sync_rx = Some(spawn_sync_thread(
+                        app.args.clone(),
+                        false,
+                        app.viewer_name.is_none(),
+                    ));
                     app.next_sync_at = None;
                 }
             }
@@ -2448,7 +2436,14 @@ fn poll_sync_events(app: &mut App) {
     let mut got_event = false;
     loop {
         match rx.try_recv() {
-            Ok(SyncEvent::Done(_new_issues)) => {
+            Ok(SyncEvent::Done(_new_issues, viewer)) => {
+                // Update the header identity when the sync thread fetched it
+                // (authentication happened outside the L-key login flow).
+                if let Some(v) = viewer {
+                    app.viewer_name = Some(v.name);
+                    app.org_name = Some(v.org_name);
+                    app.not_authenticated = false;
+                }
                 // Sync finished: refresh the issue list from SQLite so that
                 // has_next_page and end_cursor are recalculated correctly.
                 // Only refresh if the user is in normal list mode on page 1.
