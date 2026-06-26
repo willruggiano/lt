@@ -17,12 +17,12 @@ jobs:
     name: build
     runs-on: namespace-profile-cached-amd64-lg
     steps:
-      - uses: actions/checkout@v6
-      - uses: namespacelabs/nscloud-cache-action@v1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: namespacelabs/nscloud-cache-action@15799a6b54e5765f85b2aac25b3f0df43ed571c0 # v1.4.3
         with:
           path: |
             /nix
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
           extra_nix_config: |
