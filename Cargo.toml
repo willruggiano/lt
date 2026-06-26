@@ -16,7 +16,7 @@ dirs = "6"
 open = "5"
 rand = "0.10"
 ratatui = "0.30.0"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -26,7 +26,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-chumsky = "0.9"
+chumsky = "0.13"
 
 [build-dependencies]
 graphql-parser = "0.4"
