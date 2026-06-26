@@ -275,14 +275,14 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
     });
 
     quote! {
-        /// Parse a raw query string into tokens and errors using a Chumsky 0.9 parser.
+        /// Parse a raw query string into tokens and errors using a Chumsky 0.13 parser.
         ///
         /// The Chumsky parser handles character-level tokenisation and provides byte
-        /// span information via `map_with_span`.  Semantic classification of each
+        /// span information via `map_with`.  Semantic classification of each
         /// token (key -> StemKind) is done in a second pass that emits ParseErrors
         /// for unknown stem keys with optional "did you mean?" suggestions.
         fn parse_query_ast_impl(raw: &str) -> (Vec<Token>, Vec<ParseError>) {
-            use chumsky::prelude::{Parser, filter, just, end};
+            use chumsky::prelude::*;
             use chumsky::error::Simple;
 
             // Step 1: Chumsky tokeniser.
@@ -296,54 +296,61 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
             //   val_chars = non-ws*
             //   ws        = ASCII whitespace
 
-            let ws = filter::<char, _, Simple<char>>(|c: &char| c.is_ascii_whitespace())
-                .repeated();
-            let non_ws = filter::<char, _, Simple<char>>(|c: &char| !c.is_ascii_whitespace());
-            let non_ws_no_colon = filter::<char, _, Simple<char>>(|c: &char| {
-                !c.is_ascii_whitespace() && *c != ':'
-            });
+            type RawTok = (String, Option<String>, std::ops::Range<usize>);
 
-            let key_chars = non_ws_no_colon
-                .repeated()
-                .at_least(1)
-                .collect::<String>();
+            // The parser is defined inside a nested fn so the input/error lifetime
+            // (`'src`) is declared once and inferred through the whole grammar.
+            fn token_parser<'src>(
+            ) -> impl Parser<'src, &'src [char], Vec<RawTok>, extra::Err<Simple<'src, char>>>
+            {
+                let ws = any::<&'src [char], extra::Err<Simple<'src, char>>>()
+                    .filter(|c: &char| c.is_ascii_whitespace())
+                    .repeated();
+                let non_ws = any::<&'src [char], extra::Err<Simple<'src, char>>>()
+                    .filter(|c: &char| !c.is_ascii_whitespace());
+                let non_ws_no_colon = any::<&'src [char], extra::Err<Simple<'src, char>>>()
+                    .filter(|c: &char| !c.is_ascii_whitespace() && *c != ':');
 
-            let val_chars = non_ws.repeated().collect::<String>();
+                let key_chars = non_ws_no_colon
+                    .repeated()
+                    .at_least(1)
+                    .collect::<String>();
 
-            // stem: key ':' val  -> (key, Some(val))
-            let stem = key_chars
-                .clone()
-                .then_ignore(just(':'))
-                .then(val_chars)
-                .map(|(k, v)| (k, Some(v)));
+                let val_chars = non_ws.clone().repeated().collect::<String>();
 
-            // word: non_ws+ -> (word, None)
-            let word = non_ws
-                .repeated()
-                .at_least(1)
-                .collect::<String>()
-                .map(|w| (w, None::<String>));
+                // stem: key ':' val  -> (key, Some(val))
+                let stem = key_chars
+                    .then_ignore(just(':'))
+                    .then(val_chars)
+                    .map(|(k, v)| (k, Some(v)));
 
-            // Try stem before word so "key:" is a stem with empty value.
-            // map_with_span gives us the byte span (Range<usize>) of each token.
-            let raw_tok = stem
-                .or(word)
-                .map_with_span(|(k, v), span: std::ops::Range<usize>| (k, v, span));
+                // word: non_ws+ -> (word, None)
+                let word = non_ws
+                    .repeated()
+                    .at_least(1)
+                    .collect::<String>()
+                    .map(|w| (w, None::<String>));
 
-            let parser = ws
-                .clone()
-                .ignore_then(raw_tok.then_ignore(ws.clone()).repeated())
-                .then_ignore(end());
+                // Try stem before word so "key:" is a stem with empty value.
+                // map_with gives us the byte span (Range<usize>) of each token.
+                let raw_tok = stem.or(word).map_with(|(k, v), e| {
+                    let span = e.span();
+                    (k, v, span.start..span.end)
+                });
+
+                ws.clone()
+                    .ignore_then(raw_tok.then_ignore(ws.clone()).repeated().collect::<Vec<_>>())
+                    .then_ignore(end())
+            }
 
             let chars: Vec<char> = raw.chars().collect();
 
             // On parse failure (should never happen for this grammar), fall back
             // to an empty token list rather than panicking.
-            let raw_toks: Vec<(String, Option<String>, std::ops::Range<usize>)> =
-                match parser.parse(chars.as_slice()) {
-                    Ok(toks) => toks,
-                    Err(_errs) => Vec::new(),
-                };
+            let raw_toks: Vec<RawTok> = token_parser()
+                .parse(chars.as_slice())
+                .into_result()
+                .unwrap_or_default();
 
             // Step 2: classify each raw token into a typed Token variant.
             //
