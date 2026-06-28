@@ -641,11 +641,7 @@ impl Completer {
                     self.context = CompletionContext::Word;
                 }
             }
-            Some(Token::Word { .. }) => {
-                self.candidates = Vec::new();
-                self.context = CompletionContext::Word;
-            }
-            Some(Token::Unknown { .. }) => {
+            Some(Token::Word { .. } | Token::Unknown { .. }) => {
                 self.candidates = Vec::new();
                 self.context = CompletionContext::Word;
             }
@@ -712,14 +708,14 @@ impl Completer {
             }
             let new_ast = parse_query_ast(&input.value);
             self.update(&new_ast, input.cursor);
-            self.jump_token_boundary(input, &new_ast, forward);
+            Self::jump_token_boundary(input, &new_ast, forward);
             return;
         }
 
         match &self.context {
             CompletionContext::StemKey { prefix } => {
                 if self.candidates.is_empty() {
-                    self.jump_token_boundary(input, ast, forward);
+                    Self::jump_token_boundary(input, ast, forward);
                     return;
                 }
 
@@ -765,7 +761,7 @@ impl Completer {
                 };
             }
             _ => {
-                self.jump_token_boundary(input, ast, forward);
+                Self::jump_token_boundary(input, ast, forward);
             }
         }
     }
@@ -827,12 +823,7 @@ impl Completer {
     /// `input.selection_end` to the end of the token span so that the value is
     /// "selected" and typing immediately replaces it.  `PartialStem` tokens
     /// (empty value) do NOT set a selection.
-    fn jump_token_boundary(
-        &self,
-        input: &mut crate::tui::TextInput,
-        ast: &QueryAst,
-        forward: bool,
-    ) {
+    fn jump_token_boundary(input: &mut crate::tui::TextInput, ast: &QueryAst, forward: bool) {
         if ast.tokens.is_empty() {
             return;
         }
@@ -1734,7 +1725,9 @@ mod tests {
                 format!("{before}|[{sel_text}]{after}")
             };
             if let Some(ghost) = self.completer.hint_suffix() {
-                s.push_str(&format!("({ghost})"));
+                s.push('(');
+                s.push_str(ghost);
+                s.push(')');
             }
             s
         }

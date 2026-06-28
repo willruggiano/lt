@@ -699,8 +699,7 @@ impl NewIssueField {
 
     pub fn prev(&self) -> Self {
         match self {
-            Self::Title => Self::Title,
-            Self::Team => Self::Title,
+            Self::Title | Self::Team => Self::Title,
             Self::Priority => Self::Team,
             Self::State => Self::Priority,
             Self::Assignee => Self::State,
@@ -1865,12 +1864,8 @@ impl App {
                 return;
             };
             let mut evts = Vec::new();
-            loop {
-                match rx.try_recv() {
-                    Ok(ev) => evts.push(ev),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => break,
-                }
+            while let Ok(ev) = rx.try_recv() {
+                evts.push(ev);
             }
             evts
         };
@@ -2113,12 +2108,10 @@ fn build_sync_status_label(syncing: bool) -> String {
                     let elapsed =
                         chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc));
                     let mins = elapsed.num_minutes();
-                    if mins < 1 {
-                        "synced just now".to_string()
-                    } else if mins == 1 {
-                        "synced 1 min ago".to_string()
-                    } else {
-                        format!("synced {mins} min ago")
+                    match mins {
+                        ..=0 => "synced just now".to_string(),
+                        1 => "synced 1 min ago".to_string(),
+                        _ => format!("synced {mins} min ago"),
                     }
                 }
                 Err(_) => "synced".to_string(),
@@ -2146,11 +2139,7 @@ fn spawn_sync_thread(
     std::thread::spawn(move || {
         // Skip sync when no auth token is stored; notify the TUI.
         match crate::config::load_token() {
-            Ok(None) => {
-                let _ = tx.send(SyncEvent::NotAuthenticated);
-                return;
-            }
-            Err(_) => {
+            Ok(None) | Err(_) => {
                 let _ = tx.send(SyncEvent::NotAuthenticated);
                 return;
             }
