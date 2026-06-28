@@ -9,6 +9,11 @@ repository = "https://github.com/willruggiano/lt"
 keywords = ["linear", "tui", "terminal", "productivity"]
 categories = ["command-line-utilities"]
 
+# chumsky is used only by the parser generated into OUT_DIR/search_stems.rs,
+# which cargo-machete does not scan, so it would otherwise read as unused.
+[package.metadata.cargo-machete]
+ignored = ["chumsky"]
+
 [dependencies]
 anyhow = "1"
 crossterm = "0.29"
