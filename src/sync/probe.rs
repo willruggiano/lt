@@ -6,6 +6,25 @@ use crate::config;
 
 const BOOTSTRAP_URL: &str = "https://client-api.linear.app/sync/bootstrap";
 
+/// Print up to the first five lines of a response body, truncating long lines.
+fn print_body_preview(out: &mut dyn Write, body: &str) -> Result<()> {
+    let lines: Vec<&str> = body.lines().take(5).collect();
+    if lines.is_empty() {
+        writeln!(out, "(empty body)")?;
+        return Ok(());
+    }
+    writeln!(out, "--- first {} line(s) of body ---", lines.len())?;
+    for line in &lines {
+        // Truncate very long lines so the terminal stays readable.
+        if line.len() > 200 {
+            writeln!(out, "{}...", &line[..200])?;
+        } else {
+            writeln!(out, "{line}")?;
+        }
+    }
+    Ok(())
+}
+
 pub fn run(out: &mut dyn Write, override_token: Option<String>) -> Result<()> {
     let (raw_token, label) = if let Some(t) = override_token {
         (t, "cli --token flag")
@@ -56,20 +75,7 @@ pub fn run(out: &mut dyn Write, override_token: Option<String>) -> Result<()> {
                     .body_mut()
                     .read_to_string()
                     .context("reading response body")?;
-                let lines: Vec<&str> = body.lines().take(5).collect();
-                if lines.is_empty() {
-                    writeln!(out, "(empty body)")?;
-                } else {
-                    writeln!(out, "--- first {} line(s) of body ---", lines.len())?;
-                    for line in &lines {
-                        // Truncate very long lines so the terminal stays readable
-                        if line.len() > 200 {
-                            writeln!(out, "{}...", &line[..200])?;
-                        } else {
-                            writeln!(out, "{line}")?;
-                        }
-                    }
-                }
+                print_body_preview(out, &body)?;
             } else {
                 writeln!(out, "status:       {} (error)", status.as_u16())?;
                 writeln!(out, "content-type: {content_type}")?;

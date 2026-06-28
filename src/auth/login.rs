@@ -43,13 +43,13 @@ fn run_with_credentials(client_id: &str, client_secret: &str) -> Result<()> {
 
     info!("Authorization received. Exchanging for token...");
 
-    let token = exchange_code(
+    let token = exchange_code(&TokenExchange {
         client_id,
         client_secret,
-        &code,
-        &redirect_uri,
-        &code_verifier,
-    )
+        code: &code,
+        redirect_uri: &redirect_uri,
+        code_verifier: &code_verifier,
+    })
     .context("exchanging authorization code for token")?;
 
     config::save_token(&token)?;
@@ -259,20 +259,23 @@ fn http_reply(stream: &mut impl std::io::Write, status: u16, body: &str) -> Resu
 // Token exchange
 // ---------------------------------------------------------------------------
 
-fn exchange_code(
-    client_id: &str,
-    client_secret: &str,
-    code: &str,
-    redirect_uri: &str,
-    code_verifier: &str,
-) -> Result<AuthToken> {
+/// Inputs required to exchange an authorization code for an access token.
+struct TokenExchange<'a> {
+    client_id: &'a str,
+    client_secret: &'a str,
+    code: &'a str,
+    redirect_uri: &'a str,
+    code_verifier: &'a str,
+}
+
+fn exchange_code(exchange: &TokenExchange) -> Result<AuthToken> {
     let params = [
         ("grant_type", "authorization_code"),
-        ("client_id", client_id),
-        ("client_secret", client_secret),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("code_verifier", code_verifier),
+        ("client_id", exchange.client_id),
+        ("client_secret", exchange.client_secret),
+        ("code", exchange.code),
+        ("redirect_uri", exchange.redirect_uri),
+        ("code_verifier", exchange.code_verifier),
     ];
 
     let result = ureq::post(TOKEN_URL)

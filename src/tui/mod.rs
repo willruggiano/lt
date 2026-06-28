@@ -212,43 +212,31 @@ impl TextInput {
     /// Handle a key event.  Returns `true` if the value was modified (caller
     /// may want to trigger re-filtering etc.), `false` if only cursor moved or
     /// key was not handled.
+    /// Handle the deletion key bindings. Returns `Some(true)` when a deletion
+    /// key was handled (the buffer always changes), or `None` if `code` is not
+    /// a deletion key.
+    fn handle_deletion_key(&mut self, code: KeyCode, ctrl: bool, alt: bool) -> Option<bool> {
+        match code {
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Char('h') if ctrl => self.backspace(),
+            KeyCode::Char('w') if ctrl => self.delete_word_before(),
+            KeyCode::Char('u') if ctrl => self.delete_to_start(),
+            KeyCode::Char('k') if ctrl => self.delete_to_end(),
+            KeyCode::Char('d') if ctrl => self.delete_forward(),
+            KeyCode::Delete => self.delete_forward(),
+            KeyCode::Char('d') if alt => self.delete_word_after(),
+            _ => return None,
+        }
+        Some(true)
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         let alt = modifiers.contains(KeyModifiers::ALT);
+        if let Some(changed) = self.handle_deletion_key(code, ctrl, alt) {
+            return changed;
+        }
         match code {
-            // -- deletion ----------------------------------------------------
-            KeyCode::Backspace => {
-                self.backspace();
-                true
-            }
-            KeyCode::Char('h') if ctrl => {
-                self.backspace();
-                true
-            }
-            KeyCode::Char('w') if ctrl => {
-                self.delete_word_before();
-                true
-            }
-            KeyCode::Char('u') if ctrl => {
-                self.delete_to_start();
-                true
-            }
-            KeyCode::Char('k') if ctrl => {
-                self.delete_to_end();
-                true
-            }
-            KeyCode::Char('d') if ctrl => {
-                self.delete_forward();
-                true
-            }
-            KeyCode::Delete => {
-                self.delete_forward();
-                true
-            }
-            KeyCode::Char('d') if alt => {
-                self.delete_word_after();
-                true
-            }
             // -- movement ----------------------------------------------------
             KeyCode::Char('a') if ctrl => {
                 self.move_start();
@@ -752,15 +740,41 @@ pub struct NewIssueModal {
     pub modal_rx: Option<mpsc::Receiver<ModalEvent>>,
 }
 
+/// Forward/backward pagination state.
+pub struct Pagination {
+    pub has_next_page: bool,
+    pub current_cursor: Option<String>,
+    pub cursor_stack: Vec<Option<String>>,
+    pub end_cursor: Option<String>,
+}
+
+/// Background sync state (bd-25j).
+pub struct SyncState {
+    /// Receiver for background sync events.
+    pub sync_rx: Option<mpsc::Receiver<SyncEvent>>,
+    /// True while a background sync thread is running.
+    pub syncing: bool,
+    /// Human-readable description of sync status, shown in footer.
+    pub sync_status_label: String,
+    /// When to fire the next periodic delta sync (30s cadence).
+    pub next_sync_at: Option<Instant>,
+}
+
+/// Terminal/session capability flags.
+pub struct Session {
+    /// Whether the terminal supports the kitty keyboard protocol. Without it,
+    /// Ctrl-Enter is indistinguishable from Enter, so submit hints show
+    /// Alt-Enter instead (which legacy terminals can encode).
+    pub keyboard_enhanced: bool,
+    /// True when the last sync reported `NotAuthenticated` (no token stored).
+    pub not_authenticated: bool,
+}
+
 pub struct App {
     pub issues: Vec<Issue>,
     pub table_state: TableState,
     pub args: IssueArgs,
-    pub has_next_page: bool,
-    // Pagination cursors.
-    pub current_cursor: Option<String>,
-    pub cursor_stack: Vec<Option<String>>,
-    pub end_cursor: Option<String>,
+    pub pagination: Pagination,
     pub status: Status,
     pub quit: bool,
     // Filter overlay (input_mode mirrors Mode::InputFilter for compatibility).
@@ -789,14 +803,7 @@ pub struct App {
     pub new_issue_modal: Option<NewIssueModal>,
 
     // -- background sync (bd-25j) --------------------------------------------
-    /// Receiver for background sync events.
-    pub sync_rx: Option<mpsc::Receiver<SyncEvent>>,
-    /// True while a background sync thread is running.
-    pub syncing: bool,
-    /// Human-readable description of sync status, shown in footer.
-    pub sync_status_label: String,
-    /// When to fire the next periodic delta sync (30s cadence).
-    pub next_sync_at: Option<Instant>,
+    pub sync: SyncState,
 
     // -- background comment sync (bd-2mx) ------------------------------------
     /// Receiver for background comment-sync events.
@@ -808,10 +815,8 @@ pub struct App {
     /// description field).
     pub comment_input: Option<String>,
 
-    /// Whether the terminal supports the kitty keyboard protocol. Without it,
-    /// Ctrl-Enter is indistinguishable from Enter, so submit hints show
-    /// Alt-Enter instead (which legacy terminals can encode).
-    pub keyboard_enhanced: bool,
+    /// Terminal/session capability flags.
+    pub session: Session,
 
     // -- help popup (bd-5lz) -------------------------------------------------
     pub help_popup: Option<HelpPopup>,
@@ -845,20 +850,10 @@ pub struct App {
     // -- re-auth (bd-vhp) -----------------------------------------------------
     /// Receiver for the background login thread, if one is in progress.
     pub login_rx: Option<mpsc::Receiver<LoginEvent>>,
-    /// True when the last sync reported `NotAuthenticated` (no token stored).
-    pub not_authenticated: bool,
 }
 
 impl App {
-    fn new(
-        issues: Vec<Issue>,
-        has_next_page: bool,
-        end_cursor: Option<String>,
-        args: IssueArgs,
-        sync_rx: Option<mpsc::Receiver<SyncEvent>>,
-        syncing: bool,
-        sync_status_label: String,
-    ) -> Self {
+    fn new(issues: Vec<Issue>, pagination: Pagination, args: IssueArgs, sync: SyncState) -> Self {
         let mut table_state = TableState::default();
         if !issues.is_empty() {
             table_state.select(Some(0));
@@ -870,10 +865,7 @@ impl App {
             issues,
             table_state,
             args,
-            has_next_page,
-            current_cursor: None,
-            cursor_stack: Vec::new(),
-            end_cursor,
+            pagination,
             status: Status::Idle,
             quit: false,
             input_mode: false,
@@ -886,13 +878,13 @@ impl App {
             popup_selected: 0,
             footer_msg: None,
             new_issue_modal: None,
-            sync_rx,
-            syncing,
-            sync_status_label,
-            next_sync_at: None,
+            sync,
             detail_comment_rx: None,
             comment_input: None,
-            keyboard_enhanced: false,
+            session: Session {
+                keyboard_enhanced: false,
+                not_authenticated: false,
+            },
             help_popup: None,
             search_overlay: None,
             popup_anchor: None,
@@ -903,7 +895,6 @@ impl App {
             initial_args,
             last_esc_time: None,
             login_rx: None,
-            not_authenticated: false,
         }
     }
 
@@ -999,8 +990,8 @@ impl App {
             {
                 Ok(db_issues) => {
                     self.issues = db_issues.into_iter().map(db_issue_to_list_issue).collect();
-                    self.has_next_page = false; // run_query has no pagination
-                    self.end_cursor = None;
+                    self.pagination.has_next_page = false; // run_query has no pagination
+                    self.pagination.end_cursor = None;
                     let n = self.issues.len();
                     let sel = if reset_selection {
                         0
@@ -1021,6 +1012,7 @@ impl App {
         } else {
             // No active filters -- use paginated query as before.
             let offset: i64 = self
+                .pagination
                 .current_cursor
                 .as_deref()
                 .and_then(|s| s.parse().ok())
@@ -1030,9 +1022,9 @@ impl App {
             {
                 Ok((issues, has_next_page)) => {
                     self.issues = issues.into_iter().map(db_issue_to_list_issue).collect();
-                    self.has_next_page = has_next_page;
+                    self.pagination.has_next_page = has_next_page;
                     let limit = i64::from(self.args.limit.min(250));
-                    self.end_cursor = if has_next_page {
+                    self.pagination.end_cursor = if has_next_page {
                         Some((offset + limit).to_string())
                     } else {
                         None
@@ -1071,10 +1063,10 @@ impl App {
         self.do_fetch(false); // immediate cache read for responsiveness
         // Manual refresh triggers a full sync (not delta) to pick up all
         // remote changes, including any the delta window might miss.
-        if !self.syncing {
-            self.syncing = true;
-            self.sync_status_label = "full sync...".to_string();
-            self.sync_rx = Some(spawn_sync_thread(
+        if !self.sync.syncing {
+            self.sync.syncing = true;
+            self.sync.sync_status_label = "full sync...".to_string();
+            self.sync.sync_rx = Some(spawn_sync_thread(
                 self.args.clone(),
                 true,
                 self.viewer_name.is_none(),
@@ -1085,34 +1077,36 @@ impl App {
     fn cycle_sort(&mut self) {
         self.args.sort = self.args.sort.next();
         self.active_filter = self.replace_sort_in_filter();
-        self.cursor_stack.clear();
-        self.current_cursor = None;
+        self.pagination.cursor_stack.clear();
+        self.pagination.current_cursor = None;
         self.do_fetch(true);
     }
 
     fn toggle_desc(&mut self) {
         self.args.desc = !self.args.desc;
         self.active_filter = self.replace_sort_in_filter();
-        self.cursor_stack.clear();
-        self.current_cursor = None;
+        self.pagination.cursor_stack.clear();
+        self.pagination.current_cursor = None;
         self.do_fetch(true);
     }
 
     fn next_page(&mut self) {
-        if !self.has_next_page {
+        if !self.pagination.has_next_page {
             return;
         }
-        let end = self.end_cursor.clone();
-        self.cursor_stack.push(self.current_cursor.clone());
-        self.current_cursor = end;
+        let end = self.pagination.end_cursor.clone();
+        self.pagination
+            .cursor_stack
+            .push(self.pagination.current_cursor.clone());
+        self.pagination.current_cursor = end;
         self.do_fetch(true);
     }
 
     fn prev_page(&mut self) {
-        let Some(cursor) = self.cursor_stack.pop() else {
+        let Some(cursor) = self.pagination.cursor_stack.pop() else {
             return;
         };
-        self.current_cursor = cursor;
+        self.pagination.current_cursor = cursor;
         self.do_fetch(true);
     }
 
@@ -1148,73 +1142,11 @@ impl App {
             })
             .collect();
 
-        self.detail = Some(crate::linear::types::IssueDetail {
-            identifier: issue.identifier.clone(),
-            title: issue.title.clone(),
-            description: issue.description.clone(),
-            priority_label: issue.priority_label.clone(),
-            state: crate::linear::types::IssueDetailState {
-                name: issue.state.name.clone(),
-            },
-            assignee: issue
-                .assignee
-                .as_ref()
-                .map(|a| crate::linear::types::IssueDetailUser {
-                    name: a.name.clone(),
-                }),
-            team: crate::linear::types::IssueDetailTeam {
-                name: issue.team.name.clone(),
-            },
-            labels: crate::linear::types::LabelConnection {
-                nodes: issue
-                    .labels
-                    .nodes
-                    .iter()
-                    .map(|l| crate::linear::types::Label {
-                        name: l.name.clone(),
-                    })
-                    .collect(),
-            },
-            created_at: issue.created_at.clone(),
-            updated_at: issue.updated_at.clone(),
-            comments: crate::linear::types::CommentConnection {
-                nodes: cached_comments,
-            },
-            parent: None,
-            children: Vec::new(),
-        });
+        self.detail = Some(build_cached_detail(&issue, cached_comments));
 
         // Populate parent and children from the local DB cache.
-        if let Ok(conn) = crate::db::open_db() {
-            // Look up children.
-            if let Ok(children) = crate::db::query_children(&conn, &issue.id)
-                && let Some(ref mut detail) = self.detail
-            {
-                detail.children = children
-                    .into_iter()
-                    .map(|c| crate::linear::types::IssueRef {
-                        identifier: c.identifier,
-                        title: c.title,
-                        state_name: c.state_name,
-                    })
-                    .collect();
-            }
-            // Look up parent.
-            if let Some(ref parent) = issue.parent {
-                let parent_sql = "SELECT identifier, title, state_name FROM issues WHERE id = ?1";
-                if let Ok(mut stmt) = conn.prepare(parent_sql)
-                    && let Ok(row) = stmt.query_row(rusqlite::params![parent.id], |row| {
-                        Ok(crate::linear::types::IssueRef {
-                            identifier: row.get(0)?,
-                            title: row.get(1)?,
-                            state_name: row.get(2)?,
-                        })
-                    })
-                    && let Some(ref mut detail) = self.detail
-                {
-                    detail.parent = Some(row);
-                }
-            }
+        if let Some(ref mut detail) = self.detail {
+            populate_relations(detail, &issue);
         }
 
         self.status = Status::Idle;
@@ -1701,29 +1633,7 @@ impl App {
             // Fetch assignees.
             match fetch_team_members(&token.access_token, &team_id) {
                 Ok(members) => {
-                    // Build the assignees list: "Me (name)" at top if viewer is known,
-                    // then "Unassigned", then team members.
-                    let mut items: Vec<PopupItem> = Vec::new();
-                    if let Some(ref v) = viewer {
-                        items.push(PopupItem {
-                            label: format!("Me ({})", v.name),
-                            id: Some(v.id.clone()),
-                        });
-                    }
-                    items.push(PopupItem {
-                        label: "Unassigned".to_string(),
-                        id: None,
-                    });
-                    for m in members {
-                        // Skip the viewer entry since it is already at the top.
-                        if viewer.as_ref().is_some_and(|v| v.id == m.id) {
-                            continue;
-                        }
-                        items.push(PopupItem {
-                            label: m.name,
-                            id: Some(m.id),
-                        });
-                    }
+                    let items = build_assignee_items(viewer.as_ref(), members);
                     let _ = tx.send(ModalEvent::AssigneesLoaded(items));
                 }
                 Err(e) => {
@@ -1766,78 +1676,11 @@ impl App {
             return;
         };
 
-        let input = crate::linear::mutations::CreateIssueInput {
-            title: modal.title.value.trim().to_string(),
-            team_id: team_id.clone(),
-            description: if modal.description.trim().is_empty() {
-                None
-            } else {
-                Some(modal.description.trim().to_string())
-            },
-            state_id: modal
-                .states
-                .get(modal.state_selected)
-                .and_then(|s| s.id.clone()),
-            priority: modal
-                .priorities
-                .get(modal.priority_selected)
-                .and_then(|p| p.id.as_ref())
-                .and_then(|s| s.parse::<u8>().ok()),
-            assignee_id: modal
-                .assignees
-                .get(modal.assignee_selected)
-                .and_then(|a| a.id.clone()),
-        };
-
-        let title_for_db = input.title.clone();
-        let team_name = modal
-            .teams
-            .get(modal.team_selected)
-            .map(|t| t.label.clone())
-            .unwrap_or_default();
-        let state_name = modal
-            .states
-            .get(modal.state_selected)
-            .map_or_else(|| "Backlog".to_string(), |s| s.label.clone());
-        let priority_label = modal
-            .priorities
-            .get(modal.priority_selected)
-            .map_or_else(|| "No priority".to_string(), |p| p.label.clone());
-        let assignee_name = modal.assignees.get(modal.assignee_selected).and_then(|a| {
-            if a.id.is_some() {
-                Some(a.label.clone())
-            } else {
-                None
-            }
-        });
+        let (input, display) = build_create_request(modal, team_id);
 
         match crate::linear::mutations::create_issue(&token.access_token, input) {
             Ok(created) => {
-                // Optimistically insert into SQLite.
-                let now = chrono::Utc::now().to_rfc3339();
-                let db_issue = crate::db::Issue {
-                    id: created.id.clone(),
-                    identifier: created.identifier.clone(),
-                    title: title_for_db,
-                    priority_label,
-                    state_name,
-                    assignee_name,
-                    team_name,
-                    team_key: Some(team_id),
-                    created_at: now.clone(),
-                    updated_at: now,
-                    synced_at: chrono::Utc::now().to_rfc3339(),
-                    description: None,
-                    labels: String::new(),
-                    project_name: None,
-                    cycle_name: None,
-                    creator_name: None,
-                    parent_id: None,
-                    parent_identifier: None,
-                };
-                if let Ok(conn) = crate::db::open_db() {
-                    let _ = crate::db::upsert_issues(&conn, &[db_issue]);
-                }
+                cache_created_issue(&created, display);
                 // Refresh list and highlight new issue (bd-3ba).
                 let new_identifier = created.identifier.clone();
                 self.mode = Mode::List;
@@ -1902,6 +1745,214 @@ use crate::linear::viewer::fetch_viewer;
 struct Member {
     pub id: String,
     pub name: String,
+}
+
+/// Display fields captured from the new-issue modal, used to optimistically
+/// cache a freshly-created issue before the next sync overwrites it.
+struct CreatedIssueDisplay {
+    title: String,
+    priority_label: String,
+    state_name: String,
+    assignee_name: Option<String>,
+    team_name: String,
+    team_key: String,
+}
+
+/// Build the create-issue API input and the display fields used for optimistic
+/// caching from the modal's current selections. `team_id` is the resolved
+/// (validated) team id.
+fn build_create_request(
+    modal: &NewIssueModal,
+    team_id: String,
+) -> (
+    crate::linear::mutations::CreateIssueInput,
+    CreatedIssueDisplay,
+) {
+    let input = crate::linear::mutations::CreateIssueInput {
+        title: modal.title.value.trim().to_string(),
+        team_id: team_id.clone(),
+        description: if modal.description.trim().is_empty() {
+            None
+        } else {
+            Some(modal.description.trim().to_string())
+        },
+        state_id: modal
+            .states
+            .get(modal.state_selected)
+            .and_then(|s| s.id.clone()),
+        priority: modal
+            .priorities
+            .get(modal.priority_selected)
+            .and_then(|p| p.id.as_ref())
+            .and_then(|s| s.parse::<u8>().ok()),
+        assignee_id: modal
+            .assignees
+            .get(modal.assignee_selected)
+            .and_then(|a| a.id.clone()),
+    };
+
+    let display = CreatedIssueDisplay {
+        title: input.title.clone(),
+        priority_label: modal
+            .priorities
+            .get(modal.priority_selected)
+            .map_or_else(|| "No priority".to_string(), |p| p.label.clone()),
+        state_name: modal
+            .states
+            .get(modal.state_selected)
+            .map_or_else(|| "Backlog".to_string(), |s| s.label.clone()),
+        assignee_name: modal.assignees.get(modal.assignee_selected).and_then(|a| {
+            if a.id.is_some() {
+                Some(a.label.clone())
+            } else {
+                None
+            }
+        }),
+        team_name: modal
+            .teams
+            .get(modal.team_selected)
+            .map(|t| t.label.clone())
+            .unwrap_or_default(),
+        team_key: team_id,
+    };
+
+    (input, display)
+}
+
+/// Optimistically insert a freshly-created issue into the local SQLite cache.
+fn cache_created_issue(
+    created: &crate::linear::mutations::CreatedIssue,
+    display: CreatedIssueDisplay,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let db_issue = crate::db::Issue {
+        id: created.id.clone(),
+        identifier: created.identifier.clone(),
+        title: display.title,
+        priority_label: display.priority_label,
+        state_name: display.state_name,
+        assignee_name: display.assignee_name,
+        team_name: display.team_name,
+        team_key: Some(display.team_key),
+        created_at: now.clone(),
+        updated_at: now,
+        synced_at: chrono::Utc::now().to_rfc3339(),
+        description: None,
+        labels: String::new(),
+        project_name: None,
+        cycle_name: None,
+        creator_name: None,
+        parent_id: None,
+        parent_identifier: None,
+    };
+    if let Ok(conn) = crate::db::open_db() {
+        let _ = crate::db::upsert_issues(&conn, &[db_issue]);
+    }
+}
+
+/// Build an `IssueDetail` from a cached list `Issue` plus its cached comments.
+fn build_cached_detail(
+    issue: &Issue,
+    cached_comments: Vec<crate::linear::types::Comment>,
+) -> crate::linear::types::IssueDetail {
+    crate::linear::types::IssueDetail {
+        identifier: issue.identifier.clone(),
+        title: issue.title.clone(),
+        description: issue.description.clone(),
+        priority_label: issue.priority_label.clone(),
+        state: crate::linear::types::IssueDetailState {
+            name: issue.state.name.clone(),
+        },
+        assignee: issue
+            .assignee
+            .as_ref()
+            .map(|a| crate::linear::types::IssueDetailUser {
+                name: a.name.clone(),
+            }),
+        team: crate::linear::types::IssueDetailTeam {
+            name: issue.team.name.clone(),
+        },
+        labels: crate::linear::types::LabelConnection {
+            nodes: issue
+                .labels
+                .nodes
+                .iter()
+                .map(|l| crate::linear::types::Label {
+                    name: l.name.clone(),
+                })
+                .collect(),
+        },
+        created_at: issue.created_at.clone(),
+        updated_at: issue.updated_at.clone(),
+        comments: crate::linear::types::CommentConnection {
+            nodes: cached_comments,
+        },
+        parent: None,
+        children: Vec::new(),
+    }
+}
+
+/// Populate a detail's parent/children fields from the local DB cache.
+fn populate_relations(detail: &mut crate::linear::types::IssueDetail, issue: &Issue) {
+    let Ok(conn) = crate::db::open_db() else {
+        return;
+    };
+    // Look up children.
+    if let Ok(children) = crate::db::query_children(&conn, &issue.id) {
+        detail.children = children
+            .into_iter()
+            .map(|c| crate::linear::types::IssueRef {
+                identifier: c.identifier,
+                title: c.title,
+                state_name: c.state_name,
+            })
+            .collect();
+    }
+    // Look up parent.
+    if let Some(ref parent) = issue.parent {
+        let parent_sql = "SELECT identifier, title, state_name FROM issues WHERE id = ?1";
+        if let Ok(mut stmt) = conn.prepare(parent_sql)
+            && let Ok(row) = stmt.query_row(rusqlite::params![parent.id], |row| {
+                Ok(crate::linear::types::IssueRef {
+                    identifier: row.get(0)?,
+                    title: row.get(1)?,
+                    state_name: row.get(2)?,
+                })
+            })
+        {
+            detail.parent = Some(row);
+        }
+    }
+}
+
+/// Build the assignee popup items: "Me (name)" at top if the viewer is known,
+/// then "Unassigned", then the remaining team members (excluding the viewer).
+fn build_assignee_items(
+    viewer: Option<&crate::linear::viewer::Viewer>,
+    members: Vec<Member>,
+) -> Vec<PopupItem> {
+    let mut items: Vec<PopupItem> = Vec::new();
+    if let Some(v) = viewer {
+        items.push(PopupItem {
+            label: format!("Me ({})", v.name),
+            id: Some(v.id.clone()),
+        });
+    }
+    items.push(PopupItem {
+        label: "Unassigned".to_string(),
+        id: None,
+    });
+    for m in members {
+        // Skip the viewer entry since it is already at the top.
+        if viewer.is_some_and(|v| v.id == m.id) {
+            continue;
+        }
+        items.push(PopupItem {
+            label: m.name,
+            id: Some(m.id),
+        });
+    }
+    items
 }
 
 fn fetch_team_members(token: &str, team_id: &str) -> Result<Vec<Member>> {
@@ -2232,10 +2283,10 @@ fn poll_login_events(app: &mut App) {
             if let Some(org) = org_name {
                 app.org_name = Some(org);
             }
-            app.not_authenticated = false;
-            app.syncing = true;
-            app.sync_status_label = build_sync_status_label(true);
-            app.sync_rx = Some(spawn_sync_thread(
+            app.session.not_authenticated = false;
+            app.sync.syncing = true;
+            app.sync.sync_status_label = build_sync_status_label(true);
+            app.sync.sync_rx = Some(spawn_sync_thread(
                 app.args.clone(),
                 false,
                 app.viewer_name.is_none(),
@@ -2244,7 +2295,7 @@ fn poll_login_events(app: &mut App) {
         Ok(LoginEvent::Error(msg)) => {
             app.login_rx = None;
             app.footer_msg = Some(format!("Login failed: {msg}"));
-            app.sync_status_label = "not authenticated -- press L to log in".to_string();
+            app.sync.sync_status_label = "not authenticated -- press L to log in".to_string();
         }
         Err(mpsc::TryRecvError::Empty) => {} // still waiting
         Err(mpsc::TryRecvError::Disconnected) => {
@@ -2379,12 +2430,19 @@ pub fn run(args: IssueArgs) -> Result<()> {
 
     let mut app = App::new(
         issues,
-        has_next_page,
-        end_cursor,
+        Pagination {
+            has_next_page,
+            current_cursor: None,
+            cursor_stack: Vec::new(),
+            end_cursor,
+        },
         args,
-        Some(sync_rx),
-        syncing,
-        sync_status_label,
+        SyncState {
+            sync_rx: Some(sync_rx),
+            syncing,
+            sync_status_label,
+            next_sync_at: None,
+        },
     );
 
     if let Some(viewer) = viewer {
@@ -2405,7 +2463,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
             )
         );
     }
-    app.keyboard_enhanced = keyboard_enhanced;
+    app.session.keyboard_enhanced = keyboard_enhanced;
     app.status = initial_status;
     let result = run_app(&mut terminal, app);
     if keyboard_enhanced {
@@ -2421,19 +2479,19 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         poll_sync_events(&mut app);
 
         // Periodic delta sync: fire every 30s when authenticated.
-        if !app.syncing
-            && !app.not_authenticated
-            && let Some(t) = app.next_sync_at
+        if !app.sync.syncing
+            && !app.session.not_authenticated
+            && let Some(t) = app.sync.next_sync_at
             && Instant::now() >= t
         {
-            app.syncing = true;
-            app.sync_status_label = build_sync_status_label(true);
-            app.sync_rx = Some(spawn_sync_thread(
+            app.sync.syncing = true;
+            app.sync.sync_status_label = build_sync_status_label(true);
+            app.sync.sync_rx = Some(spawn_sync_thread(
                 app.args.clone(),
                 false,
                 app.viewer_name.is_none(),
             ));
-            app.next_sync_at = None;
+            app.sync.next_sync_at = None;
         }
 
         // Poll modal background loader channel (bd-vfi).
@@ -2518,7 +2576,7 @@ fn poll_detail_comment_events(app: &mut App) {
 /// Non-blocking poll of the background sync channel (bd-25j).
 fn poll_sync_events(app: &mut App) {
     // Take the receiver out temporarily so we can mutate app freely.
-    let Some(rx) = app.sync_rx.take() else {
+    let Some(rx) = app.sync.sync_rx.take() else {
         return;
     };
 
@@ -2531,49 +2589,49 @@ fn poll_sync_events(app: &mut App) {
                 if let Some(v) = viewer {
                     app.viewer_name = Some(v.name);
                     app.org_name = Some(v.org_name);
-                    app.not_authenticated = false;
+                    app.session.not_authenticated = false;
                 }
                 // Sync finished: refresh the issue list from SQLite so that
                 // has_next_page and end_cursor are recalculated correctly.
                 // Only refresh if the user is in normal list mode on page 1.
                 if matches!(app.mode, Mode::List)
-                    && app.cursor_stack.is_empty()
-                    && app.current_cursor.is_none()
+                    && app.pagination.cursor_stack.is_empty()
+                    && app.pagination.current_cursor.is_none()
                 {
                     app.do_fetch(false);
                 }
-                app.syncing = false;
-                app.sync_status_label = build_sync_status_label(false);
+                app.sync.syncing = false;
+                app.sync.sync_status_label = build_sync_status_label(false);
                 // Schedule next periodic delta sync in 30s.
-                app.next_sync_at = Some(Instant::now() + Duration::from_secs(30));
+                app.sync.next_sync_at = Some(Instant::now() + Duration::from_secs(30));
                 got_event = true;
             }
             Ok(SyncEvent::Error(msg)) => {
-                app.syncing = false;
-                app.sync_status_label = format!("sync error: {msg}");
+                app.sync.syncing = false;
+                app.sync.sync_status_label = format!("sync error: {msg}");
                 if matches!(app.status, Status::Loading) {
                     app.status = Status::Idle;
                 }
                 // Retry periodic sync in 30s even after errors.
-                app.next_sync_at = Some(Instant::now() + Duration::from_secs(30));
+                app.sync.next_sync_at = Some(Instant::now() + Duration::from_secs(30));
                 got_event = true;
             }
             Ok(SyncEvent::NotAuthenticated) => {
-                app.syncing = false;
-                app.not_authenticated = true;
-                app.sync_status_label = "not authenticated -- press L to log in".to_string();
+                app.sync.syncing = false;
+                app.session.not_authenticated = true;
+                app.sync.sync_status_label = "not authenticated -- press L to log in".to_string();
                 if matches!(app.status, Status::Loading) {
                     app.status = Status::Idle;
                 }
                 // Don't schedule periodic sync when not authenticated.
-                app.next_sync_at = None;
+                app.sync.next_sync_at = None;
                 got_event = true;
             }
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
-                app.syncing = false;
-                if app.sync_status_label == "syncing..." {
-                    app.sync_status_label = build_sync_status_label(false);
+                app.sync.syncing = false;
+                if app.sync.sync_status_label == "syncing..." {
+                    app.sync.sync_status_label = build_sync_status_label(false);
                 }
                 got_event = true;
                 break;
@@ -2582,8 +2640,8 @@ fn poll_sync_events(app: &mut App) {
     }
 
     // Put the receiver back if the thread may still send more messages.
-    if !got_event || app.syncing {
-        app.sync_rx = Some(rx);
+    if !got_event || app.sync.syncing {
+        app.sync.sync_rx = Some(rx);
     }
 }
 
@@ -2625,42 +2683,7 @@ fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 modal.title.handle_key(code, modifiers);
             }
         },
-        NewIssueField::Description => match code {
-            KeyCode::Tab => {
-                // Description is last field; Tab wraps to Title.
-                modal.focused_field = modal.focused_field.next();
-            }
-            KeyCode::BackTab => {
-                modal.focused_field = modal.focused_field.prev();
-            }
-            KeyCode::Enter => {
-                modal.description.push('\n');
-            }
-            // Vim word/line deletion for the description field (cursor always at end).
-            KeyCode::Backspace => {
-                modal.description.pop();
-            }
-            KeyCode::Char('h') if ctrl => {
-                modal.description.pop();
-            }
-            KeyCode::Char('w') if ctrl => {
-                let trimmed = modal
-                    .description
-                    .trim_end_matches(|c: char| !c.is_whitespace());
-                let new_end = trimmed.trim_end().len();
-                modal.description.truncate(new_end);
-            }
-            KeyCode::Char('u') if ctrl => {
-                modal.description.clear();
-            }
-            KeyCode::Char('k') if ctrl => {
-                // cursor is at end, so ctrl+k is a no-op here
-            }
-            KeyCode::Char(c) if !ctrl => {
-                modal.description.push(c);
-            }
-            _ => {}
-        },
+        NewIssueField::Description => handle_description_key(modal, code, ctrl),
         // ---- Picker fields ----
         field => {
             let field = field.clone();
@@ -2714,6 +2737,46 @@ fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 _ => {}
             }
         }
+    }
+}
+
+/// Handle a key press while the new-issue Description field is focused.
+fn handle_description_key(modal: &mut NewIssueModal, code: KeyCode, ctrl: bool) {
+    match code {
+        KeyCode::Tab => {
+            // Description is last field; Tab wraps to Title.
+            modal.focused_field = modal.focused_field.next();
+        }
+        KeyCode::BackTab => {
+            modal.focused_field = modal.focused_field.prev();
+        }
+        KeyCode::Enter => {
+            modal.description.push('\n');
+        }
+        // Vim word/line deletion for the description field (cursor always at end).
+        KeyCode::Backspace => {
+            modal.description.pop();
+        }
+        KeyCode::Char('h') if ctrl => {
+            modal.description.pop();
+        }
+        KeyCode::Char('w') if ctrl => {
+            let trimmed = modal
+                .description
+                .trim_end_matches(|c: char| !c.is_whitespace());
+            let new_end = trimmed.trim_end().len();
+            modal.description.truncate(new_end);
+        }
+        KeyCode::Char('u') if ctrl => {
+            modal.description.clear();
+        }
+        KeyCode::Char('k') if ctrl => {
+            // cursor is at end, so ctrl+k is a no-op here
+        }
+        KeyCode::Char(c) if !ctrl => {
+            modal.description.push(c);
+        }
+        _ => {}
     }
 }
 
@@ -2847,8 +2910,8 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // Full reset to initial state.
                 app.args = app.initial_args.clone();
                 app.active_filter = app.initial_filter.clone();
-                app.cursor_stack.clear();
-                app.current_cursor = None;
+                app.pagination.cursor_stack.clear();
+                app.pagination.current_cursor = None;
                 app.last_esc_time = None;
                 app.do_fetch(true);
             } else {
@@ -2905,7 +2968,8 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         // Re-authenticate (bd-vhp): background OAuth login.
         KeyCode::Char('L') if app.login_rx.is_none() => {
             app.login_rx = Some(spawn_login_thread());
-            app.sync_status_label = "logging in -- complete authorization in browser".to_string();
+            app.sync.sync_status_label =
+                "logging in -- complete authorization in browser".to_string();
         }
         _ => {}
     }
@@ -2962,29 +3026,7 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 overlay.last_changed = Some(Instant::now());
             }
         }
-        KeyCode::Enter => {
-            // Confirm: leave search mode with filtered results visible.
-            // Transfer results into app.issues so normal keybindings work.
-            if let Some(ref mut overlay) = app.search_overlay {
-                // Flush any pending debounce so the AST and results reflect
-                // every character the user typed before hitting Enter (bd-3r1).
-                if overlay.last_changed.is_some() {
-                    overlay.last_changed = None;
-                    overlay.run_search(app.viewport_height, app.args.limit as usize);
-                }
-                let results = std::mem::take(&mut overlay.results);
-                let selected = overlay.table_state.selected();
-                // AST is the single source of truth (bd-rbm).
-                app.active_filter = overlay.ast.clone();
-                app.sync_args_from_filter();
-                app.issues = results;
-                let n = app.issues.len();
-                let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
-                app.table_state.select(if n > 0 { Some(sel) } else { None });
-            }
-            app.mode = Mode::List;
-            app.search_overlay = None;
-        }
+        KeyCode::Enter => confirm_search(app),
         // Result-list navigation: <down>/<up> only. Plain j/k must fall
         // through to the query bar so they can be typed as filter text.
         KeyCode::Down => {
@@ -3026,30 +3068,8 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         }
         // Tab / Shift-Tab: apply stem-key completion (bd-3qb).
         // These must NOT be forwarded to TextInput::handle_key.
-        KeyCode::Tab => {
-            if let Some(ref mut overlay) = app.search_overlay {
-                let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
-                overlay
-                    .completer
-                    .apply_tab(&mut overlay.query, &ast_snapshot, true);
-                let new_raw = overlay.query.value.clone();
-                overlay.ast = search_query::parse_query_ast(&new_raw);
-                overlay.completer.update(&overlay.ast, overlay.query.cursor);
-                overlay.last_changed = Some(Instant::now());
-            }
-        }
-        KeyCode::BackTab => {
-            if let Some(ref mut overlay) = app.search_overlay {
-                let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
-                overlay
-                    .completer
-                    .apply_tab(&mut overlay.query, &ast_snapshot, false);
-                let new_raw = overlay.query.value.clone();
-                overlay.ast = search_query::parse_query_ast(&new_raw);
-                overlay.completer.update(&overlay.ast, overlay.query.cursor);
-                overlay.last_changed = Some(Instant::now());
-            }
-        }
+        KeyCode::Tab => apply_completion_tab(app, true),
+        KeyCode::BackTab => apply_completion_tab(app, false),
         // Everything else goes to the TextInput query bar.
         _ => {
             if let Some(ref mut overlay) = app.search_overlay
@@ -3058,6 +3078,45 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 overlay.last_changed = Some(Instant::now());
             }
         }
+    }
+}
+
+/// Confirm the search: leave search mode with the filtered results visible by
+/// transferring them into `app.issues` so normal keybindings work.
+fn confirm_search(app: &mut App) {
+    if let Some(ref mut overlay) = app.search_overlay {
+        // Flush any pending debounce so the AST and results reflect every
+        // character the user typed before hitting Enter (bd-3r1).
+        if overlay.last_changed.is_some() {
+            overlay.last_changed = None;
+            overlay.run_search(app.viewport_height, app.args.limit as usize);
+        }
+        let results = std::mem::take(&mut overlay.results);
+        let selected = overlay.table_state.selected();
+        // AST is the single source of truth (bd-rbm).
+        app.active_filter = overlay.ast.clone();
+        app.sync_args_from_filter();
+        app.issues = results;
+        let n = app.issues.len();
+        let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
+        app.table_state.select(if n > 0 { Some(sel) } else { None });
+    }
+    app.mode = Mode::List;
+    app.search_overlay = None;
+}
+
+/// Apply stem-key completion in the given direction (Tab forward, Shift-Tab
+/// backward) and re-parse the query AST.
+fn apply_completion_tab(app: &mut App, forward: bool) {
+    if let Some(ref mut overlay) = app.search_overlay {
+        let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
+        overlay
+            .completer
+            .apply_tab(&mut overlay.query, &ast_snapshot, forward);
+        let new_raw = overlay.query.value.clone();
+        overlay.ast = search_query::parse_query_ast(&new_raw);
+        overlay.completer.update(&overlay.ast, overlay.query.cursor);
+        overlay.last_changed = Some(Instant::now());
     }
 }
 

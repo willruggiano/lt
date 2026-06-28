@@ -363,6 +363,60 @@ fn pick_assignee(
     Ok(None)
 }
 
+/// Borrowed view of the values shown in the pre-creation confirmation summary.
+struct IssueSummary<'a> {
+    team_name: &'a str,
+    title: &'a str,
+    description: Option<&'a str>,
+    priority: u8,
+    state_id: Option<&'a str>,
+    states: &'a [WorkflowState],
+    assignee_id: Option<&'a str>,
+    viewer: &'a Viewer,
+    members: &'a [Member],
+}
+
+fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
+    writeln!(out)?;
+    writeln!(out, "--- Issue summary ---")?;
+    writeln!(out, "  Team:        {}", summary.team_name)?;
+    writeln!(out, "  Title:       {}", summary.title)?;
+    if let Some(d) = summary.description {
+        let preview: String = d.chars().take(60).collect();
+        let ellipsis = if d.len() > 60 { "..." } else { "" };
+        writeln!(out, "  Description: {preview}{ellipsis}")?;
+    } else {
+        writeln!(out, "  Description: (none)")?;
+    }
+    writeln!(out, "  Priority:    {}", priority_label(summary.priority))?;
+    if let Some(sid) = summary.state_id {
+        let sname = summary
+            .states
+            .iter()
+            .find(|s| s.id == sid)
+            .map_or(sid, |s| s.name.as_str());
+        writeln!(out, "  State:       {sname}")?;
+    } else {
+        writeln!(out, "  State:       (default)")?;
+    }
+    if let Some(aid) = summary.assignee_id {
+        let aname = if aid == summary.viewer.id {
+            summary.viewer.name.clone()
+        } else {
+            summary
+                .members
+                .iter()
+                .find(|m| m.id == aid)
+                .map_or_else(|| aid.to_string(), |m| m.name.clone())
+        };
+        writeln!(out, "  Assignee:    {aname}")?;
+    } else {
+        writeln!(out, "  Assignee:    (unassigned)")?;
+    }
+    writeln!(out, "---------------------")?;
+    Ok(())
+}
+
 pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let token = config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
@@ -405,41 +459,20 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let assignee_id = pick_assignee(out, &members, &viewer, args.assignee.as_deref())?;
 
     // Confirm summary before creating
-    writeln!(out)?;
-    writeln!(out, "--- Issue summary ---")?;
-    writeln!(out, "  Team:        {team_name}")?;
-    writeln!(out, "  Title:       {title}")?;
-    if let Some(ref d) = description {
-        let preview: String = d.chars().take(60).collect();
-        let ellipsis = if d.len() > 60 { "..." } else { "" };
-        writeln!(out, "  Description: {preview}{ellipsis}")?;
-    } else {
-        writeln!(out, "  Description: (none)")?;
-    }
-    writeln!(out, "  Priority:    {}", priority_label(priority))?;
-    if let Some(ref sid) = state_id {
-        let sname = states
-            .iter()
-            .find(|s| &s.id == sid)
-            .map_or(sid.as_str(), |s| s.name.as_str());
-        writeln!(out, "  State:       {sname}")?;
-    } else {
-        writeln!(out, "  State:       (default)")?;
-    }
-    if let Some(ref aid) = assignee_id {
-        let aname = if aid == &viewer.id {
-            viewer.name.clone()
-        } else {
-            members
-                .iter()
-                .find(|m| &m.id == aid)
-                .map_or_else(|| aid.clone(), |m| m.name.clone())
-        };
-        writeln!(out, "  Assignee:    {aname}")?;
-    } else {
-        writeln!(out, "  Assignee:    (unassigned)")?;
-    }
-    writeln!(out, "---------------------")?;
+    print_summary(
+        out,
+        &IssueSummary {
+            team_name: &team_name,
+            title: &title,
+            description: description.as_deref(),
+            priority,
+            state_id: state_id.as_deref(),
+            states: &states,
+            assignee_id: assignee_id.as_deref(),
+            viewer: &viewer,
+            members: &members,
+        },
+    )?;
 
     let confirm = read_line(out, "Create issue? [Y/n]: ")?;
     if !confirm.trim().is_empty() && confirm.trim().to_lowercase() != "y" {

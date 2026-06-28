@@ -40,32 +40,22 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     app.viewport_height = chunks[2].height.saturating_sub(1);
 
     let context = super::search_query::render_filter_context(&app.active_filter);
-    let has_next = app.has_next_page;
-    let has_prev = !app.cursor_stack.is_empty();
-    let page = app.cursor_stack.len() + 1;
-    let input_mode = app.input_mode;
-    let input_buf = app.input_buf.clone();
+    let has_next = app.pagination.has_next_page;
+    let has_prev = !app.pagination.cursor_stack.is_empty();
+    let page = app.pagination.cursor_stack.len() + 1;
 
     // Always render the header with user/org context. In search mode, append
     // the search query inline so the identity is always visible (bd-1l9).
+    let identity = Identity {
+        viewer_name: app.viewer_name.as_deref(),
+        org_name: app.org_name.as_deref(),
+    };
     if let Mode::Search = app.mode
         && let Some(ref overlay) = app.search_overlay
     {
-        render_header_with_search(
-            frame,
-            chunks[0],
-            app.viewer_name.as_deref(),
-            app.org_name.as_deref(),
-            overlay,
-        );
+        render_header_with_search(frame, chunks[0], &identity, overlay);
     } else {
-        render_header(
-            frame,
-            chunks[0],
-            &context,
-            app.viewer_name.as_deref(),
-            app.org_name.as_deref(),
-        );
+        render_header(frame, chunks[0], &context, &identity);
     }
 
     // Always render the full-width table so column widths never change.
@@ -75,34 +65,46 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // terminal cell buffer is explicitly cleared (chunk[3]).
     frame.render_widget(Paragraph::new(""), chunks[3]);
 
-    match app.mode {
-        Mode::Detail => {
-            if app.comment_input.is_some() {
-                frame.render_widget(
-                    Paragraph::new(format!(
-                        "Enter newline  {} submit  Esc cancel",
-                        submit_key_label(app.keyboard_enhanced)
-                    )),
-                    chunks[4],
-                );
-            } else if let Some(msg) = &app.footer_msg {
-                frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
-            } else {
-                render_detail_footer(frame, chunks[4]);
-            }
-        }
-        _ => {
-            if input_mode {
-                render_input(frame, chunks[4], &input_buf);
-            } else if let Some(msg) = &app.footer_msg {
-                frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
-            } else {
-                let sync_label = app.sync_status_label.clone();
-                render_footer(frame, chunks[4], has_next, has_prev, page, &sync_label);
-            }
-        }
-    }
+    let sync_label = app.sync.sync_status_label.clone();
+    let footer = FooterState {
+        has_next,
+        has_prev,
+        page,
+        sync_label: &sync_label,
+    };
+    render_status_row(frame, &chunks, app, &footer);
 
+    render_overlays(frame, &chunks, app);
+}
+
+/// Render the bottom status row (chunk 4), which switches between the detail
+/// footer, the filter input, a transient footer message, and the list footer.
+fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &FooterState) {
+    if let Mode::Detail = app.mode {
+        if app.comment_input.is_some() {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Enter newline  {} submit  Esc cancel",
+                    submit_key_label(app.session.keyboard_enhanced)
+                )),
+                chunks[4],
+            );
+        } else if let Some(msg) = &app.footer_msg {
+            frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
+        } else {
+            render_detail_footer(frame, chunks[4]);
+        }
+    } else if app.input_mode {
+        render_input(frame, chunks[4], &app.input_buf);
+    } else if let Some(msg) = &app.footer_msg {
+        frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
+    } else {
+        render_footer(frame, chunks[4], footer);
+    }
+}
+
+/// Render any active mode overlay on top of the base list/header/footer.
+fn render_overlays(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
     // Render detail overlay on top if active (bd-2ek).
     if let Mode::Detail = app.mode {
         render_detail_overlay(frame, chunks[2], app);
@@ -113,10 +115,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_popup(
             frame,
             frame.area(),
-            app.popup_anchor,
-            kind,
-            &app.popup_items,
-            app.popup_selected,
+            &Popup {
+                anchor: app.popup_anchor,
+                kind,
+                items: &app.popup_items,
+                selected: app.popup_selected,
+            },
         );
     }
 
@@ -124,7 +128,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Mode::NewIssue = app.mode
         && let Some(ref modal) = app.new_issue_modal
     {
-        render_new_issue_modal(frame, frame.area(), modal, app.keyboard_enhanced);
+        render_new_issue_modal(frame, frame.area(), modal, app.session.keyboard_enhanced);
     }
 
     // Render help popup on top if active (bd-5lz).
@@ -138,33 +142,47 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Mode::Search = app.mode
         && let Some(ref mut overlay) = app.search_overlay
     {
-        render_search_overlay(frame, &chunks, overlay, &app.args.sort, app.args.desc);
+        render_search_overlay(
+            frame,
+            chunks,
+            overlay,
+            &SortOrder {
+                field: &app.args.sort,
+                desc: app.args.desc,
+            },
+        );
     }
 }
 
 // -- header ------------------------------------------------------------------
 
-fn render_header(
-    frame: &mut Frame,
-    area: Rect,
-    context: &str,
-    viewer_name: Option<&str>,
-    org_name: Option<&str>,
-) {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(u) = viewer_name {
-        parts.push(format!("user:{u}"));
+/// User/org identity shown in the header row.
+struct Identity<'a> {
+    viewer_name: Option<&'a str>,
+    org_name: Option<&'a str>,
+}
+
+impl Identity<'_> {
+    /// Render the identity as a single `user:..  org:..` string, falling back to
+    /// an explicit unauthenticated placeholder when neither part is present.
+    fn label(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(u) = self.viewer_name {
+            parts.push(format!("user:{u}"));
+        }
+        if let Some(o) = self.org_name {
+            parts.push(format!("org:{o}"));
+        }
+        if parts.is_empty() {
+            "(not authenticated)".to_string()
+        } else {
+            parts.join("  ")
+        }
     }
-    if let Some(o) = org_name {
-        parts.push(format!("org:{o}"));
-    }
-    // When no identity info is available the user is not authenticated.
-    // Show a clear placeholder so the header is never silently blank.
-    let identity = if parts.is_empty() {
-        "(not authenticated)".to_string()
-    } else {
-        parts.join("  ")
-    };
+}
+
+fn render_header(frame: &mut Frame, area: Rect, context: &str, identity: &Identity) {
+    let identity = identity.label();
     let text = if context.is_empty() {
         identity
     } else {
@@ -179,26 +197,12 @@ fn render_header(
 fn render_header_with_search(
     frame: &mut Frame,
     area: Rect,
-    viewer_name: Option<&str>,
-    org_name: Option<&str>,
+    identity: &Identity,
     overlay: &super::SearchOverlay,
 ) {
     let mut line = Line::default();
 
-    // Build identity prefix spans.
-    let mut identity_parts: Vec<String> = Vec::new();
-    if let Some(u) = viewer_name {
-        identity_parts.push(format!("user:{u}"));
-    }
-    if let Some(o) = org_name {
-        identity_parts.push(format!("org:{o}"));
-    }
-    // When no identity info is available, show the unauthenticated placeholder.
-    let identity = if identity_parts.is_empty() {
-        "(not authenticated)".to_string()
-    } else {
-        identity_parts.join("  ")
-    };
+    let identity = identity.label();
 
     if overlay.fts_unavailable {
         let prefix = format!("{identity}  ");
@@ -226,14 +230,15 @@ fn render_header_with_search(
 
 // -- footer / input overlay --------------------------------------------------
 
-fn render_footer(
-    frame: &mut Frame,
-    area: Rect,
+/// Pagination and sync state shown in the list-mode footer.
+struct FooterState<'a> {
     has_next: bool,
     has_prev: bool,
     page: usize,
-    sync_label: &str,
-) {
+    sync_label: &'a str,
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, state: &FooterState) {
     let mut parts: Vec<&str> = vec![
         "q quit",
         "/ filter",
@@ -242,16 +247,16 @@ fn render_footer(
         "<space> detail",
         "n new",
     ];
-    if has_prev {
+    if state.has_prev {
         parts.push("ctrl+p prev");
     }
-    if has_next {
+    if state.has_next {
         parts.push("ctrl+n next");
     }
 
-    let page_str = format!("[{page}]");
+    let page_str = format!("[{}]", state.page);
     // Show sync status on the right side, separated from page indicator.
-    let sync_str = format!("  {sync_label}  {page_str}");
+    let sync_str = format!("  {}  {page_str}", state.sync_label);
     let chunks = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(to_u16(sync_str.len())),
@@ -571,14 +576,21 @@ fn render_detail_footer(frame: &mut Frame, area: Rect) {
 
 // -- Generic list-picker popup (bd-3dz) --------------------------------------
 
-fn render_popup(
-    frame: &mut Frame,
-    area: Rect,
+/// Contents and placement of the generic list-picker popup.
+struct Popup<'a> {
     anchor: Option<Rect>,
-    kind: &PopupKind,
-    items: &[super::PopupItem],
+    kind: &'a PopupKind,
+    items: &'a [super::PopupItem],
     selected: usize,
-) {
+}
+
+fn render_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
+    let Popup {
+        anchor,
+        kind,
+        items,
+        selected,
+    } = *popup;
     let title = match kind {
         PopupKind::State => " Set State ",
         PopupKind::Priority => " Set Priority ",
@@ -647,6 +659,55 @@ fn submit_key_label(keyboard_enhanced: bool) -> &'static str {
     }
 }
 
+/// Render the modal's single-line title field.
+fn render_modal_title(frame: &mut Frame, area: Rect, modal: &NewIssueModal) {
+    let active = modal.focused_field == NewIssueField::Title;
+    let label = Span::styled(
+        if active { "[Title]" } else { " Title " },
+        if active {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new().add_modifier(Modifier::BOLD)
+        },
+    );
+    let mut line = Line::from(vec![label, Span::raw("  ")]);
+    if active {
+        append_text_input_spans(&mut line, &modal.title, &[]);
+    } else {
+        line.spans.push(Span::raw(modal.title.value.clone()));
+    }
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Render the modal's multiline description field.
+fn render_modal_description(frame: &mut Frame, area: Rect, modal: &NewIssueModal) {
+    let active = modal.focused_field == NewIssueField::Description;
+    let label = Span::styled(
+        if active {
+            "[Description]"
+        } else {
+            " Description "
+        },
+        if active {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new().add_modifier(Modifier::BOLD)
+        },
+    );
+    // Description cursor is always at end (no cursor tracking for multiline).
+    let text = if active {
+        format!("{}_", modal.description)
+    } else {
+        modal.description.clone()
+    };
+    let block = Block::default()
+        .title(Line::from(label))
+        .borders(Borders::NONE);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
+}
+
 fn render_new_issue_modal(
     frame: &mut Frame,
     area: Rect,
@@ -688,101 +749,63 @@ fn render_new_issue_modal(
     ];
     let chunks = Layout::vertical(constraints).split(inner);
 
-    // Helper: field label style.
-    let label_style_active = Style::new().add_modifier(Modifier::REVERSED);
-    let label_style_normal = Style::new().add_modifier(Modifier::BOLD);
-
     // ---- Title ----
-    let title_active = modal.focused_field == NewIssueField::Title;
-    let title_label = Span::styled(
-        if title_active { "[Title]" } else { " Title " },
-        if title_active {
-            label_style_active
-        } else {
-            label_style_normal
-        },
-    );
-    let mut title_line = Line::from(vec![title_label, Span::raw("  ")]);
-    if title_active {
-        append_text_input_spans(&mut title_line, &modal.title, &[]);
-    } else {
-        title_line.spans.push(Span::raw(modal.title.value.clone()));
-    }
-    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+    render_modal_title(frame, chunks[0], modal);
 
     // ---- Team picker ----
     render_field_picker(
         frame,
         chunks[1],
-        "Team",
-        &modal.teams,
-        modal.team_selected,
-        modal.focused_field == NewIssueField::Team,
-        picker_height,
+        &FieldPicker {
+            label: "Team",
+            items: &modal.teams,
+            selected: modal.team_selected,
+            active: modal.focused_field == NewIssueField::Team,
+            visible_rows: picker_height,
+        },
     );
 
     // ---- Priority picker ----
     render_field_picker(
         frame,
         chunks[2],
-        "Priority",
-        &modal.priorities,
-        modal.priority_selected,
-        modal.focused_field == NewIssueField::Priority,
-        picker_height,
+        &FieldPicker {
+            label: "Priority",
+            items: &modal.priorities,
+            selected: modal.priority_selected,
+            active: modal.focused_field == NewIssueField::Priority,
+            visible_rows: picker_height,
+        },
     );
 
     // ---- State picker ----
     render_field_picker(
         frame,
         chunks[3],
-        "State",
-        &modal.states,
-        modal.state_selected,
-        modal.focused_field == NewIssueField::State,
-        picker_height,
+        &FieldPicker {
+            label: "State",
+            items: &modal.states,
+            selected: modal.state_selected,
+            active: modal.focused_field == NewIssueField::State,
+            visible_rows: picker_height,
+        },
     );
 
     // ---- Assignee picker ----
     render_field_picker(
         frame,
         chunks[4],
-        "Assignee",
-        &modal.assignees,
-        modal.assignee_selected,
-        modal.focused_field == NewIssueField::Assignee,
-        picker_height,
+        &FieldPicker {
+            label: "Assignee",
+            items: &modal.assignees,
+            selected: modal.assignee_selected,
+            active: modal.focused_field == NewIssueField::Assignee,
+            visible_rows: picker_height,
+        },
     );
 
     // ---- Description ----
-    let desc_active = modal.focused_field == NewIssueField::Description;
-    let desc_label = Span::styled(
-        if desc_active {
-            "[Description]"
-        } else {
-            " Description "
-        },
-        if desc_active {
-            label_style_active
-        } else {
-            label_style_normal
-        },
-    );
-    // Description cursor is always at end (no cursor tracking for multiline).
-    let desc_text = if desc_active {
-        format!("{}_", modal.description)
-    } else {
-        modal.description.clone()
-    };
-    let desc_block = Block::default()
-        .title(Line::from(desc_label))
-        .borders(Borders::NONE);
-    let desc_inner = desc_block.inner(chunks[5]);
-    frame.render_widget(desc_block, chunks[5]);
-    frame.render_widget(
-        Paragraph::new(desc_text).wrap(Wrap { trim: false }),
-        desc_inner,
-    );
+    render_modal_description(frame, chunks[5], modal);
 
     // ---- Error / loading line ----
     let status_text = if modal.loading {
@@ -884,16 +907,24 @@ fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
     frame.render_widget(List::new(items), chunks[1]);
 }
 
-/// Render a labelled inline list-picker for a single form field.
-fn render_field_picker(
-    frame: &mut Frame,
-    area: Rect,
-    label: &str,
-    items: &[super::PopupItem],
+/// A single labelled inline list-picker field within the new-issue modal.
+struct FieldPicker<'a> {
+    label: &'a str,
+    items: &'a [super::PopupItem],
     selected: usize,
     active: bool,
     visible_rows: u16,
-) {
+}
+
+/// Render a labelled inline list-picker for a single form field.
+fn render_field_picker(frame: &mut Frame, area: Rect, picker: &FieldPicker) {
+    let FieldPicker {
+        label,
+        items,
+        selected,
+        active,
+        visible_rows,
+    } = *picker;
     let label_style_active = Style::new().add_modifier(Modifier::REVERSED);
     let label_style_normal = Style::new().add_modifier(Modifier::BOLD);
 
@@ -957,12 +988,17 @@ fn render_field_picker(
 
 // -- FTS search overlay (bd-2g4) ---------------------------------------------
 
+/// Active sort field and direction.
+struct SortOrder<'a> {
+    field: &'a SortField,
+    desc: bool,
+}
+
 fn render_search_overlay(
     frame: &mut Frame,
     chunks: &[Rect],
     overlay: &mut SearchOverlay,
-    sort_field: &SortField,
-    sort_desc: bool,
+    sort: &SortOrder,
 ) {
     // The search bar is rendered in the header row (chunks[0]) by render().
     // This function only handles the results in the main content area (chunks[2]).
@@ -1000,8 +1036,8 @@ fn render_search_overlay(
     }
 
     // Render results as a table identical in style to the main list.
-    let sort_col = sort_col_index(sort_field);
-    let sort_marker = if sort_desc { "-" } else { "+" };
+    let sort_col = sort_col_index(sort.field);
+    let sort_marker = if sort.desc { "-" } else { "+" };
     let base_headers: [&str; 7] = [
         "IDENTIFIER",
         "TITLE",
@@ -1149,6 +1185,38 @@ fn push_text_spans(
 /// `Color::Red` to give the user a visual signal that a stem was not
 /// recognised.  Pass an empty slice when no error highlighting is needed
 /// (e.g. modal title input).
+/// Render the text after the block cursor, underlining any active selection.
+fn push_after_cursor_spans(
+    line: &mut Line,
+    input: &TextInput,
+    after_offset: usize,
+    errors: &[super::search_query::ParseError],
+) {
+    let after = &input.value[after_offset..];
+    let Some(sel_end) = input.selection_end else {
+        push_text_spans(line, after, after_offset, errors);
+        return;
+    };
+    let sel_end = sel_end.min(input.value.len());
+    if sel_end <= after_offset {
+        push_text_spans(line, after, after_offset, errors);
+        return;
+    }
+    // Selected portion: [after_offset, sel_end)
+    let sel_text = &input.value[after_offset..sel_end];
+    if !sel_text.is_empty() {
+        line.spans.push(Span::styled(
+            sel_text.to_owned(),
+            Style::new().add_modifier(Modifier::UNDERLINED),
+        ));
+    }
+    // Rest: [sel_end, end)
+    let rest = &input.value[sel_end..];
+    if !rest.is_empty() {
+        push_text_spans(line, rest, sel_end, errors);
+    }
+}
+
 pub fn append_text_input_spans(
     line: &mut Line,
     input: &TextInput,
@@ -1172,31 +1240,7 @@ pub fn append_text_input_spans(
             // `after` occupies bytes [cursor + ch.len_utf8(), end).
             if !after.is_empty() {
                 let after_offset = input.cursor + ch.len_utf8();
-                // If there is an active selection, render cursor..selection_end
-                // with UNDERLINED style and the remainder normally.
-                if let Some(sel_end) = input.selection_end {
-                    let sel_end = sel_end.min(input.value.len());
-                    let cursor_end = input.cursor + ch.len_utf8();
-                    if sel_end > cursor_end {
-                        // Selected portion: [cursor+ch_len, sel_end)
-                        let sel_text = &input.value[cursor_end..sel_end];
-                        if !sel_text.is_empty() {
-                            line.spans.push(Span::styled(
-                                sel_text.to_owned(),
-                                Style::new().add_modifier(Modifier::UNDERLINED),
-                            ));
-                        }
-                        // Rest: [sel_end, end)
-                        let rest = &input.value[sel_end..];
-                        if !rest.is_empty() {
-                            push_text_spans(line, rest, sel_end, errors);
-                        }
-                    } else {
-                        push_text_spans(line, after, after_offset, errors);
-                    }
-                } else {
-                    push_text_spans(line, after, after_offset, errors);
-                }
+                push_after_cursor_spans(line, input, after_offset, errors);
             }
         }
         None => {

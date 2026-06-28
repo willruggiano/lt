@@ -332,28 +332,24 @@ fn normalise_priority(s: &str) -> Option<&'static str> {
 /// # Errors
 ///
 /// Returns an error if the SQLite query fails (e.g. FTS index unavailable).
-pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec<Issue>> {
-    // Build WHERE conditions and bind parameters.
+// Build the structured WHERE conditions and their bound parameters from a
+// parsed query. Each filter stem maps to one or more SQLite conditions:
+//   assignee: LOWER(COALESCE(assignee_name,'')) LIKE '%<val>%'
+//             Special case: value "me" -> LOWER(assignee_name) = 'me'
+//   priority: priority_label = <normalised-label>
+//             Value is normalised via normalise_priority() before binding;
+//             unrecognised values are silently skipped.
+//   state:    LOWER(state_name) LIKE '%<val>%'
+//   team:     LOWER(team_name) LIKE '%<val>%'
+//             OR LOWER(COALESCE(team_key,'')) LIKE '%<val>%'
+//   label:    LOWER(COALESCE(labels,'')) LIKE '%<val>%'
+//             (column is 'labels', not 'label_names')
+fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::types::ToSql>>) {
     let mut conditions: Vec<String> = Vec::new();
-    // We collect params as String values and pass them with a macro workaround
-    // below; rusqlite requires heterogeneous param lists via the params! macro
-    // or by boxing.  We use Box<dyn rusqlite::types::ToSql> for flexibility.
+    // rusqlite requires heterogeneous param lists via the params! macro or by
+    // boxing. We box with Box<dyn ToSql> for flexibility.
     let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-    // Per-field SQL mapping (the knowledge formerly kept in TOML metadata).
-    //
-    // Each filter stem maps to one or more SQLite conditions:
-    //   assignee: LOWER(COALESCE(assignee_name,'')) LIKE '%<val>%'
-    //             Special case: value "me" -> LOWER(assignee_name) = 'me'
-    //   priority: priority_label = <normalised-label>
-    //             Value is normalised via normalise_priority() before binding;
-    //             unrecognised values are silently skipped.
-    //   state:    LOWER(state_name) LIKE '%<val>%'
-    //   team:     LOWER(team_name) LIKE '%<val>%'
-    //             OR LOWER(COALESCE(team_key,'')) LIKE '%<val>%'
-    //   label:    LOWER(COALESCE(labels,'')) LIKE '%<val>%'
-    //             (column is 'labels', not 'label_names')
-    //
     // -- assignee --
     if let Some(ref a) = q.assignee {
         if a == "me" {
@@ -415,7 +411,13 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         bind.push(Box::new(format!("%{c}%")));
     }
 
-    // -- ORDER BY --
+    (conditions, bind)
+}
+
+/// Build the final SELECT statement for the given query and structured
+/// conditions. FTS queries join against `issues_fts`; non-FTS queries scan
+/// `issues` directly.
+fn build_sql(q: &ParsedQuery, conditions: &[String], limit: usize) -> String {
     let (order_col, order_dir) = match &q.sort {
         Some((field, dir)) => (
             sort_col(field),
@@ -424,38 +426,12 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         None => ("updated_at", "DESC"),
     };
 
-    // -- FTS --
-    let has_fts = !q.fts_terms.is_empty();
-
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
-
-    let sql = if has_fts {
-        // Join issues with FTS results, apply additional structured filters.
-        format!(
-            "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
-                    i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
-                    i.synced_at, i.description, i.labels,
-                    i.project_name, i.cycle_name, i.creator_name,
-                    i.parent_id, i.parent_identifier
-             FROM issues i
-             JOIN issues_fts ON issues_fts.rowid = i.rowid
-             WHERE issues_fts MATCH ?{extra_cond}
-             ORDER BY {col} {dir}
-             LIMIT {limit}",
-            extra_cond = if conditions.is_empty() {
-                String::new()
-            } else {
-                format!(" AND {}", conditions.join(" AND "))
-            },
-            col = order_col,
-            dir = order_dir,
-            limit = limit,
-        )
-    } else {
+    if q.fts_terms.is_empty() {
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
         format!(
             "SELECT id, identifier, title, priority_label, state_name,
                     assignee_name, team_name, team_key, created_at, updated_at, synced_at,
@@ -466,7 +442,33 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
              ORDER BY {order_col} {order_dir}
              LIMIT {limit}",
         )
-    };
+    } else {
+        // Join issues with FTS results, apply additional structured filters.
+        let extra_cond = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", conditions.join(" AND "))
+        };
+        format!(
+            "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
+                    i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
+                    i.synced_at, i.description, i.labels,
+                    i.project_name, i.cycle_name, i.creator_name,
+                    i.parent_id, i.parent_identifier
+             FROM issues i
+             JOIN issues_fts ON issues_fts.rowid = i.rowid
+             WHERE issues_fts MATCH ?{extra_cond}
+             ORDER BY {order_col} {order_dir}
+             LIMIT {limit}",
+        )
+    }
+}
+
+pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec<Issue>> {
+    let (conditions, bind) = build_conditions(q);
+
+    let has_fts = !q.fts_terms.is_empty();
+    let sql = build_sql(q, &conditions, limit);
 
     // Build the final param list: for FTS queries the FTS term goes first.
     let all_params: Vec<Box<dyn rusqlite::types::ToSql>> = if has_fts {
