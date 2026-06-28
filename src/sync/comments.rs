@@ -13,7 +13,7 @@ use crate::db;
 use crate::linear::client::graphql_query;
 use crate::linear::types::PageInfo;
 
-const COMMENTS_QUERY: &str = r#"
+const COMMENTS_QUERY: &str = r"
 query IssueComments($id: String!, $after: String) {
   issue(id: $id) {
     comments(first: 100, after: $after) {
@@ -28,7 +28,7 @@ query IssueComments($id: String!, $after: String) {
     }
   }
 }
-"#;
+";
 
 #[derive(Deserialize)]
 struct CommentUser {

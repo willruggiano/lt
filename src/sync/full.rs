@@ -5,7 +5,7 @@ use crate::db;
 use crate::issues::list::fetch;
 use crate::issues::{IssueArgs, SortField};
 
-/// Convert a list::Issue into a db::Issue.
+/// Convert a `list::Issue` into a `db::Issue`.
 fn to_db_issue(src: &crate::issues::list::Issue) -> db::Issue {
     let labels = src
         .labels
@@ -37,7 +37,7 @@ fn to_db_issue(src: &crate::issues::list::Issue) -> db::Issue {
 }
 
 /// Fetch every page from the Linear API and upsert into SQLite.
-/// Sets sync_meta key='last_synced_at' to the current UTC timestamp on success.
+/// Sets `sync_meta` key='`last_synced_at`' to the current UTC timestamp on success.
 pub fn run() -> Result<()> {
     let conn = db::open_db()?;
 

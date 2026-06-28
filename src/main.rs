@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "lt", about = "Linear TUI for terminal power users", version)]
 struct Cli {
     /// Profile to use: each profile has its own credentials and local
-    /// database (one account/workspace per profile). Defaults to $LT_PROFILE
+    /// database (one account/workspace per profile). Defaults to $`LT_PROFILE`
     /// or "default".
     #[arg(long, global = true)]
     profile: Option<String>,

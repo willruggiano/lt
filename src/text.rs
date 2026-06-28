@@ -3,6 +3,6 @@ pub fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let head: String = s.chars().take(max.saturating_sub(3)).collect();
-        format!("{}...", head)
+        format!("{head}...")
     }
 }

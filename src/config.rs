@@ -13,24 +13,22 @@ static PROFILE: OnceLock<String> = OnceLock::new();
 /// startup, before any path helper is used.  `None` selects the profile
 /// named "default".
 pub fn set_profile(name: Option<String>) -> Result<()> {
-    if let Some(ref n) = name {
-        if n.is_empty()
+    if let Some(ref n) = name
+        && (n.is_empty()
             || !n
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
         {
             anyhow::bail!(
-                "invalid profile name {:?}: use only letters, digits, '-' and '_'",
-                n
+                "invalid profile name {n:?}: use only letters, digits, '-' and '_'"
             );
         }
-    }
     let _ = PROFILE.set(name.unwrap_or_else(|| "default".to_string()));
     Ok(())
 }
 
 fn profile() -> &'static str {
-    PROFILE.get().map(String::as_str).unwrap_or("default")
+    PROFILE.get().map_or("default", String::as_str)
 }
 
 /// Append the per-profile subdirectory to a base `lt` directory.
@@ -68,8 +66,7 @@ impl AuthToken {
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         now >= issued_at + expires_in
     }
 }
@@ -125,8 +122,7 @@ pub fn save_token(token: &AuthToken) -> Result<()> {
     // Preserve any issued_at already set by the caller.
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let stamped = AuthToken {
         access_token: token.access_token.clone(),
         token_type: token.token_type.clone(),

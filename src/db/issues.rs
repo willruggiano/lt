@@ -28,7 +28,7 @@ pub struct Issue {
     pub parent_identifier: Option<String>,
 }
 
-/// Insert or replace a slice of issues, setting synced_at to now (UTC).
+/// Insert or replace a slice of issues, setting `synced_at` to now (UTC).
 pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
     let synced_at = Utc::now().to_rfc3339();
     let mut stmt = conn
@@ -69,10 +69,10 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
 }
 
 /// Query issues from the local DB, applying the WHERE clause built from the
-/// IssueArgs filter fields (bd-2km) and ORDER BY from the sort fields.
+/// `IssueArgs` filter fields (bd-2km) and ORDER BY from the sort fields.
 ///
 /// An `--assignee=me` filter must be resolved to the viewer's name by the
-/// caller before calling this (see issues::list::resolve_me).
+/// caller before calling this (see `issues::list::resolve_me`).
 pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
     let (where_clause, mut bind) = crate::db::filters::build_sql_filter(args)?;
     let order = crate::db::filters::build_sql_order(args);
@@ -81,7 +81,7 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
     } else {
         format!("WHERE {where_clause} ")
     };
-    let limit = args.limit.min(250) as i64;
+    let limit = i64::from(args.limit.min(250));
     bind.push(Box::new(limit));
 
     let sql = format!(
@@ -100,7 +100,7 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
 
     let rows = stmt
         .query_map(
-            rusqlite::params_from_iter(bind.iter().map(|p| p.as_ref())),
+            rusqlite::params_from_iter(bind.iter().map(std::convert::AsRef::as_ref)),
             issue_from_row,
         )
         .context("failed to execute query_issues")?;
@@ -156,7 +156,7 @@ pub fn query_issues_page(
     };
     let direction = if args.desc { "DESC" } else { "ASC" };
     // Fetch one extra row to detect whether there is a next page.
-    let limit = args.limit.min(250) as i64;
+    let limit = i64::from(args.limit.min(250));
     let fetch_limit = limit + 1;
 
     let sql = format!(
@@ -264,7 +264,7 @@ pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
     Ok(issues)
 }
 
-/// Retrieve a value from the sync_meta table. Returns None if key is absent.
+/// Retrieve a value from the `sync_meta` table. Returns None if key is absent.
 pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
     let mut stmt = conn
         .prepare("SELECT value FROM sync_meta WHERE key = ?1")
@@ -328,7 +328,7 @@ pub fn query_children(conn: &Connection, parent_id: &str) -> Result<Vec<Issue>> 
     Ok(issues)
 }
 
-/// Insert or replace a key/value pair in the sync_meta table.
+/// Insert or replace a key/value pair in the `sync_meta` table.
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?1, ?2)",
@@ -349,7 +349,7 @@ mod tests {
             title: format!("issue {id}"),
             priority_label: "Medium".to_string(),
             state_name: state.to_string(),
-            assignee_name: assignee.map(|s| s.to_string()),
+            assignee_name: assignee.map(std::string::ToString::to_string),
             team_name: "Engineering".to_string(),
             team_key: Some("ENG".to_string()),
             created_at: "2026-01-01T00:00:00Z".to_string(),

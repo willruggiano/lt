@@ -9,7 +9,7 @@ use crate::linear::mutations::{
     CreateIssueInput, Team, WorkflowState, create_issue, fetch_teams, fetch_workflow_states,
 };
 
-const VIEWER_QUERY: &str = r#"
+const VIEWER_QUERY: &str = r"
 query Viewer {
   viewer {
     id
@@ -20,9 +20,9 @@ query Viewer {
     }
   }
 }
-"#;
+";
 
-const TEAM_MEMBERS_QUERY: &str = r#"
+const TEAM_MEMBERS_QUERY: &str = r"
 query TeamMembers($teamId: String!) {
   team(id: $teamId) {
     members {
@@ -34,7 +34,7 @@ query TeamMembers($teamId: String!) {
     }
   }
 }
-"#;
+";
 
 #[derive(Deserialize, Debug, Clone)]
 struct Organization {
@@ -89,7 +89,7 @@ pub struct NewIssueArgs {
 }
 
 fn read_line(prompt: &str) -> Result<String> {
-    print!("{}", prompt);
+    print!("{prompt}");
     io::stdout().flush()?;
     let stdin = io::stdin();
     let mut line = String::new();
@@ -133,7 +133,7 @@ fn pick_team<'a>(teams: &'a [Team], hint: Option<&str>) -> Result<&'a Team> {
         {
             return Ok(&teams[n - 1]);
         }
-        return Err(anyhow!("no team matching '{}'", h));
+        return Err(anyhow!("no team matching '{h}'"));
     }
 
     println!("Teams:");
@@ -222,7 +222,7 @@ fn open_editor_for_description() -> Result<Option<String>> {
 fn prompt_priority(hint: Option<&str>) -> Result<u8> {
     if let Some(h) = hint {
         return parse_priority(h)
-            .ok_or_else(|| anyhow!("invalid priority '{}'; use none/urgent/high/normal/low", h));
+            .ok_or_else(|| anyhow!("invalid priority '{h}'; use none/urgent/high/normal/low"));
     }
     loop {
         let input = read_line("Priority [none/urgent/high/normal/low] (default: none): ")?;
@@ -254,10 +254,10 @@ fn pick_state<'a>(
         {
             return Ok(Some(&states[n - 1]));
         }
-        return Err(anyhow!("no state matching '{}'", h));
+        return Err(anyhow!("no state matching '{h}'"));
     }
 
-    let default_name = default_state.map(|s| s.name.as_str()).unwrap_or("(first)");
+    let default_name = default_state.map_or("(first)", |s| s.name.as_str());
 
     println!("Workflow states:");
     for (i, s) in states.iter().enumerate() {
@@ -270,8 +270,7 @@ fn pick_state<'a>(
     }
 
     let input = read_line(&format!(
-        "State (number or name, default: {}): ",
-        default_name
+        "State (number or name, default: {default_name}): "
     ))?;
 
     if input.trim().is_empty() {
@@ -289,7 +288,7 @@ fn pick_state<'a>(
         return Ok(Some(&states[n - 1]));
     }
 
-    println!("Invalid state, using default: {}", default_name);
+    println!("Invalid state, using default: {default_name}");
     Ok(default_state)
 }
 
@@ -313,7 +312,7 @@ fn pick_assignee(
         {
             return Ok(Some(m.id.clone()));
         }
-        return Err(anyhow!("no member matching '{}'", h));
+        return Err(anyhow!("no member matching '{h}'"));
     }
 
     println!("Assignee (optional):");
@@ -395,12 +394,12 @@ pub fn run(args: NewIssueArgs) -> Result<()> {
     // Confirm summary before creating
     println!();
     println!("--- Issue summary ---");
-    println!("  Team:        {}", team_name);
-    println!("  Title:       {}", title);
+    println!("  Team:        {team_name}");
+    println!("  Title:       {title}");
     if let Some(ref d) = description {
         let preview: String = d.chars().take(60).collect();
         let ellipsis = if d.len() > 60 { "..." } else { "" };
-        println!("  Description: {}{}", preview, ellipsis);
+        println!("  Description: {preview}{ellipsis}");
     } else {
         println!("  Description: (none)");
     }
@@ -409,9 +408,8 @@ pub fn run(args: NewIssueArgs) -> Result<()> {
         let sname = states
             .iter()
             .find(|s| &s.id == sid)
-            .map(|s| s.name.as_str())
-            .unwrap_or(sid.as_str());
-        println!("  State:       {}", sname);
+            .map_or(sid.as_str(), |s| s.name.as_str());
+        println!("  State:       {sname}");
     } else {
         println!("  State:       (default)");
     }
@@ -421,11 +419,9 @@ pub fn run(args: NewIssueArgs) -> Result<()> {
         } else {
             members
                 .iter()
-                .find(|m| &m.id == aid)
-                .map(|m| m.name.clone())
-                .unwrap_or_else(|| aid.clone())
+                .find(|m| &m.id == aid).map_or_else(|| aid.clone(), |m| m.name.clone())
         };
-        println!("  Assignee:    {}", aname);
+        println!("  Assignee:    {aname}");
     } else {
         println!("  Assignee:    (unassigned)");
     }

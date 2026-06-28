@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::client::graphql_query;
 
-const VIEWER_QUERY: &str = r#"
+const VIEWER_QUERY: &str = r"
 query Viewer {
   viewer {
     id
@@ -16,7 +16,7 @@ query Viewer {
     }
   }
 }
-"#;
+";
 
 /// The authenticated user's identity.
 pub struct Viewer {

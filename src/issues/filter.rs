@@ -11,9 +11,9 @@ fn parse_date(s: &str, field: &str) -> Result<String> {
         || parts[2].len() != 2
         || !parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
     {
-        return Err(anyhow!("--{}: date must be YYYY-MM-DD, got {:?}", field, s));
+        return Err(anyhow!("--{field}: date must be YYYY-MM-DD, got {s:?}"));
     }
-    Ok(format!("{}T00:00:00Z", s))
+    Ok(format!("{s}T00:00:00Z"))
 }
 
 fn parse_priority(s: &str) -> Result<f64> {
@@ -24,8 +24,7 @@ fn parse_priority(s: &str) -> Result<f64> {
         "normal" | "medium" | "3" => Ok(3.0),
         "low" | "4" => Ok(4.0),
         _ => Err(anyhow!(
-            "--priority: expected none/urgent/high/normal/medium/low or 0-4, got {:?}",
-            s
+            "--priority: expected none/urgent/high/normal/medium/low or 0-4, got {s:?}"
         )),
     }
 }

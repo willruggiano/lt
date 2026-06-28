@@ -33,8 +33,7 @@ impl Comment {
     pub fn author(&self) -> &str {
         self.user
             .as_ref()
-            .map(|u| u.name.as_str())
-            .unwrap_or("unknown")
+            .map_or("unknown", |u| u.name.as_str())
     }
 }
 

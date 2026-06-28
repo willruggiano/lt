@@ -1,10 +1,10 @@
 /// Auto-refresh the stored OAuth session when the access token has expired.
 ///
-/// Linear's OAuth2 implementation does not issue refresh tokens.  The only
+/// Linear's `OAuth2` implementation does not issue refresh tokens.  The only
 /// way to obtain a new access token is to run the full authorization-code +
 /// PKCE flow again.  This module provides `try_refresh`, which attempts that
 /// flow when the stored token appears to be expired AND the client credentials
-/// (client_id + client_secret) are available -- either from environment
+/// (`client_id` + `client_secret`) are available -- either from environment
 /// variables or from the stored config file.
 ///
 /// The function is best-effort:

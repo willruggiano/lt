@@ -11,9 +11,9 @@ fn parse_date(s: &str, field: &str) -> Result<String> {
         || parts[2].len() != 2
         || !parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
     {
-        return Err(anyhow!("--{}: date must be YYYY-MM-DD, got {:?}", field, s));
+        return Err(anyhow!("--{field}: date must be YYYY-MM-DD, got {s:?}"));
     }
-    Ok(format!("{}T00:00:00Z", s))
+    Ok(format!("{s}T00:00:00Z"))
 }
 
 fn parse_priority_label(s: &str) -> Result<String> {
@@ -25,19 +25,18 @@ fn parse_priority_label(s: &str) -> Result<String> {
         "low" | "4" => "Low",
         _ => {
             return Err(anyhow!(
-                "--priority: expected none/urgent/high/normal/medium/low or 0-4, got {:?}",
-                s
+                "--priority: expected none/urgent/high/normal/medium/low or 0-4, got {s:?}"
             ));
         }
     };
     Ok(label.to_string())
 }
 
-/// Build a SQL WHERE clause and bind parameters from IssueArgs filter fields.
+/// Build a SQL WHERE clause and bind parameters from `IssueArgs` filter fields.
 ///
 /// Returns a tuple of:
 ///   - a WHERE clause string (empty string if no filters)
-///   - a Vec of boxed ToSql values matching the placeholders in the clause
+///   - a Vec of boxed `ToSql` values matching the placeholders in the clause
 ///
 /// The caller is responsible for prepending "WHERE " if the clause is non-empty.
 pub fn build_sql_filter(args: &IssueArgs) -> Result<(String, Vec<Box<dyn ToSql>>)> {
@@ -46,7 +45,7 @@ pub fn build_sql_filter(args: &IssueArgs) -> Result<(String, Vec<Box<dyn ToSql>>
 
     if let Some(team) = &args.team {
         clauses.push("(team_name LIKE ? OR team_key = ?)".to_string());
-        let pattern = format!("%{}%", team);
+        let pattern = format!("%{team}%");
         params.push(Box::new(pattern));
         params.push(Box::new(team.clone()));
     }
@@ -59,7 +58,7 @@ pub fn build_sql_filter(args: &IssueArgs) -> Result<(String, Vec<Box<dyn ToSql>>
             params.push(Box::new(assignee.clone()));
         } else {
             clauses.push("assignee_name LIKE ?".to_string());
-            let pattern = format!("%{}%", assignee);
+            let pattern = format!("%{assignee}%");
             params.push(Box::new(pattern));
         }
     } else if args.no_assignee {
@@ -68,7 +67,7 @@ pub fn build_sql_filter(args: &IssueArgs) -> Result<(String, Vec<Box<dyn ToSql>>
 
     if let Some(state) = &args.state {
         clauses.push("state_name LIKE ?".to_string());
-        let pattern = format!("%{}%", state);
+        let pattern = format!("%{state}%");
         params.push(Box::new(pattern));
     }
 
@@ -80,7 +79,7 @@ pub fn build_sql_filter(args: &IssueArgs) -> Result<(String, Vec<Box<dyn ToSql>>
 
     if let Some(title) = &args.title {
         clauses.push("title LIKE ?".to_string());
-        let pattern = format!("%{}%", title);
+        let pattern = format!("%{title}%");
         params.push(Box::new(pattern));
     }
 
@@ -112,9 +111,9 @@ pub fn build_sql_filter(args: &IssueArgs) -> Result<(String, Vec<Box<dyn ToSql>>
     Ok((sql, params))
 }
 
-/// Build a SQL ORDER BY clause from IssueArgs sort fields.
+/// Build a SQL ORDER BY clause from `IssueArgs` sort fields.
 ///
-/// Returns a string like "updated_at DESC" or "title ASC".
+/// Returns a string like "`updated_at` DESC" or "title ASC".
 /// The caller is responsible for prepending "ORDER BY ".
 pub fn build_sql_order(args: &IssueArgs) -> String {
     let col = match args.sort {
@@ -127,7 +126,7 @@ pub fn build_sql_order(args: &IssueArgs) -> String {
         SortField::Team => "team_name",
     };
     let dir = if args.desc { "DESC" } else { "ASC" };
-    format!("{} {}", col, dir)
+    format!("{col} {dir}")
 }
 
 #[cfg(test)]

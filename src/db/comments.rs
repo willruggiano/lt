@@ -15,7 +15,7 @@ pub struct Comment {
     pub synced_at: String,
 }
 
-/// Insert or replace a slice of comments, setting synced_at to now (UTC).
+/// Insert or replace a slice of comments, setting `synced_at` to now (UTC).
 pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
     let synced_at = Utc::now().to_rfc3339();
     let mut stmt = conn
@@ -41,7 +41,7 @@ pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
     Ok(())
 }
 
-/// Return all comments for a given issue_id, ordered by created_at ascending.
+/// Return all comments for a given `issue_id`, ordered by `created_at` ascending.
 pub fn query_comments(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>> {
     let mut stmt = conn
         .prepare(
@@ -73,7 +73,7 @@ pub fn query_comments(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>>
     Ok(comments)
 }
 
-/// Delete all comments for a given issue_id (used before re-inserting a fresh set).
+/// Delete all comments for a given `issue_id` (used before re-inserting a fresh set).
 pub fn delete_comments_for_issue(conn: &Connection, issue_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM issue_comments WHERE issue_id = ?1",

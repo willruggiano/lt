@@ -8,7 +8,7 @@ use crate::linear::client::graphql_query;
 use crate::linear::types::PageInfo;
 
 /// Re-use the same GraphQL query as list.rs but with a filter variable.
-const ISSUES_QUERY: &str = r#"
+const ISSUES_QUERY: &str = r"
 query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
   issues(filter: $filter, sort: $sort, first: $first, after: $after) {
     nodes {
@@ -32,7 +32,7 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
     pageInfo { hasNextPage endCursor }
   }
 }
-"#;
+";
 
 #[derive(Deserialize)]
 struct Parent {
@@ -174,8 +174,8 @@ fn fetch_page(
 /// Run incremental (delta) sync.
 ///
 /// - If no `last_synced_at` is recorded, delegates to `sync full`.
-/// - Otherwise fetches issues where updatedAt > last_synced_at, upserts them,
-///   and updates last_synced_at.
+/// - Otherwise fetches issues where updatedAt > `last_synced_at`, upserts them,
+///   and updates `last_synced_at`.
 pub fn run() -> Result<()> {
     let conn = db::open_db()?;
 
