@@ -1,0 +1,6 @@
+{
+  "format": ["rust"],
+  "minTokens": 100,
+  "reporters": ["ai"],
+  "threshold": 0
+}

@@ -1,5 +1,14 @@
 # Contributing
 
+## Strictness
+
+- Maintain **maximum strictness** across the entire codebase
+- Do not ignore lint errors using code comments without justification _and_ user
+  approval
+- When a bug or coding error could be prevented with a stricter configuration or
+  an additional lint rule, add it
+- Use [[jscpd/SKILL.md]] (`/jscpd`) for copy/paste detection
+
 ## Conventions
 
 - **Code conventions**: path-scoped rules under `docs/rules/`. They auto-load

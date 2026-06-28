@@ -4,6 +4,11 @@
   ];
 
   perSystem = {
-    devshells.default.motd = "Hello world!";
+    inputs',
+    lib,
+    ...
+  }: {
+    devshells.default.packages = [inputs'.cpd.packages.default];
+    devshells.default.motd = lib.mkForce "";
   };
 }

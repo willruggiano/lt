@@ -24,8 +24,9 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    sageox = {
-      url = "github:willruggiano/ox";
+    cpd = {
+      url = "github:kucherenko/jscpd/v5.0.11";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
     treefmt = {
       url = "github:numtide/treefmt-nix";
