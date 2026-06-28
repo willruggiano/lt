@@ -31,7 +31,7 @@ fn run_with_credentials(client_id: String, client_secret: String) -> Result<()> 
     let state = random_base64(16);
     let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/callback");
 
-    let auth_url = build_auth_url(&client_id, &redirect_uri, &state, &code_challenge);
+    let auth_url = build_auth_url(&client_id, &redirect_uri, &state, &code_challenge)?;
 
     info!("Opening Linear authorization page in your browser...");
     info!("If the browser does not open, visit: {}", auth_url);
@@ -158,8 +158,8 @@ fn build_auth_url(
     redirect_uri: &str,
     state: &str,
     code_challenge: &str,
-) -> String {
-    let mut u = url::Url::parse(AUTH_URL).expect("AUTH_URL is valid");
+) -> Result<String> {
+    let mut u = url::Url::parse(AUTH_URL).context("AUTH_URL is not a valid URL")?;
     u.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -168,7 +168,7 @@ fn build_auth_url(
         .append_pair("scope", "read,write")
         .append_pair("code_challenge", code_challenge)
         .append_pair("code_challenge_method", "S256");
-    u.to_string()
+    Ok(u.to_string())
 }
 
 // ---------------------------------------------------------------------------

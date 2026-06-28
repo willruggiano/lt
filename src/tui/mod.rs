@@ -78,7 +78,9 @@ impl TextInput {
         if self.cursor >= self.value.len() {
             return self.value.len();
         }
-        let ch = self.value[self.cursor..].chars().next().unwrap();
+        let Some(ch) = self.value[self.cursor..].chars().next() else {
+            return self.cursor;
+        };
         self.cursor + ch.len_utf8()
     }
 
@@ -86,10 +88,10 @@ impl TextInput {
         let before = &self.value[..self.cursor];
         let trimmed = before.trim_end();
         match trimmed.rfind(|c: char| c.is_whitespace()) {
-            Some(i) => {
-                let ws_char = trimmed[i..].chars().next().unwrap();
-                i + ws_char.len_utf8()
-            }
+            Some(i) => trimmed[i..]
+                .chars()
+                .next()
+                .map_or(i, |ws_char| i + ws_char.len_utf8()),
             None => 0,
         }
     }
@@ -1103,10 +1105,10 @@ impl App {
     }
 
     fn prev_page(&mut self) {
-        if self.cursor_stack.is_empty() {
+        let Some(cursor) = self.cursor_stack.pop() else {
             return;
-        }
-        self.current_cursor = self.cursor_stack.pop().unwrap();
+        };
+        self.current_cursor = cursor;
         self.do_fetch(true);
     }
 
@@ -1407,10 +1409,9 @@ impl App {
     }
 
     fn open_priority_popup(&mut self) {
-        if self.selected_issue().is_none() {
+        let Some(priority) = self.selected_issue().map(|i| i.priority) else {
             return;
-        }
-        let priority = self.selected_issue().unwrap().priority;
+        };
         // Linear priority: 0=No priority, 1=Urgent, 2=High, 3=Normal, 4=Low
         self.popup_items = vec![
             PopupItem {
