@@ -6,8 +6,9 @@ paths:
 # Rust conventions
 
 These rules are enforced by the toolchain, not just convention. The lint set is
-the source of truth; see `Cargo.toml` (`[lints]`), `clippy.toml`, `rustfmt.toml`,
-and `deny.toml`. See [[contributing.md#Strictness]] for the strictness posture.
+the source of truth; see `Cargo.toml` (`[lints]`), `clippy.toml`,
+`rustfmt.toml`, and `deny.toml`. See [[contributing.md#Strictness]] for the
+strictness posture.
 
 ## Lints
 
@@ -23,9 +24,9 @@ and `deny.toml`. See [[contributing.md#Strictness]] for the strictness posture.
 - `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!`, and `dbg!` are denied
   in non-test code. Propagate errors with `Result` and `?` (the crate uses
   `anyhow`). Tests may use these freely.
-- `print!`/`println!`/`eprint!`/`eprintln!` are denied; route diagnostics through
-  `tracing`. User-facing command output is the exception and lives in the
-  presentation layer.
+- `print!`/`println!`/`eprint!`/`eprintln!` are denied; route diagnostics
+  through `tracing`. User-facing command output is the exception and lives in
+  the presentation layer.
 
 ## Complexity budgets
 
