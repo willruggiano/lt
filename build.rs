@@ -1,8 +1,4 @@
-// Build scripts report failure by panicking: a panic aborts the build with the
-// message, which is exactly the desired behaviour for an invalid schema or
-// allowlist. The panic-safety lints denied for runtime code therefore do not
-// apply here. `too_many_lines` is allowed for the linear codegen emitters, where
-// splitting would add indirection without payoff.
+// Build scripts fail by panicking, so the runtime panic-safety and length lints don't apply.
 #![allow(
     clippy::panic,
     clippy::unwrap_used,

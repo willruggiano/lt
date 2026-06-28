@@ -5,6 +5,7 @@
   perSystem = {
     config,
     inputs',
+    lib,
     ...
   }: let
     cfg = config.pre-commit;
@@ -29,7 +30,7 @@
         jscpd = {
           enable = true;
           name = "jscpd";
-          entry = "${inputs'.cpd.packages.default}/bin/jscpd .";
+          entry = "${lib.getExe inputs'.cpd.packages.default} .";
           files = "\\.rs$";
           pass_filenames = false;
         };

@@ -13,7 +13,7 @@ check: ## Run formatter, linter, supply-chain, dedup, and test gates
 	cargo clippy --all-targets -- -D warnings
 	cargo deny check
 	cargo machete
-	jscpd .
+	cpd .
 	cargo test
 
 fix: ## Apply the fixable variants of the check gates

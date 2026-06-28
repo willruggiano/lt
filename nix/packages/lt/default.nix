@@ -24,8 +24,6 @@
         (add-pkg-deps [config.packages.toolchain])
       ];
 
-    # Rust-specific commit hooks live with the Rust package; the generic hooks
-    # are in nix/checks/pre-commit.
     pre-commit.settings.hooks = {
       clippy = {
         enable = true;
