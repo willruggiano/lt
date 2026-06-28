@@ -7,10 +7,12 @@ use super::types::GraphqlResponse;
 const GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 
 pub fn graphql_query<T: DeserializeOwned>(token: &str, query: &str, variables: Value) -> Result<T> {
-    let body = serde_json::json!({
-        "query": query,
-        "variables": variables,
-    });
+    // Build the body by moving `variables` in (the json! macro would only
+    // borrow it, leaving the by-value parameter unconsumed).
+    let mut body = serde_json::Map::with_capacity(2);
+    body.insert("query".to_owned(), Value::from(query));
+    body.insert("variables".to_owned(), variables);
+    let body = Value::Object(body);
 
     let mut response = ureq::post(GRAPHQL_URL)
         .header("Authorization", &format!("Bearer {token}"))

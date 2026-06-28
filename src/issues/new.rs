@@ -363,7 +363,7 @@ fn pick_assignee(
     Ok(None)
 }
 
-pub fn run(out: &mut dyn Write, args: NewIssueArgs) -> Result<()> {
+pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let token = config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
     let token = token.access_token;

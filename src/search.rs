@@ -20,7 +20,7 @@ pub struct SearchArgs {
     pub live: bool,
 }
 
-pub fn run(out: &mut dyn Write, args: SearchArgs) -> Result<()> {
+pub fn run(out: &mut dyn Write, args: &SearchArgs) -> Result<()> {
     if args.live {
         bail!("--live search via Linear API is not yet implemented");
     }

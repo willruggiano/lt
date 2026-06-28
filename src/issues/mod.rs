@@ -133,7 +133,7 @@ pub fn run(
             assignee,
         }) => new::run(
             out,
-            new::NewIssueArgs {
+            &new::NewIssueArgs {
                 team,
                 title,
                 description,

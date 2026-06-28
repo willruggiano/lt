@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -31,7 +31,7 @@ fn profile() -> &'static str {
 }
 
 /// Append the per-profile subdirectory to a base `lt` directory.
-pub fn profile_dir(base: PathBuf) -> PathBuf {
+pub fn profile_dir(base: &Path) -> PathBuf {
     base.join("profiles").join(profile())
 }
 
@@ -88,7 +88,7 @@ pub fn log_dir() -> Result<PathBuf> {
 
 pub fn state_dir() -> Result<PathBuf> {
     let dir = profile_dir(
-        dirs::state_dir()
+        &dirs::state_dir()
             .ok_or_else(|| anyhow::anyhow!("could not determine state directory"))?
             .join("lt"),
     );

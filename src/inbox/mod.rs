@@ -18,7 +18,7 @@ pub struct InboxArgs {
     pub limit: usize,
 }
 
-pub fn run(out: &mut dyn Write, args: InboxArgs) -> Result<()> {
+pub fn run(out: &mut dyn Write, args: &InboxArgs) -> Result<()> {
     // When --all is set we need to paginate through all pages but still cap the
     // total at --limit.  Pass max_total so the pagination loop stops early.
     // When --all is not set we only need unread notifications; fetch with the

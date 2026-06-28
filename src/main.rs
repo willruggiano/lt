@@ -89,15 +89,15 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => tui::run(issues::IssueArgs::default())?,
-        Some(Commands::Auth { command }) => auth::run(&mut out, command)?,
-        Some(Commands::Inbox { args }) => inbox::run(&mut out, args)?,
+        Some(Commands::Auth { command }) => auth::run(&mut out, &command)?,
+        Some(Commands::Inbox { args }) => inbox::run(&mut out, &args)?,
         Some(Commands::Issues { args, subcommand }) => issues::run(&mut out, args, subcommand)?,
         Some(Commands::Tui { args }) => tui::run(args)?,
         Some(Commands::Sync { command }) => {
             let cmd = command.unwrap_or(sync::SyncCommands::Delta);
             sync::run(&mut out, cmd)?;
         }
-        Some(Commands::Search { args }) => search::run(&mut out, args)?,
+        Some(Commands::Search { args }) => search::run(&mut out, &args)?,
     }
     Ok(())
 }

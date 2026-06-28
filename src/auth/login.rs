@@ -18,20 +18,20 @@ const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 /// while the TUI owns the terminal.
 pub fn run_non_interactive() -> Result<()> {
     let (client_id, client_secret) = resolve_credentials_non_interactive()?;
-    run_with_credentials(client_id, client_secret)
+    run_with_credentials(&client_id, &client_secret)
 }
 
 pub fn run() -> Result<()> {
     let (client_id, client_secret) = resolve_credentials()?;
-    run_with_credentials(client_id, client_secret)
+    run_with_credentials(&client_id, &client_secret)
 }
 
-fn run_with_credentials(client_id: String, client_secret: String) -> Result<()> {
+fn run_with_credentials(client_id: &str, client_secret: &str) -> Result<()> {
     let (code_verifier, code_challenge) = generate_pkce();
     let state = random_base64(16);
     let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/callback");
 
-    let auth_url = build_auth_url(&client_id, &redirect_uri, &state, &code_challenge)?;
+    let auth_url = build_auth_url(client_id, &redirect_uri, &state, &code_challenge)?;
 
     info!("Opening Linear authorization page in your browser...");
     info!("If the browser does not open, visit: {}", auth_url);
@@ -44,8 +44,8 @@ fn run_with_credentials(client_id: String, client_secret: String) -> Result<()> 
     info!("Authorization received. Exchanging for token...");
 
     let token = exchange_code(
-        &client_id,
-        &client_secret,
+        client_id,
+        client_secret,
         &code,
         &redirect_uri,
         &code_verifier,

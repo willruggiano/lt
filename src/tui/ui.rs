@@ -138,7 +138,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Mode::Search = app.mode
         && let Some(ref mut overlay) = app.search_overlay
     {
-        render_search_overlay(frame, chunks, overlay, &app.args.sort, app.args.desc);
+        render_search_overlay(frame, &chunks, overlay, &app.args.sort, app.args.desc);
     }
 }
 
@@ -959,7 +959,7 @@ fn render_field_picker(
 
 fn render_search_overlay(
     frame: &mut Frame,
-    chunks: std::rc::Rc<[Rect]>,
+    chunks: &[Rect],
     overlay: &mut SearchOverlay,
     sort_field: &SortField,
     sort_desc: bool,

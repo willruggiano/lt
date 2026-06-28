@@ -18,7 +18,7 @@ pub enum AuthCommands {
     Logout,
 }
 
-pub fn run(out: &mut dyn Write, cmd: AuthCommands) -> Result<()> {
+pub fn run(out: &mut dyn Write, cmd: &AuthCommands) -> Result<()> {
     match cmd {
         AuthCommands::Login => login::run(),
         AuthCommands::Status => status::run(out),
