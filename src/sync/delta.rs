@@ -1,103 +1,11 @@
 use anyhow::Result;
-use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::db;
+use crate::issues::list::{ISSUES_QUERY, Issue};
 use crate::linear::client::graphql_query;
 use crate::linear::types::PageInfo;
-
-/// Re-use the same GraphQL query as list.rs but with a filter variable.
-const ISSUES_QUERY: &str = r"
-query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
-  issues(filter: $filter, sort: $sort, first: $first, after: $after) {
-    nodes {
-      id
-      identifier
-      title
-      description
-      priorityLabel
-      priority
-      state { id name }
-      assignee { id name }
-      team { id name }
-      labels { nodes { name } }
-      project { id name }
-      cycle { id name }
-      creator { id name }
-      parent { id identifier }
-      createdAt
-      updatedAt
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-";
-
-#[derive(Deserialize)]
-struct Parent {
-    id: String,
-    identifier: String,
-}
-
-#[derive(Deserialize)]
-struct State {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct User {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct Team {
-    id: String,
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct Project {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct Cycle {
-    // Nullable in Linear's schema -- unnamed cycles identify by number.
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct LabelNode {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct LabelConnection {
-    nodes: Vec<LabelNode>,
-}
-
-#[derive(Deserialize)]
-struct Issue {
-    id: String,
-    identifier: String,
-    title: String,
-    #[serde(rename = "priorityLabel")]
-    priority_label: String,
-    state: State,
-    assignee: Option<User>,
-    team: Team,
-    description: Option<String>,
-    labels: LabelConnection,
-    project: Option<Project>,
-    cycle: Option<Cycle>,
-    creator: Option<User>,
-    parent: Option<Parent>,
-    #[serde(rename = "createdAt")]
-    created_at: String,
-    #[serde(rename = "updatedAt")]
-    updated_at: String,
-}
 
 #[derive(Deserialize)]
 struct IssueConnection {
@@ -109,36 +17,6 @@ struct IssueConnection {
 #[derive(Deserialize)]
 struct IssuesData {
     issues: IssueConnection,
-}
-
-fn to_db_issue(src: &Issue) -> db::Issue {
-    let labels = src
-        .labels
-        .nodes
-        .iter()
-        .map(|l| l.name.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
-    db::Issue {
-        id: src.id.clone(),
-        identifier: src.identifier.clone(),
-        title: src.title.clone(),
-        priority_label: src.priority_label.clone(),
-        state_name: src.state.name.clone(),
-        assignee_name: src.assignee.as_ref().map(|u| u.name.clone()),
-        team_name: src.team.name.clone(),
-        team_key: Some(src.team.id.clone()),
-        created_at: src.created_at.clone(),
-        updated_at: src.updated_at.clone(),
-        synced_at: String::new(), // filled by upsert_issues
-        description: src.description.clone(),
-        labels,
-        project_name: src.project.as_ref().map(|p| p.name.clone()),
-        cycle_name: src.cycle.as_ref().and_then(|c| c.name.clone()),
-        creator_name: src.creator.as_ref().map(|u| u.name.clone()),
-        parent_id: src.parent.as_ref().map(|p| p.id.clone()),
-        parent_identifier: src.parent.as_ref().map(|p| p.identifier.clone()),
-    }
 }
 
 /// Fetch one page of issues updated after `since` (an RFC3339 timestamp).
@@ -188,26 +66,7 @@ pub fn run() -> Result<()> {
 
     let token = crate::auth::refresh::load_or_refresh_token()?;
 
-    let mut cursor: Option<String> = None;
-
-    loop {
-        let after = cursor.as_deref();
-        let (issues, has_next, end_cursor) = fetch_page(&token.access_token, &since, after)?;
-        let count = issues.len();
-
-        if count > 0 {
-            let db_issues: Vec<db::Issue> = issues.iter().map(to_db_issue).collect();
-            db::upsert_issues(&conn, &db_issues)?;
-        }
-
-        if !has_next {
-            break;
-        }
-        cursor = end_cursor;
-    }
-
-    let now = Utc::now().to_rfc3339();
-    db::set_meta(&conn, "last_synced_at", &now)?;
-
-    Ok(())
+    super::sync_pages(&conn, |after| {
+        fetch_page(&token.access_token, &since, after)
+    })
 }

@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use super::IssueArgs;
 
-fn parse_date(s: &str, field: &str) -> Result<String> {
+pub(crate) fn parse_date(s: &str, field: &str) -> Result<String> {
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 3
         || parts[0].len() != 4

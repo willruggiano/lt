@@ -368,6 +368,34 @@ pub struct PopupItem {
     pub id: Option<String>,
 }
 
+/// Linear priority options as popup items.
+/// Index matches the Linear priority value: 0=No priority, 1=Urgent, 2=High,
+/// 3=Normal, 4=Low.
+fn priority_popup_items() -> Vec<PopupItem> {
+    vec![
+        PopupItem {
+            label: "No priority".to_string(),
+            id: Some("0".to_string()),
+        },
+        PopupItem {
+            label: "Urgent".to_string(),
+            id: Some("1".to_string()),
+        },
+        PopupItem {
+            label: "High".to_string(),
+            id: Some("2".to_string()),
+        },
+        PopupItem {
+            label: "Normal".to_string(),
+            id: Some("3".to_string()),
+        },
+        PopupItem {
+            label: "Low".to_string(),
+            id: Some("4".to_string()),
+        },
+    ]
+}
+
 /// Application mode -- only one active at a time.
 pub enum Mode {
     /// Normal list browsing mode.
@@ -992,18 +1020,7 @@ impl App {
                     self.issues = db_issues.into_iter().map(db_issue_to_list_issue).collect();
                     self.pagination.has_next_page = false; // run_query has no pagination
                     self.pagination.end_cursor = None;
-                    let n = self.issues.len();
-                    let sel = if reset_selection {
-                        0
-                    } else {
-                        self.table_state
-                            .selected()
-                            .unwrap_or(0)
-                            .min(n.saturating_sub(1))
-                    };
-                    self.table_state
-                        .select(if n > 0 { Some(sel) } else { None });
-                    self.status = Status::Idle;
+                    self.apply_fetched_selection(reset_selection);
                 }
                 Err(e) => {
                     self.status = Status::Error(e.to_string());
@@ -1029,24 +1046,29 @@ impl App {
                     } else {
                         None
                     };
-                    let n = self.issues.len();
-                    let sel = if reset_selection {
-                        0
-                    } else {
-                        self.table_state
-                            .selected()
-                            .unwrap_or(0)
-                            .min(n.saturating_sub(1))
-                    };
-                    self.table_state
-                        .select(if n > 0 { Some(sel) } else { None });
-                    self.status = Status::Idle;
+                    self.apply_fetched_selection(reset_selection);
                 }
                 Err(e) => {
                     self.status = Status::Error(e.to_string());
                 }
             }
         }
+    }
+
+    /// After replacing `self.issues`, clamp/reset the selection and mark idle.
+    fn apply_fetched_selection(&mut self, reset_selection: bool) {
+        let n = self.issues.len();
+        let sel = if reset_selection {
+            0
+        } else {
+            self.table_state
+                .selected()
+                .unwrap_or(0)
+                .min(n.saturating_sub(1))
+        };
+        self.table_state
+            .select(if n > 0 { Some(sel) } else { None });
+        self.status = Status::Idle;
     }
 
     /// Fetch and then seek to the newly created issue by identifier (bd-3ba).
@@ -1343,28 +1365,7 @@ impl App {
             return;
         };
         // Linear priority: 0=No priority, 1=Urgent, 2=High, 3=Normal, 4=Low
-        self.popup_items = vec![
-            PopupItem {
-                label: "No priority".to_string(),
-                id: Some("0".to_string()),
-            },
-            PopupItem {
-                label: "Urgent".to_string(),
-                id: Some("1".to_string()),
-            },
-            PopupItem {
-                label: "High".to_string(),
-                id: Some("2".to_string()),
-            },
-            PopupItem {
-                label: "Normal".to_string(),
-                id: Some("3".to_string()),
-            },
-            PopupItem {
-                label: "Low".to_string(),
-                id: Some("4".to_string()),
-            },
-        ];
+        self.popup_items = priority_popup_items();
         self.popup_selected = priority as usize;
         self.mode = Mode::Popup(PopupKind::Priority);
         self.footer_msg = None;
@@ -1519,28 +1520,7 @@ impl App {
             description: String::new(),
             teams: Vec::new(),
             team_selected: 0,
-            priorities: vec![
-                PopupItem {
-                    label: "No priority".to_string(),
-                    id: Some("0".to_string()),
-                },
-                PopupItem {
-                    label: "Urgent".to_string(),
-                    id: Some("1".to_string()),
-                },
-                PopupItem {
-                    label: "High".to_string(),
-                    id: Some("2".to_string()),
-                },
-                PopupItem {
-                    label: "Normal".to_string(),
-                    id: Some("3".to_string()),
-                },
-                PopupItem {
-                    label: "Low".to_string(),
-                    id: Some("4".to_string()),
-                },
-            ],
+            priorities: priority_popup_items(),
             priority_selected: 0,
             states: Vec::new(),
             state_selected: 0,

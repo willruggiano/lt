@@ -17,7 +17,7 @@ use crate::linear::types::PageInfo;
 /// Cache TTL in seconds (5 minutes).
 const CACHE_TTL_SECS: i64 = 300;
 
-const ISSUES_QUERY: &str = r"
+pub(crate) const ISSUES_QUERY: &str = r"
 query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
   issues(filter: $filter, sort: $sort, first: $first, after: $after) {
     nodes {
@@ -125,6 +125,37 @@ struct IssueConnection {
 #[derive(Deserialize)]
 struct IssuesData {
     issues: IssueConnection,
+}
+
+/// Convert a fetched `Issue` into a `db::Issue` for caching.
+pub(crate) fn to_db_issue(src: &Issue) -> db::Issue {
+    let labels = src
+        .labels
+        .nodes
+        .iter()
+        .map(|l| l.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    db::Issue {
+        id: src.id.clone(),
+        identifier: src.identifier.clone(),
+        title: src.title.clone(),
+        priority_label: src.priority_label.clone(),
+        state_name: src.state.name.clone(),
+        assignee_name: src.assignee.as_ref().map(|u| u.name.clone()),
+        team_name: src.team.name.clone(),
+        team_key: Some(src.team.id.clone()),
+        created_at: src.created_at.clone(),
+        updated_at: src.updated_at.clone(),
+        synced_at: String::new(), // filled by upsert_issues
+        description: src.description.clone(),
+        labels,
+        project_name: src.project.as_ref().map(|p| p.name.clone()),
+        cycle_name: src.cycle.as_ref().and_then(|c| c.name.clone()),
+        creator_name: src.creator.as_ref().map(|u| u.name.clone()),
+        parent_id: src.parent.as_ref().map(|p| p.id.clone()),
+        parent_identifier: src.parent.as_ref().map(|p| p.identifier.clone()),
+    }
 }
 
 pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool, Option<String>)> {

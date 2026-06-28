@@ -1,20 +1,8 @@
 use anyhow::{Result, anyhow};
 use rusqlite::types::ToSql;
 
+use crate::issues::filter::parse_date;
 use crate::issues::{IssueArgs, SortField};
-
-fn parse_date(s: &str, field: &str) -> Result<String> {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 3
-        || parts[0].len() != 4
-        || parts[1].len() != 2
-        || parts[2].len() != 2
-        || !parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
-    {
-        return Err(anyhow!("--{field}: date must be YYYY-MM-DD, got {s:?}"));
-    }
-    Ok(format!("{s}T00:00:00Z"))
-}
 
 fn parse_priority_label(s: &str) -> Result<String> {
     let label = match s.to_lowercase().as_str() {

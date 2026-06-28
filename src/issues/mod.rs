@@ -1,5 +1,5 @@
 pub mod display;
-mod filter;
+pub(crate) mod filter;
 pub mod list;
 pub mod new;
 mod sort;

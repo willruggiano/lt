@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 pub use comments::{Comment, delete_comments_for_issue, query_comments, upsert_comments};
+pub(crate) use issues::issue_from_row;
 pub use issues::{
     Issue, get_meta, query_children, query_issues, query_issues_page, search_issues, set_meta,
     upsert_issues,

@@ -3,7 +3,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+    Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
+    TableState, Wrap,
 };
 
 use super::{
@@ -18,6 +19,75 @@ use crate::text;
 /// Saturating conversion of a length/index to a terminal coordinate.
 fn to_u16(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// The data backing a rendered issue table: the rows, which column is sorted
+/// (and in which direction), and how to turn an issue into its 7 cell strings.
+struct TableSpec<'a> {
+    issues: &'a [Issue],
+    sort_col: Option<usize>,
+    desc: bool,
+    cells: fn(&Issue) -> [String; 7],
+}
+
+/// Render the shared issue table (header with sort marker, column widths sized
+/// to content, highlighted selection).
+/// Returns the computed per-column widths so callers can position overlays.
+fn render_issue_table(
+    frame: &mut Frame,
+    area: Rect,
+    spec: &TableSpec,
+    table_state: &mut TableState,
+) -> [usize; 7] {
+    let sort_marker = if spec.desc { "-" } else { "+" };
+    let base_headers: [&str; 7] = [
+        "IDENTIFIER",
+        "TITLE",
+        "STATE",
+        "PRIORITY",
+        "ASSIGNEE",
+        "TEAM",
+        "UPDATED",
+    ];
+    let headers: [String; 7] = std::array::from_fn(|i| {
+        if Some(i) == spec.sort_col {
+            format!("{} {}", base_headers[i], sort_marker)
+        } else {
+            base_headers[i].to_string()
+        }
+    });
+
+    let mut widths: [usize; 7] = headers.each_ref().map(std::string::String::len);
+    for issue in spec.issues {
+        let row = (spec.cells)(issue);
+        for (i, cell) in row.iter().enumerate() {
+            if cell.len() > widths[i] {
+                widths[i] = cell.len();
+            }
+        }
+    }
+
+    let header = Row::new(headers.map(Cell::from)).style(Style::new().add_modifier(Modifier::BOLD));
+
+    let rows: Vec<Row> = spec
+        .issues
+        .iter()
+        .map(|issue| Row::new((spec.cells)(issue).map(Cell::from)))
+        .collect();
+
+    let constraints: Vec<Constraint> = widths
+        .iter()
+        .map(|w| Constraint::Length(to_u16(*w)))
+        .collect();
+
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .column_spacing(2);
+
+    frame.render_stateful_widget(table, area, table_state);
+
+    widths
 }
 
 /// `percent`% of a terminal dimension, computed in integer arithmetic. The
@@ -290,53 +360,17 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let sort_col = sort_col_index(&app.args.sort);
-    let sort_marker = if app.args.desc { "-" } else { "+" };
-    let base_headers: [&str; 7] = [
-        "IDENTIFIER",
-        "TITLE",
-        "STATE",
-        "PRIORITY",
-        "ASSIGNEE",
-        "TEAM",
-        "UPDATED",
-    ];
-    let headers: [String; 7] = std::array::from_fn(|i| {
-        if Some(i) == sort_col {
-            format!("{} {}", base_headers[i], sort_marker)
-        } else {
-            base_headers[i].to_string()
-        }
-    });
-
-    let mut widths: [usize; 7] = headers.each_ref().map(std::string::String::len);
-    for issue in &app.issues {
-        let row = row_cells(issue);
-        for (i, cell) in row.iter().enumerate() {
-            if cell.len() > widths[i] {
-                widths[i] = cell.len();
-            }
-        }
-    }
-
-    let header = Row::new(headers.map(Cell::from)).style(Style::new().add_modifier(Modifier::BOLD));
-
-    let rows: Vec<Row> = app
-        .issues
-        .iter()
-        .map(|issue| Row::new(row_cells(issue).map(Cell::from)))
-        .collect();
-
-    let constraints: Vec<Constraint> = widths
-        .iter()
-        .map(|w| Constraint::Length(to_u16(*w)))
-        .collect();
-
-    let table = Table::new(rows, constraints)
-        .header(header)
-        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
-        .column_spacing(2);
-
-    frame.render_stateful_widget(table, area, &mut app.table_state);
+    let widths = render_issue_table(
+        frame,
+        area,
+        &TableSpec {
+            issues: &app.issues,
+            sort_col,
+            desc: app.args.desc,
+            cells: row_cells,
+        },
+        &mut app.table_state,
+    );
 
     // Compute anchor rect for the popup (bd-116).
     // Column mapping: 2=State, 3=Priority, 4=Assignee.
@@ -1037,53 +1071,17 @@ fn render_search_overlay(
 
     // Render results as a table identical in style to the main list.
     let sort_col = sort_col_index(sort.field);
-    let sort_marker = if sort.desc { "-" } else { "+" };
-    let base_headers: [&str; 7] = [
-        "IDENTIFIER",
-        "TITLE",
-        "STATE",
-        "PRIORITY",
-        "ASSIGNEE",
-        "TEAM",
-        "UPDATED",
-    ];
-    let headers: [String; 7] = std::array::from_fn(|i| {
-        if Some(i) == sort_col {
-            format!("{} {}", base_headers[i], sort_marker)
-        } else {
-            base_headers[i].to_string()
-        }
-    });
-
-    let mut widths: [usize; 7] = headers.each_ref().map(std::string::String::len);
-    for issue in &overlay.results {
-        let row = search_row_cells(issue);
-        for (i, cell) in row.iter().enumerate() {
-            if cell.len() > widths[i] {
-                widths[i] = cell.len();
-            }
-        }
-    }
-
-    let header = Row::new(headers.map(Cell::from)).style(Style::new().add_modifier(Modifier::BOLD));
-
-    let rows: Vec<Row> = overlay
-        .results
-        .iter()
-        .map(|issue| Row::new(search_row_cells(issue).map(Cell::from)))
-        .collect();
-
-    let constraints: Vec<Constraint> = widths
-        .iter()
-        .map(|w| Constraint::Length(to_u16(*w)))
-        .collect();
-
-    let table = Table::new(rows, constraints)
-        .header(header)
-        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
-        .column_spacing(2);
-
-    frame.render_stateful_widget(table, area, &mut overlay.table_state);
+    render_issue_table(
+        frame,
+        area,
+        &TableSpec {
+            issues: &overlay.results,
+            sort_col,
+            desc: sort.desc,
+            cells: search_row_cells,
+        },
+        &mut overlay.table_state,
+    );
 }
 
 fn search_row_cells(issue: &Issue) -> [String; 7] {

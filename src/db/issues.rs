@@ -113,7 +113,7 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
 }
 
 /// Map a row in the canonical issues column order to an Issue.
-fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
+pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
     Ok(Issue {
         id: row.get(0)?,
         identifier: row.get(1)?,
@@ -175,28 +175,7 @@ pub fn query_issues_page(
         .context("failed to prepare query statement")?;
 
     let rows = stmt
-        .query_map(params![fetch_limit, offset], |row| {
-            Ok(Issue {
-                id: row.get(0)?,
-                identifier: row.get(1)?,
-                title: row.get(2)?,
-                priority_label: row.get(3)?,
-                state_name: row.get(4)?,
-                assignee_name: row.get(5)?,
-                team_name: row.get(6)?,
-                team_key: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                synced_at: row.get(10)?,
-                description: row.get(11)?,
-                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                project_name: row.get(13)?,
-                cycle_name: row.get(14)?,
-                creator_name: row.get(15)?,
-                parent_id: row.get(16)?,
-                parent_identifier: row.get(17)?,
-            })
-        })
+        .query_map(params![fetch_limit, offset], issue_from_row)
         .context("failed to execute query")?;
 
     let mut issues = Vec::new();
@@ -234,28 +213,7 @@ pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
         .context("failed to prepare search_issues statement")?;
 
     let rows = stmt
-        .query_map(params![query], |row| {
-            Ok(Issue {
-                id: row.get(0)?,
-                identifier: row.get(1)?,
-                title: row.get(2)?,
-                priority_label: row.get(3)?,
-                state_name: row.get(4)?,
-                assignee_name: row.get(5)?,
-                team_name: row.get(6)?,
-                team_key: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                synced_at: row.get(10)?,
-                description: row.get(11)?,
-                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                project_name: row.get(13)?,
-                cycle_name: row.get(14)?,
-                creator_name: row.get(15)?,
-                parent_id: row.get(16)?,
-                parent_identifier: row.get(17)?,
-            })
-        })
+        .query_map(params![query], issue_from_row)
         .context("failed to execute search_issues query")?;
 
     let mut issues = Vec::new();
@@ -298,28 +256,7 @@ pub fn query_children(conn: &Connection, parent_id: &str) -> Result<Vec<Issue>> 
         .context("failed to prepare query_children statement")?;
 
     let rows = stmt
-        .query_map(params![parent_id], |row| {
-            Ok(Issue {
-                id: row.get(0)?,
-                identifier: row.get(1)?,
-                title: row.get(2)?,
-                priority_label: row.get(3)?,
-                state_name: row.get(4)?,
-                assignee_name: row.get(5)?,
-                team_name: row.get(6)?,
-                team_key: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                synced_at: row.get(10)?,
-                description: row.get(11)?,
-                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                project_name: row.get(13)?,
-                cycle_name: row.get(14)?,
-                creator_name: row.get(15)?,
-                parent_id: row.get(16)?,
-                parent_identifier: row.get(17)?,
-            })
-        })
+        .query_map(params![parent_id], issue_from_row)
         .context("failed to execute query_children query")?;
 
     let mut issues = Vec::new();

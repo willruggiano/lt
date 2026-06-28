@@ -487,28 +487,7 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         all_params.iter().map(std::convert::AsRef::as_ref).collect();
 
     let rows = stmt
-        .query_map(param_refs.as_slice(), |row| {
-            Ok(Issue {
-                id: row.get(0)?,
-                identifier: row.get(1)?,
-                title: row.get(2)?,
-                priority_label: row.get(3)?,
-                state_name: row.get(4)?,
-                assignee_name: row.get(5)?,
-                team_name: row.get(6)?,
-                team_key: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                synced_at: row.get(10)?,
-                description: row.get(11)?,
-                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                project_name: row.get(13)?,
-                cycle_name: row.get(14)?,
-                creator_name: row.get(15)?,
-                parent_id: row.get(16)?,
-                parent_identifier: row.get(17)?,
-            })
-        })
+        .query_map(param_refs.as_slice(), crate::db::issue_from_row)
         .map_err(|e| anyhow::anyhow!("execute search_query: {e}"))?;
 
     let mut issues = Vec::new();
@@ -1267,9 +1246,7 @@ mod tests {
 
     // Parity tests: From<&QueryAst> must produce identical results to parse_query.
 
-    #[test]
-    fn from_ast_parity_empty() {
-        let raw = "";
+    fn assert_from_ast_parity(raw: &str) {
         let q1 = parse_query(raw);
         let ast = parse_query_ast(raw);
         let q2 = ParsedQuery::from(&ast);
@@ -1282,17 +1259,13 @@ mod tests {
     }
 
     #[test]
+    fn from_ast_parity_empty() {
+        assert_from_ast_parity("");
+    }
+
+    #[test]
     fn from_ast_parity_full_query() {
-        let raw = "sort:updated- assignee:me priority:urgent state:todo oauth crash";
-        let q1 = parse_query(raw);
-        let ast = parse_query_ast(raw);
-        let q2 = ParsedQuery::from(&ast);
-        assert_eq!(q1.sort, q2.sort);
-        assert_eq!(q1.assignee, q2.assignee);
-        assert_eq!(q1.priority, q2.priority);
-        assert_eq!(q1.state, q2.state);
-        assert_eq!(q1.team, q2.team);
-        assert_eq!(q1.fts_terms, q2.fts_terms);
+        assert_from_ast_parity("sort:updated- assignee:me priority:urgent state:todo oauth crash");
     }
 
     #[test]

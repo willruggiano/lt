@@ -1,40 +1,8 @@
 use anyhow::Result;
-use chrono::Utc;
 
 use crate::db;
 use crate::issues::list::fetch;
 use crate::issues::{IssueArgs, SortField};
-
-/// Convert a `list::Issue` into a `db::Issue`.
-fn to_db_issue(src: &crate::issues::list::Issue) -> db::Issue {
-    let labels = src
-        .labels
-        .nodes
-        .iter()
-        .map(|l| l.name.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
-    db::Issue {
-        id: src.id.clone(),
-        identifier: src.identifier.clone(),
-        title: src.title.clone(),
-        priority_label: src.priority_label.clone(),
-        state_name: src.state.name.clone(),
-        assignee_name: src.assignee.as_ref().map(|u| u.name.clone()),
-        team_name: src.team.name.clone(),
-        team_key: Some(src.team.id.clone()),
-        created_at: src.created_at.clone(),
-        updated_at: src.updated_at.clone(),
-        synced_at: String::new(), // filled by upsert_issues
-        description: src.description.clone(),
-        labels,
-        project_name: src.project.as_ref().map(|p| p.name.clone()),
-        cycle_name: src.cycle.as_ref().and_then(|c| c.name.clone()),
-        creator_name: src.creator.as_ref().map(|u| u.name.clone()),
-        parent_id: src.parent.as_ref().map(|p| p.id.clone()),
-        parent_identifier: src.parent.as_ref().map(|p| p.identifier.clone()),
-    }
-}
 
 /// Fetch every page from the Linear API and upsert into SQLite.
 /// Sets `sync_meta` key='`last_synced_at`' to the current UTC timestamp on success.
@@ -59,25 +27,5 @@ pub fn run() -> Result<()> {
         live: false,
     };
 
-    let mut cursor: Option<String> = None;
-    loop {
-        let after = cursor.as_deref();
-        let (issues, has_next, end_cursor) = fetch(&args, after)?;
-        let count = issues.len();
-
-        if count > 0 {
-            let db_issues: Vec<db::Issue> = issues.iter().map(to_db_issue).collect();
-            db::upsert_issues(&conn, &db_issues)?;
-        }
-
-        if !has_next {
-            break;
-        }
-        cursor = end_cursor;
-    }
-
-    let now = Utc::now().to_rfc3339();
-    db::set_meta(&conn, "last_synced_at", &now)?;
-
-    Ok(())
+    super::sync_pages(&conn, |after| fetch(&args, after))
 }

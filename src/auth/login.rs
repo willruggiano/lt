@@ -62,42 +62,42 @@ fn run_with_credentials(client_id: &str, client_secret: &str) -> Result<()> {
 // Credential resolution
 // ---------------------------------------------------------------------------
 
+/// Look up credentials from env vars (precedence) then the stored config file.
+/// Returns `Ok(None)` when neither source has credentials; propagates errors
+/// from loading the config file.
+fn lookup_stored_credentials() -> Result<Option<(String, String)>> {
+    // 1. Environment variables take precedence.
+    if let (Ok(id), Ok(secret)) = (
+        std::env::var("LINEAR_CLIENT_ID"),
+        std::env::var("LINEAR_CLIENT_SECRET"),
+    ) {
+        return Ok(Some((id, secret)));
+    }
+
+    // 2. Stored config file.
+    let cfg = config::load_config()?;
+    if let (Some(id), Some(secret)) = (cfg.client_id, cfg.client_secret) {
+        return Ok(Some((id, secret)));
+    }
+
+    Ok(None)
+}
+
 /// Resolve credentials without interactive prompting. Checks env vars and
 /// config file only; returns an error if neither source has credentials.
 fn resolve_credentials_non_interactive() -> Result<(String, String)> {
-    // 1. Environment variables take precedence.
-    if let (Ok(id), Ok(secret)) = (
-        std::env::var("LINEAR_CLIENT_ID"),
-        std::env::var("LINEAR_CLIENT_SECRET"),
-    ) {
-        return Ok((id, secret));
-    }
-
-    // 2. Stored config file.
-    let cfg = config::load_config()?;
-    if let (Some(id), Some(secret)) = (cfg.client_id, cfg.client_secret) {
-        return Ok((id, secret));
-    }
-
-    Err(anyhow!(
-        "no OAuth credentials configured -- set LINEAR_CLIENT_ID and \
-         LINEAR_CLIENT_SECRET env vars or run `lt auth login` from the terminal"
-    ))
+    lookup_stored_credentials()?.ok_or_else(|| {
+        anyhow!(
+            "no OAuth credentials configured -- set LINEAR_CLIENT_ID and \
+             LINEAR_CLIENT_SECRET env vars or run `lt auth login` from the terminal"
+        )
+    })
 }
 
 fn resolve_credentials() -> Result<(String, String)> {
-    // 1. Environment variables take precedence.
-    if let (Ok(id), Ok(secret)) = (
-        std::env::var("LINEAR_CLIENT_ID"),
-        std::env::var("LINEAR_CLIENT_SECRET"),
-    ) {
-        return Ok((id, secret));
-    }
-
-    // 2. Stored config file.
-    let cfg = config::load_config()?;
-    if let (Some(id), Some(secret)) = (cfg.client_id, cfg.client_secret) {
-        return Ok((id, secret));
+    // 1. Environment variables, then 2. stored config file.
+    if let Some(creds) = lookup_stored_credentials()? {
+        return Ok(creds);
     }
 
     // 3. Interactive prompt.
