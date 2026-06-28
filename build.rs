@@ -1,4 +1,10 @@
-// build.rs
+// Build scripts fail by panicking, so the runtime panic-safety and length lints don't apply.
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines
+)]
 //
 // Phase 1 (bd-3mw): validate the allowlist against the GraphQL schema.
 // Phase 2 (bd-1pl): generate search_stems.rs from the validated allowlist.
@@ -30,7 +36,7 @@ struct AllowlistConfig {
 struct FieldSpec {
     /// Stem key as typed by the user (e.g. "assignee").
     key: String,
-    /// Field name inside IssueFilter (schema-validated).
+    /// Field name inside `IssueFilter` (schema-validated).
     gql_field: String,
     /// Expected base GraphQL type name (schema-validated).
     gql_type: String,
@@ -40,7 +46,7 @@ struct FieldSpec {
 struct SortFieldSpec {
     /// Sort key as typed by the user after "sort:" (e.g. "updated").
     key: String,
-    /// Field name inside IssueSortInput (schema-validated).
+    /// Field name inside `IssueSortInput` (schema-validated).
     gql_field: String,
     /// SQLite column name used in ORDER BY clauses.
     sql_col: String,
@@ -55,20 +61,19 @@ fn base_type_name<'a>(ty: &'a graphql_parser::schema::Type<'a, String>) -> &'a s
     use graphql_parser::schema::Type;
     match ty {
         Type::NamedType(name) => name.as_str(),
-        Type::NonNullType(inner) => base_type_name(inner),
-        Type::ListType(inner) => base_type_name(inner),
+        Type::NonNullType(inner) | Type::ListType(inner) => base_type_name(inner),
     }
 }
 
-/// Parse the GraphQL schema and return a map of IssueFilter field names to
+/// Parse the GraphQL schema and return a map of `IssueFilter` field names to
 /// their base type names.
 fn extract_issue_filter_fields(schema_src: &str) -> HashMap<String, String> {
     let doc: Document<String> = graphql_parser::parse_schema(schema_src)
         .unwrap_or_else(|e| panic!("Failed to parse GraphQL schema: {e}"));
 
     for def in &doc.definitions {
-        if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def {
-            if input.name == "IssueFilter" {
+        if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
+            && input.name == "IssueFilter" {
                 let mut map = HashMap::new();
                 for field in &input.fields {
                     let base = base_type_name(&field.value_type).to_string();
@@ -76,20 +81,19 @@ fn extract_issue_filter_fields(schema_src: &str) -> HashMap<String, String> {
                 }
                 return map;
             }
-        }
     }
 
     panic!("IssueFilter input type not found in the GraphQL schema");
 }
 
-/// Parse the GraphQL schema and return the set of field names in IssueSortInput.
+/// Parse the GraphQL schema and return the set of field names in `IssueSortInput`.
 fn extract_issue_sort_input_fields(schema_src: &str) -> HashMap<String, String> {
     let doc: Document<String> = graphql_parser::parse_schema(schema_src)
         .unwrap_or_else(|e| panic!("Failed to parse GraphQL schema: {e}"));
 
     for def in &doc.definitions {
-        if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def {
-            if input.name == "IssueSortInput" {
+        if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
+            && input.name == "IssueSortInput" {
                 let mut map = HashMap::new();
                 for field in &input.fields {
                     let base = base_type_name(&field.value_type).to_string();
@@ -97,15 +101,14 @@ fn extract_issue_sort_input_fields(schema_src: &str) -> HashMap<String, String> 
                 }
                 return map;
             }
-        }
     }
 
     panic!("IssueSortInput input type not found in the GraphQL schema");
 }
 
-/// Convert a lowercase key to PascalCase for use as an enum variant name.
+/// Convert a lowercase key to `PascalCase` for use as an enum variant name.
 fn to_pascal_case(s: &str) -> String {
-    s.split(|c: char| c == '_' || c == '-')
+    s.split(['_', '-'])
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {
@@ -120,7 +123,7 @@ fn to_pascal_case(s: &str) -> String {
 // Code generation (quote-based) -- filter stems
 // ---------------------------------------------------------------------------
 
-/// Generate the StemKey enum.
+/// Generate the `StemKey` enum.
 ///
 /// One variant per TOML field (in order) plus the hard-coded Sort variant.
 fn gen_stem_key_enum(fields: &[FieldSpec]) -> TokenStream {
@@ -139,7 +142,7 @@ fn gen_stem_key_enum(fields: &[FieldSpec]) -> TokenStream {
     }
 }
 
-/// Generate the StemKind enum.
+/// Generate the `StemKind` enum.
 ///
 /// Sort carries (field, dir); every TOML field carries a String value.
 fn gen_stem_kind_enum(fields: &[FieldSpec]) -> TokenStream {
@@ -237,8 +240,8 @@ fn gen_from_ast(fields: &[FieldSpec]) -> TokenStream {
 ///
 /// The function uses a Chumsky 0.9 parser to tokenise the raw query string.
 /// Chumsky handles the low-level character matching and provides spans via
-/// `map_with_span`.  The semantic classification of stems (key -> StemKind)
-/// is done in a post-parse step that also emits ParseErrors for unknown keys.
+/// `map_with_span`.  The semantic classification of stems (key -> `StemKind`)
+/// is done in a post-parse step that also emits `ParseErrors` for unknown keys.
 fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
     // Build the list of string literals for all known keys: ["sort", "assignee", ...]
     let key_strs: Vec<proc_macro2::Literal> = {
@@ -472,10 +475,10 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
 // Code generation (quote-based) -- sort field
 // ---------------------------------------------------------------------------
 
-/// Generate the SortField enum with label() and next() impls.
+/// Generate the `SortField` enum with `label()` and `next()` impls.
 ///
-/// Variants are in TOML order.  label() returns the user-facing key string.
-/// next() cycles through variants in order, wrapping around.
+/// Variants are in TOML order.  `label()` returns the user-facing key string.
+/// `next()` cycles through variants in order, wrapping around.
 fn gen_sort_field_enum(sort_fields: &[SortFieldSpec]) -> TokenStream {
     let variants: Vec<proc_macro2::Ident> = sort_fields
         .iter()
@@ -579,7 +582,7 @@ fn gen_parse_sort_value(sort_fields: &[SortFieldSpec]) -> TokenStream {
 
 /// Generate `sort_col(field: &SortField) -> &'static str`.
 ///
-/// Maps each SortField variant to its SQLite column name.
+/// Maps each `SortField` variant to its SQLite column name.
 fn gen_sort_col(sort_fields: &[SortFieldSpec]) -> TokenStream {
     let match_arms = sort_fields.iter().map(|f| {
         let variant = format_ident!("{}", to_pascal_case(&f.key));
@@ -697,13 +700,11 @@ fn main() {
         }
     }
 
-    if !validation_errors.is_empty() {
-        panic!(
-            "build.rs: allowlist validation failed against IssueFilter schema:\n{}\n\
-             Fix build/search_filter_fields.toml or update the GraphQL schema snapshot.",
-            validation_errors.join("\n")
-        );
-    }
+    assert!(validation_errors.is_empty(), 
+        "build.rs: allowlist validation failed against IssueFilter schema:\n{}\n\
+         Fix build/search_filter_fields.toml or update the GraphQL schema snapshot.",
+        validation_errors.join("\n")
+    );
 
     // -----------------------------------------------------------------------
     // Validate every sort_field entry against IssueSortInput in the schema
@@ -719,18 +720,14 @@ fn main() {
         }
     }
 
-    if !sort_validation_errors.is_empty() {
-        panic!(
-            "build.rs: sort_field validation failed against IssueSortInput schema:\n{}\n\
-             Fix [[sort_field]] entries in build/search_filter_fields.toml.",
-            sort_validation_errors.join("\n")
-        );
-    }
+    assert!(sort_validation_errors.is_empty(), 
+        "build.rs: sort_field validation failed against IssueSortInput schema:\n{}\n\
+         Fix [[sort_field]] entries in build/search_filter_fields.toml.",
+        sort_validation_errors.join("\n")
+    );
 
     // Require at least one sort_field entry so the generated enum is non-empty.
-    if config.sort_field.is_empty() {
-        panic!("build.rs: [[sort_field]] list in search_filter_fields.toml is empty");
-    }
+    assert!(!config.sort_field.is_empty(), "build.rs: [[sort_field]] list in search_filter_fields.toml is empty");
 
     let sort_fields = &config.sort_field;
 
@@ -749,7 +746,7 @@ fn main() {
 
     let sort_field_header = "// sort_field.rs -- generated by build.rs (bd-2w5)\n\
                              // DO NOT EDIT -- regenerate by running `cargo build`\n\n";
-    let sort_field_src = format!("{}{}", sort_field_header, sort_field_formatted);
+    let sort_field_src = format!("{sort_field_header}{sort_field_formatted}");
 
     let sort_field_path = Path::new(&out_dir).join("sort_field.rs");
     fs::write(&sort_field_path, &sort_field_src)
@@ -770,7 +767,7 @@ fn main() {
 
     let sort_build_header = "// sort_build.rs -- generated by build.rs (bd-2w5)\n\
                              // DO NOT EDIT -- regenerate by running `cargo build`\n\n";
-    let sort_build_src = format!("{}{}", sort_build_header, sort_build_formatted);
+    let sort_build_src = format!("{sort_build_header}{sort_build_formatted}");
 
     let sort_build_path = Path::new(&out_dir).join("sort_build.rs");
     fs::write(&sort_build_path, &sort_build_src)
@@ -806,7 +803,7 @@ fn main() {
 
     let file_header = "// search_stems.rs -- generated by build.rs (bd-117, bd-2w5)\n\
                        // DO NOT EDIT -- regenerate by running `cargo build`\n\n";
-    let out_src = format!("{}{}", file_header, formatted);
+    let out_src = format!("{file_header}{formatted}");
 
     let stems_path = Path::new(&out_dir).join("search_stems.rs");
     fs::write(&stems_path, &out_src)

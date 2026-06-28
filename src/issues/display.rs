@@ -67,7 +67,7 @@ pub fn print_table_cached(issues: &[db::Issue], note: &str) {
     print_row(&headers);
 
     let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-    let sep_refs: Vec<&str> = sep.iter().map(|s| s.as_str()).collect();
+    let sep_refs: Vec<&str> = sep.iter().map(std::string::String::as_str).collect();
     let sep_arr: [&str; 8] = sep_refs.try_into().unwrap();
     print_row(&sep_arr);
 
@@ -79,7 +79,7 @@ pub fn print_table_cached(issues: &[db::Issue], note: &str) {
     }
 
     if !note.is_empty() {
-        println!("\n{}", note);
+        println!("\n{note}");
     }
 }
 
@@ -99,9 +99,7 @@ pub fn print_table(issues: &[Issue]) {
                 i.state.name.clone(),
                 i.priority_label.clone(),
                 i.assignee
-                    .as_ref()
-                    .map(|u| u.name.clone())
-                    .unwrap_or_else(|| "-".to_string()),
+                    .as_ref().map_or_else(|| "-".to_string(), |u| u.name.clone()),
                 i.team.name.clone(),
                 date(&i.created_at).to_string(),
                 date(&i.updated_at).to_string(),
@@ -146,7 +144,7 @@ pub fn print_table(issues: &[Issue]) {
 
     // Separator
     let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-    let sep_refs: Vec<&str> = sep.iter().map(|s| s.as_str()).collect();
+    let sep_refs: Vec<&str> = sep.iter().map(std::string::String::as_str).collect();
     let sep_arr: [&str; 8] = sep_refs.try_into().unwrap();
     print_row(&sep_arr);
 

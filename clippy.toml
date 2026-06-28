@@ -1,0 +1,16 @@
+# Agentic-debt thresholds, mirroring the sibling projects' linters
+# (go-graphql .golangci.yml, new-frontend eslint.config.js).
+cognitive-complexity-threshold = 20 # gocognit 20 / sonarjs cognitive 20
+excessive-nesting-threshold = 5     # nestif 5
+too-many-lines-threshold = 80       # funlen 80 lines / max-lines-per-function 80
+too-many-arguments-threshold = 4    # max-params 4
+
+# 0.1.x posture: breaking the public API to simplify is acceptable.
+avoid-breaking-exported-api = false
+
+# Panic-safety lints are denied in non-test code (see Cargo.toml [lints.clippy]);
+# tests may use these shortcuts freely.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true

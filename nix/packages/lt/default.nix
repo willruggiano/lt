@@ -5,6 +5,7 @@
 }: {
   perSystem = {
     config,
+    inputs',
     pkgs,
     system,
     ...
@@ -22,6 +23,24 @@
       with cs; [
         (add-pkg-deps [config.packages.toolchain])
       ];
+
+    pre-commit.settings.hooks = {
+      clippy = {
+        enable = true;
+        packageOverrides = {
+          cargo = config.packages.toolchain;
+          clippy = config.packages.toolchain;
+        };
+        settings.denyWarnings = true;
+      };
+      rustfmt = {
+        enable = true;
+        packageOverrides = {
+          cargo = config.packages.toolchain;
+          rustfmt = config.packages.toolchain;
+        };
+      };
+    };
 
     packages = {
       default = config.packages.lt;
@@ -49,7 +68,11 @@
           auditable = false; # devshell error: conflicting paths between toolchain and cargo-auditable
           cargoLock.lockFile = ../../../Cargo.lock;
           nativeBuildInputs = with pkgs; [
+            cargo-deny
+            cargo-machete
             cmake
+            gnumake
+            inputs'.cpd.packages.default
             llvmPackages.clang
             llvmPackages.libclang.lib
             openssl

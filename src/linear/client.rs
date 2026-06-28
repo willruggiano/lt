@@ -13,7 +13,7 @@ pub fn graphql_query<T: DeserializeOwned>(token: &str, query: &str, variables: V
     });
 
     let mut response = ureq::post(GRAPHQL_URL)
-        .header("Authorization", &format!("Bearer {}", token))
+        .header("Authorization", &format!("Bearer {token}"))
         .header("Content-Type", "application/json")
         .send_json(&body)
         .context("querying Linear GraphQL API")?;

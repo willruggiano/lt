@@ -75,7 +75,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     chunks[4],
                 );
             } else if let Some(msg) = &app.footer_msg {
-                frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[4]);
+                frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
             } else {
                 render_detail_footer(frame, chunks[4]);
             }
@@ -84,7 +84,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             if input_mode {
                 render_input(frame, chunks[4], &input_buf);
             } else if let Some(msg) = &app.footer_msg {
-                frame.render_widget(Paragraph::new(format!("[!] {}", msg)), chunks[4]);
+                frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
             } else {
                 let sync_label = app.sync_status_label.clone();
                 render_footer(frame, chunks[4], has_next, has_prev, page, &sync_label);
@@ -142,10 +142,10 @@ fn render_header(
 ) {
     let mut parts: Vec<String> = Vec::new();
     if let Some(u) = viewer_name {
-        parts.push(format!("user:{}", u));
+        parts.push(format!("user:{u}"));
     }
     if let Some(o) = org_name {
-        parts.push(format!("org:{}", o));
+        parts.push(format!("org:{o}"));
     }
     // When no identity info is available the user is not authenticated.
     // Show a clear placeholder so the header is never silently blank.
@@ -157,7 +157,7 @@ fn render_header(
     let text = if context.is_empty() {
         identity
     } else {
-        format!("{}  {}", identity, context)
+        format!("{identity}  {context}")
     };
     frame.render_widget(
         Paragraph::new(text).style(Style::new().add_modifier(Modifier::BOLD)),
@@ -177,10 +177,10 @@ fn render_header_with_search(
     // Build identity prefix spans.
     let mut identity_parts: Vec<String> = Vec::new();
     if let Some(u) = viewer_name {
-        identity_parts.push(format!("user:{}", u));
+        identity_parts.push(format!("user:{u}"));
     }
     if let Some(o) = org_name {
-        identity_parts.push(format!("org:{}", o));
+        identity_parts.push(format!("org:{o}"));
     }
     // When no identity info is available, show the unauthenticated placeholder.
     let identity = if identity_parts.is_empty() {
@@ -190,14 +190,14 @@ fn render_header_with_search(
     };
 
     if overlay.fts_unavailable {
-        let prefix = format!("{}  ", identity);
+        let prefix = format!("{identity}  ");
         line.spans.push(Span::styled(
-            format!("{}Search unavailable: run lt sync first", prefix),
+            format!("{prefix}Search unavailable: run lt sync first"),
             Style::new().add_modifier(Modifier::BOLD),
         ));
     } else {
         line.spans.push(Span::styled(
-            format!("{}  ", identity),
+            format!("{identity}  "),
             Style::new().add_modifier(Modifier::BOLD),
         ));
         append_text_input_spans(&mut line, &overlay.query, &overlay.ast.errors);
@@ -238,9 +238,9 @@ fn render_footer(
         parts.push("ctrl+n next");
     }
 
-    let page_str = format!("[{}]", page);
+    let page_str = format!("[{page}]");
     // Show sync status on the right side, separated from page indicator.
-    let sync_str = format!("  {}  {}", sync_label, page_str);
+    let sync_str = format!("  {sync_label}  {page_str}");
     let chunks = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(sync_str.len() as u16),
@@ -252,14 +252,14 @@ fn render_footer(
 }
 
 fn render_input(frame: &mut Frame, area: Rect, buf: &str) {
-    frame.render_widget(Paragraph::new(format!("/ {}_", buf)), area);
+    frame.render_widget(Paragraph::new(format!("/ {buf}_")), area);
 }
 
 // -- table -------------------------------------------------------------------
 
 fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     let overlay: Option<String> = match &app.status {
-        Status::Error(msg) => Some(format!("Error: {}", msg)),
+        Status::Error(msg) => Some(format!("Error: {msg}")),
         Status::Loading => Some("Loading...".to_string()),
         Status::Idle => None,
     };
@@ -292,7 +292,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     });
 
-    let mut widths: [usize; 7] = headers.each_ref().map(|h| h.len());
+    let mut widths: [usize; 7] = headers.each_ref().map(std::string::String::len);
     for issue in &app.issues {
         let row = row_cells(issue);
         for (i, cell) in row.iter().enumerate() {
@@ -349,9 +349,7 @@ fn row_cells(issue: &Issue) -> [String; 7] {
         issue.priority_label.clone(),
         issue
             .assignee
-            .as_ref()
-            .map(|u| u.name.clone())
-            .unwrap_or_else(|| "-".to_string()),
+            .as_ref().map_or_else(|| "-".to_string(), |u| u.name.clone()),
         issue.team.name.clone(),
         date(&issue.updated_at).to_string(),
     ]
@@ -404,7 +402,7 @@ fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
             return;
         }
         Status::Error(msg) => {
-            frame.render_widget(Paragraph::new(format!("Error: {}", msg)), inner);
+            frame.render_widget(Paragraph::new(format!("Error: {msg}")), inner);
             return;
         }
         Status::Idle => {}
@@ -436,7 +434,7 @@ fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(block, area);
         // Cursor is always at the end (same model as the description field).
         frame.render_widget(
-            Paragraph::new(format!("{}_", buf)).wrap(Wrap { trim: false }),
+            Paragraph::new(format!("{buf}_")).wrap(Wrap { trim: false }),
             box_inner,
         );
     }
@@ -457,9 +455,7 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
     // Meta line: state, priority, assignee, team
     let assignee = d
         .assignee
-        .as_ref()
-        .map(|u| u.name.clone())
-        .unwrap_or_else(|| "unassigned".to_string());
+        .as_ref().map_or_else(|| "unassigned".to_string(), |u| u.name.clone());
     lines.push(Line::from(format!(
         "[{}]  {}  {}  {}",
         d.state.name, d.priority_label, assignee, d.team.name
@@ -639,7 +635,7 @@ fn render_new_issue_modal(
     keyboard_enhanced: bool,
 ) {
     // Modal dimensions: 70% wide, 22 rows tall, centred.
-    let width = (area.width as f32 * 0.70) as u16;
+    let width = (f32::from(area.width) * 0.70) as u16;
     let height = 22_u16.min(area.height.saturating_sub(2));
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
@@ -784,9 +780,9 @@ fn render_new_issue_modal(
 
 fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
     // Size: 60% wide, up to 80% tall, centred.
-    let width = ((area.width as f32 * 0.60) as u16).max(50).min(area.width);
+    let width = ((f32::from(area.width) * 0.60) as u16).max(50).min(area.width);
     let max_rows = (ALL_KEYBINDINGS.len() + 4) as u16; // header + search + border
-    let height = max_rows.min((area.height as f32 * 0.80) as u16).max(6);
+    let height = max_rows.min((f32::from(area.height) * 0.80) as u16).max(6);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup_area = Rect::new(x, y, width, height);
@@ -887,9 +883,9 @@ fn render_field_picker(
 
     let label_span = Span::styled(
         if active {
-            format!("[{}]", label)
+            format!("[{label}]")
         } else {
-            format!(" {} ", label)
+            format!(" {label} ")
         },
         if active {
             label_style_active
@@ -898,13 +894,13 @@ fn render_field_picker(
         },
     );
     // Show currently selected value next to label when not active.
-    let selected_preview = if !active {
+    let selected_preview = if active {
+        String::new()
+    } else {
         items
             .get(selected)
             .map(|i| format!("  {}", i.label))
             .unwrap_or_default()
-    } else {
-        String::new()
     };
     let label_line = Line::from(vec![label_span, Span::raw(selected_preview)]);
     frame.render_widget(Paragraph::new(label_line), chunks[0]);
@@ -1004,7 +1000,7 @@ fn render_search_overlay(
         }
     });
 
-    let mut widths: [usize; 7] = headers.each_ref().map(|h| h.len());
+    let mut widths: [usize; 7] = headers.each_ref().map(std::string::String::len);
     for issue in &overlay.results {
         let row = search_row_cells(issue);
         for (i, cell) in row.iter().enumerate() {
@@ -1046,9 +1042,7 @@ fn search_row_cells(issue: &Issue) -> [String; 7] {
         issue.priority_label.clone(),
         issue
             .assignee
-            .as_ref()
-            .map(|u| u.name.clone())
-            .unwrap_or_else(|| "-".to_string()),
+            .as_ref().map_or_else(|| "-".to_string(), |u| u.name.clone()),
         issue.team.name.clone(),
         date(&issue.updated_at).to_string(),
     ]
@@ -1127,7 +1121,7 @@ fn push_text_spans(
 /// (block-cursor) style.  If the cursor is at the end of the string, a
 /// space with reversed style is appended to show the cursor position.
 ///
-/// When `input.selection_end` is set, the range cursor..selection_end is
+/// When `input.selection_end` is set, the range `cursor..selection_end` is
 /// rendered with UNDERLINED style (in addition to the block cursor char).
 ///
 /// `errors` is the list of parse errors from the current `QueryAst`.  Any

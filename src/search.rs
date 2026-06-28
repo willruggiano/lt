@@ -40,9 +40,9 @@ pub fn run(args: SearchArgs) -> Result<()> {
         .unwrap_or(0);
 
     let note;
-    let issues: Vec<db::Issue>;
+    
 
-    if fts_count == 0 {
+    let issues: Vec<db::Issue> = if fts_count == 0 {
         // FTS index is empty -- fall back to LIKE search on title.
         note = "Note: FTS index is empty or stale. Run 'lt sync full' to rebuild it. \
                 Showing approximate results from title search."
@@ -90,13 +90,13 @@ pub fn run(args: SearchArgs) -> Result<()> {
         for row in rows {
             result.push(row.context("failed to read fallback row")?);
         }
-        issues = result;
+        result
     } else {
         note = String::new();
         let mut all = db::search_issues(&conn, &args.query)?;
         all.truncate(args.limit);
-        issues = all;
-    }
+        all
+    };
 
     print_table_cached(&issues, &note);
     Ok(())

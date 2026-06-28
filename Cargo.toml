@@ -6,6 +6,8 @@ description = "A local-first Linear TUI for terminal power users"
 license = "MIT"
 homepage = "https://github.com/willruggiano/lt"
 repository = "https://github.com/willruggiano/lt"
+keywords = ["linear", "tui", "terminal", "productivity"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
@@ -36,3 +38,28 @@ quote = "1"
 proc-macro2 = "1"
 syn = { version = "2", default-features = false, features = ["full", "parsing"] }
 prettyplease = "0.2"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# Transitive dependencies pull in duplicate versions we do not control.
+multiple_crate_versions = { level = "allow", priority = 1 }
+# Complexity gates (nursery lints enabled individually rather than the whole
+# noisy group); thresholds live in clippy.toml.
+cognitive_complexity = "deny"
+excessive_nesting = "deny"
+# Panic-safety: forbid the shortcuts coding agents reach for. Tests are exempt
+# via clippy.toml.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"

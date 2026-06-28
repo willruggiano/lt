@@ -8,7 +8,7 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum AuthCommands {
-    /// Log in to Linear via OAuth2
+    /// Log in to Linear via `OAuth2`
     Login,
     /// Show the currently authenticated identity
     Status,
@@ -24,7 +24,7 @@ pub fn run(cmd: AuthCommands) -> Result<()> {
     }
 }
 
-/// Non-interactive OAuth2 login -- errors instead of prompting when
+/// Non-interactive `OAuth2` login -- errors instead of prompting when
 /// credentials are missing. Safe to call from a background thread
 /// (used by the TUI re-auth path, bd-vhp).
 pub fn login_non_interactive() -> Result<()> {

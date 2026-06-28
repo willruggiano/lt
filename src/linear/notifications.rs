@@ -7,7 +7,7 @@ use serde_json::json;
 use super::client::graphql_query;
 use super::types::PageInfo;
 
-const NOTIFICATIONS_QUERY: &str = r#"
+const NOTIFICATIONS_QUERY: &str = r"
 query Notifications($first: Int, $after: String) {
   notifications(first: $first, after: $after) {
     nodes {
@@ -24,7 +24,7 @@ query Notifications($first: Int, $after: String) {
     pageInfo { hasNextPage endCursor }
   }
 }
-"#;
+";
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct NotificationIssueState {

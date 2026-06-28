@@ -28,7 +28,7 @@ pub fn run() -> Result<()> {
 fn run_with_credentials(client_id: String, client_secret: String) -> Result<()> {
     let (code_verifier, code_challenge) = generate_pkce();
     let state = random_base64(16);
-    let redirect_uri = format!("http://localhost:{}/callback", CALLBACK_PORT);
+    let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/callback");
 
     let auth_url = build_auth_url(&client_id, &redirect_uri, &state, &code_challenge);
 
@@ -118,7 +118,7 @@ fn resolve_credentials() -> Result<(String, String)> {
 }
 
 fn prompt(label: &str) -> Result<String> {
-    eprint!("{}", label);
+    eprint!("{label}");
     std::io::stderr().flush()?;
     let mut buf = String::new();
     std::io::stdin().read_line(&mut buf)?;
@@ -177,8 +177,8 @@ fn build_auth_url(
 /// Bind a TCP listener on `port` and block until we receive a valid OAuth
 /// callback.  Returns the `code` query parameter.
 fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-        .with_context(|| format!("binding callback listener on port {}", port))?;
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+        .with_context(|| format!("binding callback listener on port {port}"))?;
 
     info!("Listening for callback on http://localhost:{}/ ...", port);
 
@@ -216,24 +216,20 @@ fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
             return Err(anyhow!("state mismatch in OAuth callback (possible CSRF)"));
         }
 
-        match params.get("code") {
-            Some(code) => {
-                let _ = http_reply(
-                    &mut stream,
-                    200,
-                    "<html><body><h2>Authorization complete.</h2>\
-                     <p>You may close this tab.</p></body></html>",
-                );
-                return Ok(code.clone());
-            }
-            None => {
-                let error = params
-                    .get("error")
-                    .map(String::as_str)
-                    .unwrap_or("unknown error");
-                let _ = http_reply(&mut stream, 400, "Authorization failed");
-                return Err(anyhow!("authorization denied: {}", error));
-            }
+        if let Some(code) = params.get("code") {
+            let _ = http_reply(
+                &mut stream,
+                200,
+                "<html><body><h2>Authorization complete.</h2>\
+                 <p>You may close this tab.</p></body></html>",
+            );
+            return Ok(code.clone());
+        } else {
+            let error = params
+                .get("error")
+                .map_or("unknown error", String::as_str);
+            let _ = http_reply(&mut stream, 400, "Authorization failed");
+            return Err(anyhow!("authorization denied: {error}"));
         }
     }
 }

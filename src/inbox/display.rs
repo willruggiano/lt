@@ -10,25 +10,23 @@ fn relative_age(iso: &str) -> String {
     if let Some(ts) = parse_iso8601_secs(iso) {
         let diff = now_secs.saturating_sub(ts);
         if diff < 60 {
-            return format!("{}s ago", diff);
+            return format!("{diff}s ago");
         } else if diff < 3600 {
             return format!("{}m ago", diff / 60);
         } else if diff < 86400 {
             return format!("{}h ago", diff / 3600);
-        } else {
-            return format!("{}d ago", diff / 86400);
         }
+        return format!("{}d ago", diff / 86400);
     }
     iso.to_string()
 }
 
-/// Current Unix timestamp in seconds using std::time.
+/// Current Unix timestamp in seconds using `std::time`.
 fn now_unix_secs() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Minimal ISO-8601 parser: "YYYY-MM-DDTHH:MM:SS..." -> Unix seconds (UTC).
@@ -81,21 +79,21 @@ pub fn print_table(notifications: &[Notification]) {
 
     let issue_w = notifications
         .iter()
-        .map(|n| n.issue.as_ref().map(|i| i.identifier.len()).unwrap_or(0))
+        .map(|n| n.issue.as_ref().map_or(0, |i| i.identifier.len()))
         .max()
         .unwrap_or(5)
         .max(5);
 
     let title_w = notifications
         .iter()
-        .map(|n| n.issue.as_ref().map(|i| i.title.len()).unwrap_or(0))
+        .map(|n| n.issue.as_ref().map_or(0, |i| i.title.len()))
         .max()
         .unwrap_or(5)
         .clamp(5, 60);
 
     let actor_w = notifications
         .iter()
-        .map(|n| n.actor.as_ref().map(|a| a.name.len()).unwrap_or(1))
+        .map(|n| n.actor.as_ref().map_or(1, |a| a.name.len()))
         .max()
         .unwrap_or(5)
         .max(5);
@@ -121,25 +119,15 @@ pub fn print_table(notifications: &[Notification]) {
         let issue_id = n
             .issue
             .as_ref()
-            .map(|i| i.identifier.as_str())
-            .unwrap_or("-");
-        let raw_title = n.issue.as_ref().map(|i| i.title.as_str()).unwrap_or("-");
+            .map_or("-", |i| i.identifier.as_str());
+        let raw_title = n.issue.as_ref().map_or("-", |i| i.title.as_str());
         // Truncate title if needed
         let title = text::truncate(raw_title, title_w);
-        let actor = n.actor.as_ref().map(|a| a.name.as_str()).unwrap_or("-");
+        let actor = n.actor.as_ref().map_or("-", |a| a.name.as_str());
         let age = relative_age(&n.created_at);
 
         println!(
-            "{:<type_w$}  {:<issue_w$}  {:<title_w$}  {:<actor_w$}  {}",
-            type_str,
-            issue_id,
-            title,
-            actor,
-            age,
-            type_w = type_w,
-            issue_w = issue_w,
-            title_w = title_w,
-            actor_w = actor_w,
+            "{type_str:<type_w$}  {issue_id:<issue_w$}  {title:<title_w$}  {actor:<actor_w$}  {age}",
         );
     }
 }
@@ -168,8 +156,7 @@ mod tests {
         let result = relative_age("2020-01-01T00:00:00Z");
         assert!(
             result.ends_with("d ago") || result.ends_with("h ago"),
-            "unexpected: {}",
-            result
+            "unexpected: {result}"
         );
     }
 

@@ -16,7 +16,7 @@ use super::sort::build_sort;
 /// Cache TTL in seconds (5 minutes).
 const CACHE_TTL_SECS: i64 = 300;
 
-const ISSUES_QUERY: &str = r#"
+const ISSUES_QUERY: &str = r"
 query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
   issues(filter: $filter, sort: $sort, first: $first, after: $after) {
     nodes {
@@ -40,7 +40,7 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
     pageInfo { hasNextPage endCursor }
   }
 }
-"#;
+";
 
 #[derive(Deserialize, Clone)]
 pub struct Parent {
@@ -152,7 +152,7 @@ pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool,
 
 /// Resolve `--assignee=me` to the viewer's actual name so the SQL filter can
 /// match the cached `assignee_name` column.  Uses the identity cached in
-/// sync_meta when available, otherwise asks the Linear API and caches it.
+/// `sync_meta` when available, otherwise asks the Linear API and caches it.
 fn resolve_me(conn: &rusqlite::Connection, args: &mut IssueArgs) -> Result<()> {
     let is_me = args
         .assignee
@@ -161,14 +161,11 @@ fn resolve_me(conn: &rusqlite::Connection, args: &mut IssueArgs) -> Result<()> {
     if !is_me {
         return Ok(());
     }
-    let name = match db::get_meta(conn, "viewer_name")? {
-        Some(n) => n,
-        None => {
-            let token = crate::auth::refresh::load_or_refresh_token()?;
-            let viewer = crate::linear::viewer::fetch_viewer(&token.access_token)?;
-            db::set_meta(conn, "viewer_name", &viewer.name)?;
-            viewer.name
-        }
+    let name = if let Some(n) = db::get_meta(conn, "viewer_name")? { n } else {
+        let token = crate::auth::refresh::load_or_refresh_token()?;
+        let viewer = crate::linear::viewer::fetch_viewer(&token.access_token)?;
+        db::set_meta(conn, "viewer_name", &viewer.name)?;
+        viewer.name
     };
     args.assignee = Some(name);
     Ok(())
@@ -205,18 +202,17 @@ pub fn run(mut args: IssueArgs) -> Result<()> {
         Some(ref ts) => {
             // Parse the timestamp and check age.
             let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(ts)
-                .map(|t| Utc::now().signed_duration_since(t).num_seconds())
-                .unwrap_or(i64::MAX);
+                .map_or(i64::MAX, |t| Utc::now().signed_duration_since(t).num_seconds());
 
             if age_secs < CACHE_TTL_SECS {
                 // Fresh cache -- serve immediately.
                 let issues = db::query_issues(&conn, &args)?;
-                let note = format!("(cached, age {}s)", age_secs);
+                let note = format!("(cached, age {age_secs}s)");
                 print_table_cached(&issues, &note);
             } else {
                 // Stale cache -- serve immediately, then run delta sync in background.
                 let issues = db::query_issues(&conn, &args)?;
-                let note = format!("(stale cache, age {}s -- syncing in background)", age_secs);
+                let note = format!("(stale cache, age {age_secs}s -- syncing in background)");
                 print_table_cached(&issues, &note);
 
                 // Trigger delta sync in a background thread; ignore join errors.

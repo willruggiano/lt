@@ -14,7 +14,7 @@
 ///   team:<name>         -- filter by team name or key
 ///
 /// All remaining tokens are concatenated and used as an FTS5 full-text query
-/// against the issues_fts index (identifier + title columns).
+/// against the `issues_fts` index (identifier + title columns).
 ///
 /// Example
 /// -------
@@ -25,7 +25,7 @@
 ///   assignee -> "me"
 ///   priority -> "urgent"
 ///   state    -> "todo"
-///   fts_query -> "oauth* crash*"   (prefix-matched)
+///   `fts_query` -> "oauth* crash*"   (prefix-matched)
 ///
 /// Default
 /// -------
@@ -131,7 +131,7 @@ pub struct QueryAst {
 /// Parse a raw query string into a `QueryAst` with full span information.
 ///
 /// Delegates to the generated `parse_query_ast_impl()` function (from
-/// search_stems.rs) which uses Chumsky error recovery.  Never panics;
+/// `search_stems.rs`) which uses Chumsky error recovery.  Never panics;
 /// any input string yields a valid `QueryAst`.
 pub fn parse_query_ast(raw: &str) -> QueryAst {
     let (tokens, errors) = parse_query_ast_impl(raw);
@@ -282,7 +282,7 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
             }
         }
         // Plain word -- add to FTS query with prefix wildcard for incremental matching.
-        fts_words.push(format!("{}*", token));
+        fts_words.push(format!("{token}*"));
     }
 
     let fts_terms = fts_words.join(" ");
@@ -362,7 +362,7 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
             conditions.push("LOWER(assignee_name) = 'me'".to_string());
         } else {
             conditions.push("LOWER(COALESCE(assignee_name,'')) LIKE ?".to_string());
-            bind.push(Box::new(format!("%{}%", a)));
+            bind.push(Box::new(format!("%{a}%")));
         }
     }
 
@@ -379,7 +379,7 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
     // -- state --
     if let Some(ref s) = q.state {
         conditions.push("LOWER(state_name) LIKE ?".to_string());
-        bind.push(Box::new(format!("%{}%", s)));
+        bind.push(Box::new(format!("%{s}%")));
     }
 
     // -- team --
@@ -394,25 +394,25 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
     // -- label --
     if let Some(ref l) = q.label {
         conditions.push("LOWER(COALESCE(labels,'')) LIKE ?".to_string());
-        bind.push(Box::new(format!("%{}%", l)));
+        bind.push(Box::new(format!("%{l}%")));
     }
 
     // -- project --
     if let Some(ref p) = q.project {
         conditions.push("LOWER(COALESCE(project_name,'')) LIKE ?".to_string());
-        bind.push(Box::new(format!("%{}%", p)));
+        bind.push(Box::new(format!("%{p}%")));
     }
 
     // -- cycle --
     if let Some(ref c) = q.cycle {
         conditions.push("LOWER(COALESCE(cycle_name,'')) LIKE ?".to_string());
-        bind.push(Box::new(format!("%{}%", c)));
+        bind.push(Box::new(format!("%{c}%")));
     }
 
     // -- creator --
     if let Some(ref c) = q.creator {
         conditions.push("LOWER(COALESCE(creator_name,'')) LIKE ?".to_string());
-        bind.push(Box::new(format!("%{}%", c)));
+        bind.push(Box::new(format!("%{c}%")));
     }
 
     // -- ORDER BY --
@@ -463,12 +463,8 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
                     parent_id, parent_identifier
              FROM issues
              {where_clause}
-             ORDER BY {col} {dir}
+             ORDER BY {order_col} {order_dir}
              LIMIT {limit}",
-            where_clause = where_clause,
-            col = order_col,
-            dir = order_dir,
-            limit = limit,
         )
     };
 
@@ -483,10 +479,10 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
 
     let mut stmt = conn
         .prepare(&sql)
-        .map_err(|e| anyhow::anyhow!("prepare search_query: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("prepare search_query: {e}"))?;
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        all_params.iter().map(|b| b.as_ref()).collect();
+        all_params.iter().map(std::convert::AsRef::as_ref).collect();
 
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
@@ -511,11 +507,11 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
                 parent_identifier: row.get(17)?,
             })
         })
-        .map_err(|e| anyhow::anyhow!("execute search_query: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("execute search_query: {e}"))?;
 
     let mut issues = Vec::new();
     for row in rows {
-        issues.push(row.map_err(|e| anyhow::anyhow!("read search_query row: {}", e))?);
+        issues.push(row.map_err(|e| anyhow::anyhow!("read search_query row: {e}"))?);
     }
     Ok(issues)
 }
@@ -527,7 +523,7 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
 #[allow(dead_code)]
 pub fn resolve_me(q: &mut ParsedQuery, viewer_name: Option<&str>) {
     if q.assignee.as_deref() == Some("me") {
-        q.assignee = viewer_name.map(|n| n.to_lowercase());
+        q.assignee = viewer_name.map(str::to_lowercase);
     }
 }
 
@@ -690,8 +686,8 @@ impl Completer {
 
     /// Apply one Tab press (or Shift-Tab when `forward = false`).
     ///
-    /// - If input.selection_end is set: accept the current selection by
-    ///   moving the cursor to selection_end and clearing the selection,
+    /// - If `input.selection_end` is set: accept the current selection by
+    ///   moving the cursor to `selection_end` and clearing the selection,
     ///   then return without jumping further.
     /// - If context is `StemKey` and candidates are non-empty: cycle
     ///   `selected` (+1 or -1 with wrap) then replace the key portion of
@@ -742,8 +738,7 @@ impl Completer {
                 // left behind when the candidate (which already contains the
                 // colon) is inserted.
                 let (replace_start, replace_end) = match &self.active_token {
-                    Some(Token::PartialStem { key_span, .. })
-                    | Some(Token::Stem { key_span, .. }) => {
+                    Some(Token::PartialStem { key_span, .. } | Token::Stem { key_span, .. }) => {
                         (key_span.start, (key_span.end + 1).min(input.value.len()))
                     }
                     _ => {
@@ -790,8 +785,7 @@ impl Completer {
                 }
                 let candidate = self.candidates[self.selected].clone();
                 let (replace_start, replace_end) = match &self.active_token {
-                    Some(Token::PartialStem { key_span, .. })
-                    | Some(Token::Stem { key_span, .. }) => {
+                    Some(Token::PartialStem { key_span, .. } | Token::Stem { key_span, .. }) => {
                         (key_span.start, (key_span.end + 1).min(input.value.len()))
                     }
                     _ => (input.cursor.saturating_sub(prefix.len()), input.cursor),
@@ -830,8 +824,8 @@ impl Completer {
     /// For Stem/PartialStem tokens, position the cursor after the colon
     /// (i.e. at the value portion) rather than at the very start of the key.
     /// When landing on a Stem token that has a non-empty value, set
-    /// input.selection_end to the end of the token span so that the value is
-    /// "selected" and typing immediately replaces it.  PartialStem tokens
+    /// `input.selection_end` to the end of the token span so that the value is
+    /// "selected" and typing immediately replaces it.  `PartialStem` tokens
     /// (empty value) do NOT set a selection.
     fn jump_token_boundary(
         &self,
@@ -848,12 +842,9 @@ impl Completer {
         if forward {
             // Find the first token that starts strictly after the current cursor.
             let next = ast.tokens.iter().find(|t| span_bounds(t).0 > cursor);
-            match next {
-                Some(t) => {
-                    input.cursor = cursor_position_for_token(t);
-                    input.selection_end = selection_end_for_token(t);
-                }
-                None => return,
+            if let Some(t) = next {
+                input.cursor = cursor_position_for_token(t);
+                input.selection_end = selection_end_for_token(t);
             }
         } else {
             // Shift-Tab: jump to prev token.  We exclude the token the cursor
@@ -865,15 +856,10 @@ impl Completer {
             // return the same position and the jump would be a no-op.
             let prev = ast
                 .tokens
-                .iter()
-                .filter(|t| cursor_position_for_token(t) < cursor)
-                .last();
-            match prev {
-                Some(t) => {
-                    input.cursor = cursor_position_for_token(t);
-                    input.selection_end = selection_end_for_token(t);
-                }
-                None => return,
+                .iter().rfind(|t| cursor_position_for_token(t) < cursor);
+            if let Some(t) = prev {
+                input.cursor = cursor_position_for_token(t);
+                input.selection_end = selection_end_for_token(t);
             }
         }
     }
@@ -896,7 +882,7 @@ fn span_bounds(token: &Token) -> (usize, usize) {
 }
 
 /// Return the cursor position to land on when Tab-jumping to a token.
-/// For Stem and PartialStem tokens, position after the colon (at the value
+/// For Stem and `PartialStem` tokens, position after the colon (at the value
 /// portion). For Word and Unknown, position at the start of the token.
 fn cursor_position_for_token(token: &Token) -> usize {
     match token {
@@ -905,10 +891,10 @@ fn cursor_position_for_token(token: &Token) -> usize {
     }
 }
 
-/// Return the selection_end value to set when Tab-jumping to a token.
+/// Return the `selection_end` value to set when Tab-jumping to a token.
 /// For a Stem token with a non-empty value span, returns Some(span.end) so
 /// that the value is "selected" and typing replaces it immediately.
-/// PartialStem tokens (empty or invalid value) return None -- there is
+/// `PartialStem` tokens (empty or invalid value) return None -- there is
 /// nothing to select.
 /// Word and Unknown tokens also return None.
 fn selection_end_for_token(token: &Token) -> Option<usize> {
@@ -931,7 +917,7 @@ fn stem_key_candidates(prefix: &str) -> Vec<String> {
     STEM_KEY_STRINGS
         .iter()
         .filter(|s| s.to_lowercase().starts_with(lower.as_str()))
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 
@@ -948,16 +934,16 @@ fn stem_key_candidates(prefix: &str) -> Vec<String> {
 pub fn args_to_ast(args: &IssueArgs) -> QueryAst {
     let mut parts: Vec<String> = Vec::new();
     if let Some(ref t) = args.team {
-        parts.push(format!("team:{}", t));
+        parts.push(format!("team:{t}"));
     }
     if let Some(ref a) = args.assignee {
-        parts.push(format!("assignee:{}", a));
+        parts.push(format!("assignee:{a}"));
     }
     if let Some(ref s) = args.state {
-        parts.push(format!("state:{}", s));
+        parts.push(format!("state:{s}"));
     }
     if let Some(ref p) = args.priority {
-        parts.push(format!("priority:{}", p));
+        parts.push(format!("priority:{p}"));
     }
     let dir = if args.desc { "-" } else { "+" };
     parts.push(format!("sort:{}{}", args.sort.label(), dir));
@@ -982,14 +968,14 @@ pub fn render_filter_context(ast: &QueryAst) -> String {
                     };
                     parts.push(format!("sort:{}{}", field.label(), d));
                 }
-                StemKind::Assignee { value } => parts.push(format!("assignee:{}", value)),
-                StemKind::Priority { value } => parts.push(format!("priority:{}", value)),
-                StemKind::State { value } => parts.push(format!("state:{}", value)),
-                StemKind::Team { value } => parts.push(format!("team:{}", value)),
-                StemKind::Label { value } => parts.push(format!("label:{}", value)),
-                StemKind::Project { value } => parts.push(format!("project:{}", value)),
-                StemKind::Cycle { value } => parts.push(format!("cycle:{}", value)),
-                StemKind::Creator { value } => parts.push(format!("creator:{}", value)),
+                StemKind::Assignee { value } => parts.push(format!("assignee:{value}")),
+                StemKind::Priority { value } => parts.push(format!("priority:{value}")),
+                StemKind::State { value } => parts.push(format!("state:{value}")),
+                StemKind::Team { value } => parts.push(format!("team:{value}")),
+                StemKind::Label { value } => parts.push(format!("label:{value}")),
+                StemKind::Project { value } => parts.push(format!("project:{value}")),
+                StemKind::Cycle { value } => parts.push(format!("cycle:{value}")),
+                StemKind::Creator { value } => parts.push(format!("creator:{value}")),
             },
             Token::Word { text, .. } => parts.push(text.clone()),
             _ => {} // PartialStem/Unknown: skip in header display
@@ -1141,7 +1127,7 @@ mod tests {
                 assert_eq!(span.end, 5);
                 assert_eq!(text, "hello");
             }
-            other => panic!("expected Word, got {:?}", other),
+            other => panic!("expected Word, got {other:?}"),
         }
     }
 
@@ -1155,14 +1141,14 @@ mod tests {
                 assert_eq!((span.start, span.end), (0, 3));
                 assert_eq!(text, "foo");
             }
-            other => panic!("expected Word, got {:?}", other),
+            other => panic!("expected Word, got {other:?}"),
         }
         match &ast.tokens[1] {
             Token::Word { span, text } => {
                 assert_eq!((span.start, span.end), (4, 7));
                 assert_eq!(text, "bar");
             }
-            other => panic!("expected Word, got {:?}", other),
+            other => panic!("expected Word, got {other:?}"),
         }
     }
 
@@ -1183,7 +1169,7 @@ mod tests {
                 assert!(matches!(field, SortField::Updated));
                 assert_eq!(*dir, SortDir::Desc);
             }
-            other => panic!("expected Stem(Sort), got {:?}", other),
+            other => panic!("expected Stem(Sort), got {other:?}"),
         }
     }
 
@@ -1205,7 +1191,7 @@ mod tests {
                 assert_eq!((val_span.start, val_span.end), (5, 5));
                 assert_eq!(*known_key, Some(StemKey::Sort));
             }
-            other => panic!("expected PartialStem, got {:?}", other),
+            other => panic!("expected PartialStem, got {other:?}"),
         }
     }
 
@@ -1217,7 +1203,7 @@ mod tests {
             Token::PartialStem { known_key, .. } => {
                 assert_eq!(*known_key, Some(StemKey::Sort));
             }
-            other => panic!("expected PartialStem, got {:?}", other),
+            other => panic!("expected PartialStem, got {other:?}"),
         }
     }
 
@@ -1229,7 +1215,7 @@ mod tests {
             Token::PartialStem { known_key, .. } => {
                 assert_eq!(*known_key, None);
             }
-            other => panic!("expected PartialStem(known_key=None), got {:?}", other),
+            other => panic!("expected PartialStem(known_key=None), got {other:?}"),
         }
     }
 
@@ -1254,8 +1240,7 @@ mod tests {
             let slice = &raw[start..end];
             assert!(
                 !slice.contains(|c: char| c.is_ascii_whitespace()),
-                "token span contains whitespace: {:?}",
-                slice
+                "token span contains whitespace: {slice:?}"
             );
         }
     }
@@ -1271,7 +1256,7 @@ mod tests {
             } => {
                 assert_eq!(value, "me");
             }
-            other => panic!("expected Stem(Assignee), got {:?}", other),
+            other => panic!("expected Stem(Assignee), got {other:?}"),
         }
     }
 
@@ -1282,7 +1267,7 @@ mod tests {
             Token::PartialStem { known_key, .. } => {
                 assert_eq!(*known_key, Some(StemKey::Assignee));
             }
-            other => panic!("expected PartialStem, got {:?}", other),
+            other => panic!("expected PartialStem, got {other:?}"),
         }
     }
 
@@ -1393,7 +1378,7 @@ mod tests {
             CompletionContext::StemKey { prefix } => {
                 assert_eq!(prefix, "so");
             }
-            other => panic!("expected StemKey, got {:?}", other),
+            other => panic!("expected StemKey, got {other:?}"),
         }
         // Only "sort:" starts with "so"
         assert_eq!(c.candidates, vec!["sort:"]);
@@ -1410,7 +1395,7 @@ mod tests {
             CompletionContext::StemKey { prefix } => {
                 assert_eq!(prefix, "a");
             }
-            other => panic!("expected StemKey, got {:?}", other),
+            other => panic!("expected StemKey, got {other:?}"),
         }
         assert_eq!(c.candidates, vec!["assignee:"]);
     }
@@ -1427,7 +1412,7 @@ mod tests {
             CompletionContext::StemKey { prefix } => {
                 assert_eq!(prefix, "");
             }
-            other => panic!("expected StemKey with empty prefix, got {:?}", other),
+            other => panic!("expected StemKey with empty prefix, got {other:?}"),
         }
         assert_eq!(c.candidates.len(), 9); // all stem keys
     }
@@ -1451,7 +1436,7 @@ mod tests {
             CompletionContext::StemKey { prefix } => {
                 assert_eq!(prefix, "");
             }
-            other => panic!("expected StemKey with empty prefix, got {:?}", other),
+            other => panic!("expected StemKey with empty prefix, got {other:?}"),
         }
         assert_eq!(c.candidates.len(), 9); // all stem keys
     }
@@ -1484,7 +1469,7 @@ mod tests {
             CompletionContext::StemKey { prefix } => {
                 assert_eq!(prefix, "sort");
             }
-            other => panic!("expected StemKey, got {:?}", other),
+            other => panic!("expected StemKey, got {other:?}"),
         }
         assert_eq!(c.candidates, vec!["sort:"]);
         // The suffix relative to "sort" in "sort:" is ":"
@@ -1532,7 +1517,7 @@ mod tests {
                 assert!(matches!(field, SortField::Updated));
                 assert_eq!(*dir, SortDir::Desc);
             }
-            other => panic!("expected Stem(Sort), got {:?}", other),
+            other => panic!("expected Stem(Sort), got {other:?}"),
         }
     }
 
@@ -1555,14 +1540,14 @@ mod tests {
                 kind: StemKind::Team { value },
                 ..
             } => assert_eq!(value, "eng"),
-            other => panic!("expected Stem(Team), got {:?}", other),
+            other => panic!("expected Stem(Team), got {other:?}"),
         }
         match &ast.tokens[1] {
             Token::Stem {
                 kind: StemKind::Assignee { value },
                 ..
             } => assert_eq!(value, "me"),
-            other => panic!("expected Stem(Assignee), got {:?}", other),
+            other => panic!("expected Stem(Assignee), got {other:?}"),
         }
     }
 
@@ -1583,7 +1568,7 @@ mod tests {
                 assert!(matches!(field, SortField::Priority));
                 assert_eq!(*dir, SortDir::Asc);
             }
-            other => panic!("expected Stem(Sort), got {:?}", other),
+            other => panic!("expected Stem(Sort), got {other:?}"),
         }
     }
 
@@ -1675,7 +1660,7 @@ mod tests {
 
     impl Harness {
         /// Parse a snapshot string to extract initial text, cursor position,
-        /// and optional selection_end, then build the AST and initialise
+        /// and optional `selection_end`, then build the AST and initialise
         /// the completer.
         ///
         /// The trailing '(...)' ghost-text annotation is stripped and ignored
@@ -1697,7 +1682,7 @@ mod tests {
             // Split on the cursor marker '|'.
             let pipe = bare
                 .find('|')
-                .unwrap_or_else(|| panic!("snapshot missing '|': {:?}", snapshot));
+                .unwrap_or_else(|| panic!("snapshot missing '|': {snapshot:?}"));
             let before = &bare[..pipe];
             let rest = &bare[pipe + 1..];
 
@@ -1712,7 +1697,7 @@ mod tests {
                 ("", rest)
             };
 
-            let text = format!("{}{}{}", before, sel_text, after);
+            let text = format!("{before}{sel_text}{after}");
             let cursor = before.len();
             let selection_end = if sel_text.is_empty() {
                 None
@@ -1743,12 +1728,12 @@ mod tests {
             let sel_text = &self.input.value[self.input.cursor..sel_end];
             let after = &self.input.value[sel_end..];
             let mut s = if sel_text.is_empty() {
-                format!("{}|{}", before, after)
+                format!("{before}|{after}")
             } else {
-                format!("{}|[{}]{}", before, sel_text, after)
+                format!("{before}|[{sel_text}]{after}")
             };
             if let Some(ghost) = self.completer.hint_suffix() {
-                s.push_str(&format!("({})", ghost));
+                s.push_str(&format!("({ghost})"));
             }
             s
         }
@@ -1759,8 +1744,7 @@ mod tests {
             let actual = self.snapshot();
             assert_eq!(
                 actual, expected,
-                "\nsnapshot mismatch:\n  actual:   {:?}\n  expected: {:?}",
-                actual, expected
+                "\nsnapshot mismatch:\n  actual:   {actual:?}\n  expected: {expected:?}"
             );
         }
 

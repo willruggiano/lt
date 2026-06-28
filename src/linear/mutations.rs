@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::client::graphql_query;
 
-const ISSUE_UPDATE_MUTATION: &str = r#"
+const ISSUE_UPDATE_MUTATION: &str = r"
 mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) {
     success
@@ -20,9 +20,9 @@ mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
     }
   }
 }
-"#;
+";
 
-const ISSUE_CREATE_MUTATION: &str = r#"
+const ISSUE_CREATE_MUTATION: &str = r"
 mutation IssueCreate($input: IssueCreateInput!) {
   issueCreate(input: $input) {
     success
@@ -36,17 +36,17 @@ mutation IssueCreate($input: IssueCreateInput!) {
     }
   }
 }
-"#;
+";
 
-const COMMENT_CREATE_MUTATION: &str = r#"
+const COMMENT_CREATE_MUTATION: &str = r"
 mutation CommentCreate($input: CommentCreateInput!) {
   commentCreate(input: $input) {
     success
   }
 }
-"#;
+";
 
-const TEAMS_QUERY: &str = r#"
+const TEAMS_QUERY: &str = r"
 query Teams {
   teams {
     nodes {
@@ -55,9 +55,9 @@ query Teams {
     }
   }
 }
-"#;
+";
 
-const WORKFLOW_STATES_QUERY: &str = r#"
+const WORKFLOW_STATES_QUERY: &str = r"
 query WorkflowStates($teamId: String!) {
   team(id: $teamId) {
     states {
@@ -69,7 +69,7 @@ query WorkflowStates($teamId: String!) {
     }
   }
 }
-"#;
+";
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct IssueState {

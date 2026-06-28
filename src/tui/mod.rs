@@ -28,8 +28,8 @@ pub struct TextInput {
     pub value: String,
     /// Byte offset of the cursor, always on a char boundary.
     pub cursor: usize,
-    /// If set, the range cursor..selection_end is "selected" (highlighted).
-    /// selection_end is always >= cursor and always on a char boundary.
+    /// If set, the range `cursor..selection_end` is "selected" (highlighted).
+    /// `selection_end` is always >= cursor and always on a char boundary.
     /// Typing a character replaces the selection; movement keys clear it.
     pub selection_end: Option<usize>,
 }
@@ -196,7 +196,7 @@ impl TextInput {
     }
 
     /// Insert a char at the cursor.
-    /// If a selection is active (selection_end is set), the selected range is
+    /// If a selection is active (`selection_end` is set), the selected range is
     /// deleted first so that typing replaces the selection.
     pub fn insert(&mut self, c: char) {
         if let Some(end) = self.selection_end.take() {
@@ -512,7 +512,7 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
 pub struct HelpPopup {
     /// Current search query typed by the user.
     pub search: TextInput,
-    /// Indices into ALL_KEYBINDINGS that match the current search.
+    /// Indices into `ALL_KEYBINDINGS` that match the current search.
     pub filtered: Vec<usize>,
     /// Currently highlighted row in the filtered list.
     pub selected: usize,
@@ -560,7 +560,7 @@ pub struct SearchOverlay {
     pub last_changed: Option<Instant>,
     /// True when FTS index is unavailable (no sync yet).
     pub fts_unavailable: bool,
-    /// True once run_search() has been called at least once (bd-zjy).
+    /// True once `run_search()` has been called at least once (bd-zjy).
     /// Used by the renderer to distinguish "never searched" from "searched, no results".
     pub has_searched: bool,
     /// Parsed AST of the current query string (bd-3qb).
@@ -844,7 +844,7 @@ pub struct App {
     // -- re-auth (bd-vhp) -----------------------------------------------------
     /// Receiver for the background login thread, if one is in progress.
     pub login_rx: Option<mpsc::Receiver<LoginEvent>>,
-    /// True when the last sync reported NotAuthenticated (no token stored).
+    /// True when the last sync reported `NotAuthenticated` (no token stored).
     pub not_authenticated: bool,
 }
 
@@ -906,8 +906,8 @@ impl App {
         }
     }
 
-    /// Keep app.args.sort/desc in sync with active_filter (bd-rbm).
-    /// Called after active_filter is updated so that do_fetch() and the
+    /// Keep app.args.sort/desc in sync with `active_filter` (bd-rbm).
+    /// Called after `active_filter` is updated so that `do_fetch()` and the
     /// table sort-column marker reflect the confirmed filter state.
     fn sync_args_from_filter(&mut self) {
         let parsed = search_query::ParsedQuery::from(&self.active_filter);
@@ -917,8 +917,8 @@ impl App {
         }
     }
 
-    /// Produce a new QueryAst with the sort: token replaced to match
-    /// self.args.sort/desc.  Used by cycle_sort and toggle_desc (bd-rbm).
+    /// Produce a new `QueryAst` with the sort: token replaced to match
+    /// self.args.sort/desc.  Used by `cycle_sort` and `toggle_desc` (bd-rbm).
     fn replace_sort_in_filter(&self) -> search_query::QueryAst {
         let dir = if self.args.desc { "-" } else { "+" };
         let new_sort = format!("sort:{}{}", self.args.sort.label(), dir);
@@ -927,7 +927,7 @@ impl App {
             .raw
             .split_whitespace()
             .filter(|t| !t.to_lowercase().starts_with("sort:"))
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         parts.push(new_sort);
         search_query::parse_query_ast(&parts.join(" "))
@@ -966,16 +966,16 @@ impl App {
         self.move_by(i32::MAX / 2);
     }
     fn page_down(&mut self) {
-        self.move_by(self.viewport_height as i32);
+        self.move_by(i32::from(self.viewport_height));
     }
     fn page_up(&mut self) {
-        self.move_by(-(self.viewport_height as i32));
+        self.move_by(-i32::from(self.viewport_height));
     }
     fn half_page_down(&mut self) {
-        self.move_by(self.viewport_height as i32 / 2);
+        self.move_by(i32::from(self.viewport_height) / 2);
     }
     fn half_page_up(&mut self) {
-        self.move_by(-(self.viewport_height as i32 / 2));
+        self.move_by(-(i32::from(self.viewport_height) / 2));
     }
 
     fn do_fetch(&mut self, reset_selection: bool) {
@@ -1025,7 +1025,7 @@ impl App {
                 Ok((issues, has_next_page)) => {
                     self.issues = issues.into_iter().map(db_issue_to_list_issue).collect();
                     self.has_next_page = has_next_page;
-                    let limit = self.args.limit.min(250) as i64;
+                    let limit = i64::from(self.args.limit.min(250));
                     self.end_cursor = if has_next_page {
                         Some((offset + limit).to_string())
                     } else {
@@ -1116,7 +1116,7 @@ impl App {
     ///
     /// The detail is populated instantly from the local SQLite cache so the
     /// pane appears without any network round-trip.  A background thread then
-    /// calls sync_comments via the Linear API and sends the refreshed comment
+    /// calls `sync_comments` via the Linear API and sends the refreshed comment
     /// list back through `detail_comment_rx` (bd-2mx).
     fn open_detail(&mut self) {
         let issue = match self.selected_issue() {
@@ -1181,8 +1181,8 @@ impl App {
         // Populate parent and children from the local DB cache.
         if let Ok(conn) = crate::db::open_db() {
             // Look up children.
-            if let Ok(children) = crate::db::query_children(&conn, &issue.id) {
-                if let Some(ref mut detail) = self.detail {
+            if let Ok(children) = crate::db::query_children(&conn, &issue.id)
+                && let Some(ref mut detail) = self.detail {
                     detail.children = children
                         .into_iter()
                         .map(|c| crate::linear::types::IssueRef {
@@ -1192,12 +1192,11 @@ impl App {
                         })
                         .collect();
                 }
-            }
             // Look up parent.
             if let Some(ref parent) = issue.parent {
                 let parent_sql = "SELECT identifier, title, state_name FROM issues WHERE id = ?1";
-                if let Ok(mut stmt) = conn.prepare(parent_sql) {
-                    if let Ok(row) = stmt.query_row(
+                if let Ok(mut stmt) = conn.prepare(parent_sql)
+                    && let Ok(row) = stmt.query_row(
                         rusqlite::params![parent.id],
                         |row| {
                             Ok(crate::linear::types::IssueRef {
@@ -1206,12 +1205,10 @@ impl App {
                                 state_name: row.get(2)?,
                             })
                         },
-                    ) {
-                        if let Some(ref mut detail) = self.detail {
+                    )
+                        && let Some(ref mut detail) = self.detail {
                             detail.parent = Some(row);
                         }
-                    }
-                }
             }
         }
 
@@ -1223,12 +1220,9 @@ impl App {
         self.detail_comment_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let token = match crate::config::load_token() {
-                Ok(Some(t)) => t,
-                _ => {
-                    let _ = tx.send(CommentSyncEvent::Error("not logged in".to_string()));
-                    return;
-                }
+            let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+                let _ = tx.send(CommentSyncEvent::Error("not logged in".to_string()));
+                return;
             };
             let conn = match crate::db::open_db() {
                 Ok(c) => c,
@@ -1316,7 +1310,7 @@ impl App {
     /// The comment is appended to the detail pane optimistically; a background
     /// thread runs the commentCreate mutation, re-syncs the issue's comments,
     /// and delivers the authoritative list via `detail_comment_rx`.  On error
-    /// the optimistic comment is dropped (see poll_detail_comment_events).
+    /// the optimistic comment is dropped (see `poll_detail_comment_events`).
     fn submit_comment(&mut self) {
         let body = match self.comment_input.as_ref() {
             Some(b) => b.trim().to_string(),
@@ -1330,12 +1324,9 @@ impl App {
             Some(i) => i.id.clone(),
             None => return,
         };
-        let token = match crate::config::load_token() {
-            Ok(Some(t)) => t,
-            _ => {
-                self.footer_msg = Some("Not logged in".to_string());
-                return;
-            }
+        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+            self.footer_msg = Some("Not logged in".to_string());
+            return;
         };
         self.comment_input = None;
 
@@ -1382,12 +1373,9 @@ impl App {
             Some(i) => i.clone(),
             None => return,
         };
-        let token = match crate::config::load_token() {
-            Ok(Some(t)) => t,
-            _ => {
-                self.footer_msg = Some("Not logged in".to_string());
-                return;
-            }
+        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+            self.footer_msg = Some("Not logged in".to_string());
+            return;
         };
         let current_state_name = issue.state.name.clone();
         match crate::linear::mutations::fetch_workflow_states(&token.access_token, &issue.team.id) {
@@ -1408,7 +1396,7 @@ impl App {
                 self.footer_msg = None;
             }
             Err(e) => {
-                self.footer_msg = Some(format!("Failed to fetch states: {}", e));
+                self.footer_msg = Some(format!("Failed to fetch states: {e}"));
             }
         }
     }
@@ -1451,12 +1439,9 @@ impl App {
             Some(i) => i.clone(),
             None => return,
         };
-        let token = match crate::config::load_token() {
-            Ok(Some(t)) => t,
-            _ => {
-                self.footer_msg = Some("Not logged in".to_string());
-                return;
-            }
+        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+            self.footer_msg = Some("Not logged in".to_string());
+            return;
         };
         let mut items: Vec<PopupItem> = vec![PopupItem {
             label: "Unassign".to_string(),
@@ -1472,7 +1457,7 @@ impl App {
                 }
             }
             Err(e) => {
-                self.footer_msg = Some(format!("Failed to fetch members: {}", e));
+                self.footer_msg = Some(format!("Failed to fetch members: {e}"));
                 return;
             }
         }
@@ -1581,12 +1566,9 @@ impl App {
     // -- New-issue modal (bd-l6r) --------------------------------------------
 
     fn open_new_issue_modal(&mut self) {
-        let token = match crate::config::load_token() {
-            Ok(Some(t)) => t,
-            _ => {
-                self.footer_msg = Some("Not logged in".to_string());
-                return;
-            }
+        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+            self.footer_msg = Some("Not logged in".to_string());
+            return;
         };
 
         // Pre-fill team from active filter if set.
@@ -1652,7 +1634,7 @@ impl App {
                 modal.loading = false;
             }
             Err(e) => {
-                modal.error = format!("Failed to fetch teams: {}", e);
+                modal.error = format!("Failed to fetch teams: {e}");
                 modal.loading = false;
             }
         }
@@ -1683,12 +1665,9 @@ impl App {
         modal.modal_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let token = match crate::config::load_token() {
-                Ok(Some(t)) => t,
-                _ => {
-                    let _ = tx.send(ModalEvent::LoadError("Not logged in".to_string()));
-                    return;
-                }
+            let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+                let _ = tx.send(ModalEvent::LoadError("Not logged in".to_string()));
+                return;
             };
 
             // Fetch viewer for "me" shortcut (bd-1fz).
@@ -1708,8 +1687,7 @@ impl App {
                 }
                 Err(e) => {
                     let _ = tx.send(ModalEvent::LoadError(format!(
-                        "Failed to fetch states: {}",
-                        e
+                        "Failed to fetch states: {e}"
                     )));
                     return;
                 }
@@ -1733,7 +1711,7 @@ impl App {
                     });
                     for m in members {
                         // Skip the viewer entry since it is already at the top.
-                        if viewer.as_ref().map(|v| v.id == m.id).unwrap_or(false) {
+                        if viewer.as_ref().is_some_and(|v| v.id == m.id) {
                             continue;
                         }
                         items.push(PopupItem {
@@ -1745,8 +1723,7 @@ impl App {
                 }
                 Err(e) => {
                     let _ = tx.send(ModalEvent::LoadError(format!(
-                        "Failed to fetch assignees: {}",
-                        e
+                        "Failed to fetch assignees: {e}"
                     )));
                 }
             }
@@ -1754,14 +1731,11 @@ impl App {
     }
 
     fn new_issue_submit(&mut self) {
-        let token = match crate::config::load_token() {
-            Ok(Some(t)) => t,
-            _ => {
-                if let Some(m) = self.new_issue_modal.as_mut() {
-                    m.error = "Not logged in".to_string();
-                }
-                return;
+        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+            if let Some(m) = self.new_issue_modal.as_mut() {
+                m.error = "Not logged in".to_string();
             }
+            return;
         };
 
         let modal = match self.new_issue_modal.as_ref() {
@@ -1777,18 +1751,14 @@ impl App {
             return;
         }
 
-        let team_id = match modal
+        let team_id = if let Some(id) = modal
             .teams
             .get(modal.team_selected)
-            .and_then(|t| t.id.clone())
-        {
-            Some(id) => id,
-            None => {
-                if let Some(m) = self.new_issue_modal.as_mut() {
-                    m.error = "Select a team".to_string();
-                }
-                return;
+            .and_then(|t| t.id.clone()) { id } else {
+            if let Some(m) = self.new_issue_modal.as_mut() {
+                m.error = "Select a team".to_string();
             }
+            return;
         };
 
         let input = crate::linear::mutations::CreateIssueInput {
@@ -1822,14 +1792,10 @@ impl App {
             .unwrap_or_default();
         let state_name = modal
             .states
-            .get(modal.state_selected)
-            .map(|s| s.label.clone())
-            .unwrap_or_else(|| "Backlog".to_string());
+            .get(modal.state_selected).map_or_else(|| "Backlog".to_string(), |s| s.label.clone());
         let priority_label = modal
             .priorities
-            .get(modal.priority_selected)
-            .map(|p| p.label.clone())
-            .unwrap_or_else(|| "No priority".to_string());
+            .get(modal.priority_selected).map_or_else(|| "No priority".to_string(), |p| p.label.clone());
         let assignee_name = modal.assignees.get(modal.assignee_selected).and_then(|a| {
             if a.id.is_some() {
                 Some(a.label.clone())
@@ -1874,7 +1840,7 @@ impl App {
             }
             Err(e) => {
                 if let Some(m) = self.new_issue_modal.as_mut() {
-                    m.error = format!("Failed to create issue: {}", e);
+                    m.error = format!("Failed to create issue: {e}");
                 }
             }
         }
@@ -1942,7 +1908,7 @@ fn fetch_team_members(token: &str, team_id: &str) -> Result<Vec<Member>> {
     use serde::Deserialize;
     use serde_json::json;
 
-    const TEAM_MEMBERS_QUERY: &str = r#"
+    const TEAM_MEMBERS_QUERY: &str = r"
 query TeamMembers($teamId: String!) {
   team(id: $teamId) {
     members {
@@ -1953,7 +1919,7 @@ query TeamMembers($teamId: String!) {
     }
   }
 }
-"#;
+";
 
     #[derive(Deserialize)]
     struct MemberNode {
@@ -2150,7 +2116,7 @@ fn build_sync_status_label(syncing: bool) -> String {
                     } else if mins == 1 {
                         "synced 1 min ago".to_string()
                     } else {
-                        format!("synced {} min ago", mins)
+                        format!("synced {mins} min ago")
                     }
                 }
                 Err(_) => "synced".to_string(),
@@ -2280,7 +2246,7 @@ fn poll_login_events(app: &mut App) {
         }
         Ok(LoginEvent::Error(msg)) => {
             app.login_rx = None;
-            app.footer_msg = Some(format!("Login failed: {}", msg));
+            app.footer_msg = Some(format!("Login failed: {msg}"));
             app.sync_status_label = "not authenticated -- press L to log in".to_string();
         }
         Err(mpsc::TryRecvError::Empty) => {} // still waiting
@@ -2374,7 +2340,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     let (cached_issues, initial_has_next_page, initial_end_cursor) =
         (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
             let conn = crate::db::open_db()?;
-            let limit = args.limit.min(250) as i64;
+            let limit = i64::from(args.limit.min(250));
             let (db_issues, has_next) = crate::db::query_issues_page(&conn, &args, 0)?;
             let end_cursor = if has_next {
                 Some(limit.to_string())
@@ -2459,9 +2425,9 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         poll_sync_events(&mut app);
 
         // Periodic delta sync: fire every 30s when authenticated.
-        if !app.syncing && !app.not_authenticated {
-            if let Some(t) = app.next_sync_at {
-                if Instant::now() >= t {
+        if !app.syncing && !app.not_authenticated
+            && let Some(t) = app.next_sync_at
+                && Instant::now() >= t {
                     app.syncing = true;
                     app.sync_status_label = build_sync_status_label(true);
                     app.sync_rx = Some(spawn_sync_thread(
@@ -2471,8 +2437,6 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
                     ));
                     app.next_sync_at = None;
                 }
-            }
-        }
 
         // Poll modal background loader channel (bd-vfi).
         app.poll_modal_events();
@@ -2542,7 +2506,7 @@ fn poll_detail_comment_events(app: &mut App) {
             if let (Some(detail), Some(comments)) = (app.detail.as_mut(), cached) {
                 detail.comments.nodes = comments.into_iter().map(db_comment_to_api).collect();
             }
-            app.footer_msg = Some(format!("Failed to post comment: {}", msg));
+            app.footer_msg = Some(format!("Failed to post comment: {msg}"));
             true
         }
         Err(mpsc::TryRecvError::Empty) => false,
@@ -2590,7 +2554,7 @@ fn poll_sync_events(app: &mut App) {
             }
             Ok(SyncEvent::Error(msg)) => {
                 app.syncing = false;
-                app.sync_status_label = format!("sync error: {}", msg);
+                app.sync_status_label = format!("sync error: {msg}");
                 if matches!(app.status, Status::Loading) {
                     app.status = Status::Idle;
                 }
@@ -2884,8 +2848,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             let now = Instant::now();
             let is_double_esc = app
                 .last_esc_time
-                .map(|t| t.elapsed() < Duration::from_millis(500))
-                .unwrap_or(false);
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
             if is_double_esc {
                 // Full reset to initial state.
                 app.args = app.initial_args.clone();
@@ -2946,13 +2909,12 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             app.mode = Mode::Help;
         }
         // Re-authenticate (bd-vhp): background OAuth login.
-        KeyCode::Char('L') => {
-            if app.login_rx.is_none() {
+        KeyCode::Char('L')
+            if app.login_rx.is_none() => {
                 app.login_rx = Some(spawn_login_thread());
                 app.sync_status_label =
                     "logging in -- complete authorization in browser".to_string();
             }
-        }
         _ => {}
     }
 }

@@ -5,18 +5,15 @@ use crate::config;
 const BOOTSTRAP_URL: &str = "https://client-api.linear.app/sync/bootstrap";
 
 pub fn run(override_token: Option<String>) -> Result<()> {
-    let (raw_token, label) = match override_token {
-        Some(t) => (t, "cli --token flag"),
-        None => {
-            let stored = config::load_token()?
-                .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
-            (stored.access_token, "stored OAuth token")
-        }
+    let (raw_token, label) = if let Some(t) = override_token { (t, "cli --token flag") } else {
+        let stored = config::load_token()?
+            .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
+        (stored.access_token, "stored OAuth token")
     };
 
-    println!("endpoint:   {}", BOOTSTRAP_URL);
+    println!("endpoint:   {BOOTSTRAP_URL}");
     println!("params:     type=full&onlyModels=Issue");
-    println!("auth:       Bearer <token> (source: {})", label);
+    println!("auth:       Bearer <token> (source: {label})");
     println!();
 
     // Linear personal API keys must be sent raw (no "Bearer" prefix).
@@ -24,7 +21,7 @@ pub fn run(override_token: Option<String>) -> Result<()> {
     let auth_header = if raw_token.starts_with("lin_api_") {
         raw_token.clone()
     } else {
-        format!("Bearer {}", raw_token)
+        format!("Bearer {raw_token}")
     };
 
     let result = ureq::get(BOOTSTRAP_URL)
@@ -47,8 +44,8 @@ pub fn run(override_token: Option<String>) -> Result<()> {
                 .to_string();
 
             if status.is_success() {
-                println!("status:       {}", status);
-                println!("content-type: {}", content_type);
+                println!("status:       {status}");
+                println!("content-type: {content_type}");
                 println!();
 
                 let body = res
@@ -65,13 +62,13 @@ pub fn run(override_token: Option<String>) -> Result<()> {
                         if line.len() > 200 {
                             println!("{}...", &line[..200]);
                         } else {
-                            println!("{}", line);
+                            println!("{line}");
                         }
                     }
                 }
             } else {
                 println!("status:       {} (error)", status.as_u16());
-                println!("content-type: {}", content_type);
+                println!("content-type: {content_type}");
                 println!();
 
                 let body = res.body_mut().read_to_string().unwrap_or_default();
