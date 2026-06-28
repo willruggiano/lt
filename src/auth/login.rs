@@ -225,11 +225,10 @@ fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
                  <p>You may close this tab.</p></body></html>",
             );
             return Ok(code.clone());
-        } else {
-            let error = params.get("error").map_or("unknown error", String::as_str);
-            let _ = http_reply(&mut stream, 400, "Authorization failed");
-            return Err(anyhow!("authorization denied: {error}"));
         }
+        let error = params.get("error").map_or("unknown error", String::as_str);
+        let _ = http_reply(&mut stream, 400, "Authorization failed");
+        return Err(anyhow!("authorization denied: {error}"));
     }
 }
 

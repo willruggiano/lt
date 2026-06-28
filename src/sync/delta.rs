@@ -181,12 +181,9 @@ pub fn run() -> Result<()> {
 
     let last_synced_at = db::get_meta(&conn, "last_synced_at")?;
 
-    let since = match last_synced_at {
-        None => {
-            // No previous sync -- fall back to full sync.
-            return super::full::run();
-        }
-        Some(ts) => ts,
+    // No previous sync -- fall back to full sync.
+    let Some(since) = last_synced_at else {
+        return super::full::run();
     };
 
     let token = crate::auth::refresh::load_or_refresh_token()?;

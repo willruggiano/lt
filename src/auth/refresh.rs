@@ -26,9 +26,8 @@ use crate::config::AuthToken;
 #[allow(dead_code)]
 pub fn try_refresh() -> Result<bool> {
     // Load the current token.  If there is none, nothing to refresh.
-    let token = match config::load_token()? {
-        Some(t) => t,
-        None => return Ok(false),
+    let Some(token) = config::load_token()? else {
+        return Ok(false);
     };
 
     // Only attempt refresh when the token is known to have expired.

@@ -69,22 +69,20 @@ use crate::config;
 ///
 /// All errors are silently ignored -- this is a best-effort cleanup step.
 fn prune_old_logs(dir: &std::path::Path, days: u64) {
-    let threshold = match SystemTime::now().checked_sub(Duration::from_secs(days * 24 * 60 * 60)) {
-        Some(t) => t,
-        None => return,
+    let Some(threshold) = SystemTime::now().checked_sub(Duration::from_secs(days * 24 * 60 * 60))
+    else {
+        return;
     };
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        let mtime = match entry.metadata().and_then(|m| m.modified()) {
-            Ok(t) => t,
-            Err(_) => continue,
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
         };
         if mtime < threshold {
             let _ = std::fs::remove_file(&path);

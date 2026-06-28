@@ -91,9 +91,9 @@ pub fn sync_comments(conn: &rusqlite::Connection, token: &str, issue_id: &str) -
         });
 
         let data: IssueCommentsData = graphql_query(token, COMMENTS_QUERY, variables)?;
-        let issue = match data.issue {
-            Some(i) => i,
-            None => break, // issue not found; nothing to sync
+        // issue not found; nothing to sync
+        let Some(issue) = data.issue else {
+            break;
         };
 
         let conn_data = issue.comments;

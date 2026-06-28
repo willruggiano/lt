@@ -1226,9 +1226,7 @@ impl App {
         self.detail_comment_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let token = if let Ok(Some(t)) = crate::config::load_token() {
-                t
-            } else {
+            let Ok(Some(token)) = crate::config::load_token() else {
                 let _ = tx.send(CommentSyncEvent::Error("not logged in".to_string()));
                 return;
             };
@@ -1332,9 +1330,7 @@ impl App {
             Some(i) => i.id.clone(),
             None => return,
         };
-        let token = if let Ok(Some(t)) = crate::config::load_token() {
-            t
-        } else {
+        let Ok(Some(token)) = crate::config::load_token() else {
             self.footer_msg = Some("Not logged in".to_string());
             return;
         };
@@ -1383,9 +1379,7 @@ impl App {
             Some(i) => i.clone(),
             None => return,
         };
-        let token = if let Ok(Some(t)) = crate::config::load_token() {
-            t
-        } else {
+        let Ok(Some(token)) = crate::config::load_token() else {
             self.footer_msg = Some("Not logged in".to_string());
             return;
         };
@@ -1450,9 +1444,7 @@ impl App {
             Some(i) => i.clone(),
             None => return,
         };
-        let token = if let Ok(Some(t)) = crate::config::load_token() {
-            t
-        } else {
+        let Ok(Some(token)) = crate::config::load_token() else {
             self.footer_msg = Some("Not logged in".to_string());
             return;
         };
@@ -1528,9 +1520,8 @@ impl App {
         let orig_issue: crate::issues::list::Issue = issue.clone();
 
         std::thread::spawn(move || {
-            let token = match crate::config::load_token() {
-                Ok(Some(t)) => t,
-                _ => return,
+            let Ok(Some(token)) = crate::config::load_token() else {
+                return;
             };
             let result: anyhow::Result<()> = match kind2 {
                 PopupKind::State => {
@@ -1583,9 +1574,7 @@ impl App {
     // -- New-issue modal (bd-l6r) --------------------------------------------
 
     fn open_new_issue_modal(&mut self) {
-        let token = if let Ok(Some(t)) = crate::config::load_token() {
-            t
-        } else {
+        let Ok(Some(token)) = crate::config::load_token() else {
             self.footer_msg = Some("Not logged in".to_string());
             return;
         };
@@ -1664,17 +1653,15 @@ impl App {
 
     /// Kick off background loading of states and assignees for the selected team (bd-vfi).
     fn new_issue_load_states_and_assignees_bg(&mut self) {
-        let modal = match self.new_issue_modal.as_mut() {
-            Some(m) => m,
-            None => return,
+        let Some(modal) = self.new_issue_modal.as_mut() else {
+            return;
         };
-        let team_id = match modal
+        let Some(team_id) = modal
             .teams
             .get(modal.team_selected)
             .and_then(|t| t.id.clone())
-        {
-            Some(id) => id,
-            None => return,
+        else {
+            return;
         };
 
         modal.loading = true;
@@ -1684,9 +1671,7 @@ impl App {
         modal.modal_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let token = if let Ok(Some(t)) = crate::config::load_token() {
-                t
-            } else {
+            let Ok(Some(token)) = crate::config::load_token() else {
                 let _ = tx.send(ModalEvent::LoadError("Not logged in".to_string()));
                 return;
             };
@@ -1752,18 +1737,15 @@ impl App {
     }
 
     fn new_issue_submit(&mut self) {
-        let token = if let Ok(Some(t)) = crate::config::load_token() {
-            t
-        } else {
+        let Ok(Some(token)) = crate::config::load_token() else {
             if let Some(m) = self.new_issue_modal.as_mut() {
                 m.error = "Not logged in".to_string();
             }
             return;
         };
 
-        let modal = match self.new_issue_modal.as_ref() {
-            Some(m) => m,
-            None => return,
+        let Some(modal) = self.new_issue_modal.as_ref() else {
+            return;
         };
 
         if modal.title.value.trim().is_empty() {
@@ -1774,13 +1756,11 @@ impl App {
             return;
         }
 
-        let team_id = if let Some(id) = modal
+        let Some(team_id) = modal
             .teams
             .get(modal.team_selected)
             .and_then(|t| t.id.clone())
-        {
-            id
-        } else {
+        else {
             if let Some(m) = self.new_issue_modal.as_mut() {
                 m.error = "Select a team".to_string();
             }
@@ -1878,13 +1858,11 @@ impl App {
     fn poll_modal_events(&mut self) {
         // Collect events before mutating -- avoids borrow issues.
         let events: Vec<ModalEvent> = {
-            let modal = match self.new_issue_modal.as_ref() {
-                Some(m) => m,
-                None => return,
+            let Some(modal) = self.new_issue_modal.as_ref() else {
+                return;
             };
-            let rx = match modal.modal_rx.as_ref() {
-                Some(r) => r,
-                None => return,
+            let Some(rx) = modal.modal_rx.as_ref() else {
+                return;
             };
             let mut evts = Vec::new();
             loop {
@@ -1898,9 +1876,8 @@ impl App {
         };
 
         for ev in events {
-            let modal = match self.new_issue_modal.as_mut() {
-                Some(m) => m,
-                None => break,
+            let Some(modal) = self.new_issue_modal.as_mut() else {
+                break;
             };
             match ev {
                 ModalEvent::StatesLoaded(items) => {
@@ -1991,18 +1968,16 @@ fn optimistic_update_sqlite(
     kind: &PopupKind,
     item: &PopupItem,
 ) {
-    let conn = match crate::db::open_db() {
-        Ok(c) => c,
-        Err(_) => return,
+    let Ok(conn) = crate::db::open_db() else {
+        return;
     };
     let db_issue = build_db_issue_optimistic(issue, kind, item);
     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
 }
 
 fn revert_sqlite(orig: &crate::issues::list::Issue, _kind: &PopupKind) {
-    let conn = match crate::db::open_db() {
-        Ok(c) => c,
-        Err(_) => return,
+    let Ok(conn) = crate::db::open_db() else {
+        return;
     };
     let db_issue = crate::db::Issue {
         id: orig.id.clone(),
@@ -2085,19 +2060,18 @@ fn build_db_issue_optimistic(
 }
 
 fn apply_optimistic_in_memory(app: &mut App, kind: &PopupKind, item: &PopupItem) {
-    let issue = match app.selected_issue_mut() {
-        Some(i) => i,
-        None => return,
+    let Some(issue) = app.selected_issue_mut() else {
+        return;
     };
     match kind {
         PopupKind::State => {
-            issue.state.name = item.label.clone();
+            issue.state.name.clone_from(&item.label);
             if let Some(id) = &item.id {
-                issue.state.id = id.clone();
+                issue.state.id.clone_from(id);
             }
         }
         PopupKind::Priority => {
-            issue.priority_label = item.label.clone();
+            issue.priority_label.clone_from(&item.label);
             if let Some(pstr) = &item.id {
                 issue.priority = pstr.parse().unwrap_or(issue.priority);
             }
@@ -2254,9 +2228,8 @@ fn spawn_login_thread() -> mpsc::Receiver<LoginEvent> {
 
 /// Poll the background login channel and update app state on completion.
 fn poll_login_events(app: &mut App) {
-    let rx = match app.login_rx.as_ref() {
-        Some(rx) => rx,
-        None => return,
+    let Some(rx) = app.login_rx.as_ref() else {
+        return;
     };
     match rx.try_recv() {
         Ok(LoginEvent::Success {
@@ -2515,9 +2488,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
 /// When the background thread finishes syncing comments from the Linear API,
 /// the refreshed list replaces the cached comments shown in the detail pane.
 fn poll_detail_comment_events(app: &mut App) {
-    let rx = match app.detail_comment_rx.take() {
-        Some(r) => r,
-        None => return,
+    let Some(rx) = app.detail_comment_rx.take() else {
+        return;
     };
 
     let finished = match rx.try_recv() {
@@ -2557,9 +2529,8 @@ fn poll_detail_comment_events(app: &mut App) {
 /// Non-blocking poll of the background sync channel (bd-25j).
 fn poll_sync_events(app: &mut App) {
     // Take the receiver out temporarily so we can mutate app freely.
-    let rx = match app.sync_rx.take() {
-        Some(r) => r,
-        None => return,
+    let Some(rx) = app.sync_rx.take() else {
+        return;
     };
 
     let mut got_event = false;
@@ -2648,9 +2619,8 @@ fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         return;
     }
 
-    let modal = match app.new_issue_modal.as_mut() {
-        Some(m) => m,
-        None => return,
+    let Some(modal) = app.new_issue_modal.as_mut() else {
+        return;
     };
 
     match &modal.focused_field.clone() {
@@ -2849,9 +2819,8 @@ fn handle_comment_input_key(app: &mut App, code: KeyCode, modifiers: KeyModifier
         return;
     }
 
-    let buf = match app.comment_input.as_mut() {
-        Some(b) => b,
-        None => return,
+    let Some(buf) = app.comment_input.as_mut() else {
+        return;
     };
     match code {
         KeyCode::Enter => buf.push('\n'),

@@ -65,7 +65,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
     let yoe = y - era * 400; // [0, 399]
     let doy = (153 * m + 2) / 5 + d - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    let days = era * 146097 + doe - 719468; // days since 1970-01-01
+    let days = era * 146_097 + doe - 719_468; // days since 1970-01-01
     Some(days)
 }
 

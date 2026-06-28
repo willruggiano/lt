@@ -384,8 +384,10 @@ mod tests {
     #[test]
     fn query_issues_applies_assignee_filter() {
         let conn = test_db();
-        let mut args = crate::issues::IssueArgs::default();
-        args.assignee = Some("alice".to_string());
+        let args = crate::issues::IssueArgs {
+            assignee: Some("alice".to_string()),
+            ..Default::default()
+        };
         let issues = query_issues(&conn, &args).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].assignee_name.as_deref(), Some("Alice"));
@@ -394,8 +396,10 @@ mod tests {
     #[test]
     fn query_issues_applies_no_assignee_filter() {
         let conn = test_db();
-        let mut args = crate::issues::IssueArgs::default();
-        args.no_assignee = true;
+        let args = crate::issues::IssueArgs {
+            no_assignee: true,
+            ..Default::default()
+        };
         let issues = query_issues(&conn, &args).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].id, "3");
@@ -404,8 +408,10 @@ mod tests {
     #[test]
     fn query_issues_applies_state_filter_and_limit() {
         let conn = test_db();
-        let mut args = crate::issues::IssueArgs::default();
-        args.state = Some("todo".to_string());
+        let mut args = crate::issues::IssueArgs {
+            state: Some("todo".to_string()),
+            ..Default::default()
+        };
         let issues = query_issues(&conn, &args).unwrap();
         assert_eq!(issues.len(), 2);
 
