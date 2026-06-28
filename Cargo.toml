@@ -6,6 +6,7 @@ description = "A local-first Linear TUI for terminal power users"
 license = "MIT"
 homepage = "https://github.com/willruggiano/lt"
 repository = "https://github.com/willruggiano/lt"
+readme = "README.md"
 keywords = ["linear", "tui", "terminal", "productivity"]
 categories = ["command-line-utilities"]
 

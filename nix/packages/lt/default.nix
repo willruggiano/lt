@@ -75,6 +75,7 @@
               "build/*.toml"
               "Cargo.lock"
               "Cargo.toml"
+              "README.md"
             ];
           };
           auditable = false; # devshell error: conflicting paths between toolchain and cargo-auditable
