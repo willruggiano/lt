@@ -21,6 +21,22 @@
           enable = true;
           package = config.packages.treefmt;
         };
+        # Rust
+        clippy = {
+          enable = true;
+          packageOverrides = {
+            cargo = config.packages.toolchain;
+            clippy = config.packages.toolchain;
+          };
+          settings.denyWarnings = true;
+        };
+        rustfmt = {
+          enable = true;
+          packageOverrides = {
+            cargo = config.packages.toolchain;
+            rustfmt = config.packages.toolchain;
+          };
+        };
         # GitHub Actions
         actionlint.enable = true;
         # Nix

@@ -49,6 +49,8 @@
           auditable = false; # devshell error: conflicting paths between toolchain and cargo-auditable
           cargoLock.lockFile = ../../../Cargo.lock;
           nativeBuildInputs = with pkgs; [
+            cargo-deny
+            cargo-machete
             cmake
             llvmPackages.clang
             llvmPackages.libclang.lib
