@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
@@ -18,7 +20,7 @@ pub struct SearchArgs {
     pub live: bool,
 }
 
-pub fn run(args: SearchArgs) -> Result<()> {
+pub fn run(out: &mut dyn Write, args: SearchArgs) -> Result<()> {
     if args.live {
         bail!("--live search via Linear API is not yet implemented");
     }
@@ -97,6 +99,6 @@ pub fn run(args: SearchArgs) -> Result<()> {
         all
     };
 
-    print_table_cached(&issues, &note);
+    print_table_cached(out, &issues, &note)?;
     Ok(())
 }

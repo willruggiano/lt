@@ -3,6 +3,8 @@ mod logout;
 pub mod refresh;
 mod status;
 
+use std::io::Write;
+
 use anyhow::Result;
 use clap::Subcommand;
 
@@ -16,11 +18,11 @@ pub enum AuthCommands {
     Logout,
 }
 
-pub fn run(cmd: AuthCommands) -> Result<()> {
+pub fn run(out: &mut dyn Write, cmd: AuthCommands) -> Result<()> {
     match cmd {
         AuthCommands::Login => login::run(),
-        AuthCommands::Status => status::run(),
-        AuthCommands::Logout => logout::run(),
+        AuthCommands::Status => status::run(out),
+        AuthCommands::Logout => logout::run(out),
     }
 }
 

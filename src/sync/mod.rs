@@ -3,6 +3,8 @@ pub mod delta;
 pub mod full;
 mod probe;
 
+use std::io::Write;
+
 use anyhow::Result;
 use clap::Subcommand;
 
@@ -20,18 +22,18 @@ pub enum SyncCommands {
     },
 }
 
-pub fn run(cmd: SyncCommands) -> Result<()> {
+pub fn run(out: &mut dyn Write, cmd: SyncCommands) -> Result<()> {
     match cmd {
         SyncCommands::Delta => {
             delta::run()?;
-            println!("Sync complete.");
+            writeln!(out, "Sync complete.")?;
             Ok(())
         }
         SyncCommands::Full => {
             full::run()?;
-            println!("Sync complete.");
+            writeln!(out, "Sync complete.")?;
             Ok(())
         }
-        SyncCommands::Probe { token } => probe::run(token),
+        SyncCommands::Probe { token } => probe::run(out, token),
     }
 }

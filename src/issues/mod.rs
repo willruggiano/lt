@@ -4,6 +4,8 @@ pub mod list;
 pub mod new;
 mod sort;
 
+use std::io::Write;
+
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
@@ -116,7 +118,11 @@ pub enum IssueSubcommand {
     },
 }
 
-pub fn run(args: IssueArgs, subcommand: Option<IssueSubcommand>) -> Result<()> {
+pub fn run(
+    out: &mut dyn Write,
+    args: IssueArgs,
+    subcommand: Option<IssueSubcommand>,
+) -> Result<()> {
     match subcommand {
         Some(IssueSubcommand::New {
             team,
@@ -125,14 +131,17 @@ pub fn run(args: IssueArgs, subcommand: Option<IssueSubcommand>) -> Result<()> {
             priority,
             state,
             assignee,
-        }) => new::run(new::NewIssueArgs {
-            team,
-            title,
-            description,
-            priority,
-            state,
-            assignee,
-        }),
-        None => list::run(args),
+        }) => new::run(
+            out,
+            new::NewIssueArgs {
+                team,
+                title,
+                description,
+                priority,
+                state,
+                assignee,
+            },
+        ),
+        None => list::run(out, args),
     }
 }

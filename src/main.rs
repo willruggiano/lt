@@ -5,6 +5,7 @@ mod inbox;
 mod issues;
 mod linear;
 mod logging;
+mod output;
 mod search;
 mod sync;
 mod text;
@@ -84,17 +85,19 @@ fn main() -> Result<()> {
         logging::init_cli()?
     };
 
+    let mut out = output::Output::stdout();
+
     match cli.command {
         None => tui::run(issues::IssueArgs::default())?,
-        Some(Commands::Auth { command }) => auth::run(command)?,
-        Some(Commands::Inbox { args }) => inbox::run(args)?,
-        Some(Commands::Issues { args, subcommand }) => issues::run(args, subcommand)?,
+        Some(Commands::Auth { command }) => auth::run(&mut out, command)?,
+        Some(Commands::Inbox { args }) => inbox::run(&mut out, args)?,
+        Some(Commands::Issues { args, subcommand }) => issues::run(&mut out, args, subcommand)?,
         Some(Commands::Tui { args }) => tui::run(args)?,
         Some(Commands::Sync { command }) => {
             let cmd = command.unwrap_or(sync::SyncCommands::Delta);
-            sync::run(cmd)?;
+            sync::run(&mut out, cmd)?;
         }
-        Some(Commands::Search { args }) => search::run(args)?,
+        Some(Commands::Search { args }) => search::run(&mut out, args)?,
     }
     Ok(())
 }

@@ -119,7 +119,7 @@ fn resolve_credentials() -> Result<(String, String)> {
 }
 
 fn prompt(label: &str) -> Result<String> {
-    eprint!("{label}");
+    write!(std::io::stderr(), "{label}")?;
     std::io::stderr().flush()?;
     let mut buf = String::new();
     std::io::stdin().read_line(&mut buf)?;

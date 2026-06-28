@@ -1,3 +1,7 @@
+use std::io::Write;
+
+use anyhow::Result;
+
 use crate::linear::notifications::Notification;
 use crate::text;
 
@@ -68,7 +72,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
     Some(days)
 }
 
-pub fn print_table(notifications: &[Notification]) {
+pub fn print_table(out: &mut dyn Write, notifications: &[Notification]) -> Result<()> {
     // Column widths
     let type_w = notifications
         .iter()
@@ -99,7 +103,8 @@ pub fn print_table(notifications: &[Notification]) {
         .max(5);
 
     // Header
-    println!(
+    writeln!(
+        out,
         "{:<type_w$}  {:<issue_w$}  {:<title_w$}  {:<actor_w$}  AGE",
         "TYPE",
         "ISSUE",
@@ -109,10 +114,10 @@ pub fn print_table(notifications: &[Notification]) {
         issue_w = issue_w,
         title_w = title_w,
         actor_w = actor_w,
-    );
+    )?;
 
     let sep_len = type_w + 2 + issue_w + 2 + title_w + 2 + actor_w + 2 + 6;
-    println!("{}", "-".repeat(sep_len));
+    writeln!(out, "{}", "-".repeat(sep_len))?;
 
     for n in notifications {
         let type_str = &n.type_;
@@ -123,10 +128,13 @@ pub fn print_table(notifications: &[Notification]) {
         let actor = n.actor.as_ref().map_or("-", |a| a.name.as_str());
         let age = relative_age(&n.created_at);
 
-        println!(
+        writeln!(
+            out,
             "{type_str:<type_w$}  {issue_id:<issue_w$}  {title:<title_w$}  {actor:<actor_w$}  {age}",
-        );
+        )?;
     }
+
+    Ok(())
 }
 
 #[cfg(test)]

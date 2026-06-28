@@ -1,10 +1,12 @@
+use std::io::Write;
+
 use anyhow::{Context, Result, anyhow};
 
 use crate::config;
 
 const BOOTSTRAP_URL: &str = "https://client-api.linear.app/sync/bootstrap";
 
-pub fn run(override_token: Option<String>) -> Result<()> {
+pub fn run(out: &mut dyn Write, override_token: Option<String>) -> Result<()> {
     let (raw_token, label) = if let Some(t) = override_token {
         (t, "cli --token flag")
     } else {
@@ -13,10 +15,10 @@ pub fn run(override_token: Option<String>) -> Result<()> {
         (stored.access_token, "stored OAuth token")
     };
 
-    println!("endpoint:   {BOOTSTRAP_URL}");
-    println!("params:     type=full&onlyModels=Issue");
-    println!("auth:       Bearer <token> (source: {label})");
-    println!();
+    writeln!(out, "endpoint:   {BOOTSTRAP_URL}")?;
+    writeln!(out, "params:     type=full&onlyModels=Issue")?;
+    writeln!(out, "auth:       Bearer <token> (source: {label})")?;
+    writeln!(out)?;
 
     // Linear personal API keys must be sent raw (no "Bearer" prefix).
     // OAuth tokens require "Bearer <token>".
@@ -46,9 +48,9 @@ pub fn run(override_token: Option<String>) -> Result<()> {
                 .to_string();
 
             if status.is_success() {
-                println!("status:       {status}");
-                println!("content-type: {content_type}");
-                println!();
+                writeln!(out, "status:       {status}")?;
+                writeln!(out, "content-type: {content_type}")?;
+                writeln!(out)?;
 
                 let body = res
                     .body_mut()
@@ -56,26 +58,26 @@ pub fn run(override_token: Option<String>) -> Result<()> {
                     .context("reading response body")?;
                 let lines: Vec<&str> = body.lines().take(5).collect();
                 if lines.is_empty() {
-                    println!("(empty body)");
+                    writeln!(out, "(empty body)")?;
                 } else {
-                    println!("--- first {} line(s) of body ---", lines.len());
+                    writeln!(out, "--- first {} line(s) of body ---", lines.len())?;
                     for line in &lines {
                         // Truncate very long lines so the terminal stays readable
                         if line.len() > 200 {
-                            println!("{}...", &line[..200]);
+                            writeln!(out, "{}...", &line[..200])?;
                         } else {
-                            println!("{line}");
+                            writeln!(out, "{line}")?;
                         }
                     }
                 }
             } else {
-                println!("status:       {} (error)", status.as_u16());
-                println!("content-type: {content_type}");
-                println!();
+                writeln!(out, "status:       {} (error)", status.as_u16())?;
+                writeln!(out, "content-type: {content_type}")?;
+                writeln!(out)?;
 
                 let body = res.body_mut().read_to_string().unwrap_or_default();
-                println!("--- error body (up to 500 chars) ---");
-                println!("{}", &body[..body.len().min(500)]);
+                writeln!(out, "--- error body (up to 500 chars) ---")?;
+                writeln!(out, "{}", &body[..body.len().min(500)])?;
             }
         }
         Err(e) => {

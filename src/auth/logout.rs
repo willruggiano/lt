@@ -1,13 +1,15 @@
+use std::io::Write;
+
 use anyhow::Result;
 
 use crate::config;
 
-pub fn run() -> Result<()> {
-    if let None = config::load_token()? {
-        println!("Not logged in.")
+pub fn run(out: &mut dyn Write) -> Result<()> {
+    if config::load_token()?.is_none() {
+        writeln!(out, "Not logged in.")?;
     } else {
         config::remove_token()?;
-        println!("Logged out.");
+        writeln!(out, "Logged out.")?;
     }
     Ok(())
 }

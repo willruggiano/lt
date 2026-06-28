@@ -1,3 +1,7 @@
+use std::io::Write;
+
+use anyhow::Result;
+
 use super::list::Issue;
 use crate::{db, text};
 
@@ -7,11 +11,61 @@ fn date(s: &str) -> &str {
     if s.len() >= 10 { &s[..10] } else { s }
 }
 
+/// Print one padded row, each cell left-aligned to its column width.
+fn print_row(out: &mut dyn Write, cells: &[&str], widths: &[usize]) -> Result<()> {
+    let parts: Vec<String> = cells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
+        .collect();
+    writeln!(out, "{}", parts.join("  "))?;
+    Ok(())
+}
+
+/// Print the header, separator, and data rows for an 8-column table.
+fn print_table_rows(out: &mut dyn Write, headers: &[&str; 8], rows: &[[String; 8]]) -> Result<()> {
+    let mut widths = [0usize; 8];
+    for (i, h) in headers.iter().enumerate() {
+        widths[i] = h.len();
+    }
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if cell.len() > widths[i] {
+                widths[i] = cell.len();
+            }
+        }
+    }
+
+    print_row(out, headers, &widths)?;
+
+    let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    let sep_refs: Vec<&str> = sep.iter().map(std::string::String::as_str).collect();
+    print_row(out, &sep_refs, &widths)?;
+
+    for row in rows {
+        let refs: Vec<&str> = row.iter().map(String::as_str).collect();
+        print_row(out, &refs, &widths)?;
+    }
+
+    Ok(())
+}
+
+const HEADERS: [&str; 8] = [
+    "IDENTIFIER",
+    "TITLE",
+    "STATE",
+    "PRIORITY",
+    "ASSIGNEE",
+    "TEAM",
+    "CREATED",
+    "UPDATED",
+];
+
 /// Print a table of issues fetched from the local SQLite cache.
-pub fn print_table_cached(issues: &[db::Issue], note: &str) {
+pub fn print_table_cached(out: &mut dyn Write, issues: &[db::Issue], note: &str) -> Result<()> {
     if issues.is_empty() {
-        println!("No issues found.");
-        return;
+        writeln!(out, "No issues found.")?;
+        return Ok(());
     }
 
     let rows: Vec<[String; 8]> = issues
@@ -30,61 +84,19 @@ pub fn print_table_cached(issues: &[db::Issue], note: &str) {
         })
         .collect();
 
-    let headers = [
-        "IDENTIFIER",
-        "TITLE",
-        "STATE",
-        "PRIORITY",
-        "ASSIGNEE",
-        "TEAM",
-        "CREATED",
-        "UPDATED",
-    ];
-
-    let mut widths = [0usize; 8];
-    for (i, h) in headers.iter().enumerate() {
-        widths[i] = h.len();
-    }
-    for row in &rows {
-        for (i, cell) in row.iter().enumerate() {
-            if cell.len() > widths[i] {
-                widths[i] = cell.len();
-            }
-        }
-    }
-
-    let print_row = |cells: &[&str; 8]| {
-        let parts: Vec<String> = cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
-            .collect();
-        println!("{}", parts.join("  "));
-    };
-
-    print_row(&headers);
-
-    let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-    let sep_refs: Vec<&str> = sep.iter().map(std::string::String::as_str).collect();
-    let sep_arr: [&str; 8] = sep_refs.try_into().unwrap();
-    print_row(&sep_arr);
-
-    for row in &rows {
-        let refs: [&str; 8] = [
-            &row[0], &row[1], &row[2], &row[3], &row[4], &row[5], &row[6], &row[7],
-        ];
-        print_row(&refs);
-    }
+    print_table_rows(out, &HEADERS, &rows)?;
 
     if !note.is_empty() {
-        println!("\n{note}");
+        writeln!(out, "\n{note}")?;
     }
+
+    Ok(())
 }
 
-pub fn print_table(issues: &[Issue]) {
+pub fn print_table(out: &mut dyn Write, issues: &[Issue]) -> Result<()> {
     if issues.is_empty() {
-        println!("No issues found.");
-        return;
+        writeln!(out, "No issues found.")?;
+        return Ok(());
     }
 
     // Build display rows: (identifier, title, state, priority, assignee, team, created, updated)
@@ -106,51 +118,5 @@ pub fn print_table(issues: &[Issue]) {
         })
         .collect();
 
-    let headers = [
-        "IDENTIFIER",
-        "TITLE",
-        "STATE",
-        "PRIORITY",
-        "ASSIGNEE",
-        "TEAM",
-        "CREATED",
-        "UPDATED",
-    ];
-
-    // Compute column widths: max of header and all row values.
-    let mut widths = [0usize; 8];
-    for (i, h) in headers.iter().enumerate() {
-        widths[i] = h.len();
-    }
-    for row in &rows {
-        for (i, cell) in row.iter().enumerate() {
-            if cell.len() > widths[i] {
-                widths[i] = cell.len();
-            }
-        }
-    }
-
-    let print_row = |cells: &[&str; 8]| {
-        let parts: Vec<String> = cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
-            .collect();
-        println!("{}", parts.join("  "));
-    };
-
-    print_row(&headers);
-
-    // Separator
-    let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-    let sep_refs: Vec<&str> = sep.iter().map(std::string::String::as_str).collect();
-    let sep_arr: [&str; 8] = sep_refs.try_into().unwrap();
-    print_row(&sep_arr);
-
-    for row in &rows {
-        let refs: [&str; 8] = [
-            &row[0], &row[1], &row[2], &row[3], &row[4], &row[5], &row[6], &row[7],
-        ];
-        print_row(&refs);
-    }
+    print_table_rows(out, &HEADERS, &rows)
 }
