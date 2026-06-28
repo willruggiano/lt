@@ -1,5 +1,3 @@
-// build.rs
-//
 // Build scripts report failure by panicking: a panic aborts the build with the
 // message, which is exactly the desired behaviour for an invalid schema or
 // allowlist. The panic-safety lints denied for runtime code therefore do not

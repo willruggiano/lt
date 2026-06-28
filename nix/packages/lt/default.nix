@@ -5,6 +5,7 @@
 }: {
   perSystem = {
     config,
+    inputs',
     pkgs,
     system,
     ...
@@ -22,6 +23,26 @@
       with cs; [
         (add-pkg-deps [config.packages.toolchain])
       ];
+
+    # Rust-specific commit hooks live with the Rust package; the generic hooks
+    # are in nix/checks/pre-commit.
+    pre-commit.settings.hooks = {
+      clippy = {
+        enable = true;
+        packageOverrides = {
+          cargo = config.packages.toolchain;
+          clippy = config.packages.toolchain;
+        };
+        settings.denyWarnings = true;
+      };
+      rustfmt = {
+        enable = true;
+        packageOverrides = {
+          cargo = config.packages.toolchain;
+          rustfmt = config.packages.toolchain;
+        };
+      };
+    };
 
     packages = {
       default = config.packages.lt;
@@ -52,6 +73,8 @@
             cargo-deny
             cargo-machete
             cmake
+            gnumake
+            inputs'.cpd.packages.default
             llvmPackages.clang
             llvmPackages.libclang.lib
             openssl

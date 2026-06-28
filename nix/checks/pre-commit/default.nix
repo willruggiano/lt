@@ -2,7 +2,11 @@
   imports = [
     inputs.git-hooks.flakeModule
   ];
-  perSystem = {config, ...}: let
+  perSystem = {
+    config,
+    inputs',
+    ...
+  }: let
     cfg = config.pre-commit;
   in {
     devshells.default.devshell.startup.install-git-hooks.text = config.pre-commit.shellHook;
@@ -21,21 +25,13 @@
           enable = true;
           package = config.packages.treefmt;
         };
-        # Rust
-        clippy = {
+        # Copy/paste detection (no git-hooks.nix builtin; use the cpd flake input)
+        jscpd = {
           enable = true;
-          packageOverrides = {
-            cargo = config.packages.toolchain;
-            clippy = config.packages.toolchain;
-          };
-          settings.denyWarnings = true;
-        };
-        rustfmt = {
-          enable = true;
-          packageOverrides = {
-            cargo = config.packages.toolchain;
-            rustfmt = config.packages.toolchain;
-          };
+          name = "jscpd";
+          entry = "${inputs'.cpd.packages.default}/bin/jscpd .";
+          files = "\\.rs$";
+          pass_filenames = false;
         };
         # GitHub Actions
         actionlint.enable = true;
