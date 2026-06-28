@@ -1182,33 +1182,32 @@ impl App {
         if let Ok(conn) = crate::db::open_db() {
             // Look up children.
             if let Ok(children) = crate::db::query_children(&conn, &issue.id)
-                && let Some(ref mut detail) = self.detail {
-                    detail.children = children
-                        .into_iter()
-                        .map(|c| crate::linear::types::IssueRef {
-                            identifier: c.identifier,
-                            title: c.title,
-                            state_name: c.state_name,
-                        })
-                        .collect();
-                }
+                && let Some(ref mut detail) = self.detail
+            {
+                detail.children = children
+                    .into_iter()
+                    .map(|c| crate::linear::types::IssueRef {
+                        identifier: c.identifier,
+                        title: c.title,
+                        state_name: c.state_name,
+                    })
+                    .collect();
+            }
             // Look up parent.
             if let Some(ref parent) = issue.parent {
                 let parent_sql = "SELECT identifier, title, state_name FROM issues WHERE id = ?1";
                 if let Ok(mut stmt) = conn.prepare(parent_sql)
-                    && let Ok(row) = stmt.query_row(
-                        rusqlite::params![parent.id],
-                        |row| {
-                            Ok(crate::linear::types::IssueRef {
-                                identifier: row.get(0)?,
-                                title: row.get(1)?,
-                                state_name: row.get(2)?,
-                            })
-                        },
-                    )
-                        && let Some(ref mut detail) = self.detail {
-                            detail.parent = Some(row);
-                        }
+                    && let Ok(row) = stmt.query_row(rusqlite::params![parent.id], |row| {
+                        Ok(crate::linear::types::IssueRef {
+                            identifier: row.get(0)?,
+                            title: row.get(1)?,
+                            state_name: row.get(2)?,
+                        })
+                    })
+                    && let Some(ref mut detail) = self.detail
+                {
+                    detail.parent = Some(row);
+                }
             }
         }
 
@@ -1220,7 +1219,9 @@ impl App {
         self.detail_comment_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+            let token = if let Ok(Some(t)) = crate::config::load_token() {
+                t
+            } else {
                 let _ = tx.send(CommentSyncEvent::Error("not logged in".to_string()));
                 return;
             };
@@ -1324,7 +1325,9 @@ impl App {
             Some(i) => i.id.clone(),
             None => return,
         };
-        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+        let token = if let Ok(Some(t)) = crate::config::load_token() {
+            t
+        } else {
             self.footer_msg = Some("Not logged in".to_string());
             return;
         };
@@ -1373,7 +1376,9 @@ impl App {
             Some(i) => i.clone(),
             None => return,
         };
-        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+        let token = if let Ok(Some(t)) = crate::config::load_token() {
+            t
+        } else {
             self.footer_msg = Some("Not logged in".to_string());
             return;
         };
@@ -1439,7 +1444,9 @@ impl App {
             Some(i) => i.clone(),
             None => return,
         };
-        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+        let token = if let Ok(Some(t)) = crate::config::load_token() {
+            t
+        } else {
             self.footer_msg = Some("Not logged in".to_string());
             return;
         };
@@ -1566,7 +1573,9 @@ impl App {
     // -- New-issue modal (bd-l6r) --------------------------------------------
 
     fn open_new_issue_modal(&mut self) {
-        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+        let token = if let Ok(Some(t)) = crate::config::load_token() {
+            t
+        } else {
             self.footer_msg = Some("Not logged in".to_string());
             return;
         };
@@ -1665,7 +1674,9 @@ impl App {
         modal.modal_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+            let token = if let Ok(Some(t)) = crate::config::load_token() {
+                t
+            } else {
                 let _ = tx.send(ModalEvent::LoadError("Not logged in".to_string()));
                 return;
             };
@@ -1731,7 +1742,9 @@ impl App {
     }
 
     fn new_issue_submit(&mut self) {
-        let token = if let Ok(Some(t)) = crate::config::load_token() { t } else {
+        let token = if let Ok(Some(t)) = crate::config::load_token() {
+            t
+        } else {
             if let Some(m) = self.new_issue_modal.as_mut() {
                 m.error = "Not logged in".to_string();
             }
@@ -1754,7 +1767,10 @@ impl App {
         let team_id = if let Some(id) = modal
             .teams
             .get(modal.team_selected)
-            .and_then(|t| t.id.clone()) { id } else {
+            .and_then(|t| t.id.clone())
+        {
+            id
+        } else {
             if let Some(m) = self.new_issue_modal.as_mut() {
                 m.error = "Select a team".to_string();
             }
@@ -1792,10 +1808,12 @@ impl App {
             .unwrap_or_default();
         let state_name = modal
             .states
-            .get(modal.state_selected).map_or_else(|| "Backlog".to_string(), |s| s.label.clone());
+            .get(modal.state_selected)
+            .map_or_else(|| "Backlog".to_string(), |s| s.label.clone());
         let priority_label = modal
             .priorities
-            .get(modal.priority_selected).map_or_else(|| "No priority".to_string(), |p| p.label.clone());
+            .get(modal.priority_selected)
+            .map_or_else(|| "No priority".to_string(), |p| p.label.clone());
         let assignee_name = modal.assignees.get(modal.assignee_selected).and_then(|a| {
             if a.id.is_some() {
                 Some(a.label.clone())
@@ -2135,7 +2153,11 @@ fn build_sync_status_label(syncing: bool) -> String {
 /// the header current when authentication happened outside the TUI's own
 /// login flow -- e.g. the sync's automatic re-auth, or `lt auth login` run in
 /// another terminal.
-fn spawn_sync_thread(args: IssueArgs, full: bool, fetch_identity: bool) -> mpsc::Receiver<SyncEvent> {
+fn spawn_sync_thread(
+    args: IssueArgs,
+    full: bool,
+    fetch_identity: bool,
+) -> mpsc::Receiver<SyncEvent> {
     let (tx, rx) = mpsc::channel::<SyncEvent>();
     std::thread::spawn(move || {
         // Skip sync when no auth token is stored; notify the TUI.
@@ -2227,7 +2249,10 @@ fn poll_login_events(app: &mut App) {
         None => return,
     };
     match rx.try_recv() {
-        Ok(LoginEvent::Success { viewer_name, org_name }) => {
+        Ok(LoginEvent::Success {
+            viewer_name,
+            org_name,
+        }) => {
             app.login_rx = None;
             if let Some(name) = viewer_name {
                 app.viewer_name = Some(name);
@@ -2399,8 +2424,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     // Without the kitty keyboard protocol, terminals encode Ctrl-Enter and
     // Enter as the same byte, so the Ctrl-Enter submit binding never fires.
     // Enable it where supported; elsewhere the UI falls back to Alt-Enter.
-    let keyboard_enhanced =
-        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     if keyboard_enhanced {
         let _ = crossterm::execute!(
             std::io::stdout(),
@@ -2425,18 +2449,20 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         poll_sync_events(&mut app);
 
         // Periodic delta sync: fire every 30s when authenticated.
-        if !app.syncing && !app.not_authenticated
+        if !app.syncing
+            && !app.not_authenticated
             && let Some(t) = app.next_sync_at
-                && Instant::now() >= t {
-                    app.syncing = true;
-                    app.sync_status_label = build_sync_status_label(true);
-                    app.sync_rx = Some(spawn_sync_thread(
-                        app.args.clone(),
-                        false,
-                        app.viewer_name.is_none(),
-                    ));
-                    app.next_sync_at = None;
-                }
+            && Instant::now() >= t
+        {
+            app.syncing = true;
+            app.sync_status_label = build_sync_status_label(true);
+            app.sync_rx = Some(spawn_sync_thread(
+                app.args.clone(),
+                false,
+                app.viewer_name.is_none(),
+            ));
+            app.next_sync_at = None;
+        }
 
         // Poll modal background loader channel (bd-vfi).
         app.poll_modal_events();
@@ -2909,12 +2935,10 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             app.mode = Mode::Help;
         }
         // Re-authenticate (bd-vhp): background OAuth login.
-        KeyCode::Char('L')
-            if app.login_rx.is_none() => {
-                app.login_rx = Some(spawn_login_thread());
-                app.sync_status_label =
-                    "logging in -- complete authorization in browser".to_string();
-            }
+        KeyCode::Char('L') if app.login_rx.is_none() => {
+            app.login_rx = Some(spawn_login_thread());
+            app.sync_status_label = "logging in -- complete authorization in browser".to_string();
+        }
         _ => {}
     }
 }

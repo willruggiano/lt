@@ -40,7 +40,6 @@ pub fn run(args: SearchArgs) -> Result<()> {
         .unwrap_or(0);
 
     let note;
-    
 
     let issues: Vec<db::Issue> = if fts_count == 0 {
         // FTS index is empty -- fall back to LIKE search on title.

@@ -116,10 +116,7 @@ pub fn print_table(notifications: &[Notification]) {
 
     for n in notifications {
         let type_str = &n.type_;
-        let issue_id = n
-            .issue
-            .as_ref()
-            .map_or("-", |i| i.identifier.as_str());
+        let issue_id = n.issue.as_ref().map_or("-", |i| i.identifier.as_str());
         let raw_title = n.issue.as_ref().map_or("-", |i| i.title.as_str());
         // Truncate title if needed
         let title = text::truncate(raw_title, title_w);

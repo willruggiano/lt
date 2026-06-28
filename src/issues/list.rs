@@ -4,14 +4,13 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info};
 
-use crate::db;
-use crate::linear::client::graphql_query;
-use crate::linear::types::PageInfo;
-
 use super::IssueArgs;
 use super::display::{print_table, print_table_cached};
 use super::filter::build_filter;
 use super::sort::build_sort;
+use crate::db;
+use crate::linear::client::graphql_query;
+use crate::linear::types::PageInfo;
 
 /// Cache TTL in seconds (5 minutes).
 const CACHE_TTL_SECS: i64 = 300;
@@ -161,7 +160,9 @@ fn resolve_me(conn: &rusqlite::Connection, args: &mut IssueArgs) -> Result<()> {
     if !is_me {
         return Ok(());
     }
-    let name = if let Some(n) = db::get_meta(conn, "viewer_name")? { n } else {
+    let name = if let Some(n) = db::get_meta(conn, "viewer_name")? {
+        n
+    } else {
         let token = crate::auth::refresh::load_or_refresh_token()?;
         let viewer = crate::linear::viewer::fetch_viewer(&token.access_token)?;
         db::set_meta(conn, "viewer_name", &viewer.name)?;
@@ -201,8 +202,9 @@ pub fn run(mut args: IssueArgs) -> Result<()> {
         }
         Some(ref ts) => {
             // Parse the timestamp and check age.
-            let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(ts)
-                .map_or(i64::MAX, |t| Utc::now().signed_duration_since(t).num_seconds());
+            let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(ts).map_or(i64::MAX, |t| {
+                Utc::now().signed_duration_since(t).num_seconds()
+            });
 
             if age_secs < CACHE_TTL_SECS {
                 // Fresh cache -- serve immediately.

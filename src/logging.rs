@@ -22,12 +22,15 @@
 //! filter therefore sets DEBUG for the `lt` crate and WARN for everything else.
 //! Pass `RUST_LOG` to override.
 
-use anyhow::Result;
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime};
+
+use anyhow::Result;
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 // -- CR-stripping writer -----------------------------------------------------
 

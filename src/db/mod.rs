@@ -2,16 +2,16 @@ pub mod comments;
 pub mod filters;
 pub mod issues;
 
+use std::fs;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 pub use comments::{Comment, delete_comments_for_issue, query_comments, upsert_comments};
 pub use issues::{
     Issue, get_meta, query_children, query_issues, query_issues_page, search_issues, set_meta,
     upsert_issues,
 };
-
-use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::fs;
-use std::path::PathBuf;
 
 fn db_path() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir().context("could not determine local data directory")?;

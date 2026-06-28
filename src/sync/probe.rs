@@ -5,7 +5,9 @@ use crate::config;
 const BOOTSTRAP_URL: &str = "https://client-api.linear.app/sync/bootstrap";
 
 pub fn run(override_token: Option<String>) -> Result<()> {
-    let (raw_token, label) = if let Some(t) = override_token { (t, "cli --token flag") } else {
+    let (raw_token, label) = if let Some(t) = override_token {
+        (t, "cli --token flag")
+    } else {
         let stored = config::load_token()?
             .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
         (stored.access_token, "stored OAuth token")

@@ -14,7 +14,9 @@
 // cargo:rerun-if-changed directives ensure the build script re-runs whenever
 // the schema or the allowlist changes.
 
-use std::{collections::HashMap, env, fs, path::Path};
+use std::collections::HashMap;
+use std::path::Path;
+use std::{env, fs};
 
 use graphql_parser::schema::{Definition, Document, TypeDefinition};
 use proc_macro2::TokenStream;
@@ -73,14 +75,15 @@ fn extract_issue_filter_fields(schema_src: &str) -> HashMap<String, String> {
 
     for def in &doc.definitions {
         if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
-            && input.name == "IssueFilter" {
-                let mut map = HashMap::new();
-                for field in &input.fields {
-                    let base = base_type_name(&field.value_type).to_string();
-                    map.insert(field.name.clone(), base);
-                }
-                return map;
+            && input.name == "IssueFilter"
+        {
+            let mut map = HashMap::new();
+            for field in &input.fields {
+                let base = base_type_name(&field.value_type).to_string();
+                map.insert(field.name.clone(), base);
             }
+            return map;
+        }
     }
 
     panic!("IssueFilter input type not found in the GraphQL schema");
@@ -93,14 +96,15 @@ fn extract_issue_sort_input_fields(schema_src: &str) -> HashMap<String, String> 
 
     for def in &doc.definitions {
         if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
-            && input.name == "IssueSortInput" {
-                let mut map = HashMap::new();
-                for field in &input.fields {
-                    let base = base_type_name(&field.value_type).to_string();
-                    map.insert(field.name.clone(), base);
-                }
-                return map;
+            && input.name == "IssueSortInput"
+        {
+            let mut map = HashMap::new();
+            for field in &input.fields {
+                let base = base_type_name(&field.value_type).to_string();
+                map.insert(field.name.clone(), base);
             }
+            return map;
+        }
     }
 
     panic!("IssueSortInput input type not found in the GraphQL schema");
@@ -700,7 +704,8 @@ fn main() {
         }
     }
 
-    assert!(validation_errors.is_empty(), 
+    assert!(
+        validation_errors.is_empty(),
         "build.rs: allowlist validation failed against IssueFilter schema:\n{}\n\
          Fix build/search_filter_fields.toml or update the GraphQL schema snapshot.",
         validation_errors.join("\n")
@@ -720,14 +725,18 @@ fn main() {
         }
     }
 
-    assert!(sort_validation_errors.is_empty(), 
+    assert!(
+        sort_validation_errors.is_empty(),
         "build.rs: sort_field validation failed against IssueSortInput schema:\n{}\n\
          Fix [[sort_field]] entries in build/search_filter_fields.toml.",
         sort_validation_errors.join("\n")
     );
 
     // Require at least one sort_field entry so the generated enum is non-empty.
-    assert!(!config.sort_field.is_empty(), "build.rs: [[sort_field]] list in search_filter_fields.toml is empty");
+    assert!(
+        !config.sort_field.is_empty(),
+        "build.rs: [[sort_field]] list in search_filter_fields.toml is empty"
+    );
 
     let sort_fields = &config.sort_field;
 

@@ -349,7 +349,8 @@ fn row_cells(issue: &Issue) -> [String; 7] {
         issue.priority_label.clone(),
         issue
             .assignee
-            .as_ref().map_or_else(|| "-".to_string(), |u| u.name.clone()),
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |u| u.name.clone()),
         issue.team.name.clone(),
         date(&issue.updated_at).to_string(),
     ]
@@ -455,7 +456,8 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
     // Meta line: state, priority, assignee, team
     let assignee = d
         .assignee
-        .as_ref().map_or_else(|| "unassigned".to_string(), |u| u.name.clone());
+        .as_ref()
+        .map_or_else(|| "unassigned".to_string(), |u| u.name.clone());
     lines.push(Line::from(format!(
         "[{}]  {}  {}  {}",
         d.state.name, d.priority_label, assignee, d.team.name
@@ -780,7 +782,9 @@ fn render_new_issue_modal(
 
 fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
     // Size: 60% wide, up to 80% tall, centred.
-    let width = ((f32::from(area.width) * 0.60) as u16).max(50).min(area.width);
+    let width = ((f32::from(area.width) * 0.60) as u16)
+        .max(50)
+        .min(area.width);
     let max_rows = (ALL_KEYBINDINGS.len() + 4) as u16; // header + search + border
     let height = max_rows.min((f32::from(area.height) * 0.80) as u16).max(6);
     let x = area.x + area.width.saturating_sub(width) / 2;
@@ -1042,7 +1046,8 @@ fn search_row_cells(issue: &Issue) -> [String; 7] {
         issue.priority_label.clone(),
         issue
             .assignee
-            .as_ref().map_or_else(|| "-".to_string(), |u| u.name.clone()),
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |u| u.name.clone()),
         issue.team.name.clone(),
         date(&issue.updated_at).to_string(),
     ]

@@ -1,12 +1,13 @@
-use anyhow::{Context, Result, anyhow};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use sha2::{Digest, Sha256};
 use std::io::{Read, Write as _};
 use std::net::TcpListener;
 
-use crate::config::{self, AuthToken};
-
+use anyhow::{Context, Result, anyhow};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use sha2::{Digest, Sha256};
 use tracing::info;
+
+use crate::config::{self, AuthToken};
 
 const CALLBACK_PORT: u16 = 7342;
 const AUTH_URL: &str = "https://linear.app/oauth/authorize";
@@ -225,9 +226,7 @@ fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
             );
             return Ok(code.clone());
         } else {
-            let error = params
-                .get("error")
-                .map_or("unknown error", String::as_str);
+            let error = params.get("error").map_or("unknown error", String::as_str);
             let _ = http_reply(&mut stream, 400, "Authorization failed");
             return Err(anyhow!("authorization denied: {error}"));
         }

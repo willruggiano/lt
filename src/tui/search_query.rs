@@ -856,7 +856,8 @@ impl Completer {
             // return the same position and the jump would be a no-op.
             let prev = ast
                 .tokens
-                .iter().rfind(|t| cursor_position_for_token(t) < cursor);
+                .iter()
+                .rfind(|t| cursor_position_for_token(t) < cursor);
             if let Some(t) = prev {
                 input.cursor = cursor_position_for_token(t);
                 input.selection_end = selection_end_for_token(t);

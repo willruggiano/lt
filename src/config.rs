@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Profiles -- separate auth + database per account/workspace
@@ -18,11 +19,9 @@ pub fn set_profile(name: Option<String>) -> Result<()> {
             || !n
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        {
-            anyhow::bail!(
-                "invalid profile name {n:?}: use only letters, digits, '-' and '_'"
-            );
-        }
+    {
+        anyhow::bail!("invalid profile name {n:?}: use only letters, digits, '-' and '_'");
+    }
     let _ = PROFILE.set(name.unwrap_or_else(|| "default".to_string()));
     Ok(())
 }

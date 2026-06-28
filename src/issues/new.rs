@@ -1,7 +1,8 @@
+use std::io::{self, BufRead, Write};
+
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use serde_json::json;
-use std::io::{self, BufRead, Write};
 
 use crate::config;
 use crate::linear::client::graphql_query;
@@ -419,7 +420,8 @@ pub fn run(args: NewIssueArgs) -> Result<()> {
         } else {
             members
                 .iter()
-                .find(|m| &m.id == aid).map_or_else(|| aid.clone(), |m| m.name.clone())
+                .find(|m| &m.id == aid)
+                .map_or_else(|| aid.clone(), |m| m.name.clone())
         };
         println!("  Assignee:    {aname}");
     } else {

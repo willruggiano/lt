@@ -1,7 +1,5 @@
-use crate::db;
-use crate::text;
-
 use super::list::Issue;
+use crate::{db, text};
 
 const MAX_TITLE: usize = 40;
 
@@ -99,7 +97,8 @@ pub fn print_table(issues: &[Issue]) {
                 i.state.name.clone(),
                 i.priority_label.clone(),
                 i.assignee
-                    .as_ref().map_or_else(|| "-".to_string(), |u| u.name.clone()),
+                    .as_ref()
+                    .map_or_else(|| "-".to_string(), |u| u.name.clone()),
                 i.team.name.clone(),
                 date(&i.created_at).to_string(),
                 date(&i.updated_at).to_string(),
