@@ -15,6 +15,17 @@ use crate::issues::list::Issue;
 use crate::linear::types::IssueDetail;
 use crate::text;
 
+/// Saturating conversion of a length/index to a terminal coordinate.
+fn to_u16(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// `percent`% of a terminal dimension, computed in integer arithmetic. The
+/// result never exceeds `dim`, so it always fits back in `u16`.
+fn pct(dim: u16, percent: u32) -> u16 {
+    u16::try_from(u32::from(dim) * percent / 100).unwrap_or(dim)
+}
+
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -243,7 +254,7 @@ fn render_footer(
     let sync_str = format!("  {sync_label}  {page_str}");
     let chunks = Layout::horizontal([
         Constraint::Min(0),
-        Constraint::Length(sync_str.len() as u16),
+        Constraint::Length(to_u16(sync_str.len())),
     ])
     .split(area);
 
@@ -312,7 +323,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let constraints: Vec<Constraint> = widths
         .iter()
-        .map(|w| Constraint::Length(*w as u16))
+        .map(|w| Constraint::Length(to_u16(*w)))
         .collect();
 
     let table = Table::new(rows, constraints)
@@ -332,10 +343,14 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
             super::PopupKind::Assignee => 4,
         };
         // Compute x offset of the target column (each column is widths[i] + 2 spacing).
-        let col_x: u16 = widths[..col_idx].iter().map(|w| *w as u16 + 2).sum::<u16>() + area.x;
-        let col_w = widths[col_idx] as u16;
+        let col_x: u16 = widths[..col_idx]
+            .iter()
+            .map(|w| to_u16(*w) + 2)
+            .sum::<u16>()
+            + area.x;
+        let col_w = to_u16(widths[col_idx]);
         // Row y: area.y + 1 (header) + selected index + 1 (below row).
-        let sel = app.table_state.selected().unwrap_or(0) as u16;
+        let sel = to_u16(app.table_state.selected().unwrap_or(0));
         let row_y = area.y + 1 + sel + 1;
         app.popup_anchor = Some(ratatui::layout::Rect::new(col_x, row_y, col_w, 1));
     }
@@ -572,10 +587,12 @@ fn render_popup(
 
     // Size the popup to fit its contents.
     let max_label = items.iter().map(|i| i.label.len()).max().unwrap_or(10);
-    let width = (max_label + 4)
-        .max(title.len() + 2)
-        .min(area.width as usize) as u16;
-    let height = (items.len() + 2).min(area.height as usize) as u16;
+    let width = to_u16(
+        (max_label + 4)
+            .max(title.len() + 2)
+            .min(area.width as usize),
+    );
+    let height = to_u16((items.len() + 2).min(area.height as usize));
 
     // Position: if we have an anchor, open directly below the cell; otherwise centre.
     let (x, y) = if let Some(anch) = anchor {
@@ -637,7 +654,7 @@ fn render_new_issue_modal(
     keyboard_enhanced: bool,
 ) {
     // Modal dimensions: 70% wide, 22 rows tall, centred.
-    let width = (f32::from(area.width) * 0.70) as u16;
+    let width = pct(area.width, 70);
     let height = 22_u16.min(area.height.saturating_sub(2));
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
@@ -782,11 +799,9 @@ fn render_new_issue_modal(
 
 fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
     // Size: 60% wide, up to 80% tall, centred.
-    let width = ((f32::from(area.width) * 0.60) as u16)
-        .max(50)
-        .min(area.width);
-    let max_rows = (ALL_KEYBINDINGS.len() + 4) as u16; // header + search + border
-    let height = max_rows.min((f32::from(area.height) * 0.80) as u16).max(6);
+    let width = pct(area.width, 60).max(50).min(area.width);
+    let max_rows = to_u16(ALL_KEYBINDINGS.len() + 4); // header + search + border
+    let height = max_rows.min(pct(area.height, 80)).max(6);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup_area = Rect::new(x, y, width, height);
@@ -1024,7 +1039,7 @@ fn render_search_overlay(
 
     let constraints: Vec<Constraint> = widths
         .iter()
-        .map(|w| Constraint::Length(*w as u16))
+        .map(|w| Constraint::Length(to_u16(*w)))
         .collect();
 
     let table = Table::new(rows, constraints)

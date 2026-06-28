@@ -950,8 +950,13 @@ impl App {
         if n == 0 {
             return;
         }
-        let i = self.table_state.selected().unwrap_or(0) as i32;
-        let new_i = (i + delta).clamp(0, n as i32 - 1) as usize;
+        let cur = self.table_state.selected().unwrap_or(0);
+        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+        let new_i = if delta >= 0 {
+            cur.saturating_add(step).min(n - 1)
+        } else {
+            cur.saturating_sub(step)
+        };
         self.table_state.select(Some(new_i));
     }
 
@@ -1488,8 +1493,12 @@ impl App {
         if n == 0 {
             return;
         }
-        let i = self.popup_selected as i32;
-        self.popup_selected = (i + delta).clamp(0, n as i32 - 1) as usize;
+        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+        self.popup_selected = if delta >= 0 {
+            self.popup_selected.saturating_add(step).min(n - 1)
+        } else {
+            self.popup_selected.saturating_sub(step)
+        };
     }
 
     fn popup_confirm(&mut self) {

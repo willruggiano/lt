@@ -156,8 +156,8 @@ pub fn query_issues_page(
     };
     let direction = if args.desc { "DESC" } else { "ASC" };
     // Fetch one extra row to detect whether there is a next page.
-    let limit = i64::from(args.limit.min(250));
-    let fetch_limit = limit + 1;
+    let cap = args.limit.min(250);
+    let fetch_limit = i64::from(cap) + 1;
 
     let sql = format!(
         "SELECT id, identifier, title, priority_label, state_name,
@@ -204,9 +204,10 @@ pub fn query_issues_page(
         issues.push(row.context("failed to read issue row")?);
     }
 
-    let has_next = issues.len() > limit as usize;
+    let cap_rows = usize::try_from(cap).unwrap_or(usize::MAX);
+    let has_next = issues.len() > cap_rows;
     if has_next {
-        issues.truncate(limit as usize);
+        issues.truncate(cap_rows);
     }
     Ok((issues, has_next))
 }

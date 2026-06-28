@@ -51,10 +51,7 @@ fn parse_iso8601_secs(s: &str) -> Option<u64> {
     // Days from epoch (1970-01-01) to the given date using the civil-date algorithm.
     let days = days_from_civil(year, month, day)?;
     let total = days * 86400 + hour * 3600 + min * 60 + sec;
-    if total < 0 {
-        return None;
-    }
-    Some(total as u64)
+    u64::try_from(total).ok()
 }
 
 /// Returns number of days since 1970-01-01 for a given (y, m, d).
