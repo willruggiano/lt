@@ -24,15 +24,11 @@
         (add-pkg-deps [config.packages.toolchain])
       ];
 
+    # rustfmt formats without resolving dependencies, so it runs fine inside the
+    # offline `nix flake check` sandbox. clippy must compile the crate, which the
+    # git-hooks hook cannot do offline (no vendored registry); it runs as the
+    # checks.clippy derivation below, which reuses the lt package's vendoring.
     pre-commit.settings.hooks = {
-      clippy = {
-        enable = true;
-        packageOverrides = {
-          cargo = config.packages.toolchain;
-          clippy = config.packages.toolchain;
-        };
-        settings.denyWarnings = true;
-      };
       rustfmt = {
         enable = true;
         packageOverrides = {
@@ -41,6 +37,22 @@
         };
       };
     };
+
+    # Run clippy as a build-sandbox check so it has the same vendored deps and
+    # native build inputs as `nix build .#lt` (offline-capable).
+    checks.clippy = config.packages.lt.overrideAttrs (old: {
+      pname = "${old.pname}-clippy";
+      nativeBuildInputs = old.nativeBuildInputs ++ [config.packages.toolchain];
+      buildPhase = ''
+        runHook preBuild
+        cargo clippy --all-targets -- -D warnings
+        runHook postBuild
+      '';
+      doCheck = false;
+      installPhase = ''
+        touch $out
+      '';
+    });
 
     packages = {
       default = config.packages.lt;
@@ -63,6 +75,8 @@
               "build/*.toml"
               "Cargo.lock"
               "Cargo.toml"
+              "clippy.toml"
+              "README.md"
             ];
           };
           auditable = false; # devshell error: conflicting paths between toolchain and cargo-auditable

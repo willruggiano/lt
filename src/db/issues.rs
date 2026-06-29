@@ -113,7 +113,7 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<Issue>> {
 }
 
 /// Map a row in the canonical issues column order to an Issue.
-fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
+pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
     Ok(Issue {
         id: row.get(0)?,
         identifier: row.get(1)?,
@@ -156,8 +156,8 @@ pub fn query_issues_page(
     };
     let direction = if args.desc { "DESC" } else { "ASC" };
     // Fetch one extra row to detect whether there is a next page.
-    let limit = i64::from(args.limit.min(250));
-    let fetch_limit = limit + 1;
+    let cap = args.limit.min(250);
+    let fetch_limit = i64::from(cap) + 1;
 
     let sql = format!(
         "SELECT id, identifier, title, priority_label, state_name,
@@ -175,28 +175,7 @@ pub fn query_issues_page(
         .context("failed to prepare query statement")?;
 
     let rows = stmt
-        .query_map(params![fetch_limit, offset], |row| {
-            Ok(Issue {
-                id: row.get(0)?,
-                identifier: row.get(1)?,
-                title: row.get(2)?,
-                priority_label: row.get(3)?,
-                state_name: row.get(4)?,
-                assignee_name: row.get(5)?,
-                team_name: row.get(6)?,
-                team_key: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                synced_at: row.get(10)?,
-                description: row.get(11)?,
-                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                project_name: row.get(13)?,
-                cycle_name: row.get(14)?,
-                creator_name: row.get(15)?,
-                parent_id: row.get(16)?,
-                parent_identifier: row.get(17)?,
-            })
-        })
+        .query_map(params![fetch_limit, offset], issue_from_row)
         .context("failed to execute query")?;
 
     let mut issues = Vec::new();
@@ -204,9 +183,10 @@ pub fn query_issues_page(
         issues.push(row.context("failed to read issue row")?);
     }
 
-    let has_next = issues.len() > limit as usize;
+    let cap_rows = usize::try_from(cap).unwrap_or(usize::MAX);
+    let has_next = issues.len() > cap_rows;
     if has_next {
-        issues.truncate(limit as usize);
+        issues.truncate(cap_rows);
     }
     Ok((issues, has_next))
 }
@@ -233,28 +213,7 @@ pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
         .context("failed to prepare search_issues statement")?;
 
     let rows = stmt
-        .query_map(params![query], |row| {
-            Ok(Issue {
-                id: row.get(0)?,
-                identifier: row.get(1)?,
-                title: row.get(2)?,
-                priority_label: row.get(3)?,
-                state_name: row.get(4)?,
-                assignee_name: row.get(5)?,
-                team_name: row.get(6)?,
-                team_key: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                synced_at: row.get(10)?,
-                description: row.get(11)?,
-                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                project_name: row.get(13)?,
-                cycle_name: row.get(14)?,
-                creator_name: row.get(15)?,
-                parent_id: row.get(16)?,
-                parent_identifier: row.get(17)?,
-            })
-        })
+        .query_map(params![query], issue_from_row)
         .context("failed to execute search_issues query")?;
 
     let mut issues = Vec::new();
@@ -297,28 +256,7 @@ pub fn query_children(conn: &Connection, parent_id: &str) -> Result<Vec<Issue>> 
         .context("failed to prepare query_children statement")?;
 
     let rows = stmt
-        .query_map(params![parent_id], |row| {
-            Ok(Issue {
-                id: row.get(0)?,
-                identifier: row.get(1)?,
-                title: row.get(2)?,
-                priority_label: row.get(3)?,
-                state_name: row.get(4)?,
-                assignee_name: row.get(5)?,
-                team_name: row.get(6)?,
-                team_key: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                synced_at: row.get(10)?,
-                description: row.get(11)?,
-                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                project_name: row.get(13)?,
-                cycle_name: row.get(14)?,
-                creator_name: row.get(15)?,
-                parent_id: row.get(16)?,
-                parent_identifier: row.get(17)?,
-            })
-        })
+        .query_map(params![parent_id], issue_from_row)
         .context("failed to execute query_children query")?;
 
     let mut issues = Vec::new();
@@ -383,8 +321,10 @@ mod tests {
     #[test]
     fn query_issues_applies_assignee_filter() {
         let conn = test_db();
-        let mut args = crate::issues::IssueArgs::default();
-        args.assignee = Some("alice".to_string());
+        let args = crate::issues::IssueArgs {
+            assignee: Some("alice".to_string()),
+            ..Default::default()
+        };
         let issues = query_issues(&conn, &args).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].assignee_name.as_deref(), Some("Alice"));
@@ -393,8 +333,10 @@ mod tests {
     #[test]
     fn query_issues_applies_no_assignee_filter() {
         let conn = test_db();
-        let mut args = crate::issues::IssueArgs::default();
-        args.no_assignee = true;
+        let args = crate::issues::IssueArgs {
+            no_assignee: true,
+            ..Default::default()
+        };
         let issues = query_issues(&conn, &args).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].id, "3");
@@ -403,8 +345,10 @@ mod tests {
     #[test]
     fn query_issues_applies_state_filter_and_limit() {
         let conn = test_db();
-        let mut args = crate::issues::IssueArgs::default();
-        args.state = Some("todo".to_string());
+        let mut args = crate::issues::IssueArgs {
+            state: Some("todo".to_string()),
+            ..Default::default()
+        };
         let issues = query_issues(&conn, &args).unwrap();
         assert_eq!(issues.len(), 2);
 

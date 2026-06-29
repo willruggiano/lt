@@ -3,8 +3,45 @@ pub mod delta;
 pub mod full;
 mod probe;
 
+use std::io::Write;
+
 use anyhow::Result;
+use chrono::Utc;
 use clap::Subcommand;
+
+use crate::db;
+use crate::issues::list::{Issue, to_db_issue};
+
+/// Paginate through issue pages via `fetch_page`, upserting each page into the
+/// local DB, then record the current UTC time as `last_synced_at`.
+///
+/// `fetch_page` is called with the current cursor and returns
+/// `(issues, has_next_page, end_cursor)`.
+fn sync_pages<F>(conn: &rusqlite::Connection, mut fetch_page: F) -> Result<()>
+where
+    F: FnMut(Option<&str>) -> Result<(Vec<Issue>, bool, Option<String>)>,
+{
+    let mut cursor: Option<String> = None;
+    loop {
+        let after = cursor.as_deref();
+        let (issues, has_next, end_cursor) = fetch_page(after)?;
+
+        if !issues.is_empty() {
+            let db_issues: Vec<db::Issue> = issues.iter().map(to_db_issue).collect();
+            db::upsert_issues(conn, &db_issues)?;
+        }
+
+        if !has_next {
+            break;
+        }
+        cursor = end_cursor;
+    }
+
+    let now = Utc::now().to_rfc3339();
+    db::set_meta(conn, "last_synced_at", &now)?;
+
+    Ok(())
+}
 
 #[derive(Subcommand)]
 pub enum SyncCommands {
@@ -20,18 +57,18 @@ pub enum SyncCommands {
     },
 }
 
-pub fn run(cmd: SyncCommands) -> Result<()> {
+pub fn run(out: &mut dyn Write, cmd: SyncCommands) -> Result<()> {
     match cmd {
         SyncCommands::Delta => {
             delta::run()?;
-            println!("Sync complete.");
+            writeln!(out, "Sync complete.")?;
             Ok(())
         }
         SyncCommands::Full => {
             full::run()?;
-            println!("Sync complete.");
+            writeln!(out, "Sync complete.")?;
             Ok(())
         }
-        SyncCommands::Probe { token } => probe::run(token),
+        SyncCommands::Probe { token } => probe::run(out, token),
     }
 }

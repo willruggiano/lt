@@ -31,9 +31,7 @@ pub struct Comment {
 
 impl Comment {
     pub fn author(&self) -> &str {
-        self.user
-            .as_ref()
-            .map_or("unknown", |u| u.name.as_str())
+        self.user.as_ref().map_or("unknown", |u| u.name.as_str())
     }
 }
 

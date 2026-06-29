@@ -1,7 +1,8 @@
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Profiles -- separate auth + database per account/workspace
@@ -18,11 +19,9 @@ pub fn set_profile(name: Option<String>) -> Result<()> {
             || !n
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        {
-            anyhow::bail!(
-                "invalid profile name {n:?}: use only letters, digits, '-' and '_'"
-            );
-        }
+    {
+        anyhow::bail!("invalid profile name {n:?}: use only letters, digits, '-' and '_'");
+    }
     let _ = PROFILE.set(name.unwrap_or_else(|| "default".to_string()));
     Ok(())
 }
@@ -32,7 +31,7 @@ fn profile() -> &'static str {
 }
 
 /// Append the per-profile subdirectory to a base `lt` directory.
-pub fn profile_dir(base: PathBuf) -> PathBuf {
+pub fn profile_dir(base: &Path) -> PathBuf {
     base.join("profiles").join(profile())
 }
 
@@ -89,7 +88,7 @@ pub fn log_dir() -> Result<PathBuf> {
 
 pub fn state_dir() -> Result<PathBuf> {
     let dir = profile_dir(
-        dirs::state_dir()
+        &dirs::state_dir()
             .ok_or_else(|| anyhow::anyhow!("could not determine state directory"))?
             .join("lt"),
     );

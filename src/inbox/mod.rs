@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::Result;
 use clap::Args;
 
@@ -16,7 +18,7 @@ pub struct InboxArgs {
     pub limit: usize,
 }
 
-pub fn run(args: InboxArgs) -> Result<()> {
+pub fn run(out: &mut dyn Write, args: &InboxArgs) -> Result<()> {
     // When --all is set we need to paginate through all pages but still cap the
     // total at --limit.  Pass max_total so the pagination loop stops early.
     // When --all is not set we only need unread notifications; fetch with the
@@ -34,10 +36,10 @@ pub fn run(args: InboxArgs) -> Result<()> {
     };
 
     if filtered.is_empty() {
-        println!("Inbox zero.");
+        writeln!(out, "Inbox zero.")?;
         return Ok(());
     }
 
-    display::print_table(&filtered);
+    display::print_table(out, &filtered)?;
     Ok(())
 }

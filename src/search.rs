@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
@@ -18,7 +20,7 @@ pub struct SearchArgs {
     pub live: bool,
 }
 
-pub fn run(args: SearchArgs) -> Result<()> {
+pub fn run(out: &mut dyn Write, args: &SearchArgs) -> Result<()> {
     if args.live {
         bail!("--live search via Linear API is not yet implemented");
     }
@@ -40,7 +42,6 @@ pub fn run(args: SearchArgs) -> Result<()> {
         .unwrap_or(0);
 
     let note;
-    
 
     let issues: Vec<db::Issue> = if fts_count == 0 {
         // FTS index is empty -- fall back to LIKE search on title.
@@ -62,28 +63,7 @@ pub fn run(args: SearchArgs) -> Result<()> {
             .prepare(&sql)
             .context("failed to prepare fallback search statement")?;
         let rows = stmt
-            .query_map([&like_pattern], |row| {
-                Ok(db::Issue {
-                    id: row.get(0)?,
-                    identifier: row.get(1)?,
-                    title: row.get(2)?,
-                    priority_label: row.get(3)?,
-                    state_name: row.get(4)?,
-                    assignee_name: row.get(5)?,
-                    team_name: row.get(6)?,
-                    team_key: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
-                    synced_at: row.get(10)?,
-                    description: row.get(11)?,
-                    labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                    project_name: row.get(13)?,
-                    cycle_name: row.get(14)?,
-                    creator_name: row.get(15)?,
-                    parent_id: row.get(16)?,
-                    parent_identifier: row.get(17)?,
-                })
-            })
+            .query_map([&like_pattern], db::issue_from_row)
             .context("failed to execute fallback search")?;
 
         let mut result = Vec::new();
@@ -98,6 +78,6 @@ pub fn run(args: SearchArgs) -> Result<()> {
         all
     };
 
-    print_table_cached(&issues, &note);
+    print_table_cached(out, &issues, &note)?;
     Ok(())
 }

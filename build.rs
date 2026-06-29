@@ -14,7 +14,9 @@
 // cargo:rerun-if-changed directives ensure the build script re-runs whenever
 // the schema or the allowlist changes.
 
-use std::{collections::HashMap, env, fs, path::Path};
+use std::collections::HashMap;
+use std::path::Path;
+use std::{env, fs};
 
 use graphql_parser::schema::{Definition, Document, TypeDefinition};
 use proc_macro2::TokenStream;
@@ -73,14 +75,15 @@ fn extract_issue_filter_fields(schema_src: &str) -> HashMap<String, String> {
 
     for def in &doc.definitions {
         if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
-            && input.name == "IssueFilter" {
-                let mut map = HashMap::new();
-                for field in &input.fields {
-                    let base = base_type_name(&field.value_type).to_string();
-                    map.insert(field.name.clone(), base);
-                }
-                return map;
+            && input.name == "IssueFilter"
+        {
+            let mut map = HashMap::new();
+            for field in &input.fields {
+                let base = base_type_name(&field.value_type).to_string();
+                map.insert(field.name.clone(), base);
             }
+            return map;
+        }
     }
 
     panic!("IssueFilter input type not found in the GraphQL schema");
@@ -93,14 +96,15 @@ fn extract_issue_sort_input_fields(schema_src: &str) -> HashMap<String, String> 
 
     for def in &doc.definitions {
         if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
-            && input.name == "IssueSortInput" {
-                let mut map = HashMap::new();
-                for field in &input.fields {
-                    let base = base_type_name(&field.value_type).to_string();
-                    map.insert(field.name.clone(), base);
-                }
-                return map;
+            && input.name == "IssueSortInput"
+        {
+            let mut map = HashMap::new();
+            for field in &input.fields {
+                let base = base_type_name(&field.value_type).to_string();
+                map.insert(field.name.clone(), base);
             }
+            return map;
+        }
     }
 
     panic!("IssueSortInput input type not found in the GraphQL schema");
@@ -216,11 +220,11 @@ fn gen_from_ast(fields: &[FieldSpec]) -> TokenStream {
                         },
                         Token::PartialStem { .. } => {}
                         Token::Word { text, .. } => {
-                            fts_words.push(format!("{}*", text));
+                            fts_words.push(format!("{text}*"));
                         }
                         Token::Unknown { raw: raw_slice, .. } => {
                             if !raw_slice.is_empty() {
-                                fts_words.push(format!("{}*", raw_slice));
+                                fts_words.push(format!("{raw_slice}*"));
                             }
                         }
                     }
@@ -278,12 +282,51 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
     });
 
     quote! {
+        /// Levenshtein edit distance between two strings, over chars.
+        fn edit_dist(a: &str, b: &str) -> usize {
+            let av: Vec<char> = a.chars().collect();
+            let bv: Vec<char> = b.chars().collect();
+            let m = av.len();
+            let n = bv.len();
+            if m == 0 { return n; }
+            if n == 0 { return m; }
+            let mut dp = vec![vec![0usize; n + 1]; m + 1];
+            for (i, row) in dp.iter_mut().enumerate() { row[0] = i; }
+            for (j, cell) in dp[0].iter_mut().enumerate() { *cell = j; }
+            for i in 1..=m {
+                for j in 1..=n {
+                    dp[i][j] = if av[i - 1] == bv[j - 1] {
+                        dp[i - 1][j - 1]
+                    } else {
+                        1 + dp[i - 1][j].min(dp[i][j - 1]).min(dp[i - 1][j - 1])
+                    };
+                }
+            }
+            dp[m][n]
+        }
+
+        /// Closest known key within edit distance 2 of `unknown`, for "did you
+        /// mean?" suggestions.
+        fn closest_key<'k>(unknown: &str, keys: &[&'k str]) -> Option<&'k str> {
+            let mut best: Option<(&'k str, usize)> = None;
+            for &k in keys {
+                let d = edit_dist(unknown, k);
+                if d <= 2 && best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((k, d));
+                }
+            }
+            best.map(|(k, _)| k)
+        }
+
         /// Parse a raw query string into tokens and errors using a Chumsky 0.13 parser.
         ///
         /// The Chumsky parser handles character-level tokenisation and provides byte
         /// span information via `map_with`.  Semantic classification of each
-        /// token (key -> StemKind) is done in a second pass that emits ParseErrors
+        /// token (key -> `StemKind`) is done in a second pass that emits `ParseError`s
         /// for unknown stem keys with optional "did you mean?" suggestions.
+        // One dispatch arm is generated per allowlist entry, so this function
+        // exceeds the line budget by construction; that is the only allow here.
+        #[allow(clippy::too_many_lines)]
         fn parse_query_ast_impl(raw: &str) -> (Vec<Token>, Vec<ParseError>) {
             use chumsky::prelude::*;
             use chumsky::error::Simple;
@@ -319,7 +362,7 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
                     .at_least(1)
                     .collect::<String>();
 
-                let val_chars = non_ws.clone().repeated().collect::<String>();
+                let val_chars = non_ws.repeated().collect::<String>();
 
                 // stem: key ':' val  -> (key, Some(val))
                 let stem = key_chars
@@ -341,8 +384,7 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
                     (k, v, span.start..span.end)
                 });
 
-                ws.clone()
-                    .ignore_then(raw_tok.then_ignore(ws.clone()).repeated().collect::<Vec<_>>())
+                ws.ignore_then(raw_tok.then_ignore(ws).repeated().collect::<Vec<_>>())
                     .then_ignore(end())
             }
 
@@ -361,41 +403,6 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
             // char index == byte index, so we use them directly as byte offsets.
 
             let known_keys: &[&str] = &[ #( #key_strs, )* ];
-
-            fn edit_dist(a: &str, b: &str) -> usize {
-                let av: Vec<char> = a.chars().collect();
-                let bv: Vec<char> = b.chars().collect();
-                let m = av.len();
-                let n = bv.len();
-                if m == 0 { return n; }
-                if n == 0 { return m; }
-                let mut dp = vec![vec![0usize; n + 1]; m + 1];
-                for i in 0..=m { dp[i][0] = i; }
-                for j in 0..=n { dp[0][j] = j; }
-                for i in 1..=m {
-                    for j in 1..=n {
-                        dp[i][j] = if av[i - 1] == bv[j - 1] {
-                            dp[i - 1][j - 1]
-                        } else {
-                            1 + dp[i - 1][j].min(dp[i][j - 1]).min(dp[i - 1][j - 1])
-                        };
-                    }
-                }
-                dp[m][n]
-            }
-
-            fn closest_key<'k>(unknown: &str, keys: &[&'k str]) -> Option<&'k str> {
-                let mut best: Option<(&'k str, usize)> = None;
-                for &k in keys {
-                    let d = edit_dist(unknown, k);
-                    if d <= 2 {
-                        if best.map_or(true, |(_, bd)| d < bd) {
-                            best = Some((k, d));
-                        }
-                    }
-                }
-                best.map(|(k, _)| k)
-            }
 
             let mut tokens: Vec<Token> = Vec::new();
             let mut errors: Vec<ParseError> = Vec::new();
@@ -440,10 +447,9 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
                                 let suggestion = closest_key(&key_lower, known_keys);
                                 let message = match suggestion {
                                     Some(s) => format!(
-                                        "unknown filter key '{}' -- did you mean '{}'?",
-                                        key_or_word, s
+                                        "unknown filter key '{key_or_word}' -- did you mean '{s}'?"
                                     ),
-                                    None => format!("unknown filter key '{}'", key_or_word),
+                                    None => format!("unknown filter key '{key_or_word}'"),
                                 };
                                 let err = ParseError {
                                     span: Span { start: tok_start, end: colon_pos },
@@ -511,7 +517,7 @@ fn gen_sort_field_enum(sort_fields: &[SortFieldSpec]) -> TokenStream {
     quote! {
         /// A sort field for the issues list.
         ///
-        /// Generated from [[sort_field]] entries in build/search_filter_fields.toml
+        /// Generated from `[[sort_field]]` entries in `build/search_filter_fields.toml`
         /// by build.rs (bd-2w5). Do not edit by hand.
         #[derive(Clone, Debug, PartialEq, clap::ValueEnum)]
         pub enum SortField {
@@ -595,7 +601,7 @@ fn gen_sort_col(sort_fields: &[SortFieldSpec]) -> TokenStream {
     quote! {
         /// Map a sort field to the corresponding SQLite column name.
         ///
-        /// Generated from [[sort_field]] entries in build/search_filter_fields.toml
+        /// Generated from `[[sort_field]]` entries in `build/search_filter_fields.toml`
         /// by build.rs (bd-2w5). Do not edit by hand.
         fn sort_col(field: &SortField) -> &'static str {
             match field {
@@ -620,7 +626,7 @@ fn gen_build_sort(sort_fields: &[SortFieldSpec]) -> TokenStream {
     quote! {
         /// Build the Linear GraphQL `sort` argument JSON for the given field and direction.
         ///
-        /// Generated from [[sort_field]] entries in build/search_filter_fields.toml
+        /// Generated from `[[sort_field]]` entries in `build/search_filter_fields.toml`
         /// by build.rs (bd-2w5). Do not edit by hand.
         pub fn build_sort(field: &SortField, desc: bool) -> serde_json::Value {
             let order = if desc { "Descending" } else { "Ascending" };
@@ -700,7 +706,8 @@ fn main() {
         }
     }
 
-    assert!(validation_errors.is_empty(), 
+    assert!(
+        validation_errors.is_empty(),
         "build.rs: allowlist validation failed against IssueFilter schema:\n{}\n\
          Fix build/search_filter_fields.toml or update the GraphQL schema snapshot.",
         validation_errors.join("\n")
@@ -720,14 +727,18 @@ fn main() {
         }
     }
 
-    assert!(sort_validation_errors.is_empty(), 
+    assert!(
+        sort_validation_errors.is_empty(),
         "build.rs: sort_field validation failed against IssueSortInput schema:\n{}\n\
          Fix [[sort_field]] entries in build/search_filter_fields.toml.",
         sort_validation_errors.join("\n")
     );
 
     // Require at least one sort_field entry so the generated enum is non-empty.
-    assert!(!config.sort_field.is_empty(), "build.rs: [[sort_field]] list in search_filter_fields.toml is empty");
+    assert!(
+        !config.sort_field.is_empty(),
+        "build.rs: [[sort_field]] list in search_filter_fields.toml is empty"
+    );
 
     let sort_fields = &config.sort_field;
 

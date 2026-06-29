@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
@@ -34,7 +36,7 @@ struct Organization {
     url_key: String,
 }
 
-pub fn run() -> Result<()> {
+pub fn run(out: &mut dyn Write) -> Result<()> {
     let token = config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
 
@@ -63,12 +65,13 @@ pub fn run() -> Result<()> {
         .ok_or_else(|| anyhow!("empty response from Linear API"))?
         .viewer;
 
-    println!("user:         {} <{}>", viewer.name, viewer.email);
-    println!("id:           {}", viewer.id);
-    println!(
+    writeln!(out, "user:         {} <{}>", viewer.name, viewer.email)?;
+    writeln!(out, "id:           {}", viewer.id)?;
+    writeln!(
+        out,
         "organization: {} ({})",
         viewer.organization.name, viewer.organization.url_key
-    );
+    )?;
 
     Ok(())
 }

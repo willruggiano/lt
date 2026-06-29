@@ -332,28 +332,24 @@ fn normalise_priority(s: &str) -> Option<&'static str> {
 /// # Errors
 ///
 /// Returns an error if the SQLite query fails (e.g. FTS index unavailable).
-pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec<Issue>> {
-    // Build WHERE conditions and bind parameters.
+// Build the structured WHERE conditions and their bound parameters from a
+// parsed query. Each filter stem maps to one or more SQLite conditions:
+//   assignee: LOWER(COALESCE(assignee_name,'')) LIKE '%<val>%'
+//             Special case: value "me" -> LOWER(assignee_name) = 'me'
+//   priority: priority_label = <normalised-label>
+//             Value is normalised via normalise_priority() before binding;
+//             unrecognised values are silently skipped.
+//   state:    LOWER(state_name) LIKE '%<val>%'
+//   team:     LOWER(team_name) LIKE '%<val>%'
+//             OR LOWER(COALESCE(team_key,'')) LIKE '%<val>%'
+//   label:    LOWER(COALESCE(labels,'')) LIKE '%<val>%'
+//             (column is 'labels', not 'label_names')
+fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::types::ToSql>>) {
     let mut conditions: Vec<String> = Vec::new();
-    // We collect params as String values and pass them with a macro workaround
-    // below; rusqlite requires heterogeneous param lists via the params! macro
-    // or by boxing.  We use Box<dyn rusqlite::types::ToSql> for flexibility.
+    // rusqlite requires heterogeneous param lists via the params! macro or by
+    // boxing. We box with Box<dyn ToSql> for flexibility.
     let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-    // Per-field SQL mapping (the knowledge formerly kept in TOML metadata).
-    //
-    // Each filter stem maps to one or more SQLite conditions:
-    //   assignee: LOWER(COALESCE(assignee_name,'')) LIKE '%<val>%'
-    //             Special case: value "me" -> LOWER(assignee_name) = 'me'
-    //   priority: priority_label = <normalised-label>
-    //             Value is normalised via normalise_priority() before binding;
-    //             unrecognised values are silently skipped.
-    //   state:    LOWER(state_name) LIKE '%<val>%'
-    //   team:     LOWER(team_name) LIKE '%<val>%'
-    //             OR LOWER(COALESCE(team_key,'')) LIKE '%<val>%'
-    //   label:    LOWER(COALESCE(labels,'')) LIKE '%<val>%'
-    //             (column is 'labels', not 'label_names')
-    //
     // -- assignee --
     if let Some(ref a) = q.assignee {
         if a == "me" {
@@ -415,7 +411,13 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         bind.push(Box::new(format!("%{c}%")));
     }
 
-    // -- ORDER BY --
+    (conditions, bind)
+}
+
+/// Build the final SELECT statement for the given query and structured
+/// conditions. FTS queries join against `issues_fts`; non-FTS queries scan
+/// `issues` directly.
+fn build_sql(q: &ParsedQuery, conditions: &[String], limit: usize) -> String {
     let (order_col, order_dir) = match &q.sort {
         Some((field, dir)) => (
             sort_col(field),
@@ -424,38 +426,12 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         None => ("updated_at", "DESC"),
     };
 
-    // -- FTS --
-    let has_fts = !q.fts_terms.is_empty();
-
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
-
-    let sql = if has_fts {
-        // Join issues with FTS results, apply additional structured filters.
-        format!(
-            "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
-                    i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
-                    i.synced_at, i.description, i.labels,
-                    i.project_name, i.cycle_name, i.creator_name,
-                    i.parent_id, i.parent_identifier
-             FROM issues i
-             JOIN issues_fts ON issues_fts.rowid = i.rowid
-             WHERE issues_fts MATCH ?{extra_cond}
-             ORDER BY {col} {dir}
-             LIMIT {limit}",
-            extra_cond = if conditions.is_empty() {
-                String::new()
-            } else {
-                format!(" AND {}", conditions.join(" AND "))
-            },
-            col = order_col,
-            dir = order_dir,
-            limit = limit,
-        )
-    } else {
+    if q.fts_terms.is_empty() {
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
         format!(
             "SELECT id, identifier, title, priority_label, state_name,
                     assignee_name, team_name, team_key, created_at, updated_at, synced_at,
@@ -466,7 +442,33 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
              ORDER BY {order_col} {order_dir}
              LIMIT {limit}",
         )
-    };
+    } else {
+        // Join issues with FTS results, apply additional structured filters.
+        let extra_cond = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", conditions.join(" AND "))
+        };
+        format!(
+            "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
+                    i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
+                    i.synced_at, i.description, i.labels,
+                    i.project_name, i.cycle_name, i.creator_name,
+                    i.parent_id, i.parent_identifier
+             FROM issues i
+             JOIN issues_fts ON issues_fts.rowid = i.rowid
+             WHERE issues_fts MATCH ?{extra_cond}
+             ORDER BY {order_col} {order_dir}
+             LIMIT {limit}",
+        )
+    }
+}
+
+pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec<Issue>> {
+    let (conditions, bind) = build_conditions(q);
+
+    let has_fts = !q.fts_terms.is_empty();
+    let sql = build_sql(q, &conditions, limit);
 
     // Build the final param list: for FTS queries the FTS term goes first.
     let all_params: Vec<Box<dyn rusqlite::types::ToSql>> = if has_fts {
@@ -485,28 +487,7 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
         all_params.iter().map(std::convert::AsRef::as_ref).collect();
 
     let rows = stmt
-        .query_map(param_refs.as_slice(), |row| {
-            Ok(Issue {
-                id: row.get(0)?,
-                identifier: row.get(1)?,
-                title: row.get(2)?,
-                priority_label: row.get(3)?,
-                state_name: row.get(4)?,
-                assignee_name: row.get(5)?,
-                team_name: row.get(6)?,
-                team_key: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                synced_at: row.get(10)?,
-                description: row.get(11)?,
-                labels: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                project_name: row.get(13)?,
-                cycle_name: row.get(14)?,
-                creator_name: row.get(15)?,
-                parent_id: row.get(16)?,
-                parent_identifier: row.get(17)?,
-            })
-        })
+        .query_map(param_refs.as_slice(), crate::db::issue_from_row)
         .map_err(|e| anyhow::anyhow!("execute search_query: {e}"))?;
 
     let mut issues = Vec::new();
@@ -641,11 +622,7 @@ impl Completer {
                     self.context = CompletionContext::Word;
                 }
             }
-            Some(Token::Word { .. }) => {
-                self.candidates = Vec::new();
-                self.context = CompletionContext::Word;
-            }
-            Some(Token::Unknown { .. }) => {
+            Some(Token::Word { .. } | Token::Unknown { .. }) => {
                 self.candidates = Vec::new();
                 self.context = CompletionContext::Word;
             }
@@ -712,14 +689,14 @@ impl Completer {
             }
             let new_ast = parse_query_ast(&input.value);
             self.update(&new_ast, input.cursor);
-            self.jump_token_boundary(input, &new_ast, forward);
+            Self::jump_token_boundary(input, &new_ast, forward);
             return;
         }
 
         match &self.context {
             CompletionContext::StemKey { prefix } => {
                 if self.candidates.is_empty() {
-                    self.jump_token_boundary(input, ast, forward);
+                    Self::jump_token_boundary(input, ast, forward);
                     return;
                 }
 
@@ -765,7 +742,7 @@ impl Completer {
                 };
             }
             _ => {
-                self.jump_token_boundary(input, ast, forward);
+                Self::jump_token_boundary(input, ast, forward);
             }
         }
     }
@@ -827,12 +804,7 @@ impl Completer {
     /// `input.selection_end` to the end of the token span so that the value is
     /// "selected" and typing immediately replaces it.  `PartialStem` tokens
     /// (empty value) do NOT set a selection.
-    fn jump_token_boundary(
-        &self,
-        input: &mut crate::tui::TextInput,
-        ast: &QueryAst,
-        forward: bool,
-    ) {
+    fn jump_token_boundary(input: &mut crate::tui::TextInput, ast: &QueryAst, forward: bool) {
         if ast.tokens.is_empty() {
             return;
         }
@@ -856,7 +828,8 @@ impl Completer {
             // return the same position and the jump would be a no-op.
             let prev = ast
                 .tokens
-                .iter().rfind(|t| cursor_position_for_token(t) < cursor);
+                .iter()
+                .rfind(|t| cursor_position_for_token(t) < cursor);
             if let Some(t) = prev {
                 input.cursor = cursor_position_for_token(t);
                 input.selection_end = selection_end_for_token(t);
@@ -1273,9 +1246,7 @@ mod tests {
 
     // Parity tests: From<&QueryAst> must produce identical results to parse_query.
 
-    #[test]
-    fn from_ast_parity_empty() {
-        let raw = "";
+    fn assert_from_ast_parity(raw: &str) {
         let q1 = parse_query(raw);
         let ast = parse_query_ast(raw);
         let q2 = ParsedQuery::from(&ast);
@@ -1288,17 +1259,13 @@ mod tests {
     }
 
     #[test]
+    fn from_ast_parity_empty() {
+        assert_from_ast_parity("");
+    }
+
+    #[test]
     fn from_ast_parity_full_query() {
-        let raw = "sort:updated- assignee:me priority:urgent state:todo oauth crash";
-        let q1 = parse_query(raw);
-        let ast = parse_query_ast(raw);
-        let q2 = ParsedQuery::from(&ast);
-        assert_eq!(q1.sort, q2.sort);
-        assert_eq!(q1.assignee, q2.assignee);
-        assert_eq!(q1.priority, q2.priority);
-        assert_eq!(q1.state, q2.state);
-        assert_eq!(q1.team, q2.team);
-        assert_eq!(q1.fts_terms, q2.fts_terms);
+        assert_from_ast_parity("sort:updated- assignee:me priority:urgent state:todo oauth crash");
     }
 
     #[test]
@@ -1733,7 +1700,9 @@ mod tests {
                 format!("{before}|[{sel_text}]{after}")
             };
             if let Some(ghost) = self.completer.hint_suffix() {
-                s.push_str(&format!("({ghost})"));
+                s.push('(');
+                s.push_str(ghost);
+                s.push(')');
             }
             s
         }

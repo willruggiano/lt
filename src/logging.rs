@@ -22,12 +22,15 @@
 //! filter therefore sets DEBUG for the `lt` crate and WARN for everything else.
 //! Pass `RUST_LOG` to override.
 
-use anyhow::Result;
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime};
+
+use anyhow::Result;
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 // -- CR-stripping writer -----------------------------------------------------
 
@@ -66,22 +69,20 @@ use crate::config;
 ///
 /// All errors are silently ignored -- this is a best-effort cleanup step.
 fn prune_old_logs(dir: &std::path::Path, days: u64) {
-    let threshold = match SystemTime::now().checked_sub(Duration::from_secs(days * 24 * 60 * 60)) {
-        Some(t) => t,
-        None => return,
+    let Some(threshold) = SystemTime::now().checked_sub(Duration::from_secs(days * 24 * 60 * 60))
+    else {
+        return;
     };
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        let mtime = match entry.metadata().and_then(|m| m.modified()) {
-            Ok(t) => t,
-            Err(_) => continue,
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
         };
         if mtime < threshold {
             let _ = std::fs::remove_file(&path);

@@ -1,3 +1,7 @@
+use std::io::Write;
+
+use anyhow::Result;
+
 use crate::linear::notifications::Notification;
 use crate::text;
 
@@ -47,10 +51,7 @@ fn parse_iso8601_secs(s: &str) -> Option<u64> {
     // Days from epoch (1970-01-01) to the given date using the civil-date algorithm.
     let days = days_from_civil(year, month, day)?;
     let total = days * 86400 + hour * 3600 + min * 60 + sec;
-    if total < 0 {
-        return None;
-    }
-    Some(total as u64)
+    u64::try_from(total).ok()
 }
 
 /// Returns number of days since 1970-01-01 for a given (y, m, d).
@@ -64,11 +65,11 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
     let yoe = y - era * 400; // [0, 399]
     let doy = (153 * m + 2) / 5 + d - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    let days = era * 146097 + doe - 719468; // days since 1970-01-01
+    let days = era * 146_097 + doe - 719_468; // days since 1970-01-01
     Some(days)
 }
 
-pub fn print_table(notifications: &[Notification]) {
+pub fn print_table(out: &mut dyn Write, notifications: &[Notification]) -> Result<()> {
     // Column widths
     let type_w = notifications
         .iter()
@@ -99,7 +100,8 @@ pub fn print_table(notifications: &[Notification]) {
         .max(5);
 
     // Header
-    println!(
+    writeln!(
+        out,
         "{:<type_w$}  {:<issue_w$}  {:<title_w$}  {:<actor_w$}  AGE",
         "TYPE",
         "ISSUE",
@@ -109,27 +111,27 @@ pub fn print_table(notifications: &[Notification]) {
         issue_w = issue_w,
         title_w = title_w,
         actor_w = actor_w,
-    );
+    )?;
 
     let sep_len = type_w + 2 + issue_w + 2 + title_w + 2 + actor_w + 2 + 6;
-    println!("{}", "-".repeat(sep_len));
+    writeln!(out, "{}", "-".repeat(sep_len))?;
 
     for n in notifications {
         let type_str = &n.type_;
-        let issue_id = n
-            .issue
-            .as_ref()
-            .map_or("-", |i| i.identifier.as_str());
+        let issue_id = n.issue.as_ref().map_or("-", |i| i.identifier.as_str());
         let raw_title = n.issue.as_ref().map_or("-", |i| i.title.as_str());
         // Truncate title if needed
         let title = text::truncate(raw_title, title_w);
         let actor = n.actor.as_ref().map_or("-", |a| a.name.as_str());
         let age = relative_age(&n.created_at);
 
-        println!(
+        writeln!(
+            out,
             "{type_str:<type_w$}  {issue_id:<issue_w$}  {title:<title_w$}  {actor:<actor_w$}  {age}",
-        );
+        )?;
     }
+
+    Ok(())
 }
 
 #[cfg(test)]

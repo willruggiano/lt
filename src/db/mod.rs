@@ -2,28 +2,47 @@ pub mod comments;
 pub mod filters;
 pub mod issues;
 
+use std::fs;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 pub use comments::{Comment, delete_comments_for_issue, query_comments, upsert_comments};
+pub(crate) use issues::issue_from_row;
 pub use issues::{
     Issue, get_meta, query_children, query_issues, query_issues_page, search_issues, set_meta,
     upsert_issues,
 };
-
-use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::fs;
-use std::path::PathBuf;
 
 fn db_path() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir().context("could not determine local data directory")?;
     // Each profile gets its own database so accounts/workspaces never share
     // state and can run concurrently.
-    let lt_dir = crate::config::profile_dir(data_dir.join("lt"));
+    let lt_dir = crate::config::profile_dir(&data_dir.join("lt"));
     fs::create_dir_all(&lt_dir)
         .with_context(|| format!("could not create directory: {}", lt_dir.display()))?;
     Ok(lt_dir.join("lt.db"))
 }
 
-fn run_migrations(conn: &Connection) -> Result<()> {
+/// Adds a column to the `issues` table if it does not already exist.
+fn add_column_if_absent(conn: &Connection, column: &str, alter_sql: &str) -> Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name=?1",
+            [column],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !exists {
+        conn.execute_batch(alter_sql)
+            .with_context(|| format!("failed to add {column} column"))?;
+    }
+    Ok(())
+}
+
+/// Creates the base schema (tables, FTS index, and triggers) if it is absent.
+fn create_base_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS issues (
             id               TEXT PRIMARY KEY,
@@ -77,104 +96,48 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             ON issue_comments (issue_id, created_at);",
     )
     .context("failed to run migrations")?;
+    Ok(())
+}
 
-    // Migration: add description column if absent.
-    let has_description: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='description'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
-    if !has_description {
-        conn.execute_batch("ALTER TABLE issues ADD COLUMN description TEXT;")
-            .context("failed to add description column")?;
-    }
+fn run_migrations(conn: &Connection) -> Result<()> {
+    create_base_schema(conn)?;
 
-    // Migration: add labels column if absent.
-    let has_labels: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='labels'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
-    if !has_labels {
-        conn.execute_batch("ALTER TABLE issues ADD COLUMN labels TEXT NOT NULL DEFAULT '';")
-            .context("failed to add labels column")?;
-    }
-
-    // Migration: add project_name column if absent.
-    let has_project_name: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='project_name'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
-    if !has_project_name {
-        conn.execute_batch("ALTER TABLE issues ADD COLUMN project_name TEXT;")
-            .context("failed to add project_name column")?;
-    }
-
-    // Migration: add cycle_name column if absent.
-    let has_cycle_name: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='cycle_name'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
-    if !has_cycle_name {
-        conn.execute_batch("ALTER TABLE issues ADD COLUMN cycle_name TEXT;")
-            .context("failed to add cycle_name column")?;
-    }
-
-    // Migration: add creator_name column if absent.
-    let has_creator_name: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='creator_name'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
-    if !has_creator_name {
-        conn.execute_batch("ALTER TABLE issues ADD COLUMN creator_name TEXT;")
-            .context("failed to add creator_name column")?;
-    }
-
-    // Migration: add parent_id column if absent.
-    let has_parent_id: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='parent_id'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
-    if !has_parent_id {
-        conn.execute_batch("ALTER TABLE issues ADD COLUMN parent_id TEXT;")
-            .context("failed to add parent_id column")?;
-    }
-
-    // Migration: add parent_identifier column if absent.
-    let has_parent_identifier: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='parent_identifier'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
-    if !has_parent_identifier {
-        conn.execute_batch("ALTER TABLE issues ADD COLUMN parent_identifier TEXT;")
-            .context("failed to add parent_identifier column")?;
-    }
+    // Migrations: add columns that were introduced after the initial schema.
+    add_column_if_absent(
+        conn,
+        "description",
+        "ALTER TABLE issues ADD COLUMN description TEXT;",
+    )?;
+    add_column_if_absent(
+        conn,
+        "labels",
+        "ALTER TABLE issues ADD COLUMN labels TEXT NOT NULL DEFAULT '';",
+    )?;
+    add_column_if_absent(
+        conn,
+        "project_name",
+        "ALTER TABLE issues ADD COLUMN project_name TEXT;",
+    )?;
+    add_column_if_absent(
+        conn,
+        "cycle_name",
+        "ALTER TABLE issues ADD COLUMN cycle_name TEXT;",
+    )?;
+    add_column_if_absent(
+        conn,
+        "creator_name",
+        "ALTER TABLE issues ADD COLUMN creator_name TEXT;",
+    )?;
+    add_column_if_absent(
+        conn,
+        "parent_id",
+        "ALTER TABLE issues ADD COLUMN parent_id TEXT;",
+    )?;
+    add_column_if_absent(
+        conn,
+        "parent_identifier",
+        "ALTER TABLE issues ADD COLUMN parent_identifier TEXT;",
+    )?;
 
     Ok(())
 }

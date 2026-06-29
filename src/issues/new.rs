@@ -1,7 +1,8 @@
+use std::io::{self, BufRead, Write};
+
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use serde_json::json;
-use std::io::{self, BufRead, Write};
 
 use crate::config;
 use crate::linear::client::graphql_query;
@@ -88,9 +89,9 @@ pub struct NewIssueArgs {
     pub assignee: Option<String>,
 }
 
-fn read_line(prompt: &str) -> Result<String> {
-    print!("{prompt}");
-    io::stdout().flush()?;
+fn read_line(out: &mut dyn Write, prompt: &str) -> Result<String> {
+    write!(out, "{prompt}")?;
+    out.flush()?;
     let stdin = io::stdin();
     let mut line = String::new();
     stdin.lock().read_line(&mut line)?;
@@ -121,7 +122,7 @@ fn parse_priority(s: &str) -> Option<u8> {
     }
 }
 
-fn pick_team<'a>(teams: &'a [Team], hint: Option<&str>) -> Result<&'a Team> {
+fn pick_team<'a>(out: &mut dyn Write, teams: &'a [Team], hint: Option<&str>) -> Result<&'a Team> {
     if let Some(h) = hint {
         let lower = h.to_lowercase();
         if let Some(t) = teams.iter().find(|t| t.name.to_lowercase() == lower) {
@@ -136,15 +137,15 @@ fn pick_team<'a>(teams: &'a [Team], hint: Option<&str>) -> Result<&'a Team> {
         return Err(anyhow!("no team matching '{h}'"));
     }
 
-    println!("Teams:");
+    writeln!(out, "Teams:")?;
     for (i, t) in teams.iter().enumerate() {
-        println!("  {}. {}", i + 1, t.name);
+        writeln!(out, "  {}. {}", i + 1, t.name)?;
     }
 
     loop {
-        let input = read_line("Team (number or name): ")?;
+        let input = read_line(out, "Team (number or name): ")?;
         if input.is_empty() {
-            println!("Team is required.");
+            writeln!(out, "Team is required.")?;
             continue;
         }
         let lower = input.to_lowercase();
@@ -157,34 +158,37 @@ fn pick_team<'a>(teams: &'a [Team], hint: Option<&str>) -> Result<&'a Team> {
         {
             return Ok(&teams[n - 1]);
         }
-        println!(
+        writeln!(
+            out,
             "Invalid selection. Enter a number (1-{}) or team name.",
             teams.len()
-        );
+        )?;
     }
 }
 
-fn prompt_title(hint: Option<&str>) -> Result<String> {
+fn prompt_title(out: &mut dyn Write, hint: Option<&str>) -> Result<String> {
     if let Some(t) = hint
         && !t.trim().is_empty()
     {
         return Ok(t.to_string());
     }
     loop {
-        let input = read_line("Title: ")?;
+        let input = read_line(out, "Title: ")?;
         if !input.trim().is_empty() {
             return Ok(input.trim().to_string());
         }
-        println!("Title is required.");
+        writeln!(out, "Title is required.")?;
     }
 }
 
-fn prompt_description(hint: Option<&str>) -> Result<Option<String>> {
+fn prompt_description(out: &mut dyn Write, hint: Option<&str>) -> Result<Option<String>> {
     if let Some(d) = hint {
         return Ok(Some(d.to_string()));
     }
-    let input =
-        read_line("Description (optional, press Enter to skip, type 'e' to open editor): ")?;
+    let input = read_line(
+        out,
+        "Description (optional, press Enter to skip, type 'e' to open editor): ",
+    )?;
     if input.trim().is_empty() {
         return Ok(None);
     }
@@ -219,24 +223,31 @@ fn open_editor_for_description() -> Result<Option<String>> {
     }
 }
 
-fn prompt_priority(hint: Option<&str>) -> Result<u8> {
+fn prompt_priority(out: &mut dyn Write, hint: Option<&str>) -> Result<u8> {
     if let Some(h) = hint {
         return parse_priority(h)
             .ok_or_else(|| anyhow!("invalid priority '{h}'; use none/urgent/high/normal/low"));
     }
     loop {
-        let input = read_line("Priority [none/urgent/high/normal/low] (default: none): ")?;
+        let input = read_line(
+            out,
+            "Priority [none/urgent/high/normal/low] (default: none): ",
+        )?;
         if input.trim().is_empty() {
             return Ok(0);
         }
         if let Some(p) = parse_priority(&input) {
             return Ok(p);
         }
-        println!("Invalid priority. Use none, urgent, high, normal, or low.");
+        writeln!(
+            out,
+            "Invalid priority. Use none, urgent, high, normal, or low."
+        )?;
     }
 }
 
 fn pick_state<'a>(
+    out: &mut dyn Write,
     states: &'a [WorkflowState],
     hint: Option<&str>,
 ) -> Result<Option<&'a WorkflowState>> {
@@ -259,19 +270,20 @@ fn pick_state<'a>(
 
     let default_name = default_state.map_or("(first)", |s| s.name.as_str());
 
-    println!("Workflow states:");
+    writeln!(out, "Workflow states:")?;
     for (i, s) in states.iter().enumerate() {
         let marker = if Some(s.id.as_str()) == default_state.map(|d| d.id.as_str()) {
             " *"
         } else {
             ""
         };
-        println!("  {}. {}{}", i + 1, s.name, marker);
+        writeln!(out, "  {}. {}{}", i + 1, s.name, marker)?;
     }
 
-    let input = read_line(&format!(
-        "State (number or name, default: {default_name}): "
-    ))?;
+    let input = read_line(
+        out,
+        &format!("State (number or name, default: {default_name}): "),
+    )?;
 
     if input.trim().is_empty() {
         return Ok(default_state);
@@ -288,11 +300,12 @@ fn pick_state<'a>(
         return Ok(Some(&states[n - 1]));
     }
 
-    println!("Invalid state, using default: {default_name}");
+    writeln!(out, "Invalid state, using default: {default_name}")?;
     Ok(default_state)
 }
 
 fn pick_assignee(
+    out: &mut dyn Write,
     members: &[Member],
     viewer: &Viewer,
     hint: Option<&str>,
@@ -315,14 +328,14 @@ fn pick_assignee(
         return Err(anyhow!("no member matching '{h}'"));
     }
 
-    println!("Assignee (optional):");
-    println!("  0. Unassigned");
-    println!("  me. Assign to me ({})", viewer.name);
+    writeln!(out, "Assignee (optional):")?;
+    writeln!(out, "  0. Unassigned")?;
+    writeln!(out, "  me. Assign to me ({})", viewer.name)?;
     for (i, m) in members.iter().enumerate() {
-        println!("  {}. {}", i + 1, m.name);
+        writeln!(out, "  {}. {}", i + 1, m.name)?;
     }
 
-    let input = read_line("Assignee (number, 'me', or Enter for unassigned): ")?;
+    let input = read_line(out, "Assignee (number, 'me', or Enter for unassigned): ")?;
     let trimmed = input.trim();
 
     if trimmed.is_empty() || trimmed == "0" {
@@ -346,11 +359,65 @@ fn pick_assignee(
         return Ok(Some(members[n - 1].id.clone()));
     }
 
-    println!("Invalid selection, defaulting to unassigned.");
+    writeln!(out, "Invalid selection, defaulting to unassigned.")?;
     Ok(None)
 }
 
-pub fn run(args: NewIssueArgs) -> Result<()> {
+/// Borrowed view of the values shown in the pre-creation confirmation summary.
+struct IssueSummary<'a> {
+    team_name: &'a str,
+    title: &'a str,
+    description: Option<&'a str>,
+    priority: u8,
+    state_id: Option<&'a str>,
+    states: &'a [WorkflowState],
+    assignee_id: Option<&'a str>,
+    viewer: &'a Viewer,
+    members: &'a [Member],
+}
+
+fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
+    writeln!(out)?;
+    writeln!(out, "--- Issue summary ---")?;
+    writeln!(out, "  Team:        {}", summary.team_name)?;
+    writeln!(out, "  Title:       {}", summary.title)?;
+    if let Some(d) = summary.description {
+        let preview: String = d.chars().take(60).collect();
+        let ellipsis = if d.len() > 60 { "..." } else { "" };
+        writeln!(out, "  Description: {preview}{ellipsis}")?;
+    } else {
+        writeln!(out, "  Description: (none)")?;
+    }
+    writeln!(out, "  Priority:    {}", priority_label(summary.priority))?;
+    if let Some(sid) = summary.state_id {
+        let sname = summary
+            .states
+            .iter()
+            .find(|s| s.id == sid)
+            .map_or(sid, |s| s.name.as_str());
+        writeln!(out, "  State:       {sname}")?;
+    } else {
+        writeln!(out, "  State:       (default)")?;
+    }
+    if let Some(aid) = summary.assignee_id {
+        let aname = if aid == summary.viewer.id {
+            summary.viewer.name.clone()
+        } else {
+            summary
+                .members
+                .iter()
+                .find(|m| m.id == aid)
+                .map_or_else(|| aid.to_string(), |m| m.name.clone())
+        };
+        writeln!(out, "  Assignee:    {aname}")?;
+    } else {
+        writeln!(out, "  Assignee:    (unassigned)")?;
+    }
+    writeln!(out, "---------------------")?;
+    Ok(())
+}
+
+pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let token = config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
     let token = token.access_token;
@@ -364,72 +431,52 @@ pub fn run(args: NewIssueArgs) -> Result<()> {
     if teams.is_empty() {
         return Err(anyhow!("no teams found in your Linear organization"));
     }
-    let team = pick_team(&teams, args.team.as_deref())?;
+    let team = pick_team(out, &teams, args.team.as_deref())?;
     let team_id = team.id.clone();
     let team_name = team.name.clone();
 
     // Step 2: Title
-    let title = prompt_title(args.title.as_deref())?;
+    let title = prompt_title(out, args.title.as_deref())?;
 
     // Step 3: Description
-    let description = prompt_description(args.description.as_deref())?;
+    let description = prompt_description(out, args.description.as_deref())?;
 
     // Step 4: Priority
-    let priority = prompt_priority(args.priority.as_deref())?;
+    let priority = prompt_priority(out, args.priority.as_deref())?;
 
     // Step 5: State -- fetch workflow states for the chosen team
     let states = fetch_workflow_states(&token, &team_id)?;
     let state_id = if states.is_empty() {
         None
     } else {
-        pick_state(&states, args.state.as_deref())?.map(|s| s.id.clone())
+        pick_state(out, &states, args.state.as_deref())?.map(|s| s.id.clone())
     };
 
     // Step 6: Assignee -- fetch team members
     let members_data: TeamDetailData =
         graphql_query(&token, TEAM_MEMBERS_QUERY, json!({ "teamId": team_id }))?;
     let members = members_data.team.members.nodes;
-    let assignee_id = pick_assignee(&members, &viewer, args.assignee.as_deref())?;
+    let assignee_id = pick_assignee(out, &members, &viewer, args.assignee.as_deref())?;
 
     // Confirm summary before creating
-    println!();
-    println!("--- Issue summary ---");
-    println!("  Team:        {team_name}");
-    println!("  Title:       {title}");
-    if let Some(ref d) = description {
-        let preview: String = d.chars().take(60).collect();
-        let ellipsis = if d.len() > 60 { "..." } else { "" };
-        println!("  Description: {preview}{ellipsis}");
-    } else {
-        println!("  Description: (none)");
-    }
-    println!("  Priority:    {}", priority_label(priority));
-    if let Some(ref sid) = state_id {
-        let sname = states
-            .iter()
-            .find(|s| &s.id == sid)
-            .map_or(sid.as_str(), |s| s.name.as_str());
-        println!("  State:       {sname}");
-    } else {
-        println!("  State:       (default)");
-    }
-    if let Some(ref aid) = assignee_id {
-        let aname = if aid == &viewer.id {
-            viewer.name.clone()
-        } else {
-            members
-                .iter()
-                .find(|m| &m.id == aid).map_or_else(|| aid.clone(), |m| m.name.clone())
-        };
-        println!("  Assignee:    {aname}");
-    } else {
-        println!("  Assignee:    (unassigned)");
-    }
-    println!("---------------------");
+    print_summary(
+        out,
+        &IssueSummary {
+            team_name: &team_name,
+            title: &title,
+            description: description.as_deref(),
+            priority,
+            state_id: state_id.as_deref(),
+            states: &states,
+            assignee_id: assignee_id.as_deref(),
+            viewer: &viewer,
+            members: &members,
+        },
+    )?;
 
-    let confirm = read_line("Create issue? [Y/n]: ")?;
+    let confirm = read_line(out, "Create issue? [Y/n]: ")?;
     if !confirm.trim().is_empty() && confirm.trim().to_lowercase() != "y" {
-        println!("Aborted.");
+        writeln!(out, "Aborted.")?;
         return Ok(());
     }
 
@@ -443,11 +490,12 @@ pub fn run(args: NewIssueArgs) -> Result<()> {
     };
 
     let issue = create_issue(&token, input)?;
-    println!("Created: {} - {}", issue.identifier, issue.title);
-    println!(
+    writeln!(out, "Created: {} - {}", issue.identifier, issue.title)?;
+    writeln!(
+        out,
         "URL:     https://linear.app/{}/issue/{}",
         viewer.organization.url_key, issue.identifier
-    );
+    )?;
 
     Ok(())
 }

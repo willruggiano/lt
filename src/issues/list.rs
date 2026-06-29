@@ -1,22 +1,23 @@
+use std::io::Write;
+
 use anyhow::Result;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info};
 
-use crate::db;
-use crate::linear::client::graphql_query;
-use crate::linear::types::PageInfo;
-
 use super::IssueArgs;
 use super::display::{print_table, print_table_cached};
 use super::filter::build_filter;
 use super::sort::build_sort;
+use crate::db;
+use crate::linear::client::graphql_query;
+use crate::linear::types::PageInfo;
 
 /// Cache TTL in seconds (5 minutes).
 const CACHE_TTL_SECS: i64 = 300;
 
-const ISSUES_QUERY: &str = r"
+pub(crate) const ISSUES_QUERY: &str = r"
 query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
   issues(filter: $filter, sort: $sort, first: $first, after: $after) {
     nodes {
@@ -126,6 +127,37 @@ struct IssuesData {
     issues: IssueConnection,
 }
 
+/// Convert a fetched `Issue` into a `db::Issue` for caching.
+pub(crate) fn to_db_issue(src: &Issue) -> db::Issue {
+    let labels = src
+        .labels
+        .nodes
+        .iter()
+        .map(|l| l.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    db::Issue {
+        id: src.id.clone(),
+        identifier: src.identifier.clone(),
+        title: src.title.clone(),
+        priority_label: src.priority_label.clone(),
+        state_name: src.state.name.clone(),
+        assignee_name: src.assignee.as_ref().map(|u| u.name.clone()),
+        team_name: src.team.name.clone(),
+        team_key: Some(src.team.id.clone()),
+        created_at: src.created_at.clone(),
+        updated_at: src.updated_at.clone(),
+        synced_at: String::new(), // filled by upsert_issues
+        description: src.description.clone(),
+        labels,
+        project_name: src.project.as_ref().map(|p| p.name.clone()),
+        cycle_name: src.cycle.as_ref().and_then(|c| c.name.clone()),
+        creator_name: src.creator.as_ref().map(|u| u.name.clone()),
+        parent_id: src.parent.as_ref().map(|p| p.id.clone()),
+        parent_identifier: src.parent.as_ref().map(|p| p.identifier.clone()),
+    }
+}
+
 pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool, Option<String>)> {
     let token = crate::auth::refresh::load_or_refresh_token()?;
 
@@ -161,7 +193,9 @@ fn resolve_me(conn: &rusqlite::Connection, args: &mut IssueArgs) -> Result<()> {
     if !is_me {
         return Ok(());
     }
-    let name = if let Some(n) = db::get_meta(conn, "viewer_name")? { n } else {
+    let name = if let Some(n) = db::get_meta(conn, "viewer_name")? {
+        n
+    } else {
         let token = crate::auth::refresh::load_or_refresh_token()?;
         let viewer = crate::linear::viewer::fetch_viewer(&token.access_token)?;
         db::set_meta(conn, "viewer_name", &viewer.name)?;
@@ -171,13 +205,13 @@ fn resolve_me(conn: &rusqlite::Connection, args: &mut IssueArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn run(mut args: IssueArgs) -> Result<()> {
+pub fn run(out: &mut dyn Write, mut args: IssueArgs) -> Result<()> {
     // --live: bypass cache entirely.
     if args.live {
         let (issues, has_next_page, _) = fetch(&args, None)?;
-        print_table(&issues);
+        print_table(out, &issues)?;
         if has_next_page {
-            println!("\n+more issues");
+            writeln!(out, "\n+more issues")?;
         }
         return Ok(());
     }
@@ -197,23 +231,24 @@ pub fn run(mut args: IssueArgs) -> Result<()> {
             // Re-open after sync.
             let conn2 = db::open_db()?;
             let issues = db::query_issues(&conn2, &args)?;
-            print_table_cached(&issues, "(cached)");
+            print_table_cached(out, &issues, "(cached)")?;
         }
         Some(ref ts) => {
             // Parse the timestamp and check age.
-            let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(ts)
-                .map_or(i64::MAX, |t| Utc::now().signed_duration_since(t).num_seconds());
+            let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(ts).map_or(i64::MAX, |t| {
+                Utc::now().signed_duration_since(t).num_seconds()
+            });
 
             if age_secs < CACHE_TTL_SECS {
                 // Fresh cache -- serve immediately.
                 let issues = db::query_issues(&conn, &args)?;
                 let note = format!("(cached, age {age_secs}s)");
-                print_table_cached(&issues, &note);
+                print_table_cached(out, &issues, &note)?;
             } else {
                 // Stale cache -- serve immediately, then run delta sync in background.
                 let issues = db::query_issues(&conn, &args)?;
                 let note = format!("(stale cache, age {age_secs}s -- syncing in background)");
-                print_table_cached(&issues, &note);
+                print_table_cached(out, &issues, &note)?;
 
                 // Trigger delta sync in a background thread; ignore join errors.
                 std::thread::spawn(|| {

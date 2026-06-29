@@ -1,12 +1,13 @@
-use anyhow::{Context, Result, anyhow};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use sha2::{Digest, Sha256};
 use std::io::{Read, Write as _};
 use std::net::TcpListener;
 
-use crate::config::{self, AuthToken};
-
+use anyhow::{Context, Result, anyhow};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use sha2::{Digest, Sha256};
 use tracing::info;
+
+use crate::config::{self, AuthToken};
 
 const CALLBACK_PORT: u16 = 7342;
 const AUTH_URL: &str = "https://linear.app/oauth/authorize";
@@ -17,20 +18,20 @@ const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 /// while the TUI owns the terminal.
 pub fn run_non_interactive() -> Result<()> {
     let (client_id, client_secret) = resolve_credentials_non_interactive()?;
-    run_with_credentials(client_id, client_secret)
+    run_with_credentials(&client_id, &client_secret)
 }
 
 pub fn run() -> Result<()> {
     let (client_id, client_secret) = resolve_credentials()?;
-    run_with_credentials(client_id, client_secret)
+    run_with_credentials(&client_id, &client_secret)
 }
 
-fn run_with_credentials(client_id: String, client_secret: String) -> Result<()> {
+fn run_with_credentials(client_id: &str, client_secret: &str) -> Result<()> {
     let (code_verifier, code_challenge) = generate_pkce();
     let state = random_base64(16);
     let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/callback");
 
-    let auth_url = build_auth_url(&client_id, &redirect_uri, &state, &code_challenge);
+    let auth_url = build_auth_url(client_id, &redirect_uri, &state, &code_challenge)?;
 
     info!("Opening Linear authorization page in your browser...");
     info!("If the browser does not open, visit: {}", auth_url);
@@ -42,13 +43,13 @@ fn run_with_credentials(client_id: String, client_secret: String) -> Result<()> 
 
     info!("Authorization received. Exchanging for token...");
 
-    let token = exchange_code(
-        &client_id,
-        &client_secret,
-        &code,
-        &redirect_uri,
-        &code_verifier,
-    )
+    let token = exchange_code(&TokenExchange {
+        client_id,
+        client_secret,
+        code: &code,
+        redirect_uri: &redirect_uri,
+        code_verifier: &code_verifier,
+    })
     .context("exchanging authorization code for token")?;
 
     config::save_token(&token)?;
@@ -61,42 +62,42 @@ fn run_with_credentials(client_id: String, client_secret: String) -> Result<()> 
 // Credential resolution
 // ---------------------------------------------------------------------------
 
+/// Look up credentials from env vars (precedence) then the stored config file.
+/// Returns `Ok(None)` when neither source has credentials; propagates errors
+/// from loading the config file.
+fn lookup_stored_credentials() -> Result<Option<(String, String)>> {
+    // 1. Environment variables take precedence.
+    if let (Ok(id), Ok(secret)) = (
+        std::env::var("LINEAR_CLIENT_ID"),
+        std::env::var("LINEAR_CLIENT_SECRET"),
+    ) {
+        return Ok(Some((id, secret)));
+    }
+
+    // 2. Stored config file.
+    let cfg = config::load_config()?;
+    if let (Some(id), Some(secret)) = (cfg.client_id, cfg.client_secret) {
+        return Ok(Some((id, secret)));
+    }
+
+    Ok(None)
+}
+
 /// Resolve credentials without interactive prompting. Checks env vars and
 /// config file only; returns an error if neither source has credentials.
 fn resolve_credentials_non_interactive() -> Result<(String, String)> {
-    // 1. Environment variables take precedence.
-    if let (Ok(id), Ok(secret)) = (
-        std::env::var("LINEAR_CLIENT_ID"),
-        std::env::var("LINEAR_CLIENT_SECRET"),
-    ) {
-        return Ok((id, secret));
-    }
-
-    // 2. Stored config file.
-    let cfg = config::load_config()?;
-    if let (Some(id), Some(secret)) = (cfg.client_id, cfg.client_secret) {
-        return Ok((id, secret));
-    }
-
-    Err(anyhow!(
-        "no OAuth credentials configured -- set LINEAR_CLIENT_ID and \
-         LINEAR_CLIENT_SECRET env vars or run `lt auth login` from the terminal"
-    ))
+    lookup_stored_credentials()?.ok_or_else(|| {
+        anyhow!(
+            "no OAuth credentials configured -- set LINEAR_CLIENT_ID and \
+             LINEAR_CLIENT_SECRET env vars or run `lt auth login` from the terminal"
+        )
+    })
 }
 
 fn resolve_credentials() -> Result<(String, String)> {
-    // 1. Environment variables take precedence.
-    if let (Ok(id), Ok(secret)) = (
-        std::env::var("LINEAR_CLIENT_ID"),
-        std::env::var("LINEAR_CLIENT_SECRET"),
-    ) {
-        return Ok((id, secret));
-    }
-
-    // 2. Stored config file.
-    let cfg = config::load_config()?;
-    if let (Some(id), Some(secret)) = (cfg.client_id, cfg.client_secret) {
-        return Ok((id, secret));
+    // 1. Environment variables, then 2. stored config file.
+    if let Some(creds) = lookup_stored_credentials()? {
+        return Ok(creds);
     }
 
     // 3. Interactive prompt.
@@ -118,7 +119,7 @@ fn resolve_credentials() -> Result<(String, String)> {
 }
 
 fn prompt(label: &str) -> Result<String> {
-    eprint!("{label}");
+    write!(std::io::stderr(), "{label}")?;
     std::io::stderr().flush()?;
     let mut buf = String::new();
     std::io::stdin().read_line(&mut buf)?;
@@ -157,8 +158,8 @@ fn build_auth_url(
     redirect_uri: &str,
     state: &str,
     code_challenge: &str,
-) -> String {
-    let mut u = url::Url::parse(AUTH_URL).expect("AUTH_URL is valid");
+) -> Result<String> {
+    let mut u = url::Url::parse(AUTH_URL).context("AUTH_URL is not a valid URL")?;
     u.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -167,7 +168,7 @@ fn build_auth_url(
         .append_pair("scope", "read,write")
         .append_pair("code_challenge", code_challenge)
         .append_pair("code_challenge_method", "S256");
-    u.to_string()
+    Ok(u.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -224,13 +225,10 @@ fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
                  <p>You may close this tab.</p></body></html>",
             );
             return Ok(code.clone());
-        } else {
-            let error = params
-                .get("error")
-                .map_or("unknown error", String::as_str);
-            let _ = http_reply(&mut stream, 400, "Authorization failed");
-            return Err(anyhow!("authorization denied: {error}"));
         }
+        let error = params.get("error").map_or("unknown error", String::as_str);
+        let _ = http_reply(&mut stream, 400, "Authorization failed");
+        return Err(anyhow!("authorization denied: {error}"));
     }
 }
 
@@ -261,20 +259,23 @@ fn http_reply(stream: &mut impl std::io::Write, status: u16, body: &str) -> Resu
 // Token exchange
 // ---------------------------------------------------------------------------
 
-fn exchange_code(
-    client_id: &str,
-    client_secret: &str,
-    code: &str,
-    redirect_uri: &str,
-    code_verifier: &str,
-) -> Result<AuthToken> {
+/// Inputs required to exchange an authorization code for an access token.
+struct TokenExchange<'a> {
+    client_id: &'a str,
+    client_secret: &'a str,
+    code: &'a str,
+    redirect_uri: &'a str,
+    code_verifier: &'a str,
+}
+
+fn exchange_code(exchange: &TokenExchange) -> Result<AuthToken> {
     let params = [
         ("grant_type", "authorization_code"),
-        ("client_id", client_id),
-        ("client_secret", client_secret),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("code_verifier", code_verifier),
+        ("client_id", exchange.client_id),
+        ("client_secret", exchange.client_secret),
+        ("code", exchange.code),
+        ("redirect_uri", exchange.redirect_uri),
+        ("code_verifier", exchange.code_verifier),
     ];
 
     let result = ureq::post(TOKEN_URL)
