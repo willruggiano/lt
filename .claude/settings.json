@@ -16,13 +16,27 @@
       "mcp__parallel__web_fetch",
       "mcp__parallel__web_search"
     ],
-    "ask": [],
+    "ask": [
+      "Edit(.claude/*)"
+    ],
     "deny": [
-      "Edit(.claude/hooks/*)",
-      "Edit(.claude/settings.*)",
       "Edit(~/.claude/hooks/*)",
       "Edit(~/.claude/settings.*)",
       "Read(.envrc)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/bin/setup.sh\"",
+            "timeout": 600
+          }
+        ]
+      }
     ]
   },
   "worktree": {
