@@ -11,38 +11,32 @@
 //!   seed, size ──> generate() ──> Dataset ──┘                         (no token needed)
 //! ```
 //!
-//! `generate` is pure and deterministic -- no wall clock, no thread RNG -- so
-//! the same `(seed, size)` always yields byte-identical issues and comments.
-//! Knobs: `--seed` and `--size`. Design:
-//! `docs/design/deterministic-simulation-testing-adr.md`.
+//! Free-text content (names, titles, descriptions, comments, teams, projects,
+//! labels) comes from the `fake` faker library; only the genuine Linear domain
+//! enums (priority, workflow state) are fixed. All faker calls and structural
+//! choices draw from a single seeded `StdRng`, so the same `(seed, size)`
+//! always yields identical issues and comments. Knobs: `--seed`, `--size`.
+//! Design: `docs/design/dst.md`.
 
+use std::collections::HashSet;
 use std::io::Write;
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use clap::Args;
+use fake::Fake;
+use fake::faker::company::en::{BsNoun, BsVerb, Buzzword, Industry};
+use fake::faker::lorem::en::{Paragraph, Sentence, Word};
+use fake::faker::name::en::Name;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 use crate::db;
 
-const TEAMS: &[(&str, &str)] = &[
-    ("Engineering", "ENG"),
-    ("Design", "DES"),
-    ("Product", "PRD"),
-    ("Operations", "OPS"),
-];
+/// Linear's fixed priority vocabulary (matches the labels the TUI renders).
+const PRIORITIES: &[&str] = &["No priority", "Urgent", "High", "Normal", "Low"];
 
-const USERS: &[&str] = &[
-    "Ada Lovelace",
-    "Alan Turing",
-    "Grace Hopper",
-    "Edsger Dijkstra",
-    "Barbara Liskov",
-    "Ken Thompson",
-    "Margaret Hamilton",
-];
-
+/// Standard Linear workflow states.
 const STATES: &[&str] = &[
     "Backlog",
     "Todo",
@@ -52,86 +46,92 @@ const STATES: &[&str] = &[
     "Canceled",
 ];
 
-const PRIORITIES: &[&str] = &["No priority", "Urgent", "High", "Normal", "Low"];
-
-const LABELS: &[&str] = &[
-    "bug",
-    "feature",
-    "chore",
-    "docs",
-    "needs-research",
-    "needs-design",
-    "blocked",
-    "good-first-issue",
-];
-
-const PROJECTS: &[&str] = &["Core", "Mobile", "Platform", "Growth"];
-
-const VERBS: &[&str] = &[
-    "Fix",
-    "Add",
-    "Refactor",
-    "Remove",
-    "Document",
-    "Investigate",
-    "Optimize",
-    "Harden",
-];
-
-const ADJS: &[&str] = &[
-    "flaky",
-    "slow",
-    "missing",
-    "duplicate",
-    "stale",
-    "unbounded",
-    "legacy",
-];
-
-const NOUNS: &[&str] = &[
-    "sync",
-    "cache",
-    "parser",
-    "renderer",
-    "token refresh",
-    "pagination",
-    "search index",
-    "config loader",
-];
-
-const COMMENT_BODIES: &[&str] = &[
-    "Reproduced locally. Looks like a race in the background thread.",
-    "I can pick this up next cycle.",
-    "Blocked on the upstream API change.",
-    "Added a regression test; ready for review.",
-    "Is this still relevant? The code path was removed.",
-    "Nice find -- the fix is a one-liner.",
-];
-
 /// 2026-01-01T00:00:00Z. Fixed base so timestamps never depend on the wall clock.
 const BASE_SECS: i64 = 1_767_225_600;
 
 /// A generated, deterministic dataset ready to upsert into the local DB.
+#[derive(PartialEq)]
 pub struct Dataset {
     pub issues: Vec<db::Issue>,
     pub comments: Vec<db::Comment>,
 }
 
-/// Seeded dataset generator. Holds the RNG plus the per-team identifier
-/// counters so `ENG-1`, `ENG-2`, ... stay sequential within a team.
+/// Uppercase the first character of `s`.
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Derive a unique 3-letter team key (e.g. `ENG`) from a team name, suffixing
+/// a digit on collision.
+fn team_key(name: &str, used: &HashSet<String>) -> String {
+    let base: String = name
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .take(3)
+        .collect::<String>()
+        .to_uppercase();
+    let base = if base.is_empty() {
+        "TEAM".to_string()
+    } else {
+        base
+    };
+    if !used.contains(&base) {
+        return base;
+    }
+    let mut i = 2;
+    loop {
+        let cand = format!("{base}{i}");
+        if !used.contains(&cand) {
+            return cand;
+        }
+        i += 1;
+    }
+}
+
+/// Build 3-5 teams with distinct names and keys.
+fn build_teams(rng: &mut StdRng) -> Vec<(String, String)> {
+    let n = rng.random_range(3..6usize);
+    let mut teams: Vec<(String, String)> = Vec::with_capacity(n);
+    let mut names: HashSet<String> = HashSet::new();
+    let mut keys: HashSet<String> = HashSet::new();
+    let mut attempts = 0;
+    while teams.len() < n && attempts < n * 8 {
+        attempts += 1;
+        let name: String = Industry().fake_with_rng(rng);
+        if !names.insert(name.clone()) {
+            continue;
+        }
+        let key = team_key(&name, &keys);
+        keys.insert(key.clone());
+        teams.push((name, key));
+    }
+    teams
+}
+
+/// Seeded dataset generator. Holds the RNG, the generated teams, and their
+/// per-team identifier counters so `ENG-1`, `ENG-2`, ... stay sequential.
 struct Generator {
     rng: StdRng,
     seed: u64,
+    teams: Vec<(String, String)>,
     team_counters: Vec<u32>,
     base: DateTime<Utc>,
 }
 
 impl Generator {
     fn new(seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let teams = build_teams(&mut rng);
+        let team_counters = vec![0; teams.len()];
         Self {
-            rng: StdRng::seed_from_u64(seed),
+            rng,
             seed,
-            team_counters: vec![0; TEAMS.len()],
+            teams,
+            team_counters,
             base: DateTime::<Utc>::from_timestamp(BASE_SECS, 0).unwrap_or_default(),
         }
     }
@@ -152,38 +152,41 @@ impl Generator {
         (c.to_rfc3339(), u.to_rfc3339())
     }
 
-    fn title(&mut self) -> String {
-        format!(
-            "{} {} {}",
-            self.pick(VERBS),
-            self.pick(ADJS),
-            self.pick(NOUNS)
-        )
+    fn name(&mut self) -> String {
+        Name().fake_with_rng(&mut self.rng)
     }
 
-    /// A comma-joined set of 0-3 distinct labels (matching the DB column format).
+    fn title(&mut self) -> String {
+        let verb: String = BsVerb().fake_with_rng(&mut self.rng);
+        let adj: String = Buzzword().fake_with_rng(&mut self.rng);
+        let noun: String = BsNoun().fake_with_rng(&mut self.rng);
+        capitalize(&format!("{verb} {adj} {noun}"))
+    }
+
+    /// A comma-joined set of 0-3 distinct word labels (matching the DB column).
     fn labels(&mut self) -> String {
         let n = self.rng.random_range(0..4usize);
-        let mut chosen: Vec<&str> = Vec::with_capacity(n);
+        let mut chosen: Vec<String> = Vec::with_capacity(n);
         for _ in 0..n {
-            let l = *self.pick(LABELS);
-            if !chosen.contains(&l) {
-                chosen.push(l);
+            let w: String = Word().fake_with_rng(&mut self.rng);
+            if !chosen.contains(&w) {
+                chosen.push(w);
             }
         }
         chosen.join(",")
     }
 
-    /// A markdown description (heading + list) for ~80% of issues, exercising
-    /// the detail-pane renderer. The rest have none.
+    /// A markdown description (heading + paragraph + list) for ~80% of issues,
+    /// exercising the detail-pane renderer. The rest have none.
     fn description(&mut self, title: &str) -> Option<String> {
         if self.rng.random_ratio(1, 5) {
             return None;
         }
-        Some(format!(
-            "## {title}\n\nThe `{}` path needs attention.\n\n- reproduce on `main`\n- add a regression test\n- verify the fix\n",
-            self.pick(NOUNS)
-        ))
+        let para: String = Paragraph(2..4).fake_with_rng(&mut self.rng);
+        let b1: String = Sentence(4..8).fake_with_rng(&mut self.rng);
+        let b2: String = Sentence(4..8).fake_with_rng(&mut self.rng);
+        let b3: String = Sentence(4..8).fake_with_rng(&mut self.rng);
+        Some(format!("## {title}\n\n{para}\n\n- {b1}\n- {b2}\n- {b3}\n"))
     }
 
     /// A user name for ~80% of issues; `None` (unassigned) for the rest.
@@ -191,13 +194,14 @@ impl Generator {
         if self.rng.random_ratio(1, 5) {
             None
         } else {
-            Some((*self.pick(USERS)).to_string())
+            Some(self.name())
         }
     }
 
-    fn maybe<T: AsRef<str>>(&mut self, items: &[T], numerator: u32) -> Option<String> {
-        if self.rng.random_ratio(numerator, 10) {
-            Some(self.pick(items).as_ref().to_string())
+    fn maybe_project(&mut self) -> Option<String> {
+        if self.rng.random_ratio(6, 10) {
+            let p: String = Buzzword().fake_with_rng(&mut self.rng);
+            Some(capitalize(&p))
         } else {
             None
         }
@@ -233,8 +237,8 @@ impl Generator {
     }
 
     fn issue(&mut self, index: usize, existing: &[db::Issue]) -> db::Issue {
-        let team_idx = self.rng.random_range(0..TEAMS.len());
-        let (team_name, team_key) = TEAMS[team_idx];
+        let team_idx = self.rng.random_range(0..self.teams.len());
+        let (team_name, team_key) = self.teams[team_idx].clone();
         self.team_counters[team_idx] += 1;
         let identifier = format!("{team_key}-{}", self.team_counters[team_idx]);
         let (created_at, updated_at) = self.timestamps();
@@ -242,10 +246,10 @@ impl Generator {
         let description = self.description(&title);
         let assignee_name = self.maybe_user();
         let labels = self.labels();
-        let project_name = self.maybe(PROJECTS, 6);
+        let project_name = self.maybe_project();
         let cycle_name = self.maybe_cycle();
-        let creator_name = Some((*self.pick(USERS)).to_string());
-        let (parent_id, parent_identifier) = self.maybe_parent(team_key, existing);
+        let creator_name = Some(self.name());
+        let (parent_id, parent_identifier) = self.maybe_parent(&team_key, existing);
         db::Issue {
             id: format!("sim-{:016x}-{index}", self.seed),
             identifier,
@@ -253,8 +257,8 @@ impl Generator {
             priority_label: (*self.pick(PRIORITIES)).to_string(),
             state_name: (*self.pick(STATES)).to_string(),
             assignee_name,
-            team_name: team_name.to_string(),
-            team_key: Some(team_key.to_string()),
+            team_name,
+            team_key: Some(team_key),
             created_at,
             updated_at,
             synced_at: String::new(),
@@ -273,11 +277,12 @@ impl Generator {
         let mut out = Vec::with_capacity(n);
         for c in 0..n {
             let (created_at, updated_at) = self.timestamps();
+            let body: String = Sentence(8..18).fake_with_rng(&mut self.rng);
             out.push(db::Comment {
                 id: format!("{}-c{c}", issue.id),
                 issue_id: issue.id.clone(),
-                body: (*self.pick(COMMENT_BODIES)).to_string(),
-                author_name: Some((*self.pick(USERS)).to_string()),
+                body,
+                author_name: Some(self.name()),
                 created_at,
                 updated_at,
                 synced_at: String::new(),
@@ -315,16 +320,16 @@ pub struct SimArgs {
 /// Generate a dataset and write it into the active profile's local database.
 ///
 /// Marks the cache fresh so the offline list/TUI serve the generated data
-/// without attempting a network sync, and records a `viewer_name` so the
-/// `--assignee=me` filter resolves.
+/// without attempting a network sync, and records a `viewer_name` (a real
+/// assignee from the dataset) so the `--assignee=me` filter resolves.
 pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     let dataset = generate(args.seed, args.size);
     let conn = db::open_db()?;
     db::upsert_issues(&conn, &dataset.issues)?;
     db::upsert_comments(&conn, &dataset.comments)?;
     db::set_meta(&conn, "last_synced_at", &Utc::now().to_rfc3339())?;
-    if let Some(first) = USERS.first() {
-        db::set_meta(&conn, "viewer_name", first)?;
+    if let Some(name) = dataset.issues.iter().find_map(|i| i.assignee_name.clone()) {
+        db::set_meta(&conn, "viewer_name", &name)?;
     }
     writeln!(
         out,
@@ -343,46 +348,14 @@ mod tests {
 
     use super::*;
 
-    /// Stable fingerprint of a dataset for equality comparison (`db::Issue` has
-    /// no `PartialEq`).
-    fn fingerprint(d: &Dataset) -> Vec<String> {
-        let mut v: Vec<String> = d
-            .issues
-            .iter()
-            .map(|i| {
-                format!(
-                    "{}|{}|{}|{}|{}|{:?}|{}|{:?}|{}",
-                    i.id,
-                    i.identifier,
-                    i.title,
-                    i.priority_label,
-                    i.state_name,
-                    i.assignee_name,
-                    i.labels,
-                    i.parent_id,
-                    i.created_at
-                )
-            })
-            .collect();
-        v.extend(
-            d.comments
-                .iter()
-                .map(|c| format!("{}|{}|{}", c.id, c.issue_id, c.body)),
-        );
-        v
-    }
-
     #[test]
     fn same_seed_is_deterministic() {
-        assert_eq!(
-            fingerprint(&generate(42, 64)),
-            fingerprint(&generate(42, 64))
-        );
+        assert!(generate(42, 64) == generate(42, 64));
     }
 
     #[test]
     fn different_seed_differs() {
-        assert_ne!(fingerprint(&generate(1, 64)), fingerprint(&generate(2, 64)));
+        assert!(generate(1, 64) != generate(2, 64));
     }
 
     #[test]

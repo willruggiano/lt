@@ -1,8 +1,8 @@
-# Deterministic Simulation Testing (ENG-18)
+---
+issue: https://linear.app/willruggiano/issue/ENG-18/deterministic-simulation-testing
+---
 
-## Status
-
-Accepted
+# Deterministic Simulation Testing
 
 ## Context
 
@@ -42,8 +42,8 @@ smaller seam and exercises the exact code path the TUI uses.
 
 ## Decision
 
-Add a `sim` cargo feature (`[features] sim = []`, no new dependencies — `rand`
-is already required by auth). When enabled it compiles `src/sim/` into both the
+Add a `sim` cargo feature (`[features] sim = ["dep:fake"]`). When enabled it
+compiles `src/sim/` — and the optional `fake` faker dependency — into both the
 binary and the test binary.
 
 ### Generator
@@ -52,11 +52,15 @@ binary and the test binary.
 deterministic**:
 
 - RNG is `StdRng::seed_from_u64(seed)` — portable/reproducible across platforms
-  (unlike `SmallRng`).
+  (unlike `SmallRng`). The same `StdRng` drives both structural choices and
+  every `fake` faker call (`fake_with_rng`), so the whole dataset is one
+  deterministic stream.
 - No wall clock: timestamps derive from a fixed base (`2026-01-01T00:00:00Z`)
   plus seeded offsets, with `updated_at >= created_at`.
-- Records are templated from word lists (verbs/adjectives/nouns, teams, users,
-  states, priorities, labels, projects), not hand-written.
+- Free-text content (names, titles, descriptions, comments, teams, projects,
+  labels) comes from the `fake` faker library — not hand-rolled word lists. Only
+  the genuine Linear domain enums (priority, workflow state) are fixed; faking
+  those would produce nonsense, not realism.
 - Referential integrity holds by construction: per-team sequential identifiers
   (`ENG-1`, `ENG-2`, …); `parent_id` only ever points at an earlier issue on the
   same team; every comment's `issue_id` exists.

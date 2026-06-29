@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use crate::issues::IssueArgs;
 
 /// A row in the `issues` table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Issue {
     pub id: String,
     pub identifier: String,

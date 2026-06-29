@@ -16,11 +16,8 @@ categories = ["command-line-utilities"]
 ignored = ["chumsky"]
 
 [features]
-# Deterministic simulation testing: compiles the `lt sim` subcommand and the
-# seeded dataset generator into both the CLI and the test binary. No extra
-# dependencies -- `rand` is already required by auth.
-# See docs/design/deterministic-simulation-testing-adr.md.
-sim = []
+# Deterministic simulation testing. See docs/design/dst.md.
+sim = ["dep:fake"]
 
 [dependencies]
 anyhow = "1"
@@ -43,6 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 chumsky = "0.13"
 pulldown-cmark = { version = "0.13.4", default-features = false }
+fake = { version = "5.1.0", default-features = false, optional = true }
 
 [build-dependencies]
 graphql-parser = "0.4"
