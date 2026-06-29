@@ -34,3 +34,4 @@ jobs:
       - run: nix flake check
       - run: nix build .#lt
       - run: nix develop .#lt --command make check
+      - run: nix develop .#lt --command make test

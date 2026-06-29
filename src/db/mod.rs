@@ -108,7 +108,7 @@ fn create_base_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn run_migrations(conn: &Connection) -> Result<()> {
+pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     create_base_schema(conn)?;
 
     // Migrations: add columns that were introduced after the initial schema.
