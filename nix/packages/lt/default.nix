@@ -9,7 +9,12 @@
     pkgs,
     system,
     ...
-  }: {
+  }: let
+    advisorySetup = import ../../advisory-db.nix {
+      inherit pkgs;
+      advisoryDb = inputs.advisory-db;
+    };
+  in {
     _module.args.pkgs = import inputs.nixpkgs {
       inherit system;
       overlays = [
@@ -46,6 +51,26 @@
       buildPhase = ''
         runHook preBuild
         cargo clippy --all-targets -- -D warnings
+        runHook postBuild
+      '';
+      doCheck = false;
+      installPhase = ''
+        touch $out
+      '';
+    });
+
+    # Run the full `cargo deny check` as a build-sandbox check so it reuses the
+    # lt package's vendored deps (offline metadata resolution) and the baked,
+    # git-shaped advisory database (offline advisories). deny.toml is not part of
+    # the lt src fileset, so it is pulled in directly here.
+    checks.cargo-deny = config.packages.lt.overrideAttrs (old: {
+      pname = "${old.pname}-cargo-deny";
+      nativeBuildInputs = old.nativeBuildInputs ++ [config.packages.toolchain];
+      buildPhase = ''
+        runHook preBuild
+        cp ${../../../deny.toml} deny.toml
+        ${advisorySetup ".cache/advisory-db"}
+        CARGO_NET_OFFLINE=true cargo deny --offline check
         runHook postBuild
       '';
       doCheck = false;

@@ -11,7 +11,7 @@ build: ## Build the binary
 check: ## Run formatter, linter, supply-chain, dedup, and test gates
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
-	cargo deny check
+	CARGO_NET_OFFLINE=true cargo deny --offline check
 	cargo machete
 	cpd .
 	cargo dupes check --exclude-tests --min-nodes 25 --max-exact 0 --max-near 0
