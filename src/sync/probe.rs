@@ -93,3 +93,36 @@ pub fn run(out: &mut dyn Write, override_token: Option<String>) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preview(body: &str) -> String {
+        let mut buf = Vec::new();
+        print_body_preview(&mut buf, body).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn empty_body_is_reported() {
+        assert_eq!(preview(""), "(empty body)\n");
+    }
+
+    #[test]
+    fn shows_up_to_five_lines() {
+        let out = preview("a\nb\nc\nd\ne\nf\ng");
+        assert!(out.contains("first 5 line(s)"));
+        assert!(out.contains("\na\n") && out.contains("\ne\n"));
+        // Lines past the fifth are dropped.
+        assert!(!out.contains("\nf\n"));
+    }
+
+    #[test]
+    fn truncates_long_lines_at_200_chars() {
+        let long = "x".repeat(250);
+        let out = preview(&long);
+        assert!(out.contains(&format!("{}...", "x".repeat(200))));
+        assert!(!out.contains(&"x".repeat(201)));
+    }
+}

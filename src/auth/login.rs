@@ -302,3 +302,72 @@ fn exchange_code(exchange: &TokenExchange) -> Result<AuthToken> {
         Err(e) => Err(anyhow::Error::from(e)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pkce_challenge_is_sha256_of_verifier() {
+        let (verifier, challenge) = generate_pkce();
+        // Recompute S256(verifier) and compare to the emitted challenge.
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let expected = URL_SAFE_NO_PAD.encode(hasher.finalize());
+        assert_eq!(challenge, expected);
+        // base64url(no-pad) is never empty and carries no '=' padding.
+        assert!(!challenge.is_empty());
+        assert!(!challenge.contains('='));
+    }
+
+    #[test]
+    fn build_auth_url_encodes_oauth_params() {
+        let url = build_auth_url(
+            "client-123",
+            "http://localhost:7342/callback",
+            "state-xyz",
+            "chal",
+        )
+        .unwrap();
+        let parsed = url::Url::parse(&url).unwrap();
+        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(parsed.host_str(), Some("linear.app"));
+        assert_eq!(pairs.get("response_type").map(String::as_str), Some("code"));
+        assert_eq!(
+            pairs.get("client_id").map(String::as_str),
+            Some("client-123")
+        );
+        assert_eq!(
+            pairs.get("redirect_uri").map(String::as_str),
+            Some("http://localhost:7342/callback")
+        );
+        assert_eq!(pairs.get("state").map(String::as_str), Some("state-xyz"));
+        assert_eq!(pairs.get("scope").map(String::as_str), Some("read,write"));
+        assert_eq!(
+            pairs.get("code_challenge").map(String::as_str),
+            Some("chal")
+        );
+        assert_eq!(
+            pairs.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+    }
+
+    #[test]
+    fn http_reply_writes_status_line_and_body() {
+        let mut buf = Vec::new();
+        http_reply(&mut buf, 200, "<h2>ok</h2>").unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(out.contains("Content-Length: 11\r\n"));
+        assert!(out.ends_with("<h2>ok</h2>"));
+
+        let mut buf404 = Vec::new();
+        http_reply(&mut buf404, 404, "nope").unwrap();
+        assert!(
+            String::from_utf8(buf404)
+                .unwrap()
+                .starts_with("HTTP/1.1 404 Not Found\r\n")
+        );
+    }
+}
