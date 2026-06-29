@@ -120,3 +120,96 @@ pub fn print_table(out: &mut dyn Write, issues: &[Issue]) -> Result<()> {
 
     print_table_rows(out, &HEADERS, &rows)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::issues::list::{LabelConnection, LabelNode, State, Team, User};
+
+    fn cached_to_string(issues: &[db::Issue], note: &str) -> String {
+        let mut buf = Vec::new();
+        print_table_cached(&mut buf, issues, note).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn live_to_string(issues: &[Issue]) -> String {
+        let mut buf = Vec::new();
+        print_table(&mut buf, issues).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn empty_says_no_issues() {
+        assert_eq!(cached_to_string(&[], "(cached)"), "No issues found.\n");
+        assert_eq!(live_to_string(&[]), "No issues found.\n");
+    }
+
+    #[test]
+    fn live_table_renders_columns() {
+        // Two hand-built rows exercise the list::Issue -> row mapping, an
+        // unassigned issue ("-"), and the long-title truncation at MAX_TITLE.
+        let issues = vec![
+            Issue {
+                id: "1".into(),
+                identifier: "ENG-1".into(),
+                title: "Short title".into(),
+                priority_label: "Urgent".into(),
+                priority: 1,
+                state: State {
+                    id: String::new(),
+                    name: "In Progress".into(),
+                },
+                assignee: Some(User {
+                    id: String::new(),
+                    name: "Ada Lovelace".into(),
+                }),
+                team: Team {
+                    id: "ENG".into(),
+                    name: "Engineering".into(),
+                },
+                description: None,
+                labels: LabelConnection { nodes: Vec::new() },
+                project: None,
+                cycle: None,
+                creator: None,
+                parent: None,
+                created_at: "2026-01-02T03:04:05Z".into(),
+                updated_at: "2026-01-06T07:08:09Z".into(),
+            },
+            Issue {
+                id: "2".into(),
+                identifier: "ENG-2".into(),
+                title: "A title that is definitely longer than forty characters wide".into(),
+                priority_label: "No priority".into(),
+                priority: 0,
+                state: State {
+                    id: String::new(),
+                    name: "Backlog".into(),
+                },
+                assignee: None,
+                team: Team {
+                    id: "ENG".into(),
+                    name: "Engineering".into(),
+                },
+                description: None,
+                labels: LabelConnection {
+                    nodes: vec![LabelNode { name: "bug".into() }],
+                },
+                project: None,
+                cycle: None,
+                creator: None,
+                parent: None,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                updated_at: "2026-01-01T00:00:00Z".into(),
+            },
+        ];
+        insta::assert_snapshot!(live_to_string(&issues));
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn cached_table_snapshot_from_sim() {
+        let dataset = crate::sim::generate(0, 8);
+        insta::assert_snapshot!(cached_to_string(&dataset.issues, "(cached)"));
+    }
+}

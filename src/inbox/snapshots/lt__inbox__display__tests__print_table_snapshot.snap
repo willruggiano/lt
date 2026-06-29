@@ -1,0 +1,9 @@
+---
+source: src/inbox/display.rs
+expression: "String::from_utf8(buf).unwrap()"
+---
+TYPE                 ISSUE  TITLE                                        ACTOR         AGE
+---------------------------------------------------------------------------------------------
+issueAssignedToYou   ENG-1  Wire up the deterministic dataset generator  Ada Lovelace  1h ago
+issueCommentMention  ENG-2  Render markdown in the detail pane           Grace Hopper  2d ago
+issueStatusChanged   -      -                                            -             9d ago

@@ -6,11 +6,11 @@ use crate::linear::notifications::Notification;
 use crate::text;
 
 /// Format an ISO-8601 timestamp as a relative age string like '5m ago', '2h ago', '3d ago'.
-/// Falls back to the raw string if parsing fails.
-fn relative_age(iso: &str) -> String {
+/// Falls back to the raw string if parsing fails. `now_secs` is the reference
+/// "now" (Unix seconds); the binary passes the wall clock, tests a fixed value.
+fn relative_age(iso: &str, now_secs: u64) -> String {
     // Parse "2024-01-15T10:30:00.000Z" or "2024-01-15T10:30:00Z"
     // We only need the numeric parts, so a manual approach is used.
-    let now_secs = now_unix_secs();
     if let Some(ts) = parse_iso8601_secs(iso) {
         let diff = now_secs.saturating_sub(ts);
         if diff < 60 {
@@ -26,7 +26,7 @@ fn relative_age(iso: &str) -> String {
 }
 
 /// Current Unix timestamp in seconds using `std::time`.
-fn now_unix_secs() -> u64 {
+pub fn now_unix_secs() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -69,7 +69,11 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
     Some(days)
 }
 
-pub fn print_table(out: &mut dyn Write, notifications: &[Notification]) -> Result<()> {
+pub fn print_table(
+    out: &mut dyn Write,
+    notifications: &[Notification],
+    now_secs: u64,
+) -> Result<()> {
     // Column widths
     let type_w = notifications
         .iter()
@@ -123,7 +127,7 @@ pub fn print_table(out: &mut dyn Write, notifications: &[Notification]) -> Resul
         // Truncate title if needed
         let title = text::truncate(raw_title, title_w);
         let actor = n.actor.as_ref().map_or("-", |a| a.name.as_str());
-        let age = relative_age(&n.created_at);
+        let age = relative_age(&n.created_at, now_secs);
 
         writeln!(
             out,
@@ -152,19 +156,83 @@ mod tests {
 
     #[test]
     fn test_relative_age_formatting() {
-        // Use a known timestamp far in the past so the age is stable.
-        // We test that relative_age returns something ending in " ago".
-        // 2020-01-01T00:00:00Z is definitely > 1 day ago.
-        let result = relative_age("2020-01-01T00:00:00Z");
-        assert!(
-            result.ends_with("d ago") || result.ends_with("h ago"),
-            "unexpected: {result}"
-        );
+        // Fixed "now" so the age is deterministic.
+        // 2020-01-01T00:00:00Z is 0, 2020-01-02T00:00:00Z is one day later.
+        let now = parse_iso8601_secs("2020-01-02T01:00:00Z").unwrap();
+        assert_eq!(relative_age("2020-01-01T00:00:00Z", now), "1d ago");
+        assert_eq!(relative_age("2020-01-02T00:00:00Z", now), "1h ago");
+        assert_eq!(relative_age("2020-01-02T00:59:30Z", now), "30s ago");
     }
 
     #[test]
     fn test_relative_age_invalid() {
-        let result = relative_age("not-a-date");
+        let result = relative_age("not-a-date", 0);
         assert_eq!(result, "not-a-date");
+    }
+
+    #[test]
+    fn print_table_snapshot() {
+        use crate::linear::notifications::{
+            Notification, NotificationActor, NotificationIssue, NotificationIssueState,
+            NotificationIssueTeam,
+        };
+
+        fn issue(identifier: &str, title: &str) -> NotificationIssue {
+            NotificationIssue {
+                identifier: identifier.into(),
+                title: title.into(),
+                state: NotificationIssueState {
+                    name: "Todo".into(),
+                },
+                priority: None,
+                team: NotificationIssueTeam {
+                    name: "Engineering".into(),
+                },
+            }
+        }
+        fn actor(name: &str) -> NotificationActor {
+            NotificationActor { name: name.into() }
+        }
+        fn notification(
+            type_: &str,
+            iss: Option<NotificationIssue>,
+            act: Option<NotificationActor>,
+            created_at: &str,
+        ) -> Notification {
+            Notification {
+                id: format!("n-{type_}"),
+                type_: type_.into(),
+                read_at: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                issue: iss,
+                actor: act,
+            }
+        }
+
+        // Fixed "now" so the AGE column is deterministic.
+        let now = parse_iso8601_secs("2026-01-10T00:00:00Z").unwrap();
+        let notifications = vec![
+            notification(
+                "issueAssignedToYou",
+                Some(issue(
+                    "ENG-1",
+                    "Wire up the deterministic dataset generator",
+                )),
+                Some(actor("Ada Lovelace")),
+                "2026-01-09T23:00:00Z",
+            ),
+            notification(
+                "issueCommentMention",
+                Some(issue("ENG-2", "Render markdown in the detail pane")),
+                Some(actor("Grace Hopper")),
+                "2026-01-08T00:00:00Z",
+            ),
+            notification("issueStatusChanged", None, None, "2026-01-01T00:00:00Z"),
+        ];
+
+        let mut buf = Vec::new();
+        print_table(&mut buf, &notifications, now).unwrap();
+        insta::assert_snapshot!(String::from_utf8(buf).unwrap());
     }
 }
