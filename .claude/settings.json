@@ -16,9 +16,7 @@
       "mcp__parallel__web_fetch",
       "mcp__parallel__web_search"
     ],
-    "ask": [
-      "Edit(.claude/*)"
-    ],
+    "ask": ["Edit(.claude/*)"],
     "deny": [
       "Edit(~/.claude/hooks/*)",
       "Edit(~/.claude/settings.*)",
