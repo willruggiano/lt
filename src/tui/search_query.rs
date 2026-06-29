@@ -2164,3 +2164,158 @@ mod tests {
         h.assert_snapshot("priority:|");
     }
 }
+
+#[cfg(test)]
+mod run_query_tests {
+    use rusqlite::Connection;
+
+    use super::*;
+    use crate::db::{self, Issue};
+
+    /// A baseline issue; tests override only the columns a filter targets.
+    fn issue(id: &str, title: &str) -> Issue {
+        Issue {
+            id: id.to_string(),
+            identifier: format!("ENG-{id}"),
+            title: title.to_string(),
+            priority_label: "Medium".to_string(),
+            state_name: "Todo".to_string(),
+            assignee_name: None,
+            team_name: "Engineering".to_string(),
+            team_key: Some("ENG".to_string()),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            synced_at: String::new(),
+            description: None,
+            labels: String::new(),
+            project_name: None,
+            cycle_name: None,
+            creator_name: None,
+            parent_id: None,
+            parent_identifier: None,
+        }
+    }
+
+    fn test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        db::run_migrations(&conn).unwrap();
+
+        let mut r1 = issue("1", "fix oauth login");
+        r1.priority_label = "Urgent".to_string();
+        r1.assignee_name = Some("Alice".to_string());
+        r1.updated_at = "2026-01-05T00:00:00Z".to_string();
+
+        let mut r2 = issue("2", "render markdown");
+        r2.priority_label = "High".to_string();
+        r2.state_name = "In Progress".to_string();
+        r2.assignee_name = Some("Bob".to_string());
+        r2.team_name = "Design".to_string();
+        r2.team_key = Some("DES".to_string());
+        r2.updated_at = "2026-01-04T00:00:00Z".to_string();
+        r2.labels = "backend,urgent".to_string();
+        r2.project_name = Some("Platform".to_string());
+        r2.cycle_name = Some("Cycle 7".to_string());
+        r2.creator_name = Some("Carol".to_string());
+
+        let mut r3 = issue("3", "oauth token refresh");
+        r3.priority_label = "Low".to_string();
+        r3.state_name = "Done".to_string();
+        r3.updated_at = "2026-01-03T00:00:00Z".to_string();
+
+        db::upsert_issues(&conn, &[r1, r2, r3]).unwrap();
+        conn
+    }
+
+    fn ids(issues: &[Issue]) -> Vec<&str> {
+        issues.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    #[test]
+    fn fts_term_matches_title_tokens() {
+        let conn = test_db();
+        let q = parse_query("oauth");
+        let got = run_query(&conn, &q, 50).unwrap();
+        // Both "fix oauth login" and "oauth token refresh" match; default sort
+        // is updated DESC, so id 1 (newer) precedes id 3.
+        assert_eq!(ids(&got), ["1", "3"]);
+    }
+
+    #[test]
+    fn fts_term_combined_with_structured_filter() {
+        let conn = test_db();
+        let q = parse_query("oauth state:done");
+        let got = run_query(&conn, &q, 50).unwrap();
+        assert_eq!(ids(&got), ["3"]);
+    }
+
+    #[test]
+    fn assignee_filter_matches_substring() {
+        let conn = test_db();
+        let q = parse_query("assignee:ali");
+        assert_eq!(ids(&run_query(&conn, &q, 50).unwrap()), ["1"]);
+    }
+
+    #[test]
+    fn assignee_me_literal_without_resolution_matches_nothing() {
+        let conn = test_db();
+        let q = parse_query("assignee:me");
+        assert!(run_query(&conn, &q, 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn priority_filter_normalises_label() {
+        let conn = test_db();
+        let q = parse_query("priority:urgent");
+        assert_eq!(ids(&run_query(&conn, &q, 50).unwrap()), ["1"]);
+    }
+
+    #[test]
+    fn unknown_priority_is_skipped_not_applied() {
+        let conn = test_db();
+        let q = parse_query("priority:bogus");
+        // The unrecognised value drops the filter, so all rows return.
+        assert_eq!(run_query(&conn, &q, 50).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn team_filter_matches_name_or_key() {
+        let conn = test_db();
+        let by_key = parse_query("team:des");
+        assert_eq!(ids(&run_query(&conn, &by_key, 50).unwrap()), ["2"]);
+        let by_name = parse_query("team:engineering");
+        assert_eq!(ids(&run_query(&conn, &by_name, 50).unwrap()), ["1", "3"]);
+    }
+
+    #[test]
+    fn label_project_cycle_creator_filters() {
+        let conn = test_db();
+        for stem in [
+            "label:backend",
+            "project:platform",
+            "cycle:cycle",
+            "creator:carol",
+        ] {
+            let q = parse_query(stem);
+            assert_eq!(ids(&run_query(&conn, &q, 50).unwrap()), ["2"], "for {stem}");
+        }
+    }
+
+    #[test]
+    fn state_filter_substring_match() {
+        let conn = test_db();
+        let q = parse_query("state:progress");
+        assert_eq!(ids(&run_query(&conn, &q, 50).unwrap()), ["2"]);
+    }
+
+    #[test]
+    fn sort_and_limit_apply() {
+        let conn = test_db();
+        // Ascending by priority label is alphabetical: High, Low, Urgent.
+        let q = parse_query("sort:priority+");
+        let got = run_query(&conn, &q, 50).unwrap();
+        assert_eq!(ids(&got), ["2", "3", "1"]);
+
+        let limited = run_query(&conn, &parse_query("sort:updated-"), 2).unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+}
