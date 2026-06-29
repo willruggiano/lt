@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::client::graphql_query;
+use super::client::{GraphqlTransport, query_as};
 
 const ISSUE_UPDATE_MUTATION: &str = r"
 mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
@@ -177,40 +177,59 @@ pub struct CreateIssueInput {
 }
 
 /// Run the `issueUpdate` mutation for `id` with the given `input` payload.
-fn run_issue_update(token: &str, id: &str, input: &serde_json::Value) -> Result<Issue> {
+fn run_issue_update(
+    transport: &dyn GraphqlTransport,
+    id: &str,
+    input: &serde_json::Value,
+) -> Result<Issue> {
     let variables = json!({
         "id": id,
         "input": input,
     });
-    let data: IssueUpdateData = graphql_query(token, ISSUE_UPDATE_MUTATION, variables)?;
+    let data: IssueUpdateData = query_as(transport, ISSUE_UPDATE_MUTATION, variables)?;
     Ok(data.issue_update.issue)
 }
 
-pub fn update_issue_state(token: &str, id: &str, state_id: &str) -> Result<Issue> {
-    run_issue_update(token, id, &json!({ "stateId": state_id }))
+pub fn update_issue_state(
+    transport: &dyn GraphqlTransport,
+    id: &str,
+    state_id: &str,
+) -> Result<Issue> {
+    run_issue_update(transport, id, &json!({ "stateId": state_id }))
 }
 
-pub fn update_issue_priority(token: &str, id: &str, priority: u8) -> Result<Issue> {
-    run_issue_update(token, id, &json!({ "priority": priority }))
+pub fn update_issue_priority(
+    transport: &dyn GraphqlTransport,
+    id: &str,
+    priority: u8,
+) -> Result<Issue> {
+    run_issue_update(transport, id, &json!({ "priority": priority }))
 }
 
-pub fn update_issue_assignee(token: &str, id: &str, assignee_id: Option<String>) -> Result<Issue> {
+pub fn update_issue_assignee(
+    transport: &dyn GraphqlTransport,
+    id: &str,
+    assignee_id: Option<String>,
+) -> Result<Issue> {
     let assignee_id = assignee_id.map_or(serde_json::Value::Null, serde_json::Value::String);
-    run_issue_update(token, id, &json!({ "assigneeId": assignee_id }))
+    run_issue_update(transport, id, &json!({ "assigneeId": assignee_id }))
 }
 
-pub fn fetch_workflow_states(token: &str, team_id: &str) -> Result<Vec<WorkflowState>> {
+pub fn fetch_workflow_states(
+    transport: &dyn GraphqlTransport,
+    team_id: &str,
+) -> Result<Vec<WorkflowState>> {
     let variables = json!({ "teamId": team_id });
-    let data: WorkflowStatesData = graphql_query(token, WORKFLOW_STATES_QUERY, variables)?;
+    let data: WorkflowStatesData = query_as(transport, WORKFLOW_STATES_QUERY, variables)?;
     Ok(data.team.states.nodes)
 }
 
-pub fn fetch_teams(token: &str) -> Result<Vec<Team>> {
-    let data: TeamsData = graphql_query(token, TEAMS_QUERY, json!({}))?;
+pub fn fetch_teams(transport: &dyn GraphqlTransport) -> Result<Vec<Team>> {
+    let data: TeamsData = query_as(transport, TEAMS_QUERY, json!({}))?;
     Ok(data.teams.nodes)
 }
 
-pub fn create_comment(token: &str, issue_id: &str, body: &str) -> Result<()> {
+pub fn create_comment(transport: &dyn GraphqlTransport, issue_id: &str, body: &str) -> Result<()> {
     #[derive(Deserialize)]
     struct CommentCreatePayload {
         success: bool,
@@ -224,14 +243,17 @@ pub fn create_comment(token: &str, issue_id: &str, body: &str) -> Result<()> {
     let variables = json!({
         "input": { "issueId": issue_id, "body": body },
     });
-    let data: CommentCreateData = graphql_query(token, COMMENT_CREATE_MUTATION, variables)?;
+    let data: CommentCreateData = query_as(transport, COMMENT_CREATE_MUTATION, variables)?;
     if !data.comment_create.success {
         anyhow::bail!("commentCreate returned success=false");
     }
     Ok(())
 }
 
-pub fn create_issue(token: &str, input: CreateIssueInput) -> Result<CreatedIssue> {
+pub fn create_issue(
+    transport: &dyn GraphqlTransport,
+    input: CreateIssueInput,
+) -> Result<CreatedIssue> {
     let mut obj = serde_json::Map::new();
     obj.insert("title".to_string(), json!(input.title));
     obj.insert("teamId".to_string(), json!(input.team_id));
@@ -248,6 +270,6 @@ pub fn create_issue(token: &str, input: CreateIssueInput) -> Result<CreatedIssue
         obj.insert("assigneeId".to_string(), json!(assignee_id));
     }
     let variables = json!({ "input": obj });
-    let data: IssueCreateData = graphql_query(token, ISSUE_CREATE_MUTATION, variables)?;
+    let data: IssueCreateData = query_as(transport, ISSUE_CREATE_MUTATION, variables)?;
     Ok(data.issue_create.issue)
 }

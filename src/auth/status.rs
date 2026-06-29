@@ -1,20 +1,12 @@
 use std::io::Write;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
 use crate::config;
+use crate::linear::client::{HttpTransport, query_as};
 
-#[derive(Deserialize)]
-struct GraphqlResponse<T> {
-    data: Option<T>,
-    errors: Option<Vec<GraphqlError>>,
-}
-
-#[derive(Deserialize)]
-struct GraphqlError {
-    message: String,
-}
+const VIEWER_STATUS_QUERY: &str = "{ viewer { id name email organization { name urlKey } } }";
 
 #[derive(Deserialize)]
 struct ViewerData {
@@ -40,30 +32,9 @@ pub fn run(out: &mut dyn Write) -> Result<()> {
     let token = config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
 
-    let body = serde_json::json!({
-        "query": "{ viewer { id name email organization { name urlKey } } }"
-    });
-
-    let mut response = ureq::post("https://api.linear.app/graphql")
-        .header("Authorization", &format!("Bearer {}", token.access_token))
-        .header("Content-Type", "application/json")
-        .send_json(&body)
-        .context("querying Linear API")?;
-
-    let parsed: GraphqlResponse<ViewerData> = response
-        .body_mut()
-        .read_json()
-        .context("parsing API response")?;
-
-    if let Some(errors) = parsed.errors {
-        let msgs: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-        return Err(anyhow!("GraphQL errors: {}", msgs.join(", ")));
-    }
-
-    let viewer = parsed
-        .data
-        .ok_or_else(|| anyhow!("empty response from Linear API"))?
-        .viewer;
+    let transport = HttpTransport::new(token.access_token);
+    let data: ViewerData = query_as(&transport, VIEWER_STATUS_QUERY, serde_json::json!({}))?;
+    let viewer = data.viewer;
 
     writeln!(out, "user:         {} <{}>", viewer.name, viewer.email)?;
     writeln!(out, "id:           {}", viewer.id)?;

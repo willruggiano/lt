@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::client::graphql_query;
+use super::client::{GraphqlTransport, query_as};
 
 const VIEWER_QUERY: &str = r"
 query Viewer {
@@ -26,7 +26,7 @@ pub struct Viewer {
     pub org_name: String,
 }
 
-pub fn fetch_viewer(token: &str) -> Result<Viewer> {
+pub fn fetch_viewer(transport: &dyn GraphqlTransport) -> Result<Viewer> {
     #[derive(Deserialize)]
     struct OrgNode {
         name: String,
@@ -42,7 +42,7 @@ pub fn fetch_viewer(token: &str) -> Result<Viewer> {
         viewer: ViewerNode,
     }
 
-    let data: ViewerData = graphql_query(token, VIEWER_QUERY, json!({}))?;
+    let data: ViewerData = query_as(transport, VIEWER_QUERY, json!({}))?;
     Ok(Viewer {
         id: data.viewer.id,
         name: data.viewer.name,

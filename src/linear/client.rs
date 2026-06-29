@@ -81,15 +81,6 @@ pub fn query_as<T: DeserializeOwned>(
     serde_json::from_value(data).context("deserializing GraphQL data")
 }
 
-/// Build an [`HttpTransport`] from `token` and run `query`, deserializing the
-/// `data` payload into `T`.
-///
-/// Retained as a thin convenience while callers migrate to passing an explicit
-/// `&dyn GraphqlTransport`.
-pub fn graphql_query<T: DeserializeOwned>(token: &str, query: &str, variables: Value) -> Result<T> {
-    query_as(&HttpTransport::new(token), query, variables)
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;

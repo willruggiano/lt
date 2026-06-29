@@ -11,7 +11,7 @@ use super::display::{print_table, print_table_cached};
 use super::filter::build_filter;
 use super::sort::build_sort;
 use crate::db;
-use crate::linear::client::graphql_query;
+use crate::linear::client::{GraphqlTransport, HttpTransport, query_as};
 use crate::linear::types::PageInfo;
 
 /// Cache TTL in seconds (5 minutes).
@@ -160,7 +160,17 @@ pub(crate) fn to_db_issue(src: &Issue) -> db::Issue {
 
 pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool, Option<String>)> {
     let token = crate::auth::refresh::load_or_refresh_token()?;
+    fetch_with(&HttpTransport::new(token.access_token), args, after)
+}
 
+/// Fetch one page of issues through `transport`. Splitting this from `fetch`
+/// keeps the request building and page-info extraction testable with a fake
+/// transport, free of the token-load IO.
+pub fn fetch_with(
+    transport: &dyn GraphqlTransport,
+    args: &IssueArgs,
+    after: Option<&str>,
+) -> Result<(Vec<Issue>, bool, Option<String>)> {
     let limit = args.limit.min(250);
     let filter = build_filter(args)?;
     let sort = build_sort(&args.sort, args.desc);
@@ -172,7 +182,7 @@ pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool,
         "after": after,
     });
 
-    let data: IssuesData = graphql_query(&token.access_token, ISSUES_QUERY, variables)?;
+    let data: IssuesData = query_as(transport, ISSUES_QUERY, variables)?;
 
     let conn = data.issues;
     Ok((
@@ -197,7 +207,7 @@ fn resolve_me(conn: &rusqlite::Connection, args: &mut IssueArgs) -> Result<()> {
         n
     } else {
         let token = crate::auth::refresh::load_or_refresh_token()?;
-        let viewer = crate::linear::viewer::fetch_viewer(&token.access_token)?;
+        let viewer = crate::linear::viewer::fetch_viewer(&HttpTransport::new(token.access_token))?;
         db::set_meta(conn, "viewer_name", &viewer.name)?;
         viewer.name
     };

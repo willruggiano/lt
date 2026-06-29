@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::client::graphql_query;
+use super::client::{GraphqlTransport, HttpTransport, query_as};
 use super::types::PageInfo;
 
 const NOTIFICATIONS_QUERY: &str = r"
@@ -83,7 +83,7 @@ struct NotificationsData {
 /// `max_total` is the maximum number of items to return across all pages.
 /// When `max_total` is `None` the function fetches every available page.
 pub fn fetch_notifications(
-    token: &str,
+    transport: &dyn GraphqlTransport,
     page_size: usize,
     max_total: Option<usize>,
 ) -> Result<Vec<Notification>> {
@@ -108,7 +108,7 @@ pub fn fetch_notifications(
             "after": cursor,
         });
 
-        let data: NotificationsData = graphql_query(token, NOTIFICATIONS_QUERY, variables)?;
+        let data: NotificationsData = query_as(transport, NOTIFICATIONS_QUERY, variables)?;
 
         let conn = data.notifications;
         all.extend(conn.nodes);
@@ -139,5 +139,9 @@ pub fn fetch_notifications_from_config(
 ) -> Result<Vec<Notification>> {
     let token = crate::config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
-    fetch_notifications(&token.access_token, page_size, max_total)
+    fetch_notifications(
+        &HttpTransport::new(token.access_token),
+        page_size,
+        max_total,
+    )
 }
