@@ -525,6 +525,21 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
         )));
     }
 
+    // Labels, shown directly below the meta line and above Sub-issues.
+    if !d.labels.nodes.is_empty() {
+        let names = d
+            .labels
+            .nodes
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(Line::from(vec![
+            Span::styled("Labels: ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw(names),
+        ]));
+    }
+
     // Sub-issues
     if !d.children.is_empty() {
         lines.push(Line::from(""));
@@ -541,22 +556,6 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-
-    // Labels, shown above the Description section.
-    if !d.labels.nodes.is_empty() {
-        let names = d
-            .labels
-            .nodes
-            .iter()
-            .map(|l| l.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        lines.push(Line::from(vec![
-            Span::styled("Labels: ", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(names),
-        ]));
-        lines.push(Line::from(""));
-    }
 
     // Description
     if let Some(desc) = &d.description
