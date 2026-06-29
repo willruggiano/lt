@@ -14,12 +14,13 @@
         (readonly cfg.settings.configFile)
       ];
 
-    # `nix flake check` is scoped to nix tooling only: dead-code, lint, and
-    # format gates for the flake itself. Rust, copy/paste, and CI gates live in
-    # the Makefile; cross-language formatting lives in `nix fmt` (treefmt).
+    # Only Nix-related + formatting here. Makefile for everything else.
     pre-commit.settings = {
       hooks = {
-        alejandra.enable = true;
+        treefmt = {
+          enable = true;
+          package = config.packages.treefmt;
+        };
         deadnix.enable = true;
         statix.enable = true;
       };

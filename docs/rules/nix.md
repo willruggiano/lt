@@ -1,7 +1,7 @@
 ---
 paths:
   - "**/*.nix"
-  - "**/setup.sh"
+  - ".claude/bin/setup.sh"
 ---
 
 # Nix setup
@@ -32,8 +32,7 @@ Three disjoint gates exist. A check belongs to exactly one; do not duplicate it
 across them.
 
 ```text
-nix flake check   nix tooling only  alejandra, deadnix, statix (+ the treefmt
-                                    formatting check)
+nix flake check   nix tooling only  treefmt (fmt), deadnix, statix
 make check        rust + project    fmt, clippy, cargo-deny, machete, cpd,
                                     cargo-dupes, test — runs in the devshell
 nix fmt           formatting        treefmt across all languages
@@ -75,6 +74,7 @@ locally. The subdir name and `FETCH_HEAD` shape are cargo-deny version-specific
 
 ## Binary cache
 
-`flake.nix` declares the `lt.cachix.org` substituter via `nixConfig`. CI pushes
-to it (`cachix-action`); `setup.sh` and CI pass `accept-flake-config = true` so
-builds pull from the cache without prompting.
+- `flake.nix` declares the `lt.cachix.org` substituter via `nixConfig`.
+- CI pushes to it (`cachix-action`).
+- `setup.sh` and CI pass `accept-flake-config = true` so builds pull from the
+  cache without prompting.
