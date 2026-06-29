@@ -1,18 +1,9 @@
-// Build scripts fail by panicking, so the runtime panic-safety and length lints don't apply.
 #![allow(
     clippy::panic,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::too_many_lines
 )]
-//
-// Phase 1 (bd-3mw): validate the allowlist against the GraphQL schema.
-// Phase 2 (bd-1pl): generate search_stems.rs from the validated allowlist.
-// Phase 3 (bd-117): rewrite code generation with quote + prettyplease.
-// Phase 4 (bd-2w5): generate SortField enum and sort helpers from IssueSortInput.
-//
-// cargo:rerun-if-changed directives ensure the build script re-runs whenever
-// the schema or the allowlist changes.
 
 use std::collections::HashMap;
 use std::path::Path;
