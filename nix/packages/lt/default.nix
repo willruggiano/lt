@@ -54,6 +54,16 @@
       '';
     });
 
+    # cargo-dupes only parses sources (no compile), so it runs as a light check
+    # over the package source rather than reusing the lt build sandbox.
+    checks.cargo-dupes = pkgs.runCommandLocal "lt-cargo-dupes" {
+      nativeBuildInputs = [config.packages.cargo-dupes];
+    } ''
+      cargo-dupes check -p ${config.packages.lt.src} \
+        --exclude-tests --min-nodes 25 --max-exact 0 --max-near 0
+      touch $out
+    '';
+
     packages = {
       default = config.packages.lt;
 

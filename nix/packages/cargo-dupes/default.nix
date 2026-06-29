@@ -23,7 +23,7 @@
       src = pkgs.fetchCrate {
         pname = "cargo-dupes";
         version = "0.2.1";
-        hash = "sha256-wKwLoLF+kZI0Kfts6HC4fNmGkHcf8qYpBUBx0v3vfJc=";
+        hash = "sha256-KyDvpzaOiOT/Dt9a4bp41942dzgPHfGS8OTf67FS5TM=";
       };
       cargoLock.lockFile = ./Cargo.lock;
       # The crate's test suite pulls in cargo-husky (git-hook installer) and
