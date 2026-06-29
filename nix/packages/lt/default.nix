@@ -9,12 +9,7 @@
     pkgs,
     system,
     ...
-  }: let
-    advisorySetup = import ../../advisory-db.nix {
-      inherit pkgs;
-      advisoryDb = inputs.advisory-db;
-    };
-  in {
+  }: {
     _module.args.pkgs = import inputs.nixpkgs {
       inherit system;
       overlays = [
@@ -28,67 +23,6 @@
       with cs; [
         (add-pkg-deps [config.packages.toolchain])
       ];
-
-    # rustfmt formats without resolving dependencies, so it runs fine inside the
-    # offline `nix flake check` sandbox. clippy must compile the crate, which the
-    # git-hooks hook cannot do offline (no vendored registry); it runs as the
-    # checks.clippy derivation below, which reuses the lt package's vendoring.
-    pre-commit.settings.hooks = {
-      rustfmt = {
-        enable = true;
-        packageOverrides = {
-          cargo = config.packages.toolchain;
-          rustfmt = config.packages.toolchain;
-        };
-      };
-    };
-
-    # Run clippy as a build-sandbox check so it has the same vendored deps and
-    # native build inputs as `nix build .#lt` (offline-capable).
-    checks.clippy = config.packages.lt.overrideAttrs (old: {
-      pname = "${old.pname}-clippy";
-      nativeBuildInputs = old.nativeBuildInputs ++ [config.packages.toolchain];
-      buildPhase = ''
-        runHook preBuild
-        cargo clippy --all-targets -- -D warnings
-        runHook postBuild
-      '';
-      doCheck = false;
-      installPhase = ''
-        touch $out
-      '';
-    });
-
-    # Run the full `cargo deny check` as a build-sandbox check so it reuses the
-    # lt package's vendored deps (offline metadata resolution) and the baked,
-    # git-shaped advisory database (offline advisories). deny.toml is not part of
-    # the lt src fileset, so it is pulled in directly here.
-    checks.cargo-deny = config.packages.lt.overrideAttrs (old: {
-      pname = "${old.pname}-cargo-deny";
-      nativeBuildInputs = old.nativeBuildInputs ++ [config.packages.toolchain];
-      buildPhase = ''
-        runHook preBuild
-        cp ${../../../deny.toml} deny.toml
-        ${advisorySetup ".cache/advisory-db"}
-        CARGO_NET_OFFLINE=true cargo deny --offline check
-        runHook postBuild
-      '';
-      doCheck = false;
-      installPhase = ''
-        touch $out
-      '';
-    });
-
-    # cargo-dupes only parses sources (no compile), so it runs as a light check
-    # over the package source rather than reusing the lt build sandbox.
-    checks.cargo-dupes =
-      pkgs.runCommandLocal "lt-cargo-dupes" {
-        nativeBuildInputs = [config.packages.cargo-dupes];
-      } ''
-        cargo-dupes check -p ${config.packages.lt.src} \
-          --exclude-tests --min-nodes 25 --max-exact 0 --max-near 0
-        touch $out
-      '';
 
     packages = {
       default = config.packages.lt;

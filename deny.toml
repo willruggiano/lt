@@ -1,14 +1,6 @@
 [advisories]
 version = 2
 yanked = "deny"
-# Vendored RustSec advisory database (pinned via the `advisory-db` flake input).
-# The devshell startup hook and the checks.cargo-deny derivation materialize a
-# git-shaped checkout at <db-path>/advisory-db-3157b0e258782691 (the subdir name
-# cargo-deny derives from the db url) so `cargo deny --offline check` resolves the
-# database locally instead of git-cloning github.com/rustsec/advisory-db. The path
-# is relative to the cwd cargo-deny runs in (the project root under `make check`).
-db-path = ".cache/advisory-db"
-db-urls = ["https://github.com/rustsec/advisory-db"]
 
 [licenses]
 version = 2
