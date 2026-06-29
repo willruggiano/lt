@@ -499,3 +499,248 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn team(id: &str, name: &str) -> Team {
+        Team {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn state(id: &str, name: &str, type_: &str) -> WorkflowState {
+        WorkflowState {
+            id: id.to_string(),
+            name: name.to_string(),
+            type_: type_.to_string(),
+        }
+    }
+
+    fn member(id: &str, name: &str, email: &str) -> Member {
+        Member {
+            id: id.to_string(),
+            name: name.to_string(),
+            email: email.to_string(),
+        }
+    }
+
+    fn viewer() -> Viewer {
+        Viewer {
+            id: "viewer-id".to_string(),
+            name: "Vic Viewer".to_string(),
+            email: "vic@example.com".to_string(),
+            organization: Organization {
+                url_key: "acme".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn priority_label_covers_all_levels() {
+        assert_eq!(priority_label(0), "none");
+        assert_eq!(priority_label(1), "urgent");
+        assert_eq!(priority_label(2), "high");
+        assert_eq!(priority_label(3), "normal");
+        assert_eq!(priority_label(4), "low");
+        // Out-of-range falls back to "none".
+        assert_eq!(priority_label(9), "none");
+    }
+
+    #[test]
+    fn parse_priority_maps_labels_and_numbers() {
+        for (input, want) in [
+            ("none", 0),
+            ("0", 0),
+            ("urgent", 1),
+            ("1", 1),
+            ("high", 2),
+            ("2", 2),
+            ("normal", 3),
+            ("medium", 3),
+            ("3", 3),
+            ("low", 4),
+            ("4", 4),
+        ] {
+            assert_eq!(parse_priority(input), Some(want), "for {input:?}");
+        }
+        // Case-insensitive and whitespace-trimmed.
+        assert_eq!(parse_priority("  HIGH "), Some(2));
+        assert_eq!(parse_priority("bogus"), None);
+    }
+
+    #[test]
+    fn pick_team_hint_matches_name_case_insensitively() {
+        let teams = [team("t1", "Engineering"), team("t2", "Design")];
+        let mut out = Vec::new();
+        let got = pick_team(&mut out, &teams, Some("engineering")).unwrap();
+        assert_eq!(got.id, "t1");
+        // The hint path does not print the menu.
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn pick_team_hint_matches_number() {
+        let teams = [team("t1", "Engineering"), team("t2", "Design")];
+        let mut out = Vec::new();
+        let got = pick_team(&mut out, &teams, Some("2")).unwrap();
+        assert_eq!(got.id, "t2");
+    }
+
+    #[test]
+    fn pick_team_hint_no_match_errors() {
+        let teams = [team("t1", "Engineering")];
+        let mut out = Vec::new();
+        assert!(pick_team(&mut out, &teams, Some("nope")).is_err());
+        // Out-of-range numbers are not accepted.
+        assert!(pick_team(&mut out, &teams, Some("5")).is_err());
+    }
+
+    #[test]
+    fn pick_state_hint_matches_name_and_number() {
+        let states = [
+            state("s1", "Backlog", "backlog"),
+            state("s2", "Todo", "unstarted"),
+        ];
+        let mut out = Vec::new();
+        assert_eq!(
+            pick_state(&mut out, &states, Some("todo"))
+                .unwrap()
+                .unwrap()
+                .id,
+            "s2"
+        );
+        assert_eq!(
+            pick_state(&mut out, &states, Some("1"))
+                .unwrap()
+                .unwrap()
+                .id,
+            "s1"
+        );
+        assert!(pick_state(&mut out, &states, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn pick_assignee_hint_resolves_special_and_matches() {
+        let members = [member("m1", "Alice", "alice@example.com")];
+        let v = viewer();
+        let mut out = Vec::new();
+
+        assert_eq!(
+            pick_assignee(&mut out, &members, &v, Some("me")).unwrap(),
+            Some("viewer-id".to_string())
+        );
+        assert_eq!(
+            pick_assignee(&mut out, &members, &v, Some("none")).unwrap(),
+            None
+        );
+        assert_eq!(
+            pick_assignee(&mut out, &members, &v, Some("unassigned")).unwrap(),
+            None
+        );
+        assert_eq!(
+            pick_assignee(&mut out, &members, &v, Some("ALICE@example.com")).unwrap(),
+            Some("m1".to_string())
+        );
+        assert!(pick_assignee(&mut out, &members, &v, Some("ghost")).is_err());
+    }
+
+    #[test]
+    fn prompt_helpers_short_circuit_on_hints() {
+        let mut out = Vec::new();
+        assert_eq!(prompt_title(&mut out, Some("Fix bug")).unwrap(), "Fix bug");
+        assert_eq!(
+            prompt_description(&mut out, Some("details")).unwrap(),
+            Some("details".to_string())
+        );
+        assert_eq!(prompt_priority(&mut out, Some("high")).unwrap(), 2);
+        assert!(prompt_priority(&mut out, Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn print_summary_renders_all_fields() {
+        let states = [state("s1", "Todo", "unstarted")];
+        let members = [member("m1", "Alice", "alice@example.com")];
+        let v = viewer();
+        let mut out = Vec::new();
+        print_summary(
+            &mut out,
+            &IssueSummary {
+                team_name: "Engineering",
+                title: "Fix bug",
+                description: Some("a short description"),
+                priority: 2,
+                state_id: Some("s1"),
+                states: &states,
+                assignee_id: Some("m1"),
+                viewer: &v,
+                members: &members,
+            },
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Team:        Engineering"));
+        assert!(text.contains("Title:       Fix bug"));
+        assert!(text.contains("Description: a short description"));
+        assert!(text.contains("Priority:    high"));
+        assert!(text.contains("State:       Todo"));
+        assert!(text.contains("Assignee:    Alice"));
+    }
+
+    #[test]
+    fn print_summary_handles_defaults_and_truncation() {
+        let v = viewer();
+        let long = "x".repeat(80);
+        let mut out = Vec::new();
+        print_summary(
+            &mut out,
+            &IssueSummary {
+                team_name: "Engineering",
+                title: "t",
+                description: Some(&long),
+                priority: 0,
+                // Unknown state id falls back to printing the raw id.
+                state_id: Some("unknown"),
+                states: &[],
+                // Viewer self-assignment renders the viewer name.
+                assignee_id: Some("viewer-id"),
+                viewer: &v,
+                members: &[],
+            },
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        // 60-char preview plus ellipsis.
+        assert!(text.contains(&format!("Description: {}...", "x".repeat(60))));
+        assert!(text.contains("Priority:    none"));
+        assert!(text.contains("State:       unknown"));
+        assert!(text.contains("Assignee:    Vic Viewer"));
+    }
+
+    #[test]
+    fn print_summary_renders_unassigned_and_no_description() {
+        let v = viewer();
+        let mut out = Vec::new();
+        print_summary(
+            &mut out,
+            &IssueSummary {
+                team_name: "Engineering",
+                title: "t",
+                description: None,
+                priority: 1,
+                state_id: None,
+                states: &[],
+                assignee_id: None,
+                viewer: &v,
+                members: &[],
+            },
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Description: (none)"));
+        assert!(text.contains("State:       (default)"));
+        assert!(text.contains("Assignee:    (unassigned)"));
+    }
+}
