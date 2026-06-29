@@ -489,14 +489,56 @@ mod text_input_tests {
     }
 }
 
+use std::sync::Arc;
+
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::Terminal;
+use ratatui::backend::Backend;
 use ratatui::widgets::TableState;
 
 use crate::issues::IssueArgs;
 use crate::issues::list::Issue;
 use crate::linear::client::HttpTransport;
 use crate::linear::types::IssueDetail;
+
+/// Source of a database connection. Abstracted so the event loop and its
+/// methods can run against an in-memory database in tests instead of the
+/// process-global SQLite path.
+pub trait DbProvider: Send + Sync {
+    fn connect(&self) -> Result<rusqlite::Connection>;
+}
+
+/// Production provider: the process-global SQLite database.
+struct RealDb;
+
+impl DbProvider for RealDb {
+    fn connect(&self) -> Result<rusqlite::Connection> {
+        crate::db::open_db()
+    }
+}
+
+/// Source of key events for the event loop. Abstracts crossterm so tests can
+/// feed a scripted sequence instead of reading the real terminal.
+trait EventSource {
+    /// Return the next key press, or `None` if none arrived within `timeout`.
+    fn next_key(&mut self, timeout: std::time::Duration) -> Result<Option<KeyEvent>>;
+}
+
+/// Production event source: poll-and-read from the real terminal.
+struct CrosstermEvents;
+
+impl EventSource for CrosstermEvents {
+    fn next_key(&mut self, timeout: std::time::Duration) -> Result<Option<KeyEvent>> {
+        if event::poll(timeout)?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            return Ok(Some(key));
+        }
+        Ok(None)
+    }
+}
 
 pub enum Status {
     Idle,
@@ -1080,6 +1122,10 @@ pub struct App {
     // -- re-auth (bd-vhp) -----------------------------------------------------
     /// Receiver for the background login thread, if one is in progress.
     pub login_rx: Option<mpsc::Receiver<LoginEvent>>,
+
+    /// Database connection source. Defaults to the real SQLite path; tests
+    /// install an in-memory provider via `for_test`.
+    pub db: Arc<dyn DbProvider>,
 }
 
 impl App {
@@ -1125,6 +1171,7 @@ impl App {
             initial_args,
             last_esc_time: None,
             login_rx: None,
+            db: Arc::new(RealDb),
         }
     }
 
@@ -1240,7 +1287,9 @@ impl App {
             // Active filter has constraints beyond sort -- use run_query to
             // preserve them (bd-2i0).
             let limit = self.args.limit.min(250) as usize;
-            match crate::db::open_db()
+            match self
+                .db
+                .connect()
                 .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
             {
                 Ok(db_issues) => {
@@ -1261,7 +1310,9 @@ impl App {
                 .as_deref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            match crate::db::open_db()
+            match self
+                .db
+                .connect()
                 .and_then(|conn| crate::db::query_issues_page(&conn, &self.args, offset))
             {
                 Ok((issues, has_next_page)) => {
@@ -1378,7 +1429,9 @@ impl App {
         self.detail_comment_rx = None;
 
         // Build an IssueDetail immediately from cached data.
-        let cached_comments: Vec<crate::linear::types::Comment> = crate::db::open_db()
+        let cached_comments: Vec<crate::linear::types::Comment> = self
+            .db
+            .connect()
             .and_then(|conn| crate::db::query_comments(&conn, &issue.id))
             .unwrap_or_default()
             .into_iter()
@@ -1395,7 +1448,7 @@ impl App {
 
         // Populate parent and children from the local DB cache.
         if let Some(ref mut detail) = self.detail {
-            populate_relations(detail, &issue);
+            populate_relations(self.db.as_ref(), detail, &issue);
         }
 
         self.status = Status::Idle;
@@ -2111,8 +2164,12 @@ fn build_cached_detail(
 }
 
 /// Populate a detail's parent/children fields from the local DB cache.
-fn populate_relations(detail: &mut crate::linear::types::IssueDetail, issue: &Issue) {
-    let Ok(conn) = crate::db::open_db() else {
+fn populate_relations(
+    db: &dyn DbProvider,
+    detail: &mut crate::linear::types::IssueDetail,
+    issue: &Issue,
+) {
+    let Ok(conn) = db.connect() else {
         return;
     };
     // Look up children.
@@ -2686,7 +2743,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     }
     app.session.keyboard_enhanced = keyboard_enhanced;
     app.status = initial_status;
-    let result = run_app(&mut terminal, app);
+    let result = run_app(&mut terminal, &mut CrosstermEvents, &mut app);
     if keyboard_enhanced {
         let _ = crossterm::execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
     }
@@ -2694,10 +2751,17 @@ pub fn run(args: IssueArgs) -> Result<()> {
     result
 }
 
-fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
+fn run_app<B: Backend>(
+    terminal: &mut Terminal<B>,
+    events: &mut dyn EventSource,
+    app: &mut App,
+) -> Result<()>
+where
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     loop {
         // Poll background sync channel (bd-25j).
-        poll_sync_events(&mut app);
+        poll_sync_events(app);
 
         // Periodic delta sync: fire every 30s when authenticated.
         if !app.sync.syncing
@@ -2719,33 +2783,28 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> 
         app.poll_modal_events();
 
         // Poll background comment-sync channel (bd-2mx).
-        poll_detail_comment_events(&mut app);
+        poll_detail_comment_events(app);
 
         // Poll FTS search debounce (bd-2g4).
-        poll_search_debounce(&mut app);
+        poll_search_debounce(app);
 
         // Poll background login channel (bd-vhp).
-        poll_login_events(&mut app);
+        poll_login_events(app);
 
-        terminal.draw(|frame| ui::render(frame, &mut app))?;
+        terminal.draw(|frame| ui::render(frame, app))?;
 
         if app.quit {
             return Ok(());
         }
 
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
+        if let Some(key) = events.next_key(Duration::from_millis(100))? {
             match app.mode {
-                Mode::Popup(_) => handle_popup_key(&mut app, key.code),
-                Mode::Detail => handle_detail_key(&mut app, key.code, key.modifiers),
-                Mode::NewIssue => handle_new_issue_key(&mut app, key.code, key.modifiers),
-                Mode::Help => handle_help_key(&mut app, key.code, key.modifiers),
-                Mode::Search => handle_search_key(&mut app, key.code, key.modifiers),
-                Mode::List => handle_normal_key(&mut app, key.code, key.modifiers),
+                Mode::Popup(_) => handle_popup_key(app, key.code),
+                Mode::Detail => handle_detail_key(app, key.code, key.modifiers),
+                Mode::NewIssue => handle_new_issue_key(app, key.code, key.modifiers),
+                Mode::Help => handle_help_key(app, key.code, key.modifiers),
+                Mode::Search => handle_search_key(app, key.code, key.modifiers),
+                Mode::List => handle_normal_key(app, key.code, key.modifiers),
             }
         }
     }
