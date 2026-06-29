@@ -1,21 +1,5 @@
 //! Deterministic dataset generation for simulation testing (feature = "sim").
 //!
-//! `lt` is local-first: every read path (issue list, TUI, search, inbox)
-//! queries SQLite, and only *populating* the DB ever talks to Linear. `sim`
-//! is a second populator that needs no network and no token, driven by a
-//! seeded RNG so datasets are reproducible.
-//!
-//! ```text
-//!   Linear GraphQL API ──(token)──> sync ──┐
-//!                                           ├─upsert─> SQLite ─query─> list/TUI/search
-//!   seed, size ──> generate() ──> Dataset ──┘                         (no token needed)
-//! ```
-//!
-//! Free-text content (names, titles, descriptions, comments, teams, projects,
-//! labels) comes from the `fake` faker library; only the genuine Linear domain
-//! enums (priority, workflow state) are fixed. All faker calls and structural
-//! choices draw from a single seeded `StdRng`, so the same `(seed, size)`
-//! always yields identical issues and comments. Knobs: `--seed`, `--size`.
 //! Design: `docs/design/dst.md`.
 
 use std::collections::HashSet;
