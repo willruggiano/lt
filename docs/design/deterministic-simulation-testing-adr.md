@@ -14,11 +14,11 @@ Accepted
 
 Requirements from ENG-18: knobs for **seed** and **dataset size**; datasets are
 **generated, not hand-rolled**; the capability is a **cargo feature** compiled
-into both tests *and* the CLI.
+into both tests _and_ the CLI.
 
 ### Where the seam goes
 
-`lt` is local-first. Every read path queries SQLite; only *populating* the DB
+`lt` is local-first. Every read path queries SQLite; only _populating_ the DB
 touches Linear:
 
 ```text
@@ -79,8 +79,9 @@ assignee changes, new issue, posting comments) still require a token and report
 
 ## Consequences
 
-- A coding agent or developer runs `cargo run --features sim -- sim --seed N
-  --size M` then `lt issues` / `lt tui` with no Linear account.
+- A coding agent or developer runs
+  `cargo run --features sim -- sim --seed N --size M` then `lt issues` /
+  `lt tui` with no Linear account.
 - Tests call `generate()` directly for property tests, or seed an in-memory
   SQLite DB for rendering tests (ENG-19).
 - The feature is off by default; the standard build and CLI are unchanged.
