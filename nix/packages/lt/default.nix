@@ -94,6 +94,7 @@
           cargoLock.lockFile = ../../../Cargo.lock;
           nativeBuildInputs = with pkgs; [
             cargo-deny
+            config.packages.cargo-dupes
             cargo-machete
             cmake
             gnumake
