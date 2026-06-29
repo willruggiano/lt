@@ -1,3 +1,4 @@
+mod markdown;
 mod search_query;
 mod ui;
 
