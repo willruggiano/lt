@@ -54,6 +54,7 @@
           cargoLock.lockFile = ../../../Cargo.lock;
           nativeBuildInputs = with pkgs; [
             cargo-deny
+            cargo-llvm-cov
             config.packages.cargo-dupes
             cargo-machete
             cmake
@@ -73,7 +74,7 @@
 
       toolchain = pkgs.rust-bin.selectLatestNightlyWith (toolchain:
         toolchain.default.override {
-          extensions = ["rust-analyzer" "rust-src"];
+          extensions = ["rust-analyzer" "rust-src" "llvm-tools-preview"];
         });
     };
   };
