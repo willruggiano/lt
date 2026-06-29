@@ -120,6 +120,87 @@ pub fn sync_comments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linear::client::FakeTransport;
+
+    fn comment_node(id: &str, body: &str) -> serde_json::Value {
+        json!({
+            "id": id, "body": body,
+            "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+            "user": { "name": "Alice" }
+        })
+    }
+
+    fn comments_page(
+        nodes: &[serde_json::Value],
+        has_next: bool,
+        end: Option<&str>,
+    ) -> serde_json::Value {
+        json!({ "issue": { "comments": {
+            "nodes": nodes,
+            "pageInfo": { "hasNextPage": has_next, "endCursor": end }
+        }}})
+    }
+
+    fn test_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::run_migrations(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn sync_comments_paginates_and_replaces_existing() {
+        let conn = test_conn();
+        // A stale comment that the sync should replace.
+        db::upsert_comments(
+            &conn,
+            &[db::Comment {
+                id: "old".to_string(),
+                issue_id: "i1".to_string(),
+                body: "stale".to_string(),
+                author_name: None,
+                created_at: "2025-01-01T00:00:00Z".to_string(),
+                updated_at: "2025-01-01T00:00:00Z".to_string(),
+                synced_at: String::new(),
+            }],
+        )
+        .unwrap();
+
+        let transport = FakeTransport::new(vec![
+            comments_page(&[comment_node("c1", "first")], true, Some("cur")),
+            comments_page(&[comment_node("c2", "second")], false, None),
+        ]);
+        sync_comments(&conn, &transport, "i1").unwrap();
+
+        let rows = db::query_comments(&conn, "i1").unwrap();
+        assert_eq!(
+            rows.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["c1", "c2"]
+        );
+        // Second request carries the first page's cursor.
+        assert_eq!(transport.variables(1)["after"], json!("cur"));
+    }
+
+    #[test]
+    fn sync_comments_missing_issue_clears_existing() {
+        let conn = test_conn();
+        db::upsert_comments(
+            &conn,
+            &[db::Comment {
+                id: "old".to_string(),
+                issue_id: "i1".to_string(),
+                body: "stale".to_string(),
+                author_name: None,
+                created_at: "2025-01-01T00:00:00Z".to_string(),
+                updated_at: "2025-01-01T00:00:00Z".to_string(),
+                synced_at: String::new(),
+            }],
+        )
+        .unwrap();
+
+        let transport = FakeTransport::new(vec![json!({ "issue": null })]);
+        sync_comments(&conn, &transport, "i1").unwrap();
+        assert!(db::query_comments(&conn, "i1").unwrap().is_empty());
+    }
 
     #[test]
     fn api_to_db_maps_fields_and_author() {

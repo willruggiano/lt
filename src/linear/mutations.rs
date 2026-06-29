@@ -273,3 +273,77 @@ pub fn create_issue(
     let data: IssueCreateData = query_as(transport, ISSUE_CREATE_MUTATION, variables)?;
     Ok(data.issue_create.issue)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linear::client::FakeTransport;
+
+    #[test]
+    fn fetch_teams_extracts_nodes() {
+        let transport = FakeTransport::new(vec![json!({
+            "teams": { "nodes": [{ "id": "t1", "name": "Eng" }, { "id": "t2", "name": "Design" }] }
+        })]);
+        let teams = fetch_teams(&transport).unwrap();
+        assert_eq!(
+            teams.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["Eng", "Design"]
+        );
+    }
+
+    #[test]
+    fn create_issue_builds_input_omitting_absent_optionals() {
+        let transport = FakeTransport::new(vec![json!({
+            "issueCreate": { "issue": {
+                "id": "i1", "identifier": "ENG-1", "title": "New",
+                "state": { "name": "Todo" }, "priority": 0, "team": { "name": "Eng" }
+            }}
+        })]);
+        let created = create_issue(
+            &transport,
+            CreateIssueInput {
+                title: "New".to_string(),
+                team_id: "t1".to_string(),
+                description: None,
+                state_id: Some("s1".to_string()),
+                priority: None,
+                assignee_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(created.identifier, "ENG-1");
+
+        let input = &transport.variables(0)["input"];
+        assert_eq!(input["title"], json!("New"));
+        assert_eq!(input["teamId"], json!("t1"));
+        assert_eq!(input["stateId"], json!("s1"));
+        // Absent optionals are not serialized into the input object.
+        assert!(input.get("description").is_none());
+        assert!(input.get("priority").is_none());
+        assert!(input.get("assigneeId").is_none());
+    }
+
+    #[test]
+    fn create_comment_errors_on_unsuccessful_payload() {
+        let transport = FakeTransport::new(vec![json!({ "commentCreate": { "success": false } })]);
+        let err = create_comment(&transport, "i1", "hi")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("success=false"), "got: {err}");
+    }
+
+    #[test]
+    fn update_issue_state_sends_state_id_input() {
+        let transport = FakeTransport::new(vec![json!({
+            "issueUpdate": { "issue": {
+                "id": "i1", "identifier": "ENG-1", "title": "t",
+                "state": { "name": "Done" }, "priority": 1, "assignee": null
+            }}
+        })]);
+        let issue = update_issue_state(&transport, "i1", "s9").unwrap();
+        assert_eq!(issue.state.name, "Done");
+        let vars = transport.variables(0);
+        assert_eq!(vars["id"], json!("i1"));
+        assert_eq!(vars["input"]["stateId"], json!("s9"));
+    }
+}

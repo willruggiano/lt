@@ -49,3 +49,20 @@ pub fn fetch_viewer(transport: &dyn GraphqlTransport) -> Result<Viewer> {
         org_name: data.viewer.organization.name,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linear::client::FakeTransport;
+
+    #[test]
+    fn fetch_viewer_maps_nested_fields() {
+        let transport = FakeTransport::new(vec![json!({
+            "viewer": { "id": "u1", "name": "Ada", "organization": { "name": "Acme" } }
+        })]);
+        let viewer = fetch_viewer(&transport).unwrap();
+        assert_eq!(viewer.id, "u1");
+        assert_eq!(viewer.name, "Ada");
+        assert_eq!(viewer.org_name, "Acme");
+    }
+}

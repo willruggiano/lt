@@ -69,3 +69,30 @@ pub fn run() -> Result<()> {
 
     super::sync_pages(&conn, |after| fetch_page(&transport, &since, after))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linear::client::FakeTransport;
+
+    #[test]
+    fn fetch_page_filters_by_since_and_extracts_page_info() {
+        let transport = FakeTransport::new(vec![json!({
+            "issues": {
+                "nodes": [crate::issues::list::sample_issue_node("1")],
+                "pageInfo": { "hasNextPage": false, "endCursor": null }
+            }
+        })]);
+        let (issues, has_next, _end) =
+            fetch_page(&transport, "2026-01-01T00:00:00Z", None).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert!(!has_next);
+
+        let vars = transport.variables(0);
+        assert_eq!(
+            vars["filter"]["updatedAt"]["gt"],
+            json!("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(vars["first"], json!(250));
+    }
+}
