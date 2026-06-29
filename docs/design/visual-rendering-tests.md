@@ -8,18 +8,18 @@ issue: https://linear.app/willruggiano/issue/ENG-19/visual-rendering-tests
 
 `lt` has three render surfaces and almost no coverage of any of them:
 
-| Surface              | Entry point                                                              | Output         | Coverage today          |
-| -------------------- | ------------------------------------------------------------------------ | -------------- | ----------------------- |
-| TUI frame            | `tui::ui::render(frame, &mut App)` (`src/tui/ui.rs`)                      | ratatui buffer | none                    |
-| CLI tables           | `issues::display::print_table*`, `inbox::display::print_table`           | text           | inbox date helper only  |
-| Markdown → lines     | `tui::markdown::render` (`src/tui/markdown.rs`)                           | `Vec<Line>`    | done (line/span tests)  |
+| Surface          | Entry point                                                    | Output         | Coverage today         |
+| ---------------- | -------------------------------------------------------------- | -------------- | ---------------------- |
+| TUI frame        | `tui::ui::render(frame, &mut App)` (`src/tui/ui.rs`)           | ratatui buffer | none                   |
+| CLI tables       | `issues::display::print_table*`, `inbox::display::print_table` | text           | inbox date helper only |
+| Markdown → lines | `tui::markdown::render` (`src/tui/markdown.rs`)                | `Vec<Line>`    | done (line/span tests) |
 
 This doc covers the first two. Markdown rendering is already tested per-span and
 is out of scope.
 
 The data comes from [[dst.md]]: `sim::generate(seed, size)` produces a
-deterministic `Dataset` of `db::Issue`/`db::Comment` rows. ENG-19 renders a known
-seeded dataset and asserts the output.
+deterministic `Dataset` of `db::Issue`/`db::Comment` rows. ENG-19 renders a
+known seeded dataset and asserts the output.
 
 ### The render seam
 
@@ -47,8 +47,8 @@ The tests populate `App` state directly, skip the action methods, and call
 
 ### TUI harness — ratatui `TestBackend`
 
-ratatui 0.30 ships the harness (`ratatui::backend::TestBackend`, re-exported from
-`ratatui-core`). A test draws one frame and asserts the resulting buffer,
+ratatui 0.30 ships the harness (`ratatui::backend::TestBackend`, re-exported
+from `ratatui-core`). A test draws one frame and asserts the resulting buffer,
 including per-cell style:
 
 ```rust
@@ -69,9 +69,9 @@ with the existing `db_issue_to_list_issue`) or fed as `db::Issue` directly into
 ### Construction seam — `App::for_test`
 
 `App::new` is private and requires a live `SyncState` channel. Add a test-only
-`#[cfg(test)] fn for_test(...) -> App` in `tui/mod.rs` that fills the struct with
-`sync_rx: None` and spawns no threads. Tests live in the `tui` module, so private
-access needs no wider visibility. No production surface grows.
+`#[cfg(test)] fn for_test(...) -> App` in `tui/mod.rs` that fills the struct
+with `sync_rx: None` and spawns no threads. Tests live in the `tui` module, so
+private access needs no wider visibility. No production surface grows.
 
 ### Determinism — inbox clock seam
 
@@ -79,10 +79,10 @@ The TUI list/detail path has no wall-clock dependency: `date()` slices a fixed
 ISO prefix from `sim`'s fixed `BASE_SECS` (`2026-01-01`). Deterministic.
 
 `lt inbox` is not: `inbox::display::relative_age` calls `SystemTime::now()` on
-every render, so the AGE column flaps. Fix by threading an explicit
-`now: i64` (unix seconds) into `print_table`/`relative_age`; the binary passes
-the real clock, tests pass a fixed value. This is a clock seam — explicit
-dependency wiring per [[posture.md]] — not a test-only shim.
+every render, so the AGE column flaps. Fix by threading an explicit `now: i64`
+(unix seconds) into `print_table`/`relative_age`; the binary passes the real
+clock, tests pass a fixed value. This is a clock seam — explicit dependency
+wiring per [[posture.md]] — not a test-only shim.
 
 ```text
    binary  ─▶ print_table(out, &n, now_unix_secs())
@@ -92,8 +92,8 @@ dependency wiring per [[posture.md]] — not a test-only shim.
 ### Assertions — `insta` snapshots
 
 Use `insta` for both surfaces. Full-frame TUI buffers (80×24) and multi-row CLI
-tables are too large to inline as expected literals without noise, and `insta
-accept` makes intentional layout changes a one-command review.
+tables are too large to inline as expected literals without noise, and
+`insta accept` makes intentional layout changes a one-command review.
 
 Cost: `insta` adds dev-dependencies that must clear the supply-chain gate
 (`cargo deny`, see [[contributing.md#Strictness]]) and `cargo machete`. It is a
@@ -103,8 +103,8 @@ the default or `sim` runtime builds.
 ### Feature gating
 
 Tests that call `sim::generate` are gated `#[cfg(all(test, feature = "sim"))]`
-(the capability is a cargo feature per [[dst.md]]). `make test` already runs both
-`cargo test` and `cargo test --features sim`, and `make check` lints
+(the capability is a cargo feature per [[dst.md]]). `make test` already runs
+both `cargo test` and `cargo test --features sim`, and `make check` lints
 `--features sim`; no CI change is needed. Pure-fixture render tests (no `sim`)
 need no gate.
 
@@ -127,8 +127,8 @@ TUI cases seed from one or two fixed `sim` seeds for stable, realistic data.
 
 ## Consequences
 
-- New `[dev-dependencies]` entry (`insta`) gated through `cargo deny`/`cargo
-  machete`; snapshots live under `src/**/snapshots/`.
+- New `[dev-dependencies]` entry (`insta`) gated through
+  `cargo deny`/`cargo machete`; snapshots live under `src/**/snapshots/`.
 - One production change: `inbox::display::print_table`/`relative_age` gain a
   `now: i64` parameter (clock seam).
 - One test-only addition: `App::for_test` in `tui/mod.rs`.
