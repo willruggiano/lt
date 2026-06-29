@@ -22,31 +22,9 @@ flake.nix
    ├─ nix/jailed.nix     jail.nix wrapper plumbing (the `jail.programs.*` option)
    ├─ nix/formatter.nix  treefmt -> `nix fmt`; exposes packages.treefmt
    ├─ nix/packages/      packages.{lt,toolchain,cargo-dupes,claude-code}
-   ├─ nix/checks/        the flake's `pre-commit` checks (nix-only, see below)
+   ├─ nix/checks/        the flake's `pre-commit` checks (nix-only)
    └─ nix/devshell.nix   devshells.default — the dev and CI environment
 ```
-
-## Gate boundaries
-
-Four disjoint gates; each check belongs to exactly one. Do not duplicate across
-them.
-
-```text
-nix flake check   nix tooling only  treefmt (fmt), deadnix, statix
-make check        rust + project    fmt, clippy, cargo-deny, machete, cpd,
-                                    cargo-dupes — runs in the devshell
-make cov          coverage          line-coverage gate — runs in the devshell
-nix fmt           formatting        treefmt across all languages
-```
-
-- `nix flake check` answers "is the nix code well-formed?"; `make check` answers
-  "is the project correct?".
-- Rust, supply-chain, dedup, copy/paste, test, and coverage gates live in the
-  `Makefile`, never in `nix flake check`. What `make test`/`make cov` run and
-  how to use them is in [[testing.md]].
-- CI (`.github/workflows/ci.yml`) runs all three: `nix flake check` →
-  `nix build .#lt` → `nix develop .#lt -c make check` →
-  `nix develop .#lt -c make cov`.
 
 ## Devshell provisioning
 

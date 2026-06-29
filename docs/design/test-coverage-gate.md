@@ -110,7 +110,7 @@ instrumented rebuild.
 ## Consequences
 
 - New gate `make cov`, wired into CI; `nix develop` gains `cargo-llvm-cov` and
-  the `llvm-tools-preview` component (see [[nix.md#Gate boundaries]]).
+  the `llvm-tools-preview` component (see [[nix.md]]).
 - CI does one extra instrumented build (replacing the uninstrumented test run).
 - Raising coverage now has teeth: the floor blocks regressions, and the
   per-module map above is the worklist for driving it toward 100%.
