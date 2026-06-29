@@ -13,7 +13,9 @@
 #     filesystem snapshot, so later sessions start with /nix already populated.
 #   - run as a SessionStart hook       -> starts the nix-daemon, which does NOT
 #     survive in the snapshot (snapshots capture files, not processes), and
-#     exports PATH for the agent's shells via $CLAUDE_ENV_FILE.
+#     dumps the full `nix develop .#lt` environment into $CLAUDE_ENV_FILE so
+#     every agent Bash command runs inside the devshell toolchain, not merely
+#     with `nix` on PATH.
 set -euo pipefail
 
 # Only act in Claude Code cloud sessions. CLAUDE_CODE_REMOTE=true is set there.
@@ -30,8 +32,8 @@ log() { printf '[claude-setup] %s\n' "$*" >&2; }
 #    systemd as PID 1, so the standard daemon planner would fail.
 if [ ! -x "$nix_bin/nix" ]; then
   log "installing Nix (determinate, --init none)"
-  curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
-    | sh -s -- install linux --init none --no-confirm
+  curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix |
+    sh -s -- install linux --init none --no-confirm
 else
   log "Nix already installed"
 fi
@@ -46,28 +48,46 @@ if [ ! -S /nix/var/nix/daemon-socket/socket ]; then
     [ -S /nix/var/nix/daemon-socket/socket ] && break
     sleep 1
   done
-  [ -S /nix/var/nix/daemon-socket/socket ] || { log "nix-daemon failed to start"; exit 1; }
+  [ -S /nix/var/nix/daemon-socket/socket ] || {
+    log "nix-daemon failed to start"
+    exit 1
+  }
 fi
 
-# 3. Expose Nix to subsequent agent shells. Inherit the proxy CA the environment
-#    already configured (do not hard-code a path); only set it if present.
+# 3. Expose Nix to the current process so the steps below can call it. Inherit
+#    the proxy CA the environment already configured (do not hard-code a path);
+#    only set it if present.
 export PATH="$nix_bin:$PATH"
 : "${NIX_SSL_CERT_FILE:=${SSL_CERT_FILE:-}}"
 [ -n "${NIX_SSL_CERT_FILE:-}" ] && export NIX_SSL_CERT_FILE
-if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-  printf 'PATH=%s:$PATH\n' "$nix_bin" >>"$CLAUDE_ENV_FILE"
-  [ -n "${NIX_SSL_CERT_FILE:-}" ] && \
-    printf 'NIX_SSL_CERT_FILE=%s\n' "$NIX_SSL_CERT_FILE" >>"$CLAUDE_ENV_FILE"
-fi
 
-# 4. Warm the devshell so the first `make check` is fast. Best-effort: with a
-#    binary cache this is a quick fetch; a cold first build can be slow but must
-#    not block the session.
-log "warming devshell (nix develop .#lt)"
-if (cd "$project_dir" && nix develop ".#lt" --command true); then
-  log "devshell ready"
+# 4. Make the full devshell the default for the agent's shells. `nix
+#    print-dev-env` both realises the devshell (warming the binary cache) and
+#    emits it as a sourceable script; Claude sources $CLAUDE_ENV_FILE before
+#    every Bash command, so each command runs inside `nix develop .#lt` rather
+#    than just with `nix` on PATH. When CLAUDE_ENV_FILE is absent (the cloud
+#    "Setup script" phase, before Claude launches) we still realise the devshell
+#    to warm the cache for later sessions.
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  log "capturing devshell env (nix print-dev-env .#lt)"
+  # Keep `nix` reachable inside the devshell: print-dev-env saves $PATH at
+  # source time and re-appends it after the devshell entries, so prepend nix
+  # here first. It sets no SSL_CERT_FILE, so the proxy CA env is left intact.
+  printf 'export PATH=%s:"$PATH"\n' "$nix_bin" >>"$CLAUDE_ENV_FILE"
+  [ -n "${NIX_SSL_CERT_FILE:-}" ] &&
+    printf 'export NIX_SSL_CERT_FILE=%s\n' "$NIX_SSL_CERT_FILE" >>"$CLAUDE_ENV_FILE"
+  if (cd "$project_dir" && nix print-dev-env ".#lt" >>"$CLAUDE_ENV_FILE"); then
+    log "devshell env captured"
+  else
+    log "devshell env capture failed (non-fatal; nix still on PATH)"
+  fi
 else
-  log "devshell warm failed (non-fatal; tools build on first use)"
+  log "warming devshell (nix print-dev-env .#lt)"
+  if (cd "$project_dir" && nix print-dev-env ".#lt" >/dev/null); then
+    log "devshell ready"
+  else
+    log "devshell warm failed (non-fatal; tools build on first use)"
+  fi
 fi
 
 log "done"
