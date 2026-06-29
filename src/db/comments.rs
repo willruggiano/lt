@@ -82,3 +82,89 @@ pub fn delete_comments_for_issue(conn: &Connection, issue_id: &str) -> Result<()
         "delete comments for issue",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn comment(id: &str, issue_id: &str, created_at: &str) -> Comment {
+        Comment {
+            id: id.to_string(),
+            issue_id: issue_id.to_string(),
+            body: format!("body {id}"),
+            author_name: Some("Alice".to_string()),
+            created_at: created_at.to_string(),
+            updated_at: created_at.to_string(),
+            // Overwritten by upsert_comments; value here is irrelevant.
+            synced_at: String::new(),
+        }
+    }
+
+    fn test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn query_returns_comments_ordered_by_created_at() {
+        let conn = test_db();
+        upsert_comments(
+            &conn,
+            &[
+                comment("c2", "i1", "2026-01-02T00:00:00Z"),
+                comment("c1", "i1", "2026-01-01T00:00:00Z"),
+                comment("c3", "i2", "2026-01-03T00:00:00Z"),
+            ],
+        )
+        .unwrap();
+
+        let got = query_comments(&conn, "i1").unwrap();
+        assert_eq!(
+            got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["c1", "c2"]
+        );
+        assert_eq!(got[0].body, "body c1");
+        assert_eq!(got[0].author_name.as_deref(), Some("Alice"));
+        // synced_at is stamped on insert, not carried from the input.
+        assert!(!got[0].synced_at.is_empty());
+    }
+
+    #[test]
+    fn query_unknown_issue_is_empty() {
+        let conn = test_db();
+        assert!(query_comments(&conn, "missing").unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_replaces_existing_by_id() {
+        let conn = test_db();
+        upsert_comments(&conn, &[comment("c1", "i1", "2026-01-01T00:00:00Z")]).unwrap();
+
+        let mut updated = comment("c1", "i1", "2026-01-01T00:00:00Z");
+        updated.body = "edited".to_string();
+        upsert_comments(&conn, &[updated]).unwrap();
+
+        let got = query_comments(&conn, "i1").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].body, "edited");
+    }
+
+    #[test]
+    fn delete_removes_only_target_issue() {
+        let conn = test_db();
+        upsert_comments(
+            &conn,
+            &[
+                comment("c1", "i1", "2026-01-01T00:00:00Z"),
+                comment("c2", "i2", "2026-01-02T00:00:00Z"),
+            ],
+        )
+        .unwrap();
+
+        delete_comments_for_issue(&conn, "i1").unwrap();
+
+        assert!(query_comments(&conn, "i1").unwrap().is_empty());
+        assert_eq!(query_comments(&conn, "i2").unwrap().len(), 1);
+    }
+}
