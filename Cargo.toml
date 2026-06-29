@@ -15,6 +15,13 @@ categories = ["command-line-utilities"]
 [package.metadata.cargo-machete]
 ignored = ["chumsky"]
 
+[features]
+# Deterministic simulation testing: compiles the `lt sim` subcommand and the
+# seeded dataset generator into both the CLI and the test binary. No extra
+# dependencies -- `rand` is already required by auth.
+# See docs/design/deterministic-simulation-testing-adr.md.
+sim = []
+
 [dependencies]
 anyhow = "1"
 crossterm = "0.29"
