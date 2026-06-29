@@ -28,8 +28,8 @@ flake.nix
 
 ## Gate boundaries
 
-Three disjoint gates exist. A check belongs to exactly one; do not duplicate it
-across them.
+Three disjoint gates; each check belongs to exactly one. Do not duplicate across
+them.
 
 ```text
 nix flake check   nix tooling only  treefmt (fmt), deadnix, statix
@@ -38,39 +38,37 @@ make check        rust + project    fmt, clippy, cargo-deny, machete, cpd,
 nix fmt           formatting        treefmt across all languages
 ```
 
-Rule: rust, supply-chain (`cargo-deny`), dedup (`cargo-dupes`), copy/paste
-(`cpd`), and test gates live in the `Makefile`, not in `nix flake check`. The
-flake checks are limited to nix's own tooling so `nix flake check` answers one
-question — "is the nix code well-formed?" — and `make check` answers "is the
-project correct?". CI runs both (`.github/workflows/ci.yml`): `nix flake check`,
-then `nix build .#lt`, then `nix develop .#lt -c make check`.
+- `nix flake check` answers "is the nix code well-formed?"; `make check` answers
+  "is the project correct?".
+- Rust, supply-chain, dedup, copy/paste, and test gates live in the `Makefile`,
+  never in `nix flake check`.
+- CI (`.github/workflows/ci.yml`) runs both: `nix flake check` →
+  `nix build .#lt` → `nix develop .#lt -c make check`.
 
 ## Devshell provisioning
 
-`make check` and CI both run inside `nix develop .#lt`. On Anthropic-managed
-remote sessions (which ship no Nix) `.claude/bin/setup.sh` bootstraps that
-environment in three phases:
-
-```text
-install      determinate-nix, daemonless (--init none): the VM has no PID-1 init
-start daemon nohup nix-daemon: not captured by the filesystem snapshot, so it
-             runs every session
-capture env  nix print-dev-env .#lt >> $CLAUDE_ENV_FILE: every agent shell then
-             runs inside the devshell toolchain, not merely with nix on PATH
-```
-
-It is idempotent and a no-op outside `CLAUDE_CODE_REMOTE=true`, so the same
-script is safe as both the cloud "Setup script" and a `SessionStart` hook.
+- `make check` and CI run inside `nix develop .#lt`.
+- On Anthropic-managed remote sessions (no Nix), `.claude/bin/setup.sh`
+  bootstraps it:
+  - **install** — determinate-nix, daemonless (`--init none`); the VM has no
+    PID-1 init.
+  - **start daemon** — `nohup nix-daemon`; not in the filesystem snapshot, so it
+    runs every session.
+  - **capture env** — `nix print-dev-env .#lt >> $CLAUDE_ENV_FILE`; every agent
+    shell then runs inside the devshell toolchain.
+- Idempotent and a no-op outside `CLAUDE_CODE_REMOTE=true`, so it serves as both
+  the cloud "Setup script" and a `SessionStart` hook.
 
 ## Offline cargo-deny
 
-`cargo deny check` needs the RustSec advisory database, but cloning
-`github.com/rustsec/advisory-db` 403s behind the repo-scoped git proxy in remote
-sessions. `nix/advisory-db.nix` vendors the pinned `advisory-db` flake input as
-a git-shaped checkout; `nix/devshell.nix` bakes it into `$PRJ_ROOT/.cache` on
-shell startup so `make check`'s `cargo deny --offline check` resolves it
-locally. The subdir name and `FETCH_HEAD` shape are cargo-deny version-specific
-— see the header comment in `nix/advisory-db.nix`.
+- `cargo deny check` needs the RustSec advisory database, but cloning
+  `rustsec/advisory-db` 403s behind the repo-scoped git proxy in remote
+  sessions.
+- `nix/advisory-db.nix` vendors the pinned `advisory-db` input as a git-shaped
+  checkout; `nix/devshell.nix` bakes it into `$PRJ_ROOT/.cache` on startup so
+  `cargo deny --offline check` resolves it locally.
+- The subdir name and `FETCH_HEAD` shape are cargo-deny version-specific — see
+  the header comment in `nix/advisory-db.nix`.
 
 ## Binary cache
 
