@@ -137,12 +137,11 @@ DEBUG for the `lt` crate, WARN elsewhere; override with `RUST_LOG`. `panic!`,
 
 ### Testing and simulation
 
-`make test` runs the suite with and without the `sim` feature. The `sim` feature
-compiles a deterministic, seeded fake-data generator into both the test binaries
-and the CLI (`lt sim`), so the app can be driven with no Linear account or
-network. Design and the data seam are in [[dst.md]]. `make cov` enforces a
-line-coverage floor that ratchets toward full coverage; see
-[[test-coverage-gate.md]].
+The `sim` feature compiles a deterministic, seeded fake-data generator into both
+the test binaries and the CLI (`lt sim`), so the app can be driven with no
+Linear account or network. Design and the data seam are in [[dst.md]]. Test
+procedures and conventions are in [[testing.md]]; the coverage gate and its
+ratchet in [[test-coverage-gate.md]].
 
 ### Build, run, deploy
 
