@@ -78,7 +78,7 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   # source time and re-appends it after the devshell entries, so prepend nix
   # here first. It sets no SSL_CERT_FILE or NIX_CONFIG, so the proxy CA and the
   # flake-config acceptance below survive the dump that follows.
-  printf 'export PATH=%s:"$PATH"\n' "$nix_bin" >>"$CLAUDE_ENV_FILE"
+  printf 'export PATH=%s:"$PATH"\n' "$nix_bin" >"$CLAUDE_ENV_FILE"
   printf "export NIX_CONFIG='accept-flake-config = true'\n" >>"$CLAUDE_ENV_FILE"
   [ -n "${NIX_SSL_CERT_FILE:-}" ] &&
     printf 'export NIX_SSL_CERT_FILE=%s\n' "$NIX_SSL_CERT_FILE" >>"$CLAUDE_ENV_FILE"
