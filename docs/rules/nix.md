@@ -34,16 +34,16 @@ them.
 ```text
 nix flake check   nix tooling only  treefmt (fmt), deadnix, statix
 make check        rust + project    fmt, clippy, cargo-deny, machete, cpd,
-                                    cargo-dupes, test — runs in the devshell
-make cov          coverage          cargo-llvm-cov line-coverage floor — runs in
-                                    the devshell; see [[test-coverage-gate.md]]
+                                    cargo-dupes — runs in the devshell
+make cov          coverage          line-coverage gate — runs in the devshell
 nix fmt           formatting        treefmt across all languages
 ```
 
 - `nix flake check` answers "is the nix code well-formed?"; `make check` answers
   "is the project correct?".
 - Rust, supply-chain, dedup, copy/paste, test, and coverage gates live in the
-  `Makefile`, never in `nix flake check`.
+  `Makefile`, never in `nix flake check`. What `make test`/`make cov` run and
+  how to use them is in [[testing.md]].
 - CI (`.github/workflows/ci.yml`) runs all three: `nix flake check` →
   `nix build .#lt` → `nix develop .#lt -c make check` →
   `nix develop .#lt -c make cov`.
