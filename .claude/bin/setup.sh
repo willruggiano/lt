@@ -54,10 +54,14 @@ if [ ! -S /nix/var/nix/daemon-socket/socket ]; then
   }
 fi
 
-# 3. Expose Nix to the current process so the steps below can call it. Inherit
-#    the proxy CA the environment already configured (do not hard-code a path);
-#    only set it if present.
+# 3. Expose Nix to the current process so the steps below can call it, and make
+#    every nix invocation accept the flake's nixConfig without prompting -- the
+#    env-var form of `--accept-flake-config`, so both setup's own calls and the
+#    agent's pull from the lt.cachix.org binary cache declared in flake.nix.
+#    Inherit the proxy CA the environment already configured (do not hard-code a
+#    path); only set it if present.
 export PATH="$nix_bin:$PATH"
+export NIX_CONFIG="accept-flake-config = true"
 : "${NIX_SSL_CERT_FILE:=${SSL_CERT_FILE:-}}"
 [ -n "${NIX_SSL_CERT_FILE:-}" ] && export NIX_SSL_CERT_FILE
 
@@ -72,8 +76,10 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   log "capturing devshell env (nix print-dev-env .#lt)"
   # Keep `nix` reachable inside the devshell: print-dev-env saves $PATH at
   # source time and re-appends it after the devshell entries, so prepend nix
-  # here first. It sets no SSL_CERT_FILE, so the proxy CA env is left intact.
+  # here first. It sets no SSL_CERT_FILE or NIX_CONFIG, so the proxy CA and the
+  # flake-config acceptance below survive the dump that follows.
   printf 'export PATH=%s:"$PATH"\n' "$nix_bin" >>"$CLAUDE_ENV_FILE"
+  printf "export NIX_CONFIG='accept-flake-config = true'\n" >>"$CLAUDE_ENV_FILE"
   [ -n "${NIX_SSL_CERT_FILE:-}" ] &&
     printf 'export NIX_SSL_CERT_FILE=%s\n' "$NIX_SSL_CERT_FILE" >>"$CLAUDE_ENV_FILE"
   if (cd "$project_dir" && nix print-dev-env ".#lt" >>"$CLAUDE_ENV_FILE"); then
