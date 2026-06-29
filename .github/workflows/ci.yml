@@ -27,6 +27,10 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
           extra_nix_config: |
             accept-flake-config = true
+      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: lt
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
       - run: nix flake check
       - run: nix build .#lt
       - run: nix develop .#lt --command make check

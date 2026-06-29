@@ -38,6 +38,15 @@
     };
   };
 
+  nixConfig = {
+    extra-substituters = [
+      "https://lt.cachix.org"
+    ];
+    extra-trusted-public-keys = [
+      "lt.cachix.org-1:kK3H6m9hVqyMWuFZkUEhr0tRRP76db/o+UNJew+T62c="
+    ];
+  };
+
   outputs = inputs:
     inputs.flake-parts.lib.mkFlake {inherit inputs;} {
       systems = ["x86_64-linux"];
