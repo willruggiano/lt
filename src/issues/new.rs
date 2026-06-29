@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::config;
-use crate::linear::client::graphql_query;
+use crate::linear::client::{HttpTransport, query_as};
 use crate::linear::mutations::{
     CreateIssueInput, Team, WorkflowState, create_issue, fetch_teams, fetch_workflow_states,
 };
@@ -420,14 +420,14 @@ fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
 pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let token = config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
-    let token = token.access_token;
+    let transport = HttpTransport::new(token.access_token);
 
     // Fetch viewer (for "me" shortcut)
-    let viewer_data: ViewerData = graphql_query(&token, VIEWER_QUERY, json!({}))?;
+    let viewer_data: ViewerData = query_as(&transport, VIEWER_QUERY, json!({}))?;
     let viewer = viewer_data.viewer;
 
     // Step 1: Team
-    let teams = fetch_teams(&token)?;
+    let teams = fetch_teams(&transport)?;
     if teams.is_empty() {
         return Err(anyhow!("no teams found in your Linear organization"));
     }
@@ -445,7 +445,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let priority = prompt_priority(out, args.priority.as_deref())?;
 
     // Step 5: State -- fetch workflow states for the chosen team
-    let states = fetch_workflow_states(&token, &team_id)?;
+    let states = fetch_workflow_states(&transport, &team_id)?;
     let state_id = if states.is_empty() {
         None
     } else {
@@ -454,7 +454,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
 
     // Step 6: Assignee -- fetch team members
     let members_data: TeamDetailData =
-        graphql_query(&token, TEAM_MEMBERS_QUERY, json!({ "teamId": team_id }))?;
+        query_as(&transport, TEAM_MEMBERS_QUERY, json!({ "teamId": team_id }))?;
     let members = members_data.team.members.nodes;
     let assignee_id = pick_assignee(out, &members, &viewer, args.assignee.as_deref())?;
 
@@ -489,7 +489,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
         assignee_id,
     };
 
-    let issue = create_issue(&token, input)?;
+    let issue = create_issue(&transport, input)?;
     writeln!(out, "Created: {} - {}", issue.identifier, issue.title)?;
     writeln!(
         out,

@@ -4,7 +4,7 @@ use serde_json::json;
 
 use crate::db;
 use crate::issues::list::{ISSUES_QUERY, Issue};
-use crate::linear::client::graphql_query;
+use crate::linear::client::{GraphqlTransport, HttpTransport, query_as};
 use crate::linear::types::PageInfo;
 
 #[derive(Deserialize)]
@@ -21,7 +21,7 @@ struct IssuesData {
 
 /// Fetch one page of issues updated after `since` (an RFC3339 timestamp).
 fn fetch_page(
-    token: &str,
+    transport: &dyn GraphqlTransport,
     since: &str,
     after: Option<&str>,
 ) -> Result<(Vec<Issue>, bool, Option<String>)> {
@@ -40,7 +40,7 @@ fn fetch_page(
         "after": after,
     });
 
-    let data: IssuesData = graphql_query(token, ISSUES_QUERY, variables)?;
+    let data: IssuesData = query_as(transport, ISSUES_QUERY, variables)?;
     let conn = data.issues;
     Ok((
         conn.nodes,
@@ -65,8 +65,7 @@ pub fn run() -> Result<()> {
     };
 
     let token = crate::auth::refresh::load_or_refresh_token()?;
+    let transport = HttpTransport::new(token.access_token);
 
-    super::sync_pages(&conn, |after| {
-        fetch_page(&token.access_token, &since, after)
-    })
+    super::sync_pages(&conn, |after| fetch_page(&transport, &since, after))
 }

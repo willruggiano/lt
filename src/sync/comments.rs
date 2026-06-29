@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::db;
-use crate::linear::client::graphql_query;
+use crate::linear::client::{GraphqlTransport, query_as};
 use crate::linear::types::PageInfo;
 
 const COMMENTS_QUERY: &str = r"
@@ -80,7 +80,11 @@ fn api_to_db(c: &ApiComment, issue_id: &str) -> db::Comment {
 ///
 /// All existing comments for the issue are replaced with the freshly fetched
 /// set to keep the DB consistent with Linear.
-pub fn sync_comments(conn: &rusqlite::Connection, token: &str, issue_id: &str) -> Result<()> {
+pub fn sync_comments(
+    conn: &rusqlite::Connection,
+    transport: &dyn GraphqlTransport,
+    issue_id: &str,
+) -> Result<()> {
     let mut all_comments: Vec<db::Comment> = Vec::new();
     let mut cursor: Option<String> = None;
 
@@ -90,7 +94,7 @@ pub fn sync_comments(conn: &rusqlite::Connection, token: &str, issue_id: &str) -
             "after": cursor,
         });
 
-        let data: IssueCommentsData = graphql_query(token, COMMENTS_QUERY, variables)?;
+        let data: IssueCommentsData = query_as(transport, COMMENTS_QUERY, variables)?;
         // issue not found; nothing to sync
         let Some(issue) = data.issue else {
             break;

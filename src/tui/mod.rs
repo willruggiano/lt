@@ -495,6 +495,7 @@ use ratatui::widgets::TableState;
 
 use crate::issues::IssueArgs;
 use crate::issues::list::Issue;
+use crate::linear::client::HttpTransport;
 use crate::linear::types::IssueDetail;
 
 pub enum Status {
@@ -1416,7 +1417,11 @@ impl App {
                     return;
                 }
             };
-            match crate::sync::comments::sync_comments(&conn, &token.access_token, &issue_id) {
+            match crate::sync::comments::sync_comments(
+                &conn,
+                &HttpTransport::new(token.access_token),
+                &issue_id,
+            ) {
                 Ok(()) => {
                     // Read the freshly-synced comments back from the DB.
                     let fresh = crate::db::query_comments(&conn, &issue_id)
@@ -1537,9 +1542,10 @@ impl App {
 
         std::thread::spawn(move || {
             let result = (|| -> Result<Vec<crate::linear::types::Comment>> {
-                crate::linear::mutations::create_comment(&token.access_token, &issue_id, &body)?;
+                let transport = HttpTransport::new(token.access_token);
+                crate::linear::mutations::create_comment(&transport, &issue_id, &body)?;
                 let conn = crate::db::open_db()?;
-                crate::sync::comments::sync_comments(&conn, &token.access_token, &issue_id)?;
+                crate::sync::comments::sync_comments(&conn, &transport, &issue_id)?;
                 Ok(crate::db::query_comments(&conn, &issue_id)?
                     .into_iter()
                     .map(db_comment_to_api)
@@ -1568,7 +1574,10 @@ impl App {
             return;
         };
         let current_state_name = issue.state.name.clone();
-        match crate::linear::mutations::fetch_workflow_states(&token.access_token, &issue.team.id) {
+        match crate::linear::mutations::fetch_workflow_states(
+            &HttpTransport::new(token.access_token),
+            &issue.team.id,
+        ) {
             Ok(states) => {
                 self.popup_items = states
                     .into_iter()
@@ -1615,7 +1624,7 @@ impl App {
             label: "Unassign".to_string(),
             id: None,
         }];
-        match fetch_team_members(&token.access_token, &issue.team.id) {
+        match fetch_team_members(&HttpTransport::new(token.access_token), &issue.team.id) {
             Ok(members) => {
                 for m in members {
                     items.push(PopupItem {
@@ -1686,13 +1695,12 @@ impl App {
             let Ok(Some(token)) = crate::config::load_token() else {
                 return;
             };
+            let transport = HttpTransport::new(token.access_token);
             let result: anyhow::Result<()> = match kind2 {
                 PopupKind::State => {
                     if let Some(state_id) = &item2.id {
                         crate::linear::mutations::update_issue_state(
-                            &token.access_token,
-                            &issue_id,
-                            state_id,
+                            &transport, &issue_id, state_id,
                         )
                         .map(|_| ())
                     } else {
@@ -1702,18 +1710,14 @@ impl App {
                 PopupKind::Priority => {
                     if let Some(pstr) = &item2.id {
                         let p: u8 = pstr.parse().unwrap_or(0);
-                        crate::linear::mutations::update_issue_priority(
-                            &token.access_token,
-                            &issue_id,
-                            p,
-                        )
-                        .map(|_| ())
+                        crate::linear::mutations::update_issue_priority(&transport, &issue_id, p)
+                            .map(|_| ())
                     } else {
                         Ok(())
                     }
                 }
                 PopupKind::Assignee => crate::linear::mutations::update_issue_assignee(
-                    &token.access_token,
+                    &transport,
                     &issue_id,
                     item2.id.clone(),
                 )
@@ -1763,7 +1767,7 @@ impl App {
         };
 
         // Fetch teams synchronously (fast -- just a list).
-        match crate::linear::mutations::fetch_teams(&token.access_token) {
+        match crate::linear::mutations::fetch_teams(&HttpTransport::new(token.access_token)) {
             Ok(teams) => {
                 modal.teams = teams
                     .into_iter()
@@ -1818,11 +1822,13 @@ impl App {
                 return;
             };
 
+            let transport = HttpTransport::new(token.access_token);
+
             // Fetch viewer for "me" shortcut (bd-1fz).
-            let viewer = fetch_viewer(&token.access_token).ok();
+            let viewer = fetch_viewer(&transport).ok();
 
             // Fetch states.
-            match crate::linear::mutations::fetch_workflow_states(&token.access_token, &team_id) {
+            match crate::linear::mutations::fetch_workflow_states(&transport, &team_id) {
                 Ok(states) => {
                     let items: Vec<PopupItem> = states
                         .into_iter()
@@ -1842,7 +1848,7 @@ impl App {
             }
 
             // Fetch assignees.
-            match fetch_team_members(&token.access_token, &team_id) {
+            match fetch_team_members(&transport, &team_id) {
                 Ok(members) => {
                     let items = build_assignee_items(viewer.as_ref(), members);
                     let _ = tx.send(ModalEvent::AssigneesLoaded(items));
@@ -1889,7 +1895,8 @@ impl App {
 
         let (input, display) = build_create_request(modal, team_id);
 
-        match crate::linear::mutations::create_issue(&token.access_token, input) {
+        match crate::linear::mutations::create_issue(&HttpTransport::new(token.access_token), input)
+        {
             Ok(created) => {
                 cache_created_issue(&created, display);
                 // Refresh list and highlight new issue (bd-3ba).
@@ -2166,7 +2173,10 @@ fn build_assignee_items(
     items
 }
 
-fn fetch_team_members(token: &str, team_id: &str) -> Result<Vec<Member>> {
+fn fetch_team_members(
+    transport: &dyn crate::linear::client::GraphqlTransport,
+    team_id: &str,
+) -> Result<Vec<Member>> {
     use serde::Deserialize;
     use serde_json::json;
 
@@ -2203,7 +2213,7 @@ query TeamMembers($teamId: String!) {
 
     let variables = json!({ "teamId": team_id });
     let data: TeamWrapper =
-        crate::linear::client::graphql_query(token, TEAM_MEMBERS_QUERY, variables)?;
+        crate::linear::client::query_as(transport, TEAM_MEMBERS_QUERY, variables)?;
     Ok(data
         .team
         .members
@@ -2430,7 +2440,7 @@ fn spawn_sync_thread(
                     crate::config::load_token()
                         .ok()
                         .flatten()
-                        .and_then(|t| fetch_viewer(&t.access_token).ok())
+                        .and_then(|t| fetch_viewer(&HttpTransport::new(t.access_token)).ok())
                 } else {
                     None
                 };
@@ -2464,7 +2474,7 @@ fn spawn_login_thread() -> mpsc::Receiver<LoginEvent> {
             let viewer = crate::config::load_token()
                 .ok()
                 .flatten()
-                .and_then(|t| fetch_viewer(&t.access_token).ok());
+                .and_then(|t| fetch_viewer(&HttpTransport::new(t.access_token)).ok());
             let _ = tx.send(LoginEvent::Success {
                 viewer_name: viewer.as_ref().map(|v| v.name.clone()),
                 org_name: viewer.as_ref().map(|v| v.org_name.clone()),
@@ -2632,7 +2642,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     let viewer = crate::config::load_token()
         .ok()
         .flatten()
-        .and_then(|token| fetch_viewer(&token.access_token).ok());
+        .and_then(|token| fetch_viewer(&HttpTransport::new(token.access_token)).ok());
 
     // Spawn background sync thread. When the identity fetch above failed
     // (no token yet, or an expired one), ask the sync thread to deliver it
