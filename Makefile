@@ -1,7 +1,6 @@
 .DEFAULT_GOAL := help
 
-# Line-coverage floor enforced by `make cov`. Monotonic: only ever raised, in the
-# same change that adds the tests covering the gap. See docs/design/test-coverage-gate.md.
+# Line-coverage floor for `make cov`; see docs/design/test-coverage-gate.md.
 COVERAGE_FLOOR := 45
 
 .PHONY: help build check test fix cov cov-html cov-collect
