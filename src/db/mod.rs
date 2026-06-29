@@ -12,7 +12,16 @@ pub use issues::{
     Issue, get_meta, query_children, query_issues, query_issues_page, search_issues, set_meta,
     upsert_issues,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, Params};
+
+/// Run a parameterized write statement, attaching `what` to any error.
+///
+/// `what` reads as the failed action, e.g. `"set sync_meta"`.
+pub(crate) fn execute(conn: &Connection, sql: &str, params: impl Params, what: &str) -> Result<()> {
+    conn.execute(sql, params)
+        .with_context(|| format!("failed to {what}"))?;
+    Ok(())
+}
 
 fn db_path() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir().context("could not determine local data directory")?;

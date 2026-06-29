@@ -58,15 +58,15 @@ fn base_type_name<'a>(ty: &'a graphql_parser::schema::Type<'a, String>) -> &'a s
     }
 }
 
-/// Parse the GraphQL schema and return a map of `IssueFilter` field names to
+/// Parse the GraphQL schema and return a map of `input_type`'s field names to
 /// their base type names.
-fn extract_issue_filter_fields(schema_src: &str) -> HashMap<String, String> {
+fn extract_input_object_fields(schema_src: &str, input_type: &str) -> HashMap<String, String> {
     let doc: Document<String> = graphql_parser::parse_schema(schema_src)
         .unwrap_or_else(|e| panic!("Failed to parse GraphQL schema: {e}"));
 
     for def in &doc.definitions {
         if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
-            && input.name == "IssueFilter"
+            && input.name == input_type
         {
             let mut map = HashMap::new();
             for field in &input.fields {
@@ -77,28 +77,7 @@ fn extract_issue_filter_fields(schema_src: &str) -> HashMap<String, String> {
         }
     }
 
-    panic!("IssueFilter input type not found in the GraphQL schema");
-}
-
-/// Parse the GraphQL schema and return the set of field names in `IssueSortInput`.
-fn extract_issue_sort_input_fields(schema_src: &str) -> HashMap<String, String> {
-    let doc: Document<String> = graphql_parser::parse_schema(schema_src)
-        .unwrap_or_else(|e| panic!("Failed to parse GraphQL schema: {e}"));
-
-    for def in &doc.definitions {
-        if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
-            && input.name == "IssueSortInput"
-        {
-            let mut map = HashMap::new();
-            for field in &input.fields {
-                let base = base_type_name(&field.value_type).to_string();
-                map.insert(field.name.clone(), base);
-            }
-            return map;
-        }
-    }
-
-    panic!("IssueSortInput input type not found in the GraphQL schema");
+    panic!("{input_type} input type not found in the GraphQL schema");
 }
 
 /// Convert a lowercase key to `PascalCase` for use as an enum variant name.
@@ -118,14 +97,19 @@ fn to_pascal_case(s: &str) -> String {
 // Code generation (quote-based) -- filter stems
 // ---------------------------------------------------------------------------
 
+/// `PascalCase` enum-variant idents, one per TOML field (in order).
+fn field_variants(fields: &[FieldSpec]) -> Vec<proc_macro2::Ident> {
+    fields
+        .iter()
+        .map(|f| format_ident!("{}", to_pascal_case(&f.key)))
+        .collect()
+}
+
 /// Generate the `StemKey` enum.
 ///
 /// One variant per TOML field (in order) plus the hard-coded Sort variant.
 fn gen_stem_key_enum(fields: &[FieldSpec]) -> TokenStream {
-    let variants: Vec<proc_macro2::Ident> = fields
-        .iter()
-        .map(|f| format_ident!("{}", to_pascal_case(&f.key)))
-        .collect();
+    let variants = field_variants(fields);
 
     quote! {
         /// The key side of a stem token (used for completion context).
@@ -141,10 +125,7 @@ fn gen_stem_key_enum(fields: &[FieldSpec]) -> TokenStream {
 ///
 /// Sort carries (field, dir); every TOML field carries a String value.
 fn gen_stem_kind_enum(fields: &[FieldSpec]) -> TokenStream {
-    let variants: Vec<proc_macro2::Ident> = fields
-        .iter()
-        .map(|f| format_ident!("{}", to_pascal_case(&f.key)))
-        .collect();
+    let variants = field_variants(fields);
 
     quote! {
         /// The fully-parsed meaning of a recognised stem.
@@ -160,10 +141,7 @@ fn gen_stem_kind_enum(fields: &[FieldSpec]) -> TokenStream {
 ///
 /// Emits one match arm per TOML field.  The `sort:` arm is hard-coded.
 fn gen_from_ast(fields: &[FieldSpec]) -> TokenStream {
-    let variants: Vec<proc_macro2::Ident> = fields
-        .iter()
-        .map(|f| format_ident!("{}", to_pascal_case(&f.key)))
-        .collect();
+    let variants = field_variants(fields);
 
     let field_idents: Vec<proc_macro2::Ident> =
         fields.iter().map(|f| format_ident!("{}", f.key)).collect();
@@ -580,14 +558,26 @@ fn gen_parse_sort_value(sort_fields: &[SortFieldSpec]) -> TokenStream {
 /// Generate `sort_col(field: &SortField) -> &'static str`.
 ///
 /// Maps each `SortField` variant to its SQLite column name.
+/// `SortField::<Variant> => <value>,` match arms, one per sort field, where
+/// `value` selects the per-field string literal to map onto.
+fn sort_field_arms(
+    sort_fields: &[SortFieldSpec],
+    value: impl Fn(&SortFieldSpec) -> &str,
+) -> Vec<TokenStream> {
+    sort_fields
+        .iter()
+        .map(|f| {
+            let variant = format_ident!("{}", to_pascal_case(&f.key));
+            let value = value(f);
+            quote! {
+                SortField::#variant => #value,
+            }
+        })
+        .collect()
+}
+
 fn gen_sort_col(sort_fields: &[SortFieldSpec]) -> TokenStream {
-    let match_arms = sort_fields.iter().map(|f| {
-        let variant = format_ident!("{}", to_pascal_case(&f.key));
-        let col = &f.sql_col;
-        quote! {
-            SortField::#variant => #col,
-        }
-    });
+    let match_arms = sort_field_arms(sort_fields, |f| &f.sql_col);
 
     quote! {
         /// Map a sort field to the corresponding SQLite column name.
@@ -606,13 +596,7 @@ fn gen_sort_col(sort_fields: &[SortFieldSpec]) -> TokenStream {
 ///
 /// Produces the JSON payload for the Linear GraphQL `sort` argument.
 fn gen_build_sort(sort_fields: &[SortFieldSpec]) -> TokenStream {
-    let match_arms = sort_fields.iter().map(|f| {
-        let variant = format_ident!("{}", to_pascal_case(&f.key));
-        let gql = &f.gql_field;
-        quote! {
-            SortField::#variant => #gql,
-        }
-    });
+    let match_arms = sort_field_arms(sort_fields, |f| &f.gql_field);
 
     quote! {
         /// Build the Linear GraphQL `sort` argument JSON for the given field and direction.
@@ -669,8 +653,8 @@ fn main() {
             schema_path.display()
         )
     });
-    let issue_filter_fields = extract_issue_filter_fields(&schema_src);
-    let issue_sort_input_fields = extract_issue_sort_input_fields(&schema_src);
+    let issue_filter_fields = extract_input_object_fields(&schema_src, "IssueFilter");
+    let issue_sort_input_fields = extract_input_object_fields(&schema_src, "IssueSortInput");
 
     // -----------------------------------------------------------------------
     // Validate every filter allowlist entry against the schema

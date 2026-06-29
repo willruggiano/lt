@@ -176,35 +176,27 @@ pub struct CreateIssueInput {
     pub assignee_id: Option<String>,
 }
 
-pub fn update_issue_state(token: &str, id: &str, state_id: &str) -> Result<Issue> {
-    let variables = json!({
-        "id": id,
-        "input": { "stateId": state_id },
-    });
-    let data: IssueUpdateData = graphql_query(token, ISSUE_UPDATE_MUTATION, variables)?;
-    Ok(data.issue_update.issue)
-}
-
-pub fn update_issue_priority(token: &str, id: &str, priority: u8) -> Result<Issue> {
-    let variables = json!({
-        "id": id,
-        "input": { "priority": priority },
-    });
-    let data: IssueUpdateData = graphql_query(token, ISSUE_UPDATE_MUTATION, variables)?;
-    Ok(data.issue_update.issue)
-}
-
-pub fn update_issue_assignee(token: &str, id: &str, assignee_id: Option<String>) -> Result<Issue> {
-    let input = match assignee_id {
-        Some(aid) => json!({ "assigneeId": aid }),
-        None => json!({ "assigneeId": serde_json::Value::Null }),
-    };
+/// Run the `issueUpdate` mutation for `id` with the given `input` payload.
+fn run_issue_update(token: &str, id: &str, input: &serde_json::Value) -> Result<Issue> {
     let variables = json!({
         "id": id,
         "input": input,
     });
     let data: IssueUpdateData = graphql_query(token, ISSUE_UPDATE_MUTATION, variables)?;
     Ok(data.issue_update.issue)
+}
+
+pub fn update_issue_state(token: &str, id: &str, state_id: &str) -> Result<Issue> {
+    run_issue_update(token, id, &json!({ "stateId": state_id }))
+}
+
+pub fn update_issue_priority(token: &str, id: &str, priority: u8) -> Result<Issue> {
+    run_issue_update(token, id, &json!({ "priority": priority }))
+}
+
+pub fn update_issue_assignee(token: &str, id: &str, assignee_id: Option<String>) -> Result<Issue> {
+    let assignee_id = assignee_id.map_or(serde_json::Value::Null, serde_json::Value::String);
+    run_issue_update(token, id, &json!({ "assigneeId": assignee_id }))
 }
 
 pub fn fetch_workflow_states(token: &str, team_id: &str) -> Result<Vec<WorkflowState>> {
