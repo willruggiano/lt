@@ -1,0 +1,16 @@
+---
+source: src/issues/display.rs
+expression: "cached_to_string(&dataset.issues, \"(cached)\")"
+---
+IDENTIFIER  TITLE                             STATE      PRIORITY  ASSIGNEE            TEAM                            CREATED     UPDATED   
+----------  --------------------------------  ---------  --------  ------------------  ------------------------------  ----------  ----------
+ALT-1       Drive Centralized eyeballs        Todo       Normal    Eli Von             Alternative Dispute Resolution  2026-06-06  2026-06-07
+COM-1       Scale Persevering paradigms       Backlog    Normal    -                   Computer Games                  2026-02-04  2026-02-11
+MUS-1       Extend Robust systems             Backlog    Normal    -                   Music                           2026-05-01  2026-05-01
+MUS-2       Transform Compatible bandwidth    Backlog    Urgent    -                   Music                           2026-05-21  2026-05-24
+ALT-2       Enhance Total applications        In Review  Low       Cathy Wilderman     Alternative Dispute Resolution  2026-04-09  2026-04-18
+COM-2       Enhance Mandatory convergence     Done       High      Monique Wintheiser  Computer Games                  2026-05-26  2026-06-04
+PRI-1       Implement Face to face bandwidth  Todo       Urgent    Emie Parker         Printing                        2026-05-29  2026-05-30
+PRI-2       Repurpose Cross-group interfaces  In Review  Urgent    Samanta Lynch       Printing                        2026-06-09  2026-06-13
+
+(cached)

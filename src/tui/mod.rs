@@ -927,6 +927,31 @@ impl App {
         }
     }
 
+    /// Build an `App` for rendering tests: no background sync channel, no
+    /// threads, no DB. Callers populate `mode`/`detail`/`viewer_name` directly
+    /// and drive `ui::render`. See `docs/design/visual-rendering-tests.md`.
+    #[cfg(all(test, feature = "sim"))]
+    fn for_test(issues: Vec<Issue>) -> Self {
+        let mut app = Self::new(
+            issues,
+            Pagination {
+                has_next_page: false,
+                current_cursor: None,
+                cursor_stack: Vec::new(),
+                end_cursor: None,
+            },
+            IssueArgs::default(),
+            SyncState {
+                sync_rx: None,
+                syncing: false,
+                sync_status_label: String::new(),
+                next_sync_at: None,
+            },
+        );
+        app.status = Status::Idle;
+        app
+    }
+
     /// Keep app.args.sort/desc in sync with `active_filter` (bd-rbm).
     /// Called after `active_filter` is updated so that `do_fetch()` and the
     /// table sort-column marker reflect the confirmed filter state.
@@ -3118,5 +3143,130 @@ fn poll_search_debounce(app: &mut App) {
     if should_search && let Some(ref mut overlay) = app.search_overlay {
         overlay.last_changed = None;
         overlay.run_search(app.viewport_height, app.args.limit as usize);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering tests (docs/design/visual-rendering-tests.md)
+//
+// These drive `ui::render` into a ratatui `TestBackend` and snapshot the
+// resulting buffer with `insta`. They populate `App` state directly via
+// `App::for_test` and skip the DB/thread action methods, so no DB, network, or
+// profile global is touched. Data comes from the deterministic `sim` generator,
+// so the module is gated on `feature = "sim"`.
+// ---------------------------------------------------------------------------
+#[cfg(all(test, feature = "sim"))]
+mod render_tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+
+    /// Convert a seeded `sim` dataset into the list issues the TUI renders.
+    fn sim_issues(seed: u64, size: usize) -> Vec<Issue> {
+        crate::sim::generate(seed, size)
+            .issues
+            .into_iter()
+            .map(db_issue_to_list_issue)
+            .collect()
+    }
+
+    /// Draw one frame at `w`x`h` and return the rendered buffer as text.
+    fn draw(app: &mut App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| ui::render(f, app)).unwrap();
+        format!("{}", term.backend())
+    }
+
+    /// An `App` seeded with sim issues and a fixed identity for a stable header.
+    fn app_with_issues(seed: u64, size: usize) -> App {
+        let mut app = App::for_test(sim_issues(seed, size));
+        app.viewer_name = Some("Ada Lovelace".to_string());
+        app.org_name = Some("Acme".to_string());
+        app
+    }
+
+    #[test]
+    fn list_view() {
+        let mut app = app_with_issues(0, 12);
+        insta::assert_snapshot!(draw(&mut app, 100, 20));
+    }
+
+    #[test]
+    fn empty_list() {
+        let mut app = App::for_test(Vec::new());
+        app.viewer_name = Some("Ada Lovelace".to_string());
+        app.org_name = Some("Acme".to_string());
+        insta::assert_snapshot!(draw(&mut app, 80, 10));
+    }
+
+    #[test]
+    fn detail_overlay() {
+        let mut app = app_with_issues(0, 12);
+        let issue = app.issues[0].clone();
+        app.detail = Some(build_cached_detail(&issue, Vec::new()));
+        app.mode = Mode::Detail;
+        insta::assert_snapshot!(draw(&mut app, 100, 24));
+    }
+
+    #[test]
+    fn priority_popup() {
+        let mut app = app_with_issues(0, 12);
+        app.popup_items = priority_popup_items();
+        app.popup_selected = 1;
+        app.mode = Mode::Popup(PopupKind::Priority);
+        insta::assert_snapshot!(draw(&mut app, 100, 20));
+    }
+
+    #[test]
+    fn search_overlay() {
+        let mut app = app_with_issues(0, 12);
+        let mut overlay = SearchOverlay::new();
+        overlay.results = sim_issues(0, 12);
+        overlay.has_searched = true;
+        overlay.table_state.select(Some(0));
+        app.search_overlay = Some(overlay);
+        app.mode = Mode::Search;
+        insta::assert_snapshot!(draw(&mut app, 100, 20));
+    }
+
+    #[test]
+    fn help_popup() {
+        let mut app = app_with_issues(0, 12);
+        app.help_popup = Some(HelpPopup::new());
+        app.mode = Mode::Help;
+        insta::assert_snapshot!(draw(&mut app, 100, 24));
+    }
+
+    #[test]
+    fn new_issue_modal() {
+        let mut app = app_with_issues(0, 12);
+        app.new_issue_modal = Some(NewIssueModal {
+            focused_field: NewIssueField::Title,
+            title: TextInput::from_string("Fix the renderer".to_string()),
+            description: "Some description.".to_string(),
+            teams: vec![PopupItem {
+                label: "Engineering".to_string(),
+                id: Some("ENG".to_string()),
+            }],
+            team_selected: 0,
+            priorities: priority_popup_items(),
+            priority_selected: 0,
+            states: vec![PopupItem {
+                label: "Todo".to_string(),
+                id: Some("s1".to_string()),
+            }],
+            state_selected: 0,
+            assignees: vec![PopupItem {
+                label: "Ada Lovelace".to_string(),
+                id: Some("u1".to_string()),
+            }],
+            assignee_selected: 0,
+            loading: false,
+            error: String::new(),
+            modal_rx: None,
+        });
+        app.mode = Mode::NewIssue;
+        insta::assert_snapshot!(draw(&mut app, 100, 30));
     }
 }

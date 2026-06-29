@@ -75,3 +75,6 @@ unimplemented = "deny"
 dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
+
+[dev-dependencies]
+insta = "1.48.0"

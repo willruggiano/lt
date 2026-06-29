@@ -41,6 +41,7 @@
             root = ../../..;
             fileset = inputs.globset.lib.globs ../../.. [
               "**/*.rs"
+              "**/*.snap" # insta snapshots; the package build's tests read these
               "build/*.graphql"
               "build/*.toml"
               "Cargo.lock"

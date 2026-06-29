@@ -1,0 +1,14 @@
+---
+source: src/tui/mod.rs
+expression: "draw(&mut app, 80, 10)"
+---
+"user:Ada Lovelace  org:Acme  sort:updated-                                      "
+"                                                                                "
+"No issues found.                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"q quit  / filter  ? help  j/k nav  <space> detail  n new                     [1]"
