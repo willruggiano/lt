@@ -2,12 +2,7 @@
   imports = [
     inputs.git-hooks.flakeModule
   ];
-  perSystem = {
-    config,
-    inputs',
-    lib,
-    ...
-  }: let
+  perSystem = {config, ...}: let
     cfg = config.pre-commit;
   in {
     devshells.default.devshell.startup.install-git-hooks.text = config.pre-commit.shellHook;
@@ -19,24 +14,12 @@
         (readonly cfg.settings.configFile)
       ];
 
+    # `nix flake check` is scoped to nix tooling only: dead-code, lint, and
+    # format gates for the flake itself. Rust, copy/paste, and CI gates live in
+    # the Makefile; cross-language formatting lives in `nix fmt` (treefmt).
     pre-commit.settings = {
       hooks = {
-        # Formatting
-        treefmt = {
-          enable = true;
-          package = config.packages.treefmt;
-        };
-        # Copy/paste detection (no git-hooks.nix builtin; use the cpd flake input)
-        jscpd = {
-          enable = true;
-          name = "jscpd";
-          entry = "${lib.getExe inputs'.cpd.packages.default} .";
-          files = "\\.rs$";
-          pass_filenames = false;
-        };
-        # GitHub Actions
-        actionlint.enable = true;
-        # Nix
+        alejandra.enable = true;
         deadnix.enable = true;
         statix.enable = true;
       };
