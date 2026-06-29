@@ -145,3 +145,60 @@ pub fn fetch_notifications_from_config(
         max_total,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linear::client::FakeTransport;
+
+    fn node(id: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "type": "issueAssignedToYou",
+            "readAt": null,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "issue": null,
+            "actor": null
+        })
+    }
+
+    fn page(nodes: &[&str], has_next: bool, end: Option<&str>) -> serde_json::Value {
+        let nodes: Vec<_> = nodes.iter().map(|id| node(id)).collect();
+        json!({ "notifications": {
+            "nodes": nodes,
+            "pageInfo": { "hasNextPage": has_next, "endCursor": end }
+        }})
+    }
+
+    #[test]
+    fn paginates_until_last_page() {
+        let transport = FakeTransport::new(vec![
+            page(&["n1"], true, Some("c1")),
+            page(&["n2"], false, None),
+        ]);
+        let got = fetch_notifications(&transport, 250, None).unwrap();
+        assert_eq!(
+            got.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            ["n1", "n2"]
+        );
+        // The second request carries the first page's end cursor.
+        assert_eq!(transport.variables(1)["after"], json!("c1"));
+    }
+
+    #[test]
+    fn max_total_truncates_and_stops_early() {
+        let transport = FakeTransport::new(vec![page(&["n1", "n2", "n3"], true, Some("c1"))]);
+        let got = fetch_notifications(&transport, 250, Some(2)).unwrap();
+        assert_eq!(got.len(), 2);
+        // The cap is reached on the first page, so no second request is made.
+        assert_eq!(transport.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn page_size_is_capped_at_250() {
+        let transport = FakeTransport::new(vec![page(&["n1"], false, None)]);
+        fetch_notifications(&transport, 1000, None).unwrap();
+        assert_eq!(transport.variables(0)["first"], json!(250));
+    }
+}

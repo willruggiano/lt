@@ -81,6 +81,42 @@ pub fn query_as<T: DeserializeOwned>(
     serde_json::from_value(data).context("deserializing GraphQL data")
 }
 
+/// Test double for [`GraphqlTransport`]: returns scripted `data` payloads in
+/// order and records the `(query, variables)` of each call. Shared across the
+/// crate's fetcher tests.
+#[cfg(test)]
+pub struct FakeTransport {
+    responses: std::cell::RefCell<std::collections::VecDeque<Result<Value>>>,
+    pub calls: std::cell::RefCell<Vec<(String, Value)>>,
+}
+
+#[cfg(test)]
+impl FakeTransport {
+    /// Script a sequence of successful `data` payloads, one per `query` call.
+    pub fn new(responses: Vec<Value>) -> Self {
+        Self {
+            responses: std::cell::RefCell::new(responses.into_iter().map(Ok).collect()),
+            calls: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The variables passed to the call at `index`.
+    pub fn variables(&self, index: usize) -> Value {
+        self.calls.borrow()[index].1.clone()
+    }
+}
+
+#[cfg(test)]
+impl GraphqlTransport for FakeTransport {
+    fn query(&self, query: &str, variables: Value) -> Result<Value> {
+        self.calls.borrow_mut().push((query.to_string(), variables));
+        self.responses
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| Err(anyhow!("FakeTransport: no scripted response")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

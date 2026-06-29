@@ -273,14 +273,52 @@ pub fn run(out: &mut dyn Write, mut args: IssueArgs) -> Result<()> {
     Ok(())
 }
 
+/// A minimal GraphQL issue node matching [`Issue`]'s deserialization, shared by
+/// the issue-fetch tests in this module and in `sync::delta`.
+#[cfg(test)]
+pub(crate) fn sample_issue_node(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id, "identifier": format!("ENG-{id}"), "title": "t",
+        "priorityLabel": "High", "priority": 2,
+        "state": { "id": "s", "name": "Todo" },
+        "assignee": null,
+        "team": { "id": "ENG", "name": "Engineering" },
+        "description": null,
+        "labels": { "nodes": [] },
+        "project": null, "cycle": null, "creator": null, "parent": null,
+        "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-02T00:00:00Z"
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linear::client::FakeTransport;
 
     fn label(name: &str) -> LabelNode {
         LabelNode {
             name: name.to_string(),
         }
+    }
+
+    #[test]
+    fn fetch_with_maps_nodes_and_sends_pagination_vars() {
+        let transport = FakeTransport::new(vec![serde_json::json!({
+            "issues": {
+                "nodes": [sample_issue_node("1")],
+                "pageInfo": { "hasNextPage": true, "endCursor": "50" }
+            }
+        })]);
+        let args = IssueArgs::default();
+        let (issues, has_next, end) = fetch_with(&transport, &args, Some("0")).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].identifier, "ENG-1");
+        assert!(has_next);
+        assert_eq!(end.as_deref(), Some("50"));
+
+        let vars = transport.variables(0);
+        assert_eq!(vars["first"], serde_json::json!(50));
+        assert_eq!(vars["after"], serde_json::json!("0"));
     }
 
     #[test]
