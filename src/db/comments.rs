@@ -75,10 +75,10 @@ pub fn query_comments(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>>
 
 /// Delete all comments for a given `issue_id` (used before re-inserting a fresh set).
 pub fn delete_comments_for_issue(conn: &Connection, issue_id: &str) -> Result<()> {
-    conn.execute(
+    crate::db::execute(
+        conn,
         "DELETE FROM issue_comments WHERE issue_id = ?1",
         params![issue_id],
+        "delete comments for issue",
     )
-    .context("failed to delete comments for issue")?;
-    Ok(())
 }

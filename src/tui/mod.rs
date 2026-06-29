@@ -1243,23 +1243,28 @@ impl App {
     }
 
     fn detail_scroll_half_page_down(&mut self) {
-        let step = (self.viewport_height / 2).max(1);
-        self.detail_scroll = self.detail_scroll.saturating_add(step);
+        self.detail_scroll_by((self.viewport_height / 2).max(1), true);
     }
 
     fn detail_scroll_half_page_up(&mut self) {
-        let step = (self.viewport_height / 2).max(1);
-        self.detail_scroll = self.detail_scroll.saturating_sub(step);
+        self.detail_scroll_by((self.viewport_height / 2).max(1), false);
     }
 
     fn detail_scroll_page_down(&mut self) {
-        let step = self.viewport_height.max(1);
-        self.detail_scroll = self.detail_scroll.saturating_add(step);
+        self.detail_scroll_by(self.viewport_height.max(1), true);
     }
 
     fn detail_scroll_page_up(&mut self) {
-        let step = self.viewport_height.max(1);
-        self.detail_scroll = self.detail_scroll.saturating_sub(step);
+        self.detail_scroll_by(self.viewport_height.max(1), false);
+    }
+
+    /// Scroll the detail pane by `step` rows, `down` toward the bottom.
+    fn detail_scroll_by(&mut self, step: u16, down: bool) {
+        self.detail_scroll = if down {
+            self.detail_scroll.saturating_add(step)
+        } else {
+            self.detail_scroll.saturating_sub(step)
+        };
     }
 
     // -- Comment input ---------------------------------------------------------

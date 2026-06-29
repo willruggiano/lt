@@ -191,6 +191,25 @@ pub fn query_issues_page(
     Ok((issues, has_next))
 }
 
+/// Run a single-parameter `SELECT` and map each row via `issue_from_row`.
+///
+/// `what` names the query for error context.
+fn query_issues_one(conn: &Connection, sql: &str, param: &str, what: &str) -> Result<Vec<Issue>> {
+    let mut stmt = conn
+        .prepare(sql)
+        .with_context(|| format!("failed to prepare {what} statement"))?;
+
+    let rows = stmt
+        .query_map(params![param], issue_from_row)
+        .with_context(|| format!("failed to execute {what} query"))?;
+
+    let mut issues = Vec::new();
+    for row in rows {
+        issues.push(row.context("failed to read issue row")?);
+    }
+    Ok(issues)
+}
+
 /// Search issues using FTS5 full-text search.
 ///
 /// `query` supports FTS5 syntax: prefix queries (`oauth*`), phrase queries
@@ -208,19 +227,7 @@ pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<Issue>> {
                WHERE issues_fts MATCH ?1
                ORDER BY rank";
 
-    let mut stmt = conn
-        .prepare(sql)
-        .context("failed to prepare search_issues statement")?;
-
-    let rows = stmt
-        .query_map(params![query], issue_from_row)
-        .context("failed to execute search_issues query")?;
-
-    let mut issues = Vec::new();
-    for row in rows {
-        issues.push(row.context("failed to read issue row")?);
-    }
-    Ok(issues)
+    query_issues_one(conn, sql, query, "search_issues")
 }
 
 /// Retrieve a value from the `sync_meta` table. Returns None if key is absent.
@@ -251,29 +258,17 @@ pub fn query_children(conn: &Connection, parent_id: &str) -> Result<Vec<Issue>> 
                WHERE parent_id = ?1
                ORDER BY identifier ASC";
 
-    let mut stmt = conn
-        .prepare(sql)
-        .context("failed to prepare query_children statement")?;
-
-    let rows = stmt
-        .query_map(params![parent_id], issue_from_row)
-        .context("failed to execute query_children query")?;
-
-    let mut issues = Vec::new();
-    for row in rows {
-        issues.push(row.context("failed to read child issue row")?);
-    }
-    Ok(issues)
+    query_issues_one(conn, sql, parent_id, "query_children")
 }
 
 /// Insert or replace a key/value pair in the `sync_meta` table.
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    conn.execute(
+    crate::db::execute(
+        conn,
         "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?1, ?2)",
         params![key, value],
+        "set sync_meta",
     )
-    .context("failed to set sync_meta")?;
-    Ok(())
 }
 
 #[cfg(test)]
