@@ -35,6 +35,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 chumsky = "0.13"
+pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [build-dependencies]
 graphql-parser = "0.4"

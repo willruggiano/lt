@@ -9,7 +9,7 @@ use ratatui::widgets::{
 
 use super::{
     ALL_KEYBINDINGS, App, HelpPopup, Mode, NewIssueField, NewIssueModal, PopupKind, SearchOverlay,
-    Status, TextInput,
+    Status, TextInput, markdown,
 };
 use crate::issues::SortField;
 use crate::issues::list::Issue;
@@ -566,9 +566,7 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
             Style::new().add_modifier(Modifier::UNDERLINED),
         )));
         lines.push(Line::from(""));
-        for raw_line in desc.lines() {
-            lines.push(Line::from(strip_markdown(raw_line)));
-        }
+        lines.extend(markdown::render(desc));
         lines.push(Line::from(""));
     }
 
@@ -584,20 +582,11 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
                 format!("{} on {}", comment.author(), date(&comment.created_at)),
                 Style::new().add_modifier(Modifier::BOLD),
             )));
-            for raw_line in comment.body.lines() {
-                lines.push(Line::from(strip_markdown(raw_line)));
-            }
+            lines.extend(markdown::render(&comment.body));
         }
     }
 
     lines
-}
-
-/// Minimal markdown stripping: remove **bold** markers and __underline__ markers.
-fn strip_markdown(s: &str) -> String {
-    let s = s.replace("**", "");
-
-    s.replace("__", "")
 }
 
 fn render_detail_footer(frame: &mut Frame, area: Rect) {
