@@ -171,3 +171,83 @@ fn write_private_file(path: &PathBuf, content: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token(expires_in: Option<u64>, issued_at: Option<u64>) -> AuthToken {
+        AuthToken {
+            access_token: "tok".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in,
+            scope: None,
+            issued_at,
+        }
+    }
+
+    #[test]
+    fn is_expired_false_without_expiry_metadata() {
+        // Missing either field means we cannot prove expiry, so treat as valid.
+        assert!(!token(None, Some(0)).is_expired());
+        assert!(!token(Some(3600), None).is_expired());
+        assert!(!token(None, None).is_expired());
+    }
+
+    #[test]
+    fn is_expired_true_when_lifetime_elapsed() {
+        // Issued at the epoch with a 1s lifetime is unambiguously expired by now.
+        assert!(token(Some(1), Some(0)).is_expired());
+    }
+
+    #[test]
+    fn is_expired_false_for_token_far_in_future() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(!token(Some(3600), Some(now)).is_expired());
+    }
+
+    #[test]
+    fn set_profile_rejects_invalid_names() {
+        assert!(set_profile(Some(String::new())).is_err());
+        assert!(set_profile(Some("has space".to_string())).is_err());
+        assert!(set_profile(Some("slash/path".to_string())).is_err());
+    }
+
+    #[test]
+    fn profile_dir_appends_profiles_and_active_profile() {
+        // No profile is selected in the test process, so it resolves to "default".
+        let dir = profile_dir(Path::new("/base/lt"));
+        assert_eq!(dir, PathBuf::from("/base/lt/profiles/default"));
+    }
+
+    #[test]
+    fn auth_token_json_roundtrips() {
+        let original = token(Some(3600), Some(1_000_000));
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: AuthToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.access_token, "tok");
+        assert_eq!(parsed.expires_in, Some(3600));
+        assert_eq!(parsed.issued_at, Some(1_000_000));
+    }
+
+    #[test]
+    fn auth_token_issued_at_defaults_when_absent() {
+        // Tokens saved before issued_at existed must still deserialize.
+        let parsed: AuthToken =
+            serde_json::from_str(r#"{"access_token":"a","token_type":"Bearer"}"#).unwrap();
+        assert_eq!(parsed.issued_at, None);
+        assert!(!parsed.is_expired());
+    }
+
+    #[test]
+    fn config_defaults_to_empty_credentials() {
+        let cfg = Config::default();
+        assert!(cfg.client_id.is_none());
+        assert!(cfg.client_secret.is_none());
+        let parsed: Config = serde_json::from_str("{}").unwrap();
+        assert!(parsed.client_id.is_none());
+    }
+}
