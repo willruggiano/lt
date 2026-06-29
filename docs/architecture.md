@@ -144,5 +144,3 @@ test workflows. Strictness gates (fmt, clippy, `cargo deny`, `cargo machete`,
 copy/paste detection) run under `make check`. Setup, conventions, and the
 strictness posture are in [[contributing.md]]; engineering principles are in
 [[posture.md]].
-</content>
-</invoke>
