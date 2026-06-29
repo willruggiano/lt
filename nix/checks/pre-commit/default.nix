@@ -34,6 +34,14 @@
           files = "\\.rs$";
           pass_filenames = false;
         };
+        # AST-level Rust duplicate detection; complements the token-based jscpd.
+        cargo-dupes = {
+          enable = true;
+          name = "cargo-dupes";
+          entry = "${lib.getExe config.packages.cargo-dupes} check --exclude-tests --min-nodes 25 --max-exact 0 --max-near 0";
+          files = "\\.rs$";
+          pass_filenames = false;
+        };
         # GitHub Actions
         actionlint.enable = true;
         # Nix

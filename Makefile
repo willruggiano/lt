@@ -14,6 +14,7 @@ check: ## Run formatter, linter, supply-chain, dedup, and test gates
 	cargo deny check
 	cargo machete
 	cpd .
+	cargo dupes check --exclude-tests --min-nodes 25 --max-exact 0 --max-near 0
 	cargo test
 
 fix: ## Apply the fixable variants of the check gates
