@@ -112,3 +112,42 @@ pub fn sync_comments(conn: &rusqlite::Connection, token: &str, issue_id: &str) -
     db::upsert_comments(conn, &all_comments)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_to_db_maps_fields_and_author() {
+        let api: ApiComment = serde_json::from_value(json!({
+            "id": "c1",
+            "body": "looks good",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T00:00:00Z",
+            "user": { "name": "Alice" }
+        }))
+        .unwrap();
+        let row = api_to_db(&api, "issue-9");
+        assert_eq!(row.id, "c1");
+        assert_eq!(row.issue_id, "issue-9");
+        assert_eq!(row.body, "looks good");
+        assert_eq!(row.author_name.as_deref(), Some("Alice"));
+        assert_eq!(row.created_at, "2026-01-01T00:00:00Z");
+        assert_eq!(row.updated_at, "2026-01-02T00:00:00Z");
+        // synced_at is stamped later by upsert_comments.
+        assert!(row.synced_at.is_empty());
+    }
+
+    #[test]
+    fn api_to_db_handles_missing_author() {
+        let api: ApiComment = serde_json::from_value(json!({
+            "id": "c2",
+            "body": "system note",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "user": null
+        }))
+        .unwrap();
+        assert!(api_to_db(&api, "issue-9").author_name.is_none());
+    }
+}

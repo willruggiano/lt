@@ -262,3 +262,108 @@ pub fn run(out: &mut dyn Write, mut args: IssueArgs) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn label(name: &str) -> LabelNode {
+        LabelNode {
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn to_db_issue_maps_and_joins_labels() {
+        let issue = Issue {
+            id: "1".to_string(),
+            identifier: "ENG-1".to_string(),
+            title: "Wire it up".to_string(),
+            priority_label: "High".to_string(),
+            priority: 2,
+            state: State {
+                id: "s1".to_string(),
+                name: "In Progress".to_string(),
+            },
+            assignee: Some(User {
+                id: "u1".to_string(),
+                name: "Alice".to_string(),
+            }),
+            team: Team {
+                id: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            description: Some("body".to_string()),
+            labels: LabelConnection {
+                nodes: vec![label("bug"), label("backend")],
+            },
+            project: Some(Project {
+                id: "p1".to_string(),
+                name: "Platform".to_string(),
+            }),
+            cycle: Some(Cycle {
+                id: "c1".to_string(),
+                name: Some("Cycle 7".to_string()),
+            }),
+            creator: Some(User {
+                id: "u2".to_string(),
+                name: "Carol".to_string(),
+            }),
+            parent: Some(Parent {
+                id: "9".to_string(),
+                identifier: "ENG-9".to_string(),
+            }),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        };
+
+        let row = to_db_issue(&issue);
+        assert_eq!(row.identifier, "ENG-1");
+        assert_eq!(row.assignee_name.as_deref(), Some("Alice"));
+        assert_eq!(row.team_key.as_deref(), Some("ENG"));
+        assert_eq!(row.labels, "bug,backend");
+        assert_eq!(row.project_name.as_deref(), Some("Platform"));
+        assert_eq!(row.cycle_name.as_deref(), Some("Cycle 7"));
+        assert_eq!(row.creator_name.as_deref(), Some("Carol"));
+        assert_eq!(row.parent_id.as_deref(), Some("9"));
+        assert_eq!(row.parent_identifier.as_deref(), Some("ENG-9"));
+        // synced_at is filled by upsert_issues, not the mapper.
+        assert!(row.synced_at.is_empty());
+    }
+
+    #[test]
+    fn to_db_issue_handles_absent_optionals() {
+        let issue = Issue {
+            id: "2".to_string(),
+            identifier: "ENG-2".to_string(),
+            title: "t".to_string(),
+            priority_label: "No priority".to_string(),
+            priority: 0,
+            state: State {
+                id: "s".to_string(),
+                name: "Todo".to_string(),
+            },
+            assignee: None,
+            team: Team {
+                id: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            description: None,
+            labels: LabelConnection { nodes: Vec::new() },
+            project: None,
+            cycle: None,
+            creator: None,
+            parent: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let row = to_db_issue(&issue);
+        assert!(row.assignee_name.is_none());
+        assert_eq!(row.labels, "");
+        assert!(row.project_name.is_none());
+        assert!(row.cycle_name.is_none());
+        assert!(row.creator_name.is_none());
+        assert!(row.parent_id.is_none());
+    }
+}
