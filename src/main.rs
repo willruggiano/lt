@@ -7,6 +7,8 @@ mod linear;
 mod logging;
 mod output;
 mod search;
+#[cfg(feature = "sim")]
+mod sim;
 mod sync;
 mod text;
 mod tui;
@@ -61,6 +63,12 @@ enum Commands {
         #[command(flatten)]
         args: search::SearchArgs,
     },
+    /// Generate a deterministic fake dataset into the local DB (no Linear account needed)
+    #[cfg(feature = "sim")]
+    Sim {
+        #[command(flatten)]
+        args: sim::SimArgs,
+    },
 }
 
 fn main() -> Result<()> {
@@ -98,6 +106,8 @@ fn main() -> Result<()> {
             sync::run(&mut out, cmd)?;
         }
         Some(Commands::Search { args }) => search::run(&mut out, &args)?,
+        #[cfg(feature = "sim")]
+        Some(Commands::Sim { args }) => sim::run(&mut out, &args)?,
     }
     Ok(())
 }

@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 
 /// A row in the `issue_comments` table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Comment {
     pub id: String,
     pub issue_id: String,
