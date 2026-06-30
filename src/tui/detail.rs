@@ -3,7 +3,8 @@ use std::sync::mpsc;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use super::{App, CommentSyncEvent, DbProvider, Issue, Mode, Status};
+use super::{App, CommentSyncEvent, Issue, Mode, Status};
+use crate::db::Database;
 use crate::linear::client::HttpTransport;
 
 impl App {
@@ -43,7 +44,7 @@ impl App {
 
         // Populate parent and children from the local DB cache.
         if let Some(ref mut detail) = self.detail {
-            populate_relations(self.db.as_ref(), detail, &issue);
+            populate_relations(&self.db, detail, &issue);
         }
 
         self.status = Status::Idle;
@@ -255,7 +256,7 @@ pub(crate) fn build_cached_detail(
 
 /// Populate a detail's parent/children fields from the local DB cache.
 pub(crate) fn populate_relations(
-    db: &dyn DbProvider,
+    db: &Database,
     detail: &mut crate::linear::types::IssueDetail,
     issue: &Issue,
 ) {

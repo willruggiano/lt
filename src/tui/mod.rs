@@ -13,7 +13,7 @@ mod render_tests;
 #[cfg(all(test, feature = "sim"))]
 mod loop_tests;
 
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -49,27 +49,10 @@ use crate::linear::client::HttpTransport;
 use crate::linear::types::IssueDetail;
 use crate::linear::viewer::fetch_viewer;
 
-/// Source of a database connection. Abstracted so the event loop and its
-/// methods can run against an in-memory database in tests instead of the
-/// process-global SQLite path.
-pub trait DbProvider: Send + Sync {
-    fn connect(&self) -> Result<rusqlite::Connection>;
-}
-
-/// Production provider: the process-global SQLite database.
-struct RealDb;
-
-impl DbProvider for RealDb {
-    fn connect(&self) -> Result<rusqlite::Connection> {
-        crate::db::open_db()
-    }
-}
-
 /// Wall-clock source. The set of clocks is closed -- the real system clock in
 /// the binary, plus a fixed instant in tests -- so it is an enum rather than a
-/// trait or a boxed closure (cf. `DbProvider`, which wraps genuinely different
-/// I/O and needs dynamic dispatch). The `Fixed` variant is compiled out of the
-/// production binary.
+/// trait or a boxed closure (cf. `db::Database`, which is an enum for the same
+/// reason). The `Fixed` variant is compiled out of the production binary.
 pub enum Clock {
     /// The real wall clock.
     System,
@@ -402,9 +385,9 @@ pub struct App {
     /// Receiver for the background login thread, if one is in progress.
     pub login_rx: Option<mpsc::Receiver<LoginEvent>>,
 
-    /// Database connection source. Defaults to the real SQLite path; tests
-    /// install an in-memory provider via `for_test`.
-    pub db: Arc<dyn DbProvider>,
+    /// Database handle. Defaults to the per-profile SQLite file; tests install
+    /// an in-memory database via `Database::memory`.
+    pub db: crate::db::Database,
 
     /// Wall-clock source. Defaults to the system clock; tests install a fixed
     /// clock so time-derived labels are deterministic.
@@ -454,7 +437,7 @@ impl App {
             initial_args,
             last_esc_time: None,
             login_rx: None,
-            db: Arc::new(RealDb),
+            db: crate::db::Database::Profile,
             clock: Clock::System,
         }
     }

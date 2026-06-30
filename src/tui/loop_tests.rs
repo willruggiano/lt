@@ -7,42 +7,12 @@
 // Per the agreed scope, no network-spawning method is invoked.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
-
-/// In-memory `DbProvider`: every `connect()` opens the same shared-cache
-/// database, so writes made through one connection are visible to the next.
-/// A keepalive connection (held in a `Mutex` to stay `Sync`) keeps the
-/// shared cache alive for the provider's lifetime.
-struct MemoryDb {
-    uri: String,
-    _keepalive: Mutex<rusqlite::Connection>,
-}
-
-impl MemoryDb {
-    fn new() -> Result<Self> {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let uri = format!("file:lt_tui_memdb_{n}?mode=memory&cache=shared");
-        let conn = rusqlite::Connection::open(&uri)?;
-        crate::db::run_migrations(&conn)?;
-        Ok(Self {
-            uri,
-            _keepalive: Mutex::new(conn),
-        })
-    }
-}
-
-impl DbProvider for MemoryDb {
-    fn connect(&self) -> Result<rusqlite::Connection> {
-        Ok(rusqlite::Connection::open(&self.uri)?)
-    }
-}
+use crate::db::Database;
 
 /// Scripted key source for `run_app`. Yields the queued keys, then errors so
 /// a forgotten quit key terminates the loop instead of hanging.
@@ -88,15 +58,15 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> crate::db::Issue {
     }
 }
 
-/// Build an `App` backed by a fresh `MemoryDb` seeded with `rows`.
+/// Build an `App` backed by a fresh in-memory `Database` seeded with `rows`.
 fn app_with_db(rows: &[crate::db::Issue]) -> Result<App> {
-    let db = MemoryDb::new()?;
+    let db = Database::memory()?;
     {
         let conn = db.connect()?;
         crate::db::upsert_issues(&conn, rows)?;
     }
     let mut app = App::for_test(Vec::new());
-    app.db = Arc::new(db);
+    app.db = db;
     Ok(app)
 }
 
@@ -220,7 +190,7 @@ fn populate_relations_fills_parent_and_children() {
 
     // Seed the issue under a parent so query_children finds it.
     issue.id = "p1".to_string();
-    populate_relations(app.db.as_ref(), &mut detail, &issue);
+    populate_relations(&app.db, &mut detail, &issue);
     assert_eq!(detail.children.len(), 1);
     assert_eq!(detail.children[0].identifier, "ENG-10");
 }
