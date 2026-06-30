@@ -214,34 +214,8 @@ fn populate_relations_fills_parent_and_children() {
     child.parent_id = Some("p1".to_string());
     let app = app_with_db(&[parent, child]).unwrap();
 
-    // The issue whose relations we resolve points at parent p1.
-    let mut issue = crate::issues::list::Issue {
-        id: "c1".to_string(),
-        identifier: "ENG-10".to_string(),
-        title: "child".to_string(),
-        priority_label: "No priority".to_string(),
-        priority: 0,
-        state: crate::issues::list::State {
-            id: String::new(),
-            name: "Done".to_string(),
-        },
-        assignee: None,
-        team: crate::issues::list::Team {
-            id: String::new(),
-            name: "Engineering".to_string(),
-        },
-        description: None,
-        labels: crate::issues::list::LabelConnection { nodes: Vec::new() },
-        project: None,
-        cycle: None,
-        creator: None,
-        parent: Some(crate::issues::list::Parent {
-            id: "p1".to_string(),
-            identifier: "ENG-9".to_string(),
-        }),
-        created_at: "2026-01-08T00:00:00Z".to_string(),
-        updated_at: "2026-01-08T00:00:00Z".to_string(),
-    };
+    // The issue whose relations we resolve; populate_relations keys off its id.
+    let mut issue: crate::issues::list::Issue = db_issue("c1", "ENG-10", "Done", 8).into();
     let mut detail = build_cached_detail(&issue, Vec::new());
 
     // Seed the issue under a parent so query_children finds it.
@@ -350,30 +324,7 @@ fn poll_sync_events_done_refreshes_and_sets_identity() {
 
 #[test]
 fn poll_detail_comment_events_done_updates_detail() {
-    let issue = crate::issues::list::Issue {
-        id: "c1".to_string(),
-        identifier: "ENG-1".to_string(),
-        title: "t".to_string(),
-        priority_label: "No priority".to_string(),
-        priority: 0,
-        state: crate::issues::list::State {
-            id: String::new(),
-            name: "Todo".to_string(),
-        },
-        assignee: None,
-        team: crate::issues::list::Team {
-            id: String::new(),
-            name: "Engineering".to_string(),
-        },
-        description: None,
-        labels: crate::issues::list::LabelConnection { nodes: Vec::new() },
-        project: None,
-        cycle: None,
-        creator: None,
-        parent: None,
-        created_at: "2026-01-05T00:00:00Z".to_string(),
-        updated_at: "2026-01-05T00:00:00Z".to_string(),
-    };
+    let issue: crate::issues::list::Issue = db_issue("c1", "ENG-1", "Todo", 5).into();
     let mut app = app_with_db(&[]).unwrap();
     app.detail = Some(build_cached_detail(&issue, Vec::new()));
     let (tx, rx) = mpsc::channel();
