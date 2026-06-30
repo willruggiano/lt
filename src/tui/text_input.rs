@@ -26,18 +26,21 @@ pub struct TextInput {
     pub selection_end: Option<usize>,
 }
 
-impl TextInput {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn from_string(s: String) -> Self {
-        let cursor = s.len();
+impl From<String> for TextInput {
+    /// Seed the field with existing text, cursor at the end.
+    fn from(value: String) -> Self {
+        let cursor = value.len();
         Self {
-            value: s,
+            value,
             cursor,
             selection_end: None,
         }
+    }
+}
+
+impl TextInput {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Returns `(before_cursor, char_at_cursor_or_none, after_cursor_past_that_char)`.
@@ -289,7 +292,7 @@ mod text_input_tests {
 
     #[test]
     fn from_string_places_cursor_at_end() {
-        let t = TextInput::from_string("hello".to_string());
+        let t = TextInput::from("hello".to_string());
         assert_eq!(t.cursor, 5);
         assert_eq!(t.value.as_str(), "hello");
     }
