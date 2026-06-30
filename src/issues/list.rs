@@ -29,7 +29,7 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
       state { id name }
       assignee { id name }
       team { id name }
-      labels { nodes { name } }
+      labels { nodes { id name } }
       project { id name }
       cycle { id name }
       creator { id name }

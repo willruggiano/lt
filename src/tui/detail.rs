@@ -228,6 +228,7 @@ pub(crate) fn build_cached_detail(
                 .nodes
                 .iter()
                 .map(|l| crate::linear::types::Label {
+                    id: l.id.clone(),
                     name: l.name.clone(),
                 })
                 .collect(),

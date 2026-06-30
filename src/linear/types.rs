@@ -42,6 +42,7 @@ pub struct CommentUser {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Label {
+    pub id: String,
     pub name: String,
 }
 
