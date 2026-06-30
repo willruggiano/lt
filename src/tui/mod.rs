@@ -124,8 +124,6 @@ pub enum CommentSyncEvent {
     Done(Vec<crate::linear::types::Comment>),
     /// Comment sync error (non-fatal; cached data remains shown).
     Error(String),
-    /// Posting a new comment failed; the optimistic comment must be dropped.
-    PostError(String),
 }
 
 // ---------------------------------------------------------------------------

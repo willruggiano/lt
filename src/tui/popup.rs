@@ -339,55 +339,14 @@ impl super::App {
             None => return,
         };
 
-        // 1. Optimistic SQLite update.
-        optimistic_update_sqlite(&issue, &kind, &item);
+        // 1. Enqueue local intent (overlay + outbox) in one transaction. No
+        //    network: the sync drainer replays it. The read model merges the
+        //    overlay, so the change renders without a base write.
+        enqueue_edit(&issue.id, &kind, &item);
 
-        // 2. Update in-memory issue list for instant feedback.
+        // 2. Update the in-memory issue list for instant feedback before the
+        //    next DB-backed fetch reloads the merged read model.
         apply_optimistic_in_memory(self, &kind, &item);
-
-        // 3. Fire mutation in background thread.
-        let issue_id: String = issue.id.clone();
-        let kind2: PopupKind = kind.clone();
-        let item2: PopupItem = item.clone();
-        let orig_issue: crate::linear::types::Issue = issue.clone();
-
-        std::thread::spawn(move || {
-            let Ok(Some(token)) = crate::config::load_token() else {
-                return;
-            };
-            let transport = HttpTransport::new(token.access_token);
-            let result: anyhow::Result<()> = match kind2 {
-                PopupKind::State => {
-                    if let Some(state_id) = &item2.id {
-                        crate::linear::mutations::update_issue_state(
-                            &transport, &issue_id, state_id,
-                        )
-                        .map(|_| ())
-                    } else {
-                        Ok(())
-                    }
-                }
-                PopupKind::Priority => {
-                    if let Some(pstr) = &item2.id {
-                        let p: u8 = pstr.parse().unwrap_or(0);
-                        crate::linear::mutations::update_issue_priority(&transport, &issue_id, p)
-                            .map(|_| ())
-                    } else {
-                        Ok(())
-                    }
-                }
-                PopupKind::Assignee => crate::linear::mutations::update_issue_assignee(
-                    &transport,
-                    &issue_id,
-                    item2.id.clone(),
-                )
-                .map(|_| ()),
-            };
-            if let Err(_e) = result {
-                // On failure: revert SQLite to the original values.
-                revert_sqlite(&orig_issue, &kind2);
-            }
-        });
 
         self.mode = Mode::List;
         self.popup_anchor = None;
@@ -403,22 +362,32 @@ impl super::App {
 // Optimistic SQLite helpers
 // ---------------------------------------------------------------------------
 
-fn optimistic_update_sqlite(
-    issue: &crate::linear::types::Issue,
-    kind: &PopupKind,
-    item: &PopupItem,
-) {
+/// Enqueue a popup edit as local intent: the matching overlay row plus the
+/// coalesced `issueUpdate` outbox command, in one transaction. Unset choices
+/// (a priority/state item with no id) are no-ops; an assignee item with no id
+/// clears the assignee.
+fn enqueue_edit(issue_id: &str, kind: &PopupKind, item: &PopupItem) {
+    use crate::db::outbox::{
+        enqueue_assignee_change, enqueue_priority_change, enqueue_state_change,
+    };
     let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) else {
         return;
     };
-    let _ = crate::db::upsert_issues(&conn, &[build_optimistic_issue(issue, kind, item)]);
-}
-
-fn revert_sqlite(orig: &crate::linear::types::Issue, _kind: &PopupKind) {
-    let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) else {
-        return;
+    let _ = match kind {
+        PopupKind::State => match &item.id {
+            Some(id) => enqueue_state_change(&conn, issue_id, id, &item.label),
+            None => Ok(()),
+        },
+        PopupKind::Priority => match item.id.as_deref().and_then(|s| s.parse::<u8>().ok()) {
+            Some(p) => enqueue_priority_change(&conn, issue_id, p),
+            None => Ok(()),
+        },
+        PopupKind::Assignee => enqueue_assignee_change(
+            &conn,
+            issue_id,
+            item.id.as_deref().map(|id| (id, item.label.as_str())),
+        ),
     };
-    let _ = crate::db::upsert_issues(&conn, std::slice::from_ref(orig));
 }
 
 /// Apply a popup choice to an issue fragment in place. Shared by the in-memory
@@ -451,7 +420,10 @@ fn apply_change(issue: &mut crate::linear::types::Issue, kind: &PopupKind, item:
 }
 
 /// The optimistic issue fragment a popup choice produces: the selected issue
-/// with the chosen field applied.
+/// with the chosen field applied. Used by the render tests to exercise the
+/// applied-change shape; the live write path applies the change in-memory via
+/// [`apply_optimistic_in_memory`].
+#[cfg(all(test, feature = "sim"))]
 pub(crate) fn build_optimistic_issue(
     issue: &crate::linear::types::Issue,
     kind: &PopupKind,

@@ -87,6 +87,10 @@ SQLite (`sync_pages` in `src/sync/mod.rs`), then stamps `last_synced_at`:
   full when no prior sync exists (`src/sync/delta.rs`).
 - **probe** — test whether a token is accepted by the API (`src/sync/probe.rs`).
 
+Both full and delta first drain the mutation outbox (`src/sync/drain.rs`),
+replaying queued local edits and creates against the API before fetching, so all
+base writes are serialized through the sync thread.
+
 `lt` deliberately polls the public GraphQL API rather than Linear's browser-only
 sync engine; the README's "Why not Linear's sync protocol?" records the
 rationale.
@@ -121,10 +125,15 @@ spawned thread and reports back over an `mpsc` channel that the loop drains with
        └────── mpsc ────────────┘   (poll_* drains channels per frame)
 ```
 
-Writes are optimistic: the local SQLite row and in-memory state are updated
-immediately, the mutation fires on a worker thread, and the optimistic change is
-reverted (by reloading from the cache) if the mutation fails. The modal redesign
-is documented in [[tui-modal.md]].
+Writes never touch the network from the UI thread. An edit writes its intent to
+the local DB and returns: a `pending_overlay` row plus a command in the `outbox`
+table, committed together. The read model is `merge(base, overlay)` — the
+overlay wins per field — so the edit renders immediately without a base write,
+and a concurrent delta sync (which writes only the base) cannot clobber it. The
+sync drainer (`src/sync/drain.rs`) is the single writer that replays the outbox
+against the API and reconciles the base on success. This split, the typed
+inputs, and the offline outbox are documented in
+[[linear-api-types-codegen.md]]; the modal redesign in [[tui-modal.md]].
 
 ### Logging
 

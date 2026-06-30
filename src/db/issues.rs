@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{Connection, params};
@@ -103,7 +105,12 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
 /// Upsert one `(id, name)` row into a named entity table, updating the name on
 /// id conflict (so a rename touches a single row). `name` is optional because
 /// `cycles.name` is nullable; the other tables always pass `Some`.
-fn upsert_named_entity(conn: &Connection, table: &str, id: &str, name: Option<&str>) -> Result<()> {
+pub(crate) fn upsert_named_entity(
+    conn: &Connection,
+    table: &str,
+    id: &str,
+    name: Option<&str>,
+) -> Result<()> {
     let sql = format!(
         "INSERT INTO {table} (id, name) VALUES (?1, ?2)
          ON CONFLICT(id) DO UPDATE SET name = excluded.name"
@@ -126,68 +133,162 @@ pub fn upsert_issues(conn: &Connection, issues: &[types::Issue]) -> Result<()> {
         .context("failed to begin issue upsert transaction")?;
 
     for issue in issues {
-        upsert_named_entity(&tx, "teams", &issue.team.id, Some(&issue.team.name))?;
-        upsert_named_entity(
-            &tx,
-            "workflow_states",
-            &issue.state.id,
-            Some(&issue.state.name),
-        )?;
-        if let Some(a) = &issue.assignee {
-            upsert_named_entity(&tx, "users", &a.id, Some(&a.name))?;
-        }
-        if let Some(c) = &issue.creator {
-            upsert_named_entity(&tx, "users", &c.id, Some(&c.name))?;
-        }
-        if let Some(p) = &issue.project {
-            upsert_named_entity(&tx, "projects", &p.id, Some(&p.name))?;
-        }
-        if let Some(c) = &issue.cycle {
-            upsert_named_entity(&tx, "cycles", &c.id, c.name.as_deref())?;
-        }
-
-        tx.execute(
-            "INSERT OR REPLACE INTO issues
-                (id, identifier, title, priority_label, description,
-                 created_at, updated_at, synced_at, parent_id,
-                 team_id, state_id, assignee_id, creator_id, project_id, cycle_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![
-                issue.id,
-                issue.identifier,
-                issue.title,
-                issue.priority_label,
-                issue.description,
-                issue.created_at,
-                issue.updated_at,
-                synced_at,
-                issue.parent.as_ref().map(|p| &p.id),
-                issue.team.id,
-                issue.state.id,
-                issue.assignee.as_ref().map(|u| &u.id),
-                issue.creator.as_ref().map(|u| &u.id),
-                issue.project.as_ref().map(|p| &p.id),
-                issue.cycle.as_ref().map(|c| &c.id),
-            ],
-        )
-        .context("failed to upsert issue")?;
-
-        tx.execute(
-            "DELETE FROM issue_labels WHERE issue_id = ?1",
-            params![issue.id],
-        )
-        .context("failed to clear issue labels")?;
-        for label in &issue.labels.nodes {
-            upsert_named_entity(&tx, "labels", &label.id, Some(&label.name))?;
-            tx.execute(
-                "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
-                params![issue.id, label.id],
-            )
-            .context("failed to link issue label")?;
-        }
+        upsert_issue_tx(&tx, issue, &synced_at)?;
     }
 
     tx.commit().context("failed to commit issue upsert")?;
+    Ok(())
+}
+
+/// Upsert a single issue fragment into the relational base within an existing
+/// transaction: its referenced entities, the issue row with FK columns, and its
+/// label links. Shared by [`upsert_issues`] and the outbox's optimistic create.
+pub(crate) fn upsert_issue_tx(
+    tx: &Connection,
+    issue: &types::Issue,
+    synced_at: &str,
+) -> Result<()> {
+    upsert_named_entity(tx, "teams", &issue.team.id, Some(&issue.team.name))?;
+    upsert_named_entity(
+        tx,
+        "workflow_states",
+        &issue.state.id,
+        Some(&issue.state.name),
+    )?;
+    if let Some(a) = &issue.assignee {
+        upsert_named_entity(tx, "users", &a.id, Some(&a.name))?;
+    }
+    if let Some(c) = &issue.creator {
+        upsert_named_entity(tx, "users", &c.id, Some(&c.name))?;
+    }
+    if let Some(p) = &issue.project {
+        upsert_named_entity(tx, "projects", &p.id, Some(&p.name))?;
+    }
+    if let Some(c) = &issue.cycle {
+        upsert_named_entity(tx, "cycles", &c.id, c.name.as_deref())?;
+    }
+
+    tx.execute(
+        "INSERT OR REPLACE INTO issues
+            (id, identifier, title, priority_label, description,
+             created_at, updated_at, synced_at, parent_id,
+             team_id, state_id, assignee_id, creator_id, project_id, cycle_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            issue.id,
+            issue.identifier,
+            issue.title,
+            issue.priority_label,
+            issue.description,
+            issue.created_at,
+            issue.updated_at,
+            synced_at,
+            issue.parent.as_ref().map(|p| &p.id),
+            issue.team.id,
+            issue.state.id,
+            issue.assignee.as_ref().map(|u| &u.id),
+            issue.creator.as_ref().map(|u| &u.id),
+            issue.project.as_ref().map(|p| &p.id),
+            issue.cycle.as_ref().map(|c| &c.id),
+        ],
+    )
+    .context("failed to upsert issue")?;
+
+    tx.execute(
+        "DELETE FROM issue_labels WHERE issue_id = ?1",
+        params![issue.id],
+    )
+    .context("failed to clear issue labels")?;
+    for label in &issue.labels.nodes {
+        upsert_named_entity(tx, "labels", &label.id, Some(&label.name))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
+            params![issue.id, label.id],
+        )
+        .context("failed to link issue label")?;
+    }
+    Ok(())
+}
+
+/// One pending-overlay row resolved against its referenced entity name.
+struct OverlayApply {
+    field: String,
+    value: Option<String>,
+    state_name: Option<String>,
+    user_name: Option<String>,
+}
+
+/// Load every pending overlay row, resolving the state/assignee name through
+/// the entity tables in one query. The set is small (only un-synced edits), so
+/// it is read whole and grouped in memory rather than filtered per issue list.
+fn load_overlays(conn: &Connection) -> Result<HashMap<String, Vec<OverlayApply>>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT po.entity_id, po.field, po.value, ws.name, u.name
+             FROM pending_overlay po
+             LEFT JOIN workflow_states ws ON po.field = 'state'    AND ws.id = po.value
+             LEFT JOIN users u           ON po.field = 'assignee' AND u.id  = po.value",
+        )
+        .context("failed to prepare overlay merge query")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                OverlayApply {
+                    field: r.get(1)?,
+                    value: r.get(2)?,
+                    state_name: r.get(3)?,
+                    user_name: r.get(4)?,
+                },
+            ))
+        })
+        .context("failed to query overlays")?;
+    let mut map: HashMap<String, Vec<OverlayApply>> = HashMap::new();
+    for row in rows {
+        let (id, apply) = row.context("failed to read overlay row")?;
+        map.entry(id).or_default().push(apply);
+    }
+    Ok(map)
+}
+
+/// Merge the pending overlay over the base issues: overlay wins per field. This
+/// is the read half of the base/overlay split -- un-synced local intent renders
+/// immediately without ever being written into the base.
+fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> {
+    let map = load_overlays(conn)?;
+    if map.is_empty() {
+        return Ok(());
+    }
+    for issue in issues {
+        let Some(rows) = map.get(&issue.id) else {
+            continue;
+        };
+        for o in rows {
+            match o.field.as_str() {
+                "state" => {
+                    if let Some(id) = &o.value {
+                        issue.state = types::State {
+                            id: id.clone(),
+                            name: o.state_name.clone().unwrap_or_default(),
+                        };
+                    }
+                }
+                "priority" => {
+                    if let Some(p) = o.value.as_deref().and_then(|v| v.parse::<u8>().ok()) {
+                        issue.priority = p;
+                        issue.priority_label = types::priority_u8_to_label(p).to_string();
+                    }
+                }
+                "assignee" => {
+                    issue.assignee = o.value.as_ref().map(|id| types::User {
+                        id: id.clone(),
+                        name: o.user_name.clone().unwrap_or_default(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
     Ok(())
 }
 
@@ -230,6 +331,7 @@ pub fn query_issues(conn: &Connection, args: &IssueArgs) -> Result<Vec<types::Is
     for row in rows {
         issues.push(row.context("failed to read issue row")?);
     }
+    apply_overlays(conn, &mut issues)?;
     Ok(issues)
 }
 
@@ -274,6 +376,7 @@ pub fn query_issues_page(
     if has_next {
         issues.truncate(cap_rows);
     }
+    apply_overlays(conn, &mut issues)?;
     Ok((issues, has_next))
 }
 
@@ -298,6 +401,7 @@ fn query_issues_one(
     for row in rows {
         issues.push(row.context("failed to read issue row")?);
     }
+    apply_overlays(conn, &mut issues)?;
     Ok(issues)
 }
 
@@ -626,6 +730,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_state_name, 0);
+    }
+
+    #[test]
+    fn read_model_merges_pending_overlay_over_base() {
+        let conn = graph_db();
+        // Enqueue a state + assignee-clear edit; the read model must render the
+        // overlay values, not the base.
+        crate::db::outbox::enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
+        crate::db::outbox::enqueue_assignee_change(&conn, "1", None).unwrap();
+
+        let args = IssueArgs {
+            title: Some("Wire it up".to_string()),
+            ..Default::default()
+        };
+        let issues = query_issues(&conn, &args).unwrap();
+        let issue = issues.iter().find(|i| i.id == "1").unwrap();
+        assert_eq!(issue.state.name, "Done");
+        assert!(issue.assignee.is_none());
+
+        // The base row is untouched by the overlay.
+        let base_state: String = conn
+            .query_row("SELECT state_id FROM issues WHERE id = '1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(base_state, "s1");
     }
 
     #[test]

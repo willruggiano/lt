@@ -13,3 +13,7 @@
   otherwise) as primary evidence
 - Do: read a project's public documentation and/or clone and explore its source
   code
+- Prefer `make check` and `make test` to validate changes -- they are the gate.
+  Run them, not ad-hoc one-off `cargo` invocations. Reach for an individual
+  command only to debug a gate that has already _failed_ (which generally should
+  not be necessary).

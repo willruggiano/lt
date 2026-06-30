@@ -1,5 +1,6 @@
 pub mod comments;
 pub mod delta;
+pub mod drain;
 pub mod full;
 mod probe;
 

@@ -185,3 +185,16 @@ pub(crate) fn priority_label_to_u8(label: &str) -> u8 {
         _ => 0,
     }
 }
+
+/// Map a numeric priority level to its label, matching the popup picker's
+/// vocabulary. Used to write a priority overlay back into the `priority_label`
+/// base column on ack.
+pub(crate) fn priority_u8_to_label(priority: u8) -> &'static str {
+    match priority {
+        1 => "Urgent",
+        2 => "High",
+        3 => "Normal",
+        4 => "Low",
+        _ => "No priority",
+    }
+}

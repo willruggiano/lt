@@ -570,18 +570,25 @@ Follow-up (post-stack):
   changes (the overlay/outbox contents). Conflict reconciliation deferred with
   it.
 
-Open — small verify items before PR 2/4:
+Resolved in PR 4:
 
-- **`null` = "clear" scope** — proven only for `assigneeId`
-  (`mutations.rs:214`). Confirm the same for the other nullable FK fields
-  (`cycleId`, `projectId`, `parentId`) against the live API before exposing a UI
-  "clear" for them, or gate `Field::Null` to assignee initially.
+- **One compiling spike** — confirmed: cynic accepts `Field<T>` against a
+  nullable input field. The derive aligns it to `Option<Field<T>>` and asserts
+  `Option<Field<T>>: IsScalar<Option<Marker>>`, which reduces to
+  `Field<T>: IsScalar<Marker>` — satisfied by a blanket
+  `impl<T, U> IsScalar<U> for Field<T> where T: IsScalar<U>`
+  (`src/linear/inputs.rs`). Serialization is wired through
+  `skip_serializing_if = "Field::is_absent"`.
+- **`null` = "clear" scope** — `Field::Null` is exposed only for `assigneeId`
+  (the one UI "clear", via the unassign popup). The other nullable FK fields are
+  not yet editable, so the live-API confirmation is deferred until they are.
+
+Still open (deferred):
+
 - **Labels model** — `labelIds` (full replace) vs `addedLabelIds`/
   `removedLabelIds` (incremental); the incremental pair maps poorly to one
-  `(entity, field)` overlay row. Pick a model for the labels field. Product
-  call.
-- **One compiling spike** — confirm cynic accepts `Field<T>` against a nullable
-  input field (expected, but exercise the derive's type-check once).
+  `(entity, field)` overlay row. Labels are not yet mutated in the UI, so the
+  model choice is deferred. Product call.
 
 ## Decisions (resolved in review)
 

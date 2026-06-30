@@ -12,8 +12,10 @@ posture is in [[contributing.md#Strictness]]; engineering principles in
 
 ## Running
 
-- `make test` runs the suite twice: `cargo test`, then
-  `cargo test --features sim`. Both must pass.
+- `make test` runs the suite twice: `cargo test` (the shipped, feature-off
+  build), then `cargo test --all-features` (which enables `sim`). Both must
+  pass: the two runs exercise distinct compile configurations, so neither alone
+  is sufficient.
 - `make cov` enforces the line-coverage floor; `make cov-html` writes a
   browsable report for finding gaps. The gate and its ratchet are in
   [[test-coverage-gate.md]].
