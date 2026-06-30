@@ -66,31 +66,32 @@ Lessons applied (for resuming):
 Raised in review; tracked here, not done in the extraction PRs:
 
 - [x] **Collapse the DB seam (review #4).** Done. The `DbProvider` trait,
-  `RealDb`, and the test `MemoryDb` are replaced by one `db::Database` enum
-  (`Profile` | `Memory { uri, keepalive }`, the latter `#[cfg]`'d to tests).
-  A closed two-case set is an enum, not a trait + impls, which drops the
-  `Arc<dyn>` (single owner) and the `Mutex` keepalive (`App` is already
-  `!Sync`). It lives in `src/db/` (the module that owns `open_db`); `App.db:
-  db::Database`. The `Profile` variant is lazy (delegates to `open_db` on
-  `connect`) so `App::new` stays infallible.
-- [x] **Clock seam for `build_sync_status_label` (review #6).** Done in
-  add3bd1. The wall clock is a `Clock` enum on `App` (`Clock::System` in the
-  binary, `Clock::Fixed(instant)` `#[cfg]`'d in for tests) -- an enum, not a
-  threaded `DateTime` param or boxed closure, because the set of clocks is
-  closed. `build_sync_status_label` split into a pure `format_sync_label`
-  (covered by a fixed-clock test) plus a thin DB reader; the `last_synced_at`
-  read stays for the Database-seam item above.
+      `RealDb`, and the test `MemoryDb` are replaced by one `db::Database` enum
+      (`Profile` | `Memory { uri, keepalive }`, the latter `#[cfg]`'d to tests).
+      A closed two-case set is an enum, not a trait + impls, which drops the
+      `Arc<dyn>` (single owner) and the `Mutex` keepalive (`App` is already
+      `!Sync`). It lives in `src/db/` (the module that owns `open_db`);
+      `App.db: db::Database`. The `Profile` variant is lazy (delegates to
+      `open_db` on `connect`) so `App::new` stays infallible.
+- [x] **Clock seam for `build_sync_status_label` (review #6).** Done in add3bd1.
+      The wall clock is a `Clock` enum on `App` (`Clock::System` in the binary,
+      `Clock::Fixed(instant)` `#[cfg]`'d in for tests) -- an enum, not a
+      threaded `DateTime` param or boxed closure, because the set of clocks is
+      closed. `build_sync_status_label` split into a pure `format_sync_label`
+      (covered by a fixed-clock test) plus a thin DB reader; the
+      `last_synced_at` read stays for the Database-seam item above.
 - [x] **Align the `From<db::Issue>` placement with `From<db::Comment>`.** Done.
-  The display `Issue` (and its nested `State`/`User`/`Team`/`Project`/`Cycle`/
-  `Parent`, reusing the existing `Label`/`LabelConnection`) and
-  `priority_label_to_u8` moved from `src/issues/list.rs` to `crate::linear::types`
-  -- it is a Linear API DTO, the same category as `Comment`. Both cache
-  conversions now live in `src/db/issues.rs`, anchored on the API type (cf.
-  `db/comments`): `From<db::Issue> for linear::Issue` (rehydrate) and
-  `Into<db::Issue> for linear::Issue` (ingest, with an `#[allow(from_over_into)]`
-  since the pair is deliberately anchored on the DTO). `to_db_issue` is gone;
-  `sync` calls `.into()`. `issues::list` keeps only the list command + fetch.
-  Bigger than a move; do as its own change.
+      The display `Issue` (and its nested
+      `State`/`User`/`Team`/`Project`/`Cycle`/ `Parent`, reusing the existing
+      `Label`/`LabelConnection`) and `priority_label_to_u8` moved from
+      `src/issues/list.rs` to `crate::linear::types` -- it is a Linear API DTO,
+      the same category as `Comment`. Both cache conversions now live in
+      `src/db/issues.rs`, anchored on the API type (cf. `db/comments`):
+      `From<db::Issue> for linear::Issue` (rehydrate) and
+      `Into<db::Issue> for linear::Issue` (ingest, with an
+      `#[allow(from_over_into)]` since the pair is deliberately anchored on the
+      DTO). `to_db_issue` is gone; `sync` calls `.into()`. `issues::list` keeps
+      only the list command + fetch. Bigger than a move; do as its own change.
 
 ## Context
 
