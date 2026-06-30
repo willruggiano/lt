@@ -6,14 +6,14 @@ Proposed — `Refs: ENG-31`
 
 > **Revision (PR #26 review).** The first draft scoped this to "stop
 > hand-writing response structs." The review pushed back on one line —
-> *"per-operation modules re-emit small nested structs, so cross-operation
-> sharing is lost"* — and asked us to do better, with three threads: a
+> _"per-operation modules re-emit small nested structs, so cross-operation
+> sharing is lost"_ — and asked us to do better, with three threads: a
 > relational DB schema, offline-capable mutations, and **GraphQL fragments as
 > the shared type at the `tui <-> db/api` boundary**, all under one rule:
-> *Linear's GraphQL API is hit only by the sync thread; the TUI touches only the
-> local database.* This revision answers that. The type-codegen decision is now
+> _Linear's GraphQL API is hit only by the sync thread; the TUI touches only the
+> local database._ This revision answers that. The type-codegen decision is now
 > one pillar of a local-first data architecture, and the recommendation changes
-> accordingly (cynic over graphql_client — see [Pillar 1](#pillar-1)).
+> accordingly (cynic over `graphql_client` — see [Pillar 1](#pillar-1)).
 
 ## Context
 
@@ -24,8 +24,8 @@ types defined in the `linear::types` crate."
 
 Two pieces of infrastructure already exist and shape every option below:
 
-- A committed schema snapshot: `build/linear-schema-definition.graphql`
-  (37,149 lines; 524 `type`, 371 `input`, 95 `enum`, 8 `interface`, 8 `scalar`).
+- A committed schema snapshot: `build/linear-schema-definition.graphql` (37,149
+  lines; 524 `type`, 371 `input`, 95 `enum`, 8 `interface`, 8 `scalar`).
 - A `build.rs` codegen seam that already parses that schema with
   `graphql-parser` and emits Rust via `quote`/`syn`/`prettyplease` into
   `OUT_DIR` (`build.rs:12`, `build.rs:63-81`, `build.rs:786-796`). It currently
@@ -51,8 +51,8 @@ src/auth/status.rs            3   viewer status (inline)
 
 ~13 operations across 7 files, each redeclaring its own response shape. The
 duplication is acute for trivial wrappers: `State`, `IssueState`,
-`IssueDetailState`, `NotificationIssueState` are all `{ name }` or `{ id, name }`;
-the `Team*` family likewise. Every field carries a manual
+`IssueDetailState`, `NotificationIssueState` are all `{ name }` or
+`{ id, name }`; the `Team*` family likewise. Every field carries a manual
 `#[serde(rename = "camelCase")]` (`types.rs:60`, `notifications.rs:58-63`).
 
 ### The transport seam (preserved by every option below)
@@ -71,7 +71,7 @@ serde_json variables   ─┤
 
 `query_as` is generic over any `DeserializeOwned`. **Whatever produces `T` is
 orthogonal to the transport.** Verified for both candidate libraries: their
-generated types are plain serde types (graphql_client emits
+generated types are plain serde types (`graphql_client` emits
 `Serialize`/`Deserialize`; cynic's `GraphQlResponse<ResponseData>` is bounded
 `ResponseData: DeserializeOwned` and decoded with `serde_json`,
 `cynic-3.13.2/src/http.rs:101,222`). Neither requires adopting its bundled HTTP
@@ -99,9 +99,9 @@ type Comment implements Node {
 The code uses three: `body`, `createdAt`, `user { name }`
 (`sync/comments.rs:18-30`). Whole-schema generation would emit 524 recursive,
 mostly-`Option`, mostly-unused structs with no representation for
-field-arguments — the opposite of [[posture.md#2. Simplicity First]] ("Minimum code… Nothing
-speculative"). The types the code wants are **shaped to the selection set of
-each operation**. That fact drives the whole design.
+field-arguments — the opposite of [[posture.md#2. Simplicity First]] ("Minimum
+code… Nothing speculative"). The types the code wants are **shaped to the
+selection set of each operation**. That fact drives the whole design.
 
 ```text
    GraphQL object type (Comment: ~50 fields)   ──X── do NOT mirror
@@ -144,7 +144,7 @@ schema), and the write path (offline outbox).
 ### Enforce the rule structurally, not by convention
 
 "The TUI never hits the API" is worthless as a comment and a grep. Make it a
-*compile error*. Split the single crate into a Cargo workspace where the
+_compile error_. Split the single crate into a Cargo workspace where the
 dependency edges encode the rule:
 
 ```text
@@ -159,7 +159,7 @@ dependency edges encode the rule:
 ```
 
 `lt-tui` not listing `lt-sync` or the GraphQL client in its `[dependencies]`
-means an API call from the render/event path *does not compile*. This is the
+means an API call from the render/event path _does not compile_. This is the
 systematic answer to "how do we prevent this class of error rather than
 best-effort": the cargo dependency graph is the enforcement mechanism, checked
 on every build. It also gives the type layer a natural home (`lt-types`) that
@@ -173,27 +173,29 @@ so the crate boundaries are not retrofitted.
 ---
 
 <a id="pillar-1"></a>
-## Pillar 1 — Shared fragment types: graphql_client vs cynic
 
-The review's specific objection — *cross-operation struct sharing is lost* — is
+## Pillar 1 — Shared fragment types: `graphql_client` vs cynic
+
+The review's specific objection — _cross-operation struct sharing is lost_ — is
 real and library-dependent. Primary evidence from the vendored sources:
 
-**graphql_client (0.16.0)** is *query-first*: a `#[derive(GraphQLQuery)]` marker
-struct points at a `.graphql` file + schema, and codegen emits a module of
-response types shaped to the selection set. It generates only used types
+**`graphql_client` (0.16.0)** is _query-first_: a `#[derive(GraphQLQuery)]`
+marker struct points at a `.graphql` file + schema, and codegen emits a module
+of response types shaped to the selection set. It generates only used types
 (`codegen/enums.rs:30`), maps nullability/list to `Option`/`Vec`
-(`type_qualifiers.rs:1-10`), auto-emits serde renames (`codegen/shared.rs:26-32`),
-gives enums an `Other(String)` forward-compat fallback (`codegen/enums.rs:62-95`),
-and supports inline fragments (`query/selection.rs:18,68`) — needed for the
-Notifications `... on IssueNotification` (`notifications.rs:19-21`). **But
-fragments are rendered per `BoundQuery`** — `generate_fragment_definitions`
-iterates one operation's `all_used_types.fragment_ids()` (`codegen.rs:248-252`).
-A fragment used by two separate derives is emitted twice, in two modules. The
-only way to share is to put every operation in one document under one derive;
-even then the types are codegen-named, deeply nested, and `Deserialize`-only —
-awkward to *construct* from DB rows, which the read model requires.
+(`type_qualifiers.rs:1-10`), auto-emits serde renames
+(`codegen/shared.rs:26-32`), gives enums an `Other(String)` forward-compat
+fallback (`codegen/enums.rs:62-95`), and supports inline fragments
+(`query/selection.rs:18,68`) — needed for the Notifications
+`... on IssueNotification` (`notifications.rs:19-21`). **But fragments are
+rendered per `BoundQuery`** — `generate_fragment_definitions` iterates one
+operation's `all_used_types.fragment_ids()` (`codegen.rs:248-252`). A fragment
+used by two separate derives is emitted twice, in two modules. The only way to
+share is to put every operation in one document under one derive; even then the
+types are codegen-named, deeply nested, and `Deserialize`-only — awkward to
+_construct_ from DB rows, which the read model requires.
 
-**cynic (3.13.2)** is *struct-first* ("a bring your own types GraphQL client",
+**cynic (3.13.2)** is _struct-first_ ("a bring your own types GraphQL client",
 `cynic-3.13.2/README.md`). You hand-author a struct and
 `#[derive(cynic::QueryFragment)]`; cynic checks it against the schema and
 generates the GraphQL from it. The decisive property, from the crate docs
@@ -205,14 +207,14 @@ generates the GraphQL from it. The decisive property, from the crate docs
 That is first-class cross-operation sharing: define `IssueRow` once, reuse it as
 a field in the list query, the delta query, and the detail query. Because the
 struct is **ours**, it can carry methods and `From`/`Into` impls and be
-**constructed by hand from a SQL join** — which is precisely what the
-"DB returns fragment types" contract needs. Interfaces/unions are supported
-(README features; the Notifications case). Responses are serde-decoded
-(`http.rs:101`), so the existing transport seam holds; we do not enable cynic's
-`http-*` features.
+**constructed by hand from a SQL join** — which is precisely what the "DB
+returns fragment types" contract needs. Interfaces/unions are supported (README
+features; the Notifications case). Responses are serde-decoded (`http.rs:101`),
+so the existing transport seam holds; we do not enable cynic's `http-*`
+features.
 
 ```text
-  graphql_client                          cynic
+  `graphql_client`                          cynic
   ──────────────                          ─────
   .graphql query ──derive──> module       struct + derive ──> GraphQL string
   types: codegen-owned, per-op            types: hand-owned, shared across ops
@@ -223,18 +225,19 @@ struct is **ours**, it can carry methods and `From`/`Into` impls and be
 
 ### Recommendation: cynic
 
-For the *original* narrow scope (kill hand-written response structs, types stay
-inside the sync layer), graphql_client is the lower-effort win and was the first
-draft's pick. For the *expanded* architecture — where fragment types are the
-durable, shared, hand-constructed contract between DB and TUI — cynic is the
+For the _original_ narrow scope (kill hand-written response structs, types stay
+inside the sync layer), `graphql_client` is the lower-effort win and was the
+first draft's pick. For the _expanded_ architecture — where fragment types are
+the durable, shared, hand-constructed contract between DB and TUI — cynic is the
 right tool, because it makes the fragment type a normal owned Rust struct usable
-in all three roles (fetch / store-read / render). graphql_client's per-operation,
-codegen-owned, Deserialize-only types cannot fill the DB-return role without a
-second hand-written domain layer, which defeats the point.
+in all three roles (fetch / store-read / render). `graphql_client`'s
+per-operation, codegen-owned, Deserialize-only types cannot fill the DB-return
+role without a second hand-written domain layer, which defeats the point.
 
 Honest costs of cynic:
+
 - **Structs are hand-authored** (cynic verifies, doesn't write them). `querygen`
-  bootstraps from a query; net authoring is higher than graphql_client.
+  bootstraps from a query; net authoring is higher than `graphql_client`.
 - **A `use_schema!` module** must be generated from the snapshot
   (`lib.rs:18-22`) — one-time wiring.
 - **Custom scalars** (`DateTime`, `ID`) get **newtypes** (`impl cynic::Scalar`),
@@ -244,13 +247,13 @@ Honest costs of cynic:
   [[posture.md]] ("distinct named types over bare primitives where they carry
   meaning"). Small, deliberate, decided.
 - **One struct plays three roles** (wire selection + storage read model + view
-  model). For a local-first cache this coupling is *desirable* — the cache
+  model). For a local-first cache this coupling is _desirable_ — the cache
   stores exactly what the UI needs, sourced from exactly that selection — but a
   change to the UI's needs deliberately ripples to the fetch selection and the
   storage contract. We accept that as the single-source-of-truth property.
 
-graphql_client remains the fallback if hand-authoring is rejected, in which case
-fragment types stay a sync-internal concern and the TUI↔DB contract is a
+`graphql_client` remains the fallback if hand-authoring is rejected, in which
+case fragment types stay a sync-internal concern and the TUI↔DB contract is a
 separate hand-written domain layer (status quo, minus the response-struct
 churn).
 
@@ -260,7 +263,7 @@ Wire-sourced selections become fragment types. Locally-assembled types stay
 hand-written: `IssueDetail`/`IssueRef` are built from the cache, not a query
 (`tui/detail.rs:206-280`); `Viewer` (`viewer.rs:21-27`) is a projection;
 `db::Issue` (`db/issues.rs:8-27`) is the row type. Under the new architecture
-several of these *become* DB-returned fragment types (e.g. the issue read
+several of these _become_ DB-returned fragment types (e.g. the issue read
 model), but the principle stands: generation/codegen targets wire selections,
 not local projections.
 
@@ -281,9 +284,9 @@ synthesizes empty ids, `db/issues.rs:38-46`); labels unsearchable/filterable
 relationally; a renamed team/user must be rewritten across every issue row; no
 foundation for storing the other entities the API already returns.
 
-The schema is natively relational. `Issue` references
-`team: Team!`, `state: WorkflowState!`, `assignee: User`, `creator: User`,
-`project: Project`, `cycle: Cycle`, `parent: Issue`, and `labels` (a connection)
+The schema is natively relational. `Issue` references `team: Team!`,
+`state: WorkflowState!`, `assignee: User`, `creator: User`, `project: Project`,
+`cycle: Cycle`, `parent: Issue`, and `labels` (a connection)
 (`build/linear-schema-definition.graphql`, `type Issue`). Proposed tables, one
 per entity, FKs + indexes:
 
@@ -325,11 +328,12 @@ fragment IssueRow on Issue {            SELECT i.*, t.name, s.name, a.name, ...
 }                                        → build IssueRow { … } in Rust
 ```
 
-Nested fragments (`StateName on WorkflowState { name }`, `Actor on User { name }`)
-map to joined columns and are the reuse units across the list/delta/detail
-read models. This makes the relational schema's coverage a checkable property:
-**every field any fragment selects must have a column or join** — a drift gate
-analogous to the existing allowlist gate (`build.rs:684-689`).
+Nested fragments (`StateName on WorkflowState { name }`,
+`Actor on User { name }`) map to joined columns and are the reuse units across
+the list/delta/detail read models. This makes the relational schema's coverage a
+checkable property: **every field any fragment selects must have a column or
+join** — a drift gate analogous to the existing allowlist gate
+(`build.rs:684-689`).
 
 The sync layer performs the inverse: a fetched `IssueRow` (and its nested
 entities) is **upserted into the entity tables**, not flattened — so a team
@@ -351,8 +355,8 @@ the same physical row that delta sync overwrites; "apply outbox after merge" /
 "skip rows with pending" / "reconcile by updatedAt" are all best-effort patches
 over a shared-mutable-row model — they depend on getting a predicate exactly
 right on every code path, forever. The root cause is that **one row holds two
-different things**: confirmed server truth and unconfirmed local intent. Separate
-them and the race becomes unrepresentable.
+different things**: confirmed server truth and unconfirmed local intent.
+Separate them and the race becomes unrepresentable.
 
 ### Base / overlay split (the structural fix)
 
@@ -364,9 +368,9 @@ them and the race becomes unrepresentable.
 ```
 
 A delta pull writes only `issues` (base); it has **no SQL statement that can
-touch `pending_overlay`**. The value the UI renders is `merge(base, overlay)`, so
-a concurrent delta merge cannot clobber pending intent — there is no ordering to
-get right because the delta write cannot reach the cell that holds intent:
+touch `pending_overlay`**. The value the UI renders is `merge(base, overlay)`,
+so a concurrent delta merge cannot clobber pending intent — there is no ordering
+to get right because the delta write cannot reach the cell that holds intent:
 
 ```text
    UI:   t0  BEGIN; upsert pending_overlay(issue,state=Done); INSERT outbox; COMMIT   [no network]
@@ -375,8 +379,8 @@ get right because the delta write cannot reach the cell that holds intent:
    ack:  t2  BEGIN; upsert issues(state=Done); DELETE pending_overlay(issue,state); COMMIT
 ```
 
-The outbox is still needed — it records the *command* to replay against the API —
-but it is paired with the overlay, not a substitute for it:
+The outbox is still needed — it records the _command_ to replay against the API
+— but it is paired with the overlay, not a substitute for it:
 
 ```text
 mutation_outbox(
@@ -390,8 +394,8 @@ mutation_outbox(
 The mechanism is a stack of four primitives, in order of how much they carry:
 
 1. **Base/overlay split** — load-bearing; makes the clobber unrepresentable.
-2. **Transactional outbox** — the overlay write and the outbox `INSERT` commit in
-   one rusqlite transaction (`Connection::transaction()`), so intent is never
+2. **Transactional outbox** — the overlay write and the outbox `INSERT` commit
+   in one rusqlite transaction (`Connection::transaction()`), so intent is never
    half-recorded. Replaces today's unrelated spawn-then-maybe-revert
    (`popup.rs:343-389`).
 3. **Single-writer reconcile loop** — one owner serializes all base writes (sync
@@ -401,7 +405,7 @@ The mechanism is a stack of four primitives, in order of how much they carry:
 4. **Hardening:** an `updated_at`/version guard keeps the base monotonic against
    stale delta pages; an **outbox rebase** on each new base retires
    server-satisfied commands and surfaces genuine field-level conflicts. These
-   carry conflict *resolution/UX*, layered on a default that is already safe.
+   carry conflict _resolution/UX_, layered on a default that is already safe.
 
 This also enforces the target rule on the write path: the TUI opens no
 `HttpTransport` (today it does, `popup.rs:354-358`) — it writes overlay + outbox
@@ -409,21 +413,22 @@ and reads the merge; the API edge lives only in the sync drainer.
 
 > Evidence: this section follows a focused research pass that compared the model
 > against event-sourcing, CRDTs (cr-sqlite — rejected: it merges cr-sqlite
-> *peers*, and Linear's server is a non-CRDT authority, not a peer), and
+> _peers_, and Linear's server is a non-CRDT authority, not a peer), and
 > snapshot-diff; and re-confirmed **SQLite/rusqlite** over redb / native_db (no
 > FTS, no joins) and sled (beta; its README recommends SQLite) — SQLite is the
-> only store giving FTS5 + relational joins + multi-table transactional atomicity
-> at once. Claims are grounded in repo `file:line` and crate sources read on disk.
+> only store giving FTS5 + relational joins + multi-table transactional
+> atomicity at once. Claims are grounded in repo `file:line` and crate sources
+> read on disk.
 
 ---
 
 ## Options considered (type layer)
 
-| Option | Verdict |
-|---|---|
-| A. Whole-schema type generation | Rejected — the core constraint (524 unused recursive types) |
-| B. graphql_client (query-first) | Fallback — least effort, but per-op types can't be the DB↔TUI contract |
-| C. **cynic (struct-first, shared fragments)** | **Recommended** for the expanded architecture |
+| Option                                                 | Verdict                                                                                                              |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| A. Whole-schema type generation                        | Rejected — the core constraint (524 unused recursive types)                                                          |
+| B. `graphql_client` (query-first)                      | Fallback — least effort, but per-op types can't be the DB↔TUI contract                                               |
+| C. **cynic (struct-first, shared fragments)**          | **Recommended** for the expanded architecture                                                                        |
 | D. Extend `build.rs` to a custom operation→type mapper | Rejected — reimplements solved codegen (`type_qualifiers`, `enums`, inline fragments) for no payoff ([[posture.md]]) |
 
 ---
@@ -432,39 +437,41 @@ and reads the merge; the API edge lives only in the sync drainer.
 
 Decided in review: commit to all three pillars, shipped as a **stack** of PRs,
 each rebasing on the one below. Each PR compiles and passes `make test` +
-`make check` on its own; the stack lets reviewers approve and merge incrementally
-without a single mega-diff.
+`make check` on its own; the stack lets reviewers approve and merge
+incrementally without a single mega-diff.
 
 1. **`cynic` + schema module + one fragment.** Add `cynic` (no `http-*`
    features), `use_schema!` over the snapshot. Model **Viewer** as a
    `QueryFragment`; build the operation, POST via existing `HttpTransport`,
    decode through `query_as`. → verify: `fetch_viewer` test green
    (`viewer.rs:53-68`); `cargo deny` (`make check`).
-2. **Relational schema + sync upsert** (Pillar 2). Entity tables/indexes/
-   migrations; rewrite the sync upsert to populate entity tables from fetched
-   fragments instead of the flat row. Keep a compatibility read path until the
-   query layer moves. → verify: existing fetcher tests with `FakeTransport`
-   unchanged (`list.rs:180+`, `delta.rs:63+`, `comments.rs:123+`); new DB tests
-   for joins.
+2. **Relational schema + base/overlay + sync upsert** (Pillar 2). Entity tables/
+   indexes/migrations **plus the `pending_overlay` table** (introduced with the
+   schema, not retrofitted); rewrite the sync upsert to populate entity tables
+   (the base) from fetched fragments instead of the flat row. Keep a
+   compatibility read path until the query layer moves. → verify: existing
+   fetcher tests with `FakeTransport` unchanged (`list.rs:180+`, `delta.rs:63+`,
+   `comments.rs:123+`); new DB tests for joins; a **clobber test** (delta write
+   to base leaves overlay intact).
 3. **Read model = fragment types.** Reconstruct `IssueRow`/comment fragments
    from joins; retarget TUI/CLI render + `From`/`.into()` bridges
    (`db/issues.rs:29-81`, `render_tests.rs:222`, `loop_tests.rs:188`) onto the
    shared fragment types. Drop the flat `issues` columns. → verify: TUI/CLI
    snapshot tests (`insta`) re-accepted intentionally; `cpd`/`cargo dupes`
    confirm dedup.
-4. **Base/overlay + typed inputs + outbox** (Pillar 3). Add `pending_overlay`;
-   compute the read model as `merge(base, overlay)`; model `IssueUpdateInput`/
-   `IssueCreateInput`/`CommentCreateInput` via cynic input objects; the
-   transactional outbox (overlay write + enqueue in one txn); move API mutations
-   behind the single-writer sync drainer; replace `popup.rs` direct-spawn with
-   enqueue. → verify: mutation tests assert the same variables JSON
-   (`mutations.rs:294-324`); a **clobber test** (pending overlay edit + a delta
-   pull writing the old value to base → read model still shows the edit); outbox
-   drain + reconcile + offline-write tests.
-5. **Workspace split** (structural enforcement). Break the crate into
-   `lt-types` / `lt-db` / `lt-sync` / `lt-tui` / `lt-cli` so `lt-tui` cannot
-   depend on `cynic`/`HttpTransport`. → verify: the workspace builds; an API
-   import from `lt-tui` fails to compile.
+4. **Typed inputs + outbox drain** (Pillar 3). Read model =
+   `merge(base, overlay)`; model
+   `IssueUpdateInput`/`IssueCreateInput`/`CommentCreateInput` via cynic input
+   objects; the transactional outbox (overlay write + enqueue in one txn); move
+   API mutations behind the single-writer sync drainer; replace `popup.rs`
+   direct-spawn with enqueue. Overlay granularity (per-field + per-entity
+   coalescing) follows the R&D conclusion. → verify: mutation tests assert the
+   same variables JSON (`mutations.rs:294-324`); outbox drain + reconcile +
+   offline-write tests.
+5. **Workspace split** (structural enforcement). Break the crate into `lt-types`
+   / `lt-db` / `lt-sync` / `lt-tui` / `lt-cli` so `lt-tui` cannot depend on
+   `cynic`/`HttpTransport`. → verify: the workspace builds; an API import from
+   `lt-tui` fails to compile.
 6. **Delete the corpse.** Remove unused hand-written structs; `cargo machete`
    clean.
 
@@ -481,15 +488,18 @@ without a single mega-diff.
 ## Risks / open questions
 
 Resolved (primary-source verified):
+
 - **cynic shares structs across operations?** Yes — `lib.rs:54-67`.
-- **cynic decodes via serde, so the transport survives?** Yes — `http.rs:101,222`
-  (`DeserializeOwned`); we skip its `http-*` features.
+- **cynic decodes via serde, so the transport survives?** Yes —
+  `http.rs:101,222` (`DeserializeOwned`); we skip its `http-*` features.
 - **Inline fragments / unions (Notifications)?** Yes — cynic README features;
-  graphql_client `query/selection.rs:18`.
-- **graphql_client fragment sharing is per-operation?** Yes — `codegen.rs:248`.
+  `graphql_client` `query/selection.rs:18`.
+- **`graphql_client` fragment sharing is per-operation?** Yes —
+  `codegen.rs:248`.
 - **Whole-schema bloat?** Avoided by both (used-types-only / hand-authored).
 
 Resolved in review:
+
 - **Supply chain — validated now, not deferred.** Ran `cargo deny check` against
   this repo's exact `deny.toml` on a probe crate depending on `cynic` +
   `cynic-codegen`: **licenses ok, bans ok, sources ok**. The cynic crates are
@@ -503,39 +513,62 @@ Resolved in review:
   overlap existing deps.
 - **Custom scalar policy → newtypes.** `DateTime`/`ID` become distinct
   `impl Scalar` newtypes, not `String` (see [Pillar 1](#pillar-1) costs).
-- **`build.rs` unification → leave separate.** The search-grammar codegen and the
-  cynic schema module both read the snapshot; keep them separate for now, unify
-  later. (Confirmed.)
+- **`build.rs` unification → leave separate.** The search-grammar codegen and
+  the cynic schema module both read the snapshot; keep them separate for now,
+  unify later. (Confirmed.)
 
 Resolved by research (folded into Pillar 3):
+
 - **Outbox vs delta-sync ordering** — answered structurally, not by ordering
   rules: split confirmed **base** from pending **overlay**, read model =
-  `merge(base, overlay)`, so a delta pull physically cannot reach pending intent.
-  Keep the outbox (records the command) + transactional enqueue + single-writer
-  base loop; `updated_at` guard and outbox rebase as hardening.
-- **Is SQLite the right database?** Yes — only candidate giving FTS5 + relational
-  joins + multi-table transactional atomicity at once; redb/native_db lack
-  FTS/joins, sled is beta. Keep `rusqlite` (bundled).
+  `merge(base, overlay)`, so a delta pull physically cannot reach pending
+  intent. Keep the outbox (records the command) + transactional enqueue +
+  single-writer base loop; `updated_at` guard and outbox rebase as hardening.
+- **Is SQLite the right database?** Yes — only candidate giving FTS5 +
+  relational joins + multi-table transactional atomicity at once; redb/native_db
+  lack FTS/joins, sled is beta. Keep `rusqlite` (bundled).
 
-Open — genuinely undecided (residual product/tuning calls):
-- **Overlay granularity** — per-field (matches today's single-field popups,
-  `popup.rs:359-385`) vs per-op. Decide before the overlay schema.
-- **Conflict UX** — when an outbox rebase finds the server changed a field the
-  user also changed pre-ack: auto-take-server, keep-local-and-retry, or prompt?
-  Product policy, not derivable from code.
-- **`updated_at` trust** — the base-monotonicity guard assumes Linear's
-  `updated_at` is monotonic per entity; needs empirical confirmation against the
-  live API, or a server-returned version field instead.
-- **Read-model materialization** — `LEFT JOIN pending_overlay` + `COALESCE` in
-  SQL vs a Rust-side fold after `query_issues` (`db/issues.rs:162-199`); benchmark
-  per [[posture.md]].
-- **Overlay sequencing** — introduce base/overlay *with* the relational schema
-  (PR 2) rather than retrofit in PR 4? Easier with than after.
+Resolved in review:
+
+- **No version/fingerprint token exists** — checked the snapshot:
+  `interface Node` exposes only `id: ID!`, and `type Issue` carries
+  `updatedAt: DateTime!`, `history` (`IssueHistoryConnection`), and
+  `previousIdentifiers`, but **no** `version`/`hash`/`fingerprint` field (the
+  `version` fields in the schema are on unrelated types like `Release`). So the
+  base-monotonicity guard uses `updatedAt`; we accept it is a server clock, not
+  a strict per-entity version. If staleness bites in practice, the fallback is
+  to compare a content hash we compute locally, not a server token (there is
+  none).
+- **Read-model materialization → start simple, then benchmark.** Begin with the
+  straightforward form (`LEFT JOIN pending_overlay` + `COALESCE`, or a Rust-side
+  fold) and benchmark it at scale using the seeded `sim::generate` dataset
+  (`docs/design/dst.md`), per [[posture.md]]'s "add or update a focused
+  benchmark." No premature materialized view.
+- **Overlay sequencing → introduce with, not retrofit.** The base/overlay split
+  lands **with** the relational schema (PR 2), not bolted on in PR 4 —
+  confirmed.
+- **Conflict UX → deferred.** Conflict reconciliation is out of scope for the
+  stack; the overlay default (overlay wins per field until ack) is already safe.
+
+Follow-up (post-stack):
+
+- **`lt outbox` command** — mirror `lt inbox`: a CLI view of pending local
+  changes (the overlay/outbox contents). Conflict reconciliation deferred with
+  it.
+
+Open — genuinely undecided:
+
+- **Overlay granularity (per-field vs per-op)** — under R&D. The decision hinges
+  on whether per-field overlay rows can be **coalesced per entity into a single
+  typed `issueUpdate`** (e.g. state + assignee + priority in one mutation) while
+  keeping compile-time type safety and the GraphQL absent-vs-null distinction.
+  If yes, per-field wins; if not clean, per-op is the pragmatic fallback.
+  Research in flight; its conclusion sets the overlay schema in PR 2.
 
 ## Decisions (resolved in review)
 
 1. Architecture: **adopt** API-only-via-sync / TUI-only-via-DB, enforced
    structurally by a Cargo **workspace split** (PR 5), not convention.
 2. Type layer: **cynic** (shared, owned, composable fragment types). Confirmed.
-3. Scope/sequencing: **all three pillars**, shipped as a **stack of PRs**
-   (see migration plan). Confirmed.
+3. Scope/sequencing: **all three pillars**, shipped as a **stack of PRs** (see
+   migration plan). Confirmed.
