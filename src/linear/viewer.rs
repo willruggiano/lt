@@ -6,9 +6,6 @@ use cynic::QueryBuilder;
 use super::client::{GraphqlTransport, query_as};
 use super::schema;
 
-/// `query Viewer { viewer { id name organization { name } } }`, modeled as a
-/// cynic `QueryFragment` and checked against the schema snapshot at compile
-/// time.
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query")]
 struct ViewerQuery {
