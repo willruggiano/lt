@@ -30,16 +30,16 @@ configs); full `make check` passes at the latest commit. `tui/mod.rs`: 4259 ->
       largest 257. Cross-module helpers are `pub(super)` (ui-internal); only
       `render()` stays `pub`. Render output byte-identical (zero pending
       snapshots). Tracker refs stripped from the moved comments (review #3).
-- [ ] PR9 idiomatic conversions (review #1/#2/#7) — replace the free conversion
-      helpers with `From` impls **placed with their destination types**:
-      `impl From<db::Issue> for issues::list::Issue` in `src/issues/list.rs`,
-      `impl From<db::Comment> for linear::types::Comment` in
-      `src/linear/types.rs`; update call sites to `.map(Into::into)`. This also
-      lets the inline `Comment { .. }` closures in `detail.rs` reuse the impl.
-      Keep `priority_label_to_u8` (lossy label parse, not a `From`) and
-      `build_cached_detail` (two inputs, a named constructor reads better than a
-      tuple `From`) as functions. Likely empties `convert.rs` to just
-      `priority_label_to_u8` -> fold it into `convert`/`issues` as fits.
+- [x] PR9 idiomatic conversions (review #1/#2/#7) (df0662f) — replaced the free
+      `convert.rs` helpers with `From` impls and removed the module.
+      `From<db::Issue> for issues::list::Issue` lives in `src/issues/list.rs`
+      (already imports `db`; no new edge), carrying `priority_label_to_u8`.
+      `From<db::Comment> for linear::types::Comment` lives in
+      `src/db/comments.rs` — **not** `linear/types.rs`: placing it on the db
+      side keeps `linear::types` a dependency-free leaf and matches the
+      consumer→producer arrow (the cache rehydrates API types). Call sites use
+      `.map(Into::into)`. `priority_label_to_u8` (lossy) and
+      `build_cached_detail` (two inputs) stay functions.
 - [ ] PR10 `/simplify` test-fixture dedup
 
 Lessons applied (for resuming):
@@ -70,6 +70,17 @@ Raised in review; tracked here, not done in the extraction PRs:
   wall-clock should be threaded as an explicit parameter (cf.
   `relative_age(iso, now_secs)`) for determinism. Pre-existing behavior moved
   verbatim; seam it separately.
+- **Align the `From<db::Issue>` placement with `From<db::Comment>`.** PR9 left
+  the two rehydration impls on opposite sides: `From<db::Comment>` is db-side
+  (`src/db/comments.rs`, `db -> linear`) but `From<db::Issue>` is on the
+  destination side (`src/issues/list.rs`, `issues -> db`). The consistent
+  end-state is **both** db-side: move `From<db::Issue>` (and
+  `priority_label_to_u8`) into `src/db/issues.rs`, inverting to
+  `db -> issues::list` like `db/comments`. Precondition: `issues::list`
+  currently imports `crate::db` for its query/print helpers, so adding
+  `db -> issues::list` today creates an `issues <-> db` cycle. First make
+  `issues::list` a leaf (relocate its db-querying code), then invert the arrow.
+  Bigger than a move; do as its own change.
 
 ## Context
 
