@@ -12,7 +12,7 @@ impl App {
     /// The detail is populated instantly from the local SQLite cache so the
     /// pane appears without any network round-trip.  A background thread then
     /// calls `sync_comments` via the Linear API and sends the refreshed comment
-    /// list back through `detail_comment_rx` (bd-2mx).
+    /// list back through `detail_comment_rx`.
     pub(crate) fn open_detail(&mut self) {
         let issue = match self.selected_issue() {
             Some(i) => i.clone(),
@@ -290,7 +290,7 @@ pub(crate) fn populate_relations(
     }
 }
 
-/// Non-blocking poll of the background comment-sync channel (bd-2mx).
+/// Non-blocking poll of the background comment-sync channel.
 ///
 /// When the background thread finishes syncing comments from the Linear API,
 /// the refreshed list replaces the cached comments shown in the detail pane.
@@ -333,7 +333,7 @@ pub(crate) fn poll_detail_comment_events(app: &mut App) {
     }
 }
 
-// -- Detail pane keybindings (bd-2g8, bd-1wz) --------------------------------
+// -- Detail pane keybindings --------------------------------
 //
 // Vim-like scrolling bindings:
 //   j / Down        -- scroll down one line

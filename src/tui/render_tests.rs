@@ -24,7 +24,7 @@ fn sim_issues(seed: u64, size: usize) -> Vec<Issue> {
 fn draw(app: &mut App, w: u16, h: u16) -> String {
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     term.draw(|f| ui::render(f, app)).unwrap();
-    format!("{}", term.backend())
+    term.backend().to_string()
 }
 
 /// An `App` seeded with sim issues and a fixed identity for a stable header.

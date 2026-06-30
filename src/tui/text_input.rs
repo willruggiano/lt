@@ -40,11 +40,6 @@ impl TextInput {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-
     /// Returns `(before_cursor, char_at_cursor_or_none, after_cursor_past_that_char)`.
     /// Useful for rendering the cursor position.
     pub fn display_parts(&self) -> (&str, Option<char>, &str) {
@@ -296,7 +291,7 @@ mod text_input_tests {
     fn from_string_places_cursor_at_end() {
         let t = TextInput::from_string("hello".to_string());
         assert_eq!(t.cursor, 5);
-        assert_eq!(t.as_str(), "hello");
+        assert_eq!(t.value.as_str(), "hello");
     }
 
     #[test]
