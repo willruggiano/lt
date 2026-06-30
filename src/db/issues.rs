@@ -28,8 +28,6 @@ pub struct Issue {
     pub parent_identifier: Option<String>,
 }
 
-/// Rehydrate the display `Issue` shown in the list from a cached row. The row
-/// stores only names, so the id fields of nested records are left empty.
 impl From<Issue> for crate::linear::types::Issue {
     fn from(src: Issue) -> Self {
         use crate::linear::types;
@@ -84,41 +82,34 @@ impl From<Issue> for crate::linear::types::Issue {
     }
 }
 
-/// Flatten a fetched API `Issue` into a cache row. The inverse of the
-/// rehydration impl above; `synced_at` is left empty for `upsert_issues` to
-/// fill. Both conversions are deliberately anchored on the API `Issue` so the
-/// pair reads together (cf. `db::comments`), which means this direction is an
-/// `Into` rather than a `From<_> for Issue` -- `from_over_into` is allowed for
-/// that reason.
-#[allow(clippy::from_over_into)]
-impl Into<Issue> for crate::linear::types::Issue {
-    fn into(self) -> Issue {
-        let labels = self
+impl From<crate::linear::types::Issue> for Issue {
+    fn from(src: crate::linear::types::Issue) -> Self {
+        let labels = src
             .labels
             .nodes
             .iter()
             .map(|l| l.name.as_str())
             .collect::<Vec<_>>()
             .join(",");
-        Issue {
-            id: self.id,
-            identifier: self.identifier,
-            title: self.title,
-            priority_label: self.priority_label,
-            state_name: self.state.name,
-            assignee_name: self.assignee.map(|u| u.name),
-            team_name: self.team.name,
-            team_key: Some(self.team.id),
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+        Self {
+            id: src.id,
+            identifier: src.identifier,
+            title: src.title,
+            priority_label: src.priority_label,
+            state_name: src.state.name,
+            assignee_name: src.assignee.map(|u| u.name),
+            team_name: src.team.name,
+            team_key: Some(src.team.id),
+            created_at: src.created_at,
+            updated_at: src.updated_at,
             synced_at: String::new(),
-            description: self.description,
+            description: src.description,
             labels,
-            project_name: self.project.map(|p| p.name),
-            cycle_name: self.cycle.and_then(|c| c.name),
-            creator_name: self.creator.map(|u| u.name),
-            parent_id: self.parent.as_ref().map(|p| p.id.clone()),
-            parent_identifier: self.parent.map(|p| p.identifier),
+            project_name: src.project.map(|p| p.name),
+            cycle_name: src.cycle.and_then(|c| c.name),
+            creator_name: src.creator.map(|u| u.name),
+            parent_id: src.parent.as_ref().map(|p| p.id.clone()),
+            parent_identifier: src.parent.map(|p| p.identifier),
         }
     }
 }
