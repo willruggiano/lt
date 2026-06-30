@@ -65,6 +65,30 @@ impl DbProvider for RealDb {
     }
 }
 
+/// Wall-clock source. The set of clocks is closed -- the real system clock in
+/// the binary, plus a fixed instant in tests -- so it is an enum rather than a
+/// trait or a boxed closure (cf. `DbProvider`, which wraps genuinely different
+/// I/O and needs dynamic dispatch). The `Fixed` variant is compiled out of the
+/// production binary.
+pub enum Clock {
+    /// The real wall clock.
+    System,
+    /// A clock frozen at a fixed instant, for deterministic tests.
+    #[cfg(all(test, feature = "sim"))]
+    Fixed(chrono::DateTime<chrono::Utc>),
+}
+
+impl Clock {
+    /// Read the current instant.
+    pub fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        match self {
+            Clock::System => chrono::Utc::now(),
+            #[cfg(all(test, feature = "sim"))]
+            Clock::Fixed(instant) => *instant,
+        }
+    }
+}
+
 /// Source of key events for the event loop. Abstracts crossterm so tests can
 /// feed a scripted sequence instead of reading the real terminal.
 trait EventSource {
@@ -381,6 +405,10 @@ pub struct App {
     /// Database connection source. Defaults to the real SQLite path; tests
     /// install an in-memory provider via `for_test`.
     pub db: Arc<dyn DbProvider>,
+
+    /// Wall-clock source. Defaults to the system clock; tests install a fixed
+    /// clock so time-derived labels are deterministic.
+    pub clock: Clock,
 }
 
 impl App {
@@ -427,6 +455,7 @@ impl App {
             last_esc_time: None,
             login_rx: None,
             db: Arc::new(RealDb),
+            clock: Clock::System,
         }
     }
 
@@ -703,7 +732,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
         (Vec::new(), false, None, true, Status::Loading)
     };
 
-    let sync_status_label = build_sync_status_label(syncing);
+    let sync_status_label = build_sync_status_label(syncing, &Clock::System);
 
     // Fetch viewer identity for header display.
     let viewer = crate::config::load_token()
@@ -780,7 +809,7 @@ where
             && Instant::now() >= t
         {
             app.sync.syncing = true;
-            app.sync.sync_status_label = build_sync_status_label(true);
+            app.sync.sync_status_label = build_sync_status_label(true, &app.clock);
             app.sync.sync_rx = Some(spawn_sync_thread(
                 app.args.clone(),
                 false,
