@@ -2,7 +2,11 @@
   imports = [
     inputs.git-hooks.flakeModule
   ];
-  perSystem = {config, ...}: let
+  perSystem = {
+    config,
+    pkgs,
+    ...
+  }: let
     cfg = config.pre-commit;
   in {
     devshells.default.devshell.startup.install-git-hooks.text = config.pre-commit.shellHook;
@@ -14,7 +18,7 @@
         (readonly cfg.settings.configFile)
       ];
 
-    # Only Nix-related + formatting here. Makefile for everything else.
+    # Nix, formatting, and Markdown linting here. Makefile for the cargo gates.
     pre-commit.settings = {
       hooks = {
         treefmt = {
@@ -23,6 +27,15 @@
         };
         deadnix.enable = true;
         statix.enable = true;
+        # markdownlint-cli2 reads .markdownlint-cli2.jsonc for its globs and the
+        # custom wiki-link rule; git-hooks.nix ships only markdownlint (cli v1).
+        markdownlint-cli2 = {
+          enable = true;
+          package = pkgs.markdownlint-cli2;
+          entry = "${pkgs.markdownlint-cli2}/bin/markdownlint-cli2";
+          files = "\\.md$";
+          pass_filenames = false;
+        };
       };
     };
   };

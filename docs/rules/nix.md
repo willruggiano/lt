@@ -22,7 +22,7 @@ flake.nix
    ├─ nix/jailed.nix     jail.nix wrapper plumbing (the `jail.programs.*` option)
    ├─ nix/formatter.nix  treefmt -> `nix fmt`; exposes packages.treefmt
    ├─ nix/packages/      packages.{lt,toolchain,cargo-dupes,claude-code}
-   ├─ nix/checks/        the flake's `pre-commit` checks (nix-only)
+   ├─ nix/checks/        the flake's `pre-commit` checks (Nix, fmt, Markdown)
    └─ nix/devshell.nix   devshells.default — the dev and CI environment
 ```
 

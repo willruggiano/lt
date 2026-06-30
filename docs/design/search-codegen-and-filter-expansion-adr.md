@@ -201,7 +201,7 @@ The dead metadata fields were presumably intended to drive SQL generation, but
 the schema is too simplistic. Here is a side-by-side of what the TOML declares
 versus what `run_query()` actually does:
 
-```
+```text
 TOML declares                  run_query() actually does
 -----------------------------  -------------------------------------------
 assignee:
@@ -378,7 +378,7 @@ schema supports them or until operator syntax is designed.
 
 For context, here is the full data flow from user input to SQL execution:
 
-```
+```text
 User types in search bar
   |
   v

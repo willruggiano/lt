@@ -30,3 +30,8 @@ paths:
   carry no information and go stale. When you move or delete code, delete its
   comment too. (A wiki-link to a doc that explains _why_ is different, and is
   encouraged above.)
+
+Where mechanically checkable, these conventions are enforced by the
+`markdownlint-cli2` pre-commit hook (see [[nix.md]]), plus a custom rule for the
+wiki-link form. "Never duplicate content" and "one topic per document" remain
+review matters.

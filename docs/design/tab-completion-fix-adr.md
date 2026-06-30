@@ -16,19 +16,19 @@ in stem tokens (e.g. `sort:`, `assignee:`) is handled by two functions:
 Reproduced from the bd-zsj bug report (notation: `|` = cursor, `(text)` = ghost
 text):
 
-```
+```text
 Initial:   sort:updated-|
 Tab:       sort|:updated-          <-- cursor BEFORE the colon (wrong)
 ```
 
-```
+```text
 Initial:   sort:updated- |(sort:)
 Tab:       sort:updated- sort:|    <-- correct insertion
 Tab:       sort|:updated- sort:    <-- wrapped around, cursor before colon
 Tab:       sort::updated- sort:    <-- double colon!
 ```
 
-```
+```text
 Initial:   sort:updated- assignee:will priority:high|
 Shift-Tab: sort:updated- assignee:will priority|:high  <-- before colon
 Shift-Tab: sort:updated- assignee:will priority:|:high <-- double colon
@@ -43,7 +43,7 @@ Shift-Tab: sort:updated- assignee:will priority:|:high <-- double colon
 `key_span` on Stem/PartialStem tokens is half-open `[start, end)`, covering only
 the key text. For `sort:updated-`:
 
-```
+```text
 byte:       0  1  2  3  4  5  6  ...  12
 char:       s  o  r  t  :  u  p  ...  -
             ^-----------^
@@ -119,7 +119,7 @@ uses stale state.
 
 Build a test harness that mirrors the bug report notation:
 
-```
+```text
 |        cursor position
 (text)   ghost text (hint_suffix) at end of line
 ```
