@@ -193,7 +193,10 @@ mod tests {
                 },
                 description: None,
                 labels: LabelConnection {
-                    nodes: vec![Label { name: "bug".into() }],
+                    nodes: vec![Label {
+                        id: "l1".into(),
+                        name: "bug".into(),
+                    }],
                 },
                 project: None,
                 cycle: None,

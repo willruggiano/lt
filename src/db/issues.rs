@@ -58,6 +58,7 @@ impl From<Issue> for crate::linear::types::Issue {
                     .split(',')
                     .filter(|s| !s.is_empty())
                     .map(|n| types::Label {
+                        id: String::new(),
                         name: n.to_string(),
                     })
                     .collect(),
@@ -151,6 +152,88 @@ pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
         ])
         .context("failed to upsert issue")?;
     }
+    Ok(())
+}
+
+/// Upsert one `(id, name)` row into a named entity table, updating the name on
+/// id conflict (so a rename touches a single row). `name` is optional because
+/// `cycles.name` is nullable; the other tables always pass `Some`.
+fn upsert_named_entity(conn: &Connection, table: &str, id: &str, name: Option<&str>) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {table} (id, name) VALUES (?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name"
+    );
+    conn.execute(&sql, params![id, name])
+        .with_context(|| format!("failed to upsert {table}"))?;
+    Ok(())
+}
+
+/// Populate the relational base from fetched issue fragments: upsert each
+/// referenced entity, set the issue's FK columns, and rebuild its label links.
+///
+/// Runs in one transaction per call. The flat `issues` row must already exist
+/// (written by [`upsert_issues`]); this fills the FK columns on it. Only the
+/// sync layer calls this — it is the sole source of the normalized base.
+pub fn upsert_issue_graph(conn: &Connection, issues: &[crate::linear::types::Issue]) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("failed to begin issue-graph transaction")?;
+
+    for issue in issues {
+        upsert_named_entity(&tx, "teams", &issue.team.id, Some(&issue.team.name))?;
+        upsert_named_entity(
+            &tx,
+            "workflow_states",
+            &issue.state.id,
+            Some(&issue.state.name),
+        )?;
+        if let Some(a) = &issue.assignee {
+            upsert_named_entity(&tx, "users", &a.id, Some(&a.name))?;
+        }
+        if let Some(c) = &issue.creator {
+            upsert_named_entity(&tx, "users", &c.id, Some(&c.name))?;
+        }
+        if let Some(p) = &issue.project {
+            upsert_named_entity(&tx, "projects", &p.id, Some(&p.name))?;
+        }
+        if let Some(c) = &issue.cycle {
+            upsert_named_entity(&tx, "cycles", &c.id, c.name.as_deref())?;
+        }
+
+        tx.execute(
+            "UPDATE issues
+                SET team_id = ?2, state_id = ?3, assignee_id = ?4,
+                    creator_id = ?5, project_id = ?6, cycle_id = ?7
+              WHERE id = ?1",
+            params![
+                issue.id,
+                issue.team.id,
+                issue.state.id,
+                issue.assignee.as_ref().map(|u| &u.id),
+                issue.creator.as_ref().map(|u| &u.id),
+                issue.project.as_ref().map(|p| &p.id),
+                issue.cycle.as_ref().map(|c| &c.id),
+            ],
+        )
+        .context("failed to set issue FK columns")?;
+
+        tx.execute(
+            "DELETE FROM issue_labels WHERE issue_id = ?1",
+            params![issue.id],
+        )
+        .context("failed to clear issue labels")?;
+        for label in &issue.labels.nodes {
+            upsert_named_entity(&tx, "labels", &label.id, Some(&label.name))?;
+            tx.execute(
+                "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
+                params![issue.id, label.id],
+            )
+            .context("failed to link issue label")?;
+        }
+    }
+
+    tx.commit()
+        .context("failed to commit issue-graph transaction")?;
     Ok(())
 }
 
@@ -399,10 +482,11 @@ mod tests {
         conn
     }
 
-    #[test]
-    fn api_issue_into_row_maps_and_joins_labels() {
+    /// A fully-populated API issue (all optionals `Some`, two labels) shared by
+    /// the conversion and relational-upsert tests.
+    fn sample_api_issue() -> crate::linear::types::Issue {
         use crate::linear::types as api;
-        let issue = api::Issue {
+        api::Issue {
             id: "1".to_string(),
             identifier: "ENG-1".to_string(),
             title: "Wire it up".to_string(),
@@ -424,9 +508,11 @@ mod tests {
             labels: api::LabelConnection {
                 nodes: vec![
                     api::Label {
+                        id: "l-bug".to_string(),
                         name: "bug".to_string(),
                     },
                     api::Label {
+                        id: "l-backend".to_string(),
                         name: "backend".to_string(),
                     },
                 ],
@@ -449,9 +535,12 @@ mod tests {
             }),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-02T00:00:00Z".to_string(),
-        };
+        }
+    }
 
-        let row: Issue = issue.into();
+    #[test]
+    fn api_issue_into_row_maps_and_joins_labels() {
+        let row: Issue = sample_api_issue().into();
         assert_eq!(row.identifier, "ENG-1");
         assert_eq!(row.assignee_name.as_deref(), Some("Alice"));
         assert_eq!(row.team_key.as_deref(), Some("ENG"));
@@ -547,5 +636,111 @@ mod tests {
         let args = crate::issues::IssueArgs::default();
         let issues = query_issues(&conn, &args).unwrap();
         assert_eq!(issues.len(), 3);
+    }
+
+    fn graph_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        let api = sample_api_issue();
+        upsert_issues(&conn, &[api.clone().into()]).unwrap();
+        upsert_issue_graph(&conn, &[api]).unwrap();
+        conn
+    }
+
+    #[test]
+    fn upsert_issue_graph_populates_entities_fks_and_links() {
+        let conn = graph_db();
+
+        // Entity tables carry id -> name, deduplicated by id.
+        let team_name: String = conn
+            .query_row("SELECT name FROM teams WHERE id = 'ENG'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(team_name, "Engineering");
+
+        // The issue's FK columns point at those entities.
+        let fks: (String, String, String, String, String) = conn
+            .query_row(
+                "SELECT team_id, state_id, assignee_id, project_id, cycle_id
+                 FROM issues WHERE id = '1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            fks,
+            (
+                "ENG".to_string(),
+                "s1".to_string(),
+                "u1".to_string(),
+                "p1".to_string(),
+                "c1".to_string(),
+            )
+        );
+
+        // The selection reconstructs from joins.
+        let (state, team, assignee, labels): (String, String, String, String) = conn
+            .query_row(
+                "SELECT ws.name, t.name, u.name,
+                        (SELECT GROUP_CONCAT(l.name, ',') FROM issue_labels il
+                           JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id)
+                 FROM issues i
+                 JOIN teams t            ON t.id = i.team_id
+                 JOIN workflow_states ws ON ws.id = i.state_id
+                 LEFT JOIN users u       ON u.id = i.assignee_id
+                 WHERE i.id = '1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state, "In Progress");
+        assert_eq!(team, "Engineering");
+        assert_eq!(assignee, "Alice");
+        let mut names: Vec<&str> = labels.split(',').collect();
+        names.sort_unstable();
+        assert_eq!(names, ["backend", "bug"]);
+    }
+
+    #[test]
+    fn delta_base_write_leaves_pending_overlay_intact() {
+        let conn = graph_db();
+
+        // Local intent the UI would record on an edit.
+        conn.execute(
+            "INSERT INTO pending_overlay (entity_id, field, value) VALUES ('1', 'state', 'Done')",
+            [],
+        )
+        .unwrap();
+
+        // A delta pull rewrites the base (state changed server-side).
+        let mut updated = sample_api_issue();
+        updated.state = crate::linear::types::State {
+            id: "s2".to_string(),
+            name: "Canceled".to_string(),
+        };
+        upsert_issues(&conn, &[updated.clone().into()]).unwrap();
+        upsert_issue_graph(&conn, &[updated]).unwrap();
+
+        // Base moved; the overlay row is physically untouched by the base write.
+        let base_state: String = conn
+            .query_row("SELECT state_id FROM issues WHERE id = '1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(base_state, "s2");
+        let overlay: String = conn
+            .query_row(
+                "SELECT value FROM pending_overlay WHERE entity_id = '1' AND field = 'state'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(overlay, "Done");
     }
 }

@@ -10,7 +10,7 @@ pub use comments::{Comment, delete_comments_for_issue, query_comments, upsert_co
 pub(crate) use issues::issue_from_row;
 pub use issues::{
     Issue, get_meta, query_children, query_issues, query_issues_page, search_issues, set_meta,
-    upsert_issues,
+    upsert_issue_graph, upsert_issues,
 };
 use rusqlite::{Connection, Params};
 
@@ -108,6 +108,42 @@ fn create_base_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Creates the relational entity tables, the issue/label join table, and the
+/// pending-overlay table if they are absent.
+///
+/// These are the normalized "base" the sync layer populates from fetched issue
+/// fragments; the flat `issues` columns remain the read path until the query
+/// layer moves onto joins. `pending_overlay` is the local-intent half of the
+/// base/overlay split: a delta write touches only the base tables, never it.
+fn create_relational_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS workflow_states (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS cycles (id TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE IF NOT EXISTS labels (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS issue_labels (
+            issue_id TEXT NOT NULL,
+            label_id TEXT NOT NULL,
+            PRIMARY KEY (issue_id, label_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_issue_labels_label_id ON issue_labels (label_id);
+        CREATE TABLE IF NOT EXISTS pending_overlay (
+            entity_id TEXT NOT NULL,
+            field     TEXT NOT NULL,
+            value     TEXT,
+            PRIMARY KEY (entity_id, field)
+        );
+        CREATE INDEX IF NOT EXISTS idx_issues_team_id   ON issues (team_id);
+        CREATE INDEX IF NOT EXISTS idx_issues_state_id  ON issues (state_id);
+        CREATE INDEX IF NOT EXISTS idx_issues_team_state ON issues (team_id, state_id);
+        CREATE INDEX IF NOT EXISTS idx_issues_updated_at ON issues (updated_at);",
+    )
+    .context("failed to create relational schema")?;
+    Ok(())
+}
+
 pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     create_base_schema(conn)?;
 
@@ -147,6 +183,31 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         "parent_identifier",
         "ALTER TABLE issues ADD COLUMN parent_identifier TEXT;",
     )?;
+
+    // Relational FK columns: populated by the sync layer alongside the flat
+    // name columns. The flat columns stay the read path until the query layer
+    // moves onto joins.
+    for (col, sql) in [
+        ("team_id", "ALTER TABLE issues ADD COLUMN team_id TEXT;"),
+        ("state_id", "ALTER TABLE issues ADD COLUMN state_id TEXT;"),
+        (
+            "assignee_id",
+            "ALTER TABLE issues ADD COLUMN assignee_id TEXT;",
+        ),
+        (
+            "creator_id",
+            "ALTER TABLE issues ADD COLUMN creator_id TEXT;",
+        ),
+        (
+            "project_id",
+            "ALTER TABLE issues ADD COLUMN project_id TEXT;",
+        ),
+        ("cycle_id", "ALTER TABLE issues ADD COLUMN cycle_id TEXT;"),
+    ] {
+        add_column_if_absent(conn, col, sql)?;
+    }
+
+    create_relational_schema(conn)?;
 
     Ok(())
 }
