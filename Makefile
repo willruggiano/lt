@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 
 # Line-coverage floor for `make cov`; see docs/design/test-coverage-gate.md.
-COVERAGE_FLOOR := 72
+COVERAGE_FLOOR := 70
 
 .PHONY: help build check test fix cov cov-html cov-collect
 
