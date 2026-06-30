@@ -40,7 +40,13 @@ configs); full `make check` passes at the latest commit. `tui/mod.rs`: 4259 ->
       consumer→producer arrow (the cache rehydrates API types). Call sites use
       `.map(Into::into)`. `priority_label_to_u8` (lossy) and
       `build_cached_detail` (two inputs) stay functions.
-- [ ] PR10 `/simplify` test-fixture dedup
+- [x] PR10 `/simplify` test-fixture dedup (3bf18d8) — 4-angle review (reuse,
+      simplification, efficiency, altitude) over the authored code. The
+      anticipated targets were already clean (jscpd/cargo-dupes 0%;
+      `run_query_tests` shares `test_db()` and the multi-stem test already
+      loops; render_tests vs loop_tests fixtures are genuinely distinct). One
+      real finding: two ~24-line inline `list::Issue` literals in `loop_tests`
+      collapsed to `db_issue(..).into()` via PR9's `From`. Other angles: none.
 
 Lessons applied (for resuming):
 
