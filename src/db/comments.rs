@@ -15,8 +15,6 @@ pub struct Comment {
     pub synced_at: String,
 }
 
-/// Rehydrate the API comment type shown in the detail pane from a cached row.
-/// The cache stores only the author's name, not the full user record.
 impl From<Comment> for crate::linear::types::Comment {
     fn from(c: Comment) -> Self {
         Self {

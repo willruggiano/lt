@@ -27,7 +27,6 @@ pub struct TextInput {
 }
 
 impl From<String> for TextInput {
-    /// Seed the field with existing text, cursor at the end.
     fn from(value: String) -> Self {
         let cursor = value.len();
         Self {
