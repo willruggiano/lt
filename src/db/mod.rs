@@ -3,7 +3,7 @@ pub mod filters;
 pub mod issues;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 pub use comments::{Comment, delete_comments_for_issue, query_comments, upsert_comments};
@@ -23,7 +23,7 @@ pub(crate) fn execute(conn: &Connection, sql: &str, params: impl Params, what: &
     Ok(())
 }
 
-fn db_path() -> Result<PathBuf> {
+pub(crate) fn db_path() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir().context("could not determine local data directory")?;
     // Each profile gets its own database so accounts/workspaces never share
     // state and can run concurrently.
@@ -151,23 +151,24 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn open_db() -> Result<Connection> {
-    let path = db_path()?;
-    let conn = Connection::open(&path)
-        .with_context(|| format!("could not open database at {}", path.display()))?;
+/// Open a connection to the SQLite database at `uri` -- a filesystem path or a
+/// `file:...?mode=memory` URI -- and run migrations.
+pub fn open_db(uri: impl AsRef<Path>) -> Result<Connection> {
+    let uri = uri.as_ref();
+    let conn = Connection::open(uri)
+        .with_context(|| format!("could not open database at {}", uri.display()))?;
     run_migrations(&conn)?;
     Ok(conn)
 }
 
 /// A handle to the issue database. The set of databases is closed -- the
-/// per-profile SQLite file in normal use, or an isolated in-memory database in
-/// tests -- so it is an enum rather than a trait with two impls (both are
-/// SQLite; they differ only in where they live). `connect()` opens a fresh
-/// connection to it.
+/// per-profile file on disk in normal use, or an isolated in-memory database in
+/// tests -- so it is an enum rather than a trait with two impls. Both are
+/// SQLite opened by path; `connect()` opens a fresh connection via `open_db`.
 pub enum Database {
-    /// The per-profile SQLite file. Opening and migrating is deferred to
-    /// `connect()` (via `open_db`), so constructing this variant does no I/O.
-    Profile,
+    /// The SQLite file on disk. Resolving the path and migrating is deferred to
+    /// `connect()`, so constructing this variant does no I/O.
+    File,
     /// An isolated, shared-cache in-memory database for tests. SQLite destroys
     /// a shared-cache in-memory database when its last connection closes, so
     /// the handle holds one open connection for its own lifetime.
@@ -184,8 +185,7 @@ impl Database {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let uri = format!("file:lt_memdb_{n}?mode=memory&cache=shared");
-        let keepalive = Connection::open(&uri)?;
-        run_migrations(&keepalive)?;
+        let keepalive = open_db(&uri)?;
         Ok(Self::Memory {
             uri,
             _keepalive: keepalive,
@@ -195,9 +195,9 @@ impl Database {
     /// Open a fresh connection to this database.
     pub fn connect(&self) -> Result<Connection> {
         match self {
-            Database::Profile => open_db(),
+            Database::File => open_db(db_path()?),
             #[cfg(all(test, feature = "sim"))]
-            Database::Memory { uri, .. } => Ok(Connection::open(uri)?),
+            Database::Memory { uri, .. } => open_db(uri),
         }
     }
 }

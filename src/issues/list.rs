@@ -2,7 +2,6 @@ use std::io::Write;
 
 use anyhow::Result;
 use chrono::Utc;
-use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info};
 
@@ -12,7 +11,7 @@ use super::filter::build_filter;
 use super::sort::build_sort;
 use crate::db;
 use crate::linear::client::{GraphqlTransport, HttpTransport, query_as};
-use crate::linear::types::{Issue, PageInfo};
+use crate::linear::types::{Issue, IssuesData};
 
 /// Cache TTL in seconds (5 minutes).
 const CACHE_TTL_SECS: i64 = 300;
@@ -42,18 +41,6 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
   }
 }
 ";
-
-#[derive(Deserialize)]
-struct IssueConnection {
-    nodes: Vec<Issue>,
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
-}
-
-#[derive(Deserialize)]
-struct IssuesData {
-    issues: IssueConnection,
-}
 
 pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool, Option<String>)> {
     let token = crate::auth::refresh::load_or_refresh_token()?;
@@ -123,7 +110,7 @@ pub fn run(out: &mut dyn Write, mut args: IssueArgs) -> Result<()> {
         return Ok(());
     }
 
-    let conn = db::open_db()?;
+    let conn = db::open_db(db::db_path()?)?;
     resolve_me(&conn, &mut args)?;
 
     // Check last_synced_at from sync_meta.
@@ -136,7 +123,7 @@ pub fn run(out: &mut dyn Write, mut args: IssueArgs) -> Result<()> {
             drop(conn);
             crate::sync::full::run()?;
             // Re-open after sync.
-            let conn2 = db::open_db()?;
+            let conn2 = db::open_db(db::db_path()?)?;
             let issues = db::query_issues(&conn2, &args)?;
             print_table_cached(out, &issues, "(cached)")?;
         }

@@ -7,7 +7,7 @@ use crate::issues::{IssueArgs, SortField};
 /// Fetch every page from the Linear API and upsert into SQLite.
 /// Sets `sync_meta` key='`last_synced_at`' to the current UTC timestamp on success.
 pub fn run() -> Result<()> {
-    let conn = db::open_db()?;
+    let conn = db::open_db(db::db_path()?)?;
 
     // Use a default IssueArgs with no filters and max page size.
     let args = IssueArgs {

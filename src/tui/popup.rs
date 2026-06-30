@@ -172,7 +172,10 @@ impl SearchOverlay {
         } else {
             list_limit
         };
-        match crate::db::open_db().and_then(|conn| search_query::run_query(&conn, &parsed, limit)) {
+        match crate::db::db_path()
+            .and_then(crate::db::open_db)
+            .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
+        {
             Ok(db_issues) => {
                 self.results = db_issues.into_iter().map(Into::into).collect();
                 if self.results.is_empty() {
@@ -405,7 +408,7 @@ fn optimistic_update_sqlite(
     kind: &PopupKind,
     item: &PopupItem,
 ) {
-    let Ok(conn) = crate::db::open_db() else {
+    let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) else {
         return;
     };
     let db_issue = build_db_issue_optimistic(issue, kind, item);
@@ -413,7 +416,7 @@ fn optimistic_update_sqlite(
 }
 
 fn revert_sqlite(orig: &crate::linear::types::Issue, _kind: &PopupKind) {
-    let Ok(conn) = crate::db::open_db() else {
+    let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) else {
         return;
     };
     let db_issue = crate::db::Issue {

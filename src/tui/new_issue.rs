@@ -415,7 +415,7 @@ fn cache_created_issue(
         parent_id: None,
         parent_identifier: None,
     };
-    if let Ok(conn) = crate::db::open_db() {
+    if let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) {
         let _ = crate::db::upsert_issues(&conn, &[db_issue]);
     }
 }

@@ -436,7 +436,7 @@ impl App {
             initial_args,
             last_esc_time: None,
             login_rx: None,
-            db: crate::db::Database::Profile,
+            db: crate::db::Database::File,
             clock: Clock::System,
         }
     }
@@ -686,7 +686,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
     // Use query_issues_page so we can capture the correct has_next_page flag.
     let (cached_issues, initial_has_next_page, initial_end_cursor) =
         (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
-            let conn = crate::db::open_db()?;
+            let conn = crate::db::open_db(crate::db::db_path()?)?;
             let limit = i64::from(args.limit.min(250));
             let (db_issues, has_next) = crate::db::query_issues_page(&conn, &args, 0)?;
             let end_cursor = if has_next {

@@ -25,7 +25,7 @@ pub fn run(out: &mut dyn Write, args: &SearchArgs) -> Result<()> {
         bail!("--live search via Linear API is not yet implemented");
     }
 
-    let conn = db::open_db().context("failed to open local database")?;
+    let conn = db::open_db(db::db_path()?).context("failed to open local database")?;
 
     // Check whether any issues exist at all.
     let total: i64 = conn

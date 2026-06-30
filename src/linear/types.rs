@@ -162,6 +162,19 @@ pub struct Issue {
     pub updated_at: String,
 }
 
+/// One page of the `issues` list query: the issue nodes plus pagination info.
+#[derive(Deserialize)]
+pub struct IssueConnection {
+    pub nodes: Vec<Issue>,
+    #[serde(rename = "pageInfo")]
+    pub page_info: PageInfo,
+}
+
+#[derive(Deserialize)]
+pub struct IssuesData {
+    pub issues: IssueConnection,
+}
+
 /// Map a Linear priority label to its numeric level. Lossy: any unrecognised
 /// label (including "No priority") collapses to 0, so this is a parse, not a
 /// `From`.

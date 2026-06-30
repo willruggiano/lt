@@ -1,23 +1,10 @@
 use anyhow::Result;
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::db;
 use crate::issues::list::ISSUES_QUERY;
 use crate::linear::client::{GraphqlTransport, HttpTransport, query_as};
-use crate::linear::types::{Issue, PageInfo};
-
-#[derive(Deserialize)]
-struct IssueConnection {
-    nodes: Vec<Issue>,
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
-}
-
-#[derive(Deserialize)]
-struct IssuesData {
-    issues: IssueConnection,
-}
+use crate::linear::types::{Issue, IssuesData};
 
 /// Fetch one page of issues updated after `since` (an RFC3339 timestamp).
 fn fetch_page(
@@ -55,7 +42,7 @@ fn fetch_page(
 /// - Otherwise fetches issues where updatedAt > `last_synced_at`, upserts them,
 ///   and updates `last_synced_at`.
 pub fn run() -> Result<()> {
-    let conn = db::open_db()?;
+    let conn = db::open_db(db::db_path()?)?;
 
     let last_synced_at = db::get_meta(&conn, "last_synced_at")?;
 

@@ -59,7 +59,7 @@ impl App {
                 let _ = tx.send(CommentSyncEvent::Error("not logged in".to_string()));
                 return;
             };
-            let conn = match crate::db::open_db() {
+            let conn = match crate::db::db_path().and_then(crate::db::open_db) {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = tx.send(CommentSyncEvent::Error(e.to_string()));
@@ -193,7 +193,7 @@ impl App {
             let result = (|| -> Result<Vec<crate::linear::types::Comment>> {
                 let transport = HttpTransport::new(token.access_token);
                 crate::linear::mutations::create_comment(&transport, &issue_id, &body)?;
-                let conn = crate::db::open_db()?;
+                let conn = crate::db::open_db(crate::db::db_path()?)?;
                 crate::sync::comments::sync_comments(&conn, &transport, &issue_id)?;
                 Ok(crate::db::query_comments(&conn, &issue_id)?
                     .into_iter()
@@ -315,7 +315,8 @@ pub(crate) fn poll_detail_comment_events(app: &mut App) {
             // Posting failed: drop the optimistic comment by reloading the
             // cached set, and surface the error in the footer.
             let cached = app.selected_issue().map(|i| i.id.clone()).and_then(|id| {
-                crate::db::open_db()
+                crate::db::db_path()
+                    .and_then(crate::db::open_db)
                     .and_then(|conn| crate::db::query_comments(&conn, &id))
                     .ok()
             });
