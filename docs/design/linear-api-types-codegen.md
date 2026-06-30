@@ -345,47 +345,75 @@ spawns a thread that calls the API, and reverts SQLite if the call fails
 (`popup.rs:352-393`). Offline = guaranteed revert; and the TUI talks to the API,
 violating the target rule.
 
-Invert it with a durable **outbox**:
+An outbox alone does **not** fix the core race, and the first draft was wrong to
+frame it as an ordering problem. A bare outbox still writes the user's edit into
+the same physical row that delta sync overwrites; "apply outbox after merge" /
+"skip rows with pending" / "reconcile by updatedAt" are all best-effort patches
+over a shared-mutable-row model — they depend on getting a predicate exactly
+right on every code path, forever. The root cause is that **one row holds two
+different things**: confirmed server truth and unconfirmed local intent. Separate
+them and the race becomes unrepresentable.
+
+### Base / overlay split (the structural fix)
 
 ```text
-   TUI write ──► (1) apply optimistically to entity tables
-             └─► (2) INSERT into mutation_outbox   (local, no network)     ── UI thread ends here
-
-   sync thread / `lt sync` ──► drain outbox in order:
-        pending ─► call mutations.rs (existing fns) ─► success: mark applied,
-                                                       reconcile returned entity into tables
-                                                ─► failure: backoff + retry / surface permanent error
+   issues          ─ confirmed server truth ONLY. Written by sync + acks.  (BASE)
+   pending_overlay ─ local intent, keyed by (entity_id, field). Written by  (OVERLAY)
+                     UI enqueue; deleted on ack. 1:1 with the outbox.
+   read model      = merge(BASE, OVERLAY)  — overlay wins per field, computed at read
 ```
+
+A delta pull writes only `issues` (base); it has **no SQL statement that can
+touch `pending_overlay`**. The value the UI renders is `merge(base, overlay)`, so
+a concurrent delta merge cannot clobber pending intent — there is no ordering to
+get right because the delta write cannot reach the cell that holds intent:
+
+```text
+   UI:   t0  BEGIN; upsert pending_overlay(issue,state=Done); INSERT outbox; COMMIT   [no network]
+   sync: t1  upsert issues(state=Todo)                 -- base only
+   read: ∀t  merge(base, overlay) => state=Done        -- no flicker, no clobber
+   ack:  t2  BEGIN; upsert issues(state=Done); DELETE pending_overlay(issue,state); COMMIT
+```
+
+The outbox is still needed — it records the *command* to replay against the API —
+but it is paired with the overlay, not a substitute for it:
 
 ```text
 mutation_outbox(
-  seq         INTEGER PK AUTOINCREMENT,   -- total order
-  op_type     TEXT,                       -- IssueUpdate | IssueCreate | CommentCreate
-  entity_id   TEXT,                       -- target (or client temp id for creates)
-  variables   TEXT,                       -- JSON: the typed Variables payload
-  status      TEXT,                       -- pending | in_flight | failed
-  attempts    INTEGER, last_error TEXT,
-  created_at  TEXT)
+  seq        INTEGER PK AUTOINCREMENT,  -- total order
+  op_type    TEXT,                      -- IssueUpdate | IssueCreate | CommentCreate
+  entity_id  TEXT,                      -- target (or client temp id for creates)
+  variables  TEXT,                      -- JSON: the typed Variables payload
+  status     TEXT, attempts INTEGER, last_error TEXT, created_at TEXT)
 ```
 
-Design points / correctness concerns to settle:
+The mechanism is a stack of four primitives, in order of how much they carry:
 
-- **No UI-thread network.** Step (2) replaces the `spawn → HttpTransport` in
-  `popup.rs`; the existing `mutations.rs` functions move behind the sync drainer.
-  This is the change that actually enforces "TUI only hits the DB."
-- **Ordering vs delta sync.** A delta pull must not clobber a row that has
-  un-acked outbox entries. Options: (a) apply outbox *after* each delta merge so
-  local intent re-wins; (b) skip overwriting rows with pending mutations;
-  (c) reconcile by `updatedAt`. Server remains source of truth once a mutation
-  acks. This is the central correctness question and must be specified before
-  implementation.
-- **Creates need temp ids.** `IssueCreate` has no server id until acked; the
-  outbox carries a client temp id, and reconciliation rewrites FKs on ack.
-- **Idempotency / retries.** Retries must not double-apply; key on `seq` and
-  treat a confirmed server state as terminal.
+1. **Base/overlay split** — load-bearing; makes the clobber unrepresentable.
+2. **Transactional outbox** — the overlay write and the outbox `INSERT` commit in
+   one rusqlite transaction (`Connection::transaction()`), so intent is never
+   half-recorded. Replaces today's unrelated spawn-then-maybe-revert
+   (`popup.rs:343-389`).
+3. **Single-writer reconcile loop** — one owner serializes all base writes (sync
+   upserts + acks) so they never interleave; fits the existing worker+mpsc model
+   ([[architecture.md]] §TUI). Today there are two independent writers
+   (`popup.rs:354`, `sync/mod.rs`).
+4. **Hardening:** an `updated_at`/version guard keeps the base monotonic against
+   stale delta pages; an **outbox rebase** on each new base retires
+   server-satisfied commands and surfaces genuine field-level conflicts. These
+   carry conflict *resolution/UX*, layered on a default that is already safe.
 
-This pillar is the largest behavioral change and can land **after** Pillars 1–2;
-the type and storage layers do not depend on it.
+This also enforces the target rule on the write path: the TUI opens no
+`HttpTransport` (today it does, `popup.rs:354-358`) — it writes overlay + outbox
+and reads the merge; the API edge lives only in the sync drainer.
+
+> Evidence: this section follows a focused research pass that compared the model
+> against event-sourcing, CRDTs (cr-sqlite — rejected: it merges cr-sqlite
+> *peers*, and Linear's server is a non-CRDT authority, not a peer), and
+> snapshot-diff; and re-confirmed **SQLite/rusqlite** over redb / native_db (no
+> FTS, no joins) and sled (beta; its README recommends SQLite) — SQLite is the
+> only store giving FTS5 + relational joins + multi-table transactional atomicity
+> at once. Claims are grounded in repo `file:line` and crate sources read on disk.
 
 ---
 
@@ -424,14 +452,15 @@ without a single mega-diff.
    shared fragment types. Drop the flat `issues` columns. → verify: TUI/CLI
    snapshot tests (`insta`) re-accepted intentionally; `cpd`/`cargo dupes`
    confirm dedup.
-4. **Typed mutation inputs + outbox** (Pillar 3). Model `IssueUpdateInput`/
-   `IssueCreateInput`/`CommentCreateInput` via cynic input objects; introduce
-   `mutation_outbox`; move API mutations behind the sync drainer; replace
-   `popup.rs` direct-spawn with enqueue. → verify: mutation tests assert the same
-   variables JSON (`mutations.rs:294-324`); new outbox drain + reconcile tests;
-   an offline-write test (enqueue with no transport, drain later). *The
-   outbox/delta ordering model is under separate research (see Open questions);
-   its conclusion lands in this PR.*
+4. **Base/overlay + typed inputs + outbox** (Pillar 3). Add `pending_overlay`;
+   compute the read model as `merge(base, overlay)`; model `IssueUpdateInput`/
+   `IssueCreateInput`/`CommentCreateInput` via cynic input objects; the
+   transactional outbox (overlay write + enqueue in one txn); move API mutations
+   behind the single-writer sync drainer; replace `popup.rs` direct-spawn with
+   enqueue. → verify: mutation tests assert the same variables JSON
+   (`mutations.rs:294-324`); a **clobber test** (pending overlay edit + a delta
+   pull writing the old value to base → read model still shows the edit); outbox
+   drain + reconcile + offline-write tests.
 5. **Workspace split** (structural enforcement). Break the crate into
    `lt-types` / `lt-db` / `lt-sync` / `lt-tui` / `lt-cli` so `lt-tui` cannot
    depend on `cynic`/`HttpTransport`. → verify: the workspace builds; an API
@@ -478,11 +507,30 @@ Resolved in review:
   cynic schema module both read the snapshot; keep them separate for now, unify
   later. (Confirmed.)
 
-Open — genuinely undecided:
-- **Outbox vs delta-sync ordering** — the central write-path correctness
-  question. Under active research (architecture fit, SQLite vs alternatives, and
-  how to make non-clobbering *structural* rather than best-effort); its
-  conclusion gates PR 4. This is the one open question with material risk.
+Resolved by research (folded into Pillar 3):
+- **Outbox vs delta-sync ordering** — answered structurally, not by ordering
+  rules: split confirmed **base** from pending **overlay**, read model =
+  `merge(base, overlay)`, so a delta pull physically cannot reach pending intent.
+  Keep the outbox (records the command) + transactional enqueue + single-writer
+  base loop; `updated_at` guard and outbox rebase as hardening.
+- **Is SQLite the right database?** Yes — only candidate giving FTS5 + relational
+  joins + multi-table transactional atomicity at once; redb/native_db lack
+  FTS/joins, sled is beta. Keep `rusqlite` (bundled).
+
+Open — genuinely undecided (residual product/tuning calls):
+- **Overlay granularity** — per-field (matches today's single-field popups,
+  `popup.rs:359-385`) vs per-op. Decide before the overlay schema.
+- **Conflict UX** — when an outbox rebase finds the server changed a field the
+  user also changed pre-ack: auto-take-server, keep-local-and-retry, or prompt?
+  Product policy, not derivable from code.
+- **`updated_at` trust** — the base-monotonicity guard assumes Linear's
+  `updated_at` is monotonic per entity; needs empirical confirmation against the
+  live API, or a server-returned version field instead.
+- **Read-model materialization** — `LEFT JOIN pending_overlay` + `COALESCE` in
+  SQL vs a Rust-side fold after `query_issues` (`db/issues.rs:162-199`); benchmark
+  per [[posture.md]].
+- **Overlay sequencing** — introduce base/overlay *with* the relational schema
+  (PR 2) rather than retrofit in PR 4? Easier with than after.
 
 ## Decisions (resolved in review)
 
