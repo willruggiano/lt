@@ -185,7 +185,7 @@ fn populate_relations_fills_parent_and_children() {
     let app = app_with_db(&[parent, child]).unwrap();
 
     // The issue whose relations we resolve; populate_relations keys off its id.
-    let mut issue: crate::issues::list::Issue = db_issue("c1", "ENG-10", "Done", 8).into();
+    let mut issue: crate::linear::types::Issue = db_issue("c1", "ENG-10", "Done", 8).into();
     let mut detail = build_cached_detail(&issue, Vec::new());
 
     // Seed the issue under a parent so query_children finds it.
@@ -294,7 +294,7 @@ fn poll_sync_events_done_refreshes_and_sets_identity() {
 
 #[test]
 fn poll_detail_comment_events_done_updates_detail() {
-    let issue: crate::issues::list::Issue = db_issue("c1", "ENG-1", "Todo", 5).into();
+    let issue: crate::linear::types::Issue = db_issue("c1", "ENG-1", "Todo", 5).into();
     let mut app = app_with_db(&[]).unwrap();
     app.detail = Some(build_cached_detail(&issue, Vec::new()));
     let (tx, rx) = mpsc::channel();

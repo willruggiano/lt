@@ -28,6 +28,101 @@ pub struct Issue {
     pub parent_identifier: Option<String>,
 }
 
+/// Rehydrate the display `Issue` shown in the list from a cached row. The row
+/// stores only names, so the id fields of nested records are left empty.
+impl From<Issue> for crate::linear::types::Issue {
+    fn from(src: Issue) -> Self {
+        use crate::linear::types;
+        Self {
+            id: src.id,
+            identifier: src.identifier,
+            title: src.title,
+            priority: types::priority_label_to_u8(&src.priority_label),
+            priority_label: src.priority_label,
+            state: types::State {
+                id: String::new(),
+                name: src.state_name,
+            },
+            assignee: src.assignee_name.map(|n| types::User {
+                id: String::new(),
+                name: n,
+            }),
+            team: types::Team {
+                id: src.team_key.unwrap_or_default(),
+                name: src.team_name,
+            },
+            created_at: src.created_at,
+            updated_at: src.updated_at,
+            description: src.description,
+            labels: types::LabelConnection {
+                nodes: src
+                    .labels
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|n| types::Label {
+                        name: n.to_string(),
+                    })
+                    .collect(),
+            },
+            project: src.project_name.map(|n| types::Project {
+                id: String::new(),
+                name: n,
+            }),
+            cycle: src.cycle_name.map(|n| types::Cycle {
+                id: String::new(),
+                name: Some(n),
+            }),
+            creator: src.creator_name.map(|n| types::User {
+                id: String::new(),
+                name: n,
+            }),
+            parent: src.parent_id.map(|id| types::Parent {
+                id,
+                identifier: src.parent_identifier.unwrap_or_default(),
+            }),
+        }
+    }
+}
+
+/// Flatten a fetched API `Issue` into a cache row. The inverse of the
+/// rehydration impl above; `synced_at` is left empty for `upsert_issues` to
+/// fill. Both conversions are deliberately anchored on the API `Issue` so the
+/// pair reads together (cf. `db::comments`), which means this direction is an
+/// `Into` rather than a `From<_> for Issue` -- `from_over_into` is allowed for
+/// that reason.
+#[allow(clippy::from_over_into)]
+impl Into<Issue> for crate::linear::types::Issue {
+    fn into(self) -> Issue {
+        let labels = self
+            .labels
+            .nodes
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        Issue {
+            id: self.id,
+            identifier: self.identifier,
+            title: self.title,
+            priority_label: self.priority_label,
+            state_name: self.state.name,
+            assignee_name: self.assignee.map(|u| u.name),
+            team_name: self.team.name,
+            team_key: Some(self.team.id),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            synced_at: String::new(),
+            description: self.description,
+            labels,
+            project_name: self.project.map(|p| p.name),
+            cycle_name: self.cycle.and_then(|c| c.name),
+            creator_name: self.creator.map(|u| u.name),
+            parent_id: self.parent.as_ref().map(|p| p.id.clone()),
+            parent_identifier: self.parent.map(|p| p.identifier),
+        }
+    }
+}
+
 /// Insert or replace a slice of issues, setting `synced_at` to now (UTC).
 pub fn upsert_issues(conn: &Connection, issues: &[Issue]) -> Result<()> {
     let synced_at = Utc::now().to_rfc3339();
@@ -311,6 +406,109 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn api_issue_into_row_maps_and_joins_labels() {
+        use crate::linear::types as api;
+        let issue = api::Issue {
+            id: "1".to_string(),
+            identifier: "ENG-1".to_string(),
+            title: "Wire it up".to_string(),
+            priority_label: "High".to_string(),
+            priority: 2,
+            state: api::State {
+                id: "s1".to_string(),
+                name: "In Progress".to_string(),
+            },
+            assignee: Some(api::User {
+                id: "u1".to_string(),
+                name: "Alice".to_string(),
+            }),
+            team: api::Team {
+                id: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            description: Some("body".to_string()),
+            labels: api::LabelConnection {
+                nodes: vec![
+                    api::Label {
+                        name: "bug".to_string(),
+                    },
+                    api::Label {
+                        name: "backend".to_string(),
+                    },
+                ],
+            },
+            project: Some(api::Project {
+                id: "p1".to_string(),
+                name: "Platform".to_string(),
+            }),
+            cycle: Some(api::Cycle {
+                id: "c1".to_string(),
+                name: Some("Cycle 7".to_string()),
+            }),
+            creator: Some(api::User {
+                id: "u2".to_string(),
+                name: "Carol".to_string(),
+            }),
+            parent: Some(api::Parent {
+                id: "9".to_string(),
+                identifier: "ENG-9".to_string(),
+            }),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        };
+
+        let row: Issue = issue.into();
+        assert_eq!(row.identifier, "ENG-1");
+        assert_eq!(row.assignee_name.as_deref(), Some("Alice"));
+        assert_eq!(row.team_key.as_deref(), Some("ENG"));
+        assert_eq!(row.labels, "bug,backend");
+        assert_eq!(row.project_name.as_deref(), Some("Platform"));
+        assert_eq!(row.cycle_name.as_deref(), Some("Cycle 7"));
+        assert_eq!(row.creator_name.as_deref(), Some("Carol"));
+        assert_eq!(row.parent_id.as_deref(), Some("9"));
+        assert_eq!(row.parent_identifier.as_deref(), Some("ENG-9"));
+        // synced_at is filled by upsert_issues, not the conversion.
+        assert!(row.synced_at.is_empty());
+    }
+
+    #[test]
+    fn api_issue_into_row_handles_absent_optionals() {
+        use crate::linear::types as api;
+        let issue = api::Issue {
+            id: "2".to_string(),
+            identifier: "ENG-2".to_string(),
+            title: "t".to_string(),
+            priority_label: "No priority".to_string(),
+            priority: 0,
+            state: api::State {
+                id: "s".to_string(),
+                name: "Todo".to_string(),
+            },
+            assignee: None,
+            team: api::Team {
+                id: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            description: None,
+            labels: api::LabelConnection { nodes: Vec::new() },
+            project: None,
+            cycle: None,
+            creator: None,
+            parent: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let row: Issue = issue.into();
+        assert!(row.assignee_name.is_none());
+        assert_eq!(row.labels, "");
+        assert!(row.project_name.is_none());
+        assert!(row.cycle_name.is_none());
+        assert!(row.creator_name.is_none());
+        assert!(row.parent_id.is_none());
     }
 
     #[test]

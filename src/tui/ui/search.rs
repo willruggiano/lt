@@ -5,7 +5,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use super::table::sort_col_index;
 use super::util::{TableSpec, render_issue_table};
 use crate::issues::SortField;
-use crate::issues::list::Issue;
+use crate::linear::types::Issue;
 use crate::text;
 use crate::tui::SearchOverlay;
 

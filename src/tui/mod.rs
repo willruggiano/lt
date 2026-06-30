@@ -42,11 +42,10 @@ pub(crate) use sync::{
 pub(crate) use text_input::TextInput;
 
 use crate::issues::IssueArgs;
-use crate::issues::list::Issue;
-#[cfg(all(test, feature = "sim"))]
-pub(crate) use crate::issues::list::priority_label_to_u8;
 use crate::linear::client::HttpTransport;
-use crate::linear::types::IssueDetail;
+#[cfg(all(test, feature = "sim"))]
+pub(crate) use crate::linear::types::priority_label_to_u8;
+use crate::linear::types::{Issue, IssueDetail};
 use crate::linear::viewer::fetch_viewer;
 
 /// Wall-clock source. The set of clocks is closed -- the real system clock in

@@ -89,7 +89,7 @@ pub(crate) fn spawn_sync_thread(
                 let issues = (|| -> Result<Vec<Issue>> {
                     let conn = crate::db::open_db()?;
                     let db_issues = crate::db::query_issues(&conn, &args)?;
-                    // Convert db::Issue -> issues::list::Issue.
+                    // Rehydrate db rows into the API issue type.
                     Ok(db_issues.into_iter().map(Into::into).collect())
                 })();
                 // A successful sync implies a valid token, so the identity

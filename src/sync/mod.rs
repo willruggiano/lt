@@ -10,7 +10,7 @@ use chrono::Utc;
 use clap::Subcommand;
 
 use crate::db;
-use crate::issues::list::{Issue, to_db_issue};
+use crate::linear::types::Issue;
 
 /// Paginate through issue pages via `fetch_page`, upserting each page into the
 /// local DB, then record the current UTC time as `last_synced_at`.
@@ -27,7 +27,7 @@ where
         let (issues, has_next, end_cursor) = fetch_page(after)?;
 
         if !issues.is_empty() {
-            let db_issues: Vec<db::Issue> = issues.iter().map(to_db_issue).collect();
+            let db_issues: Vec<db::Issue> = issues.into_iter().map(Into::into).collect();
             db::upsert_issues(conn, &db_issues)?;
         }
 

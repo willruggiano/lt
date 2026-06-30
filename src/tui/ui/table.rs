@@ -4,7 +4,7 @@ use ratatui::widgets::Paragraph;
 
 use super::util::{TableSpec, render_issue_table, to_u16};
 use crate::issues::SortField;
-use crate::issues::list::Issue;
+use crate::linear::types::Issue;
 use crate::text;
 use crate::tui::{App, Mode, PopupKind, Status};
 
