@@ -85,11 +85,13 @@ pub fn query_comments(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>>
     Ok(comments)
 }
 
-/// Delete all comments for a given `issue_id` (used before re-inserting a fresh set).
+/// Delete the synced comments for an `issue_id` before re-inserting a fresh set.
+/// Optimistic `local:` rows (un-acked comment creates) are preserved so a sync
+/// does not wipe a comment the drainer has not posted yet.
 pub fn delete_comments_for_issue(conn: &Connection, issue_id: &str) -> Result<()> {
     crate::db::execute(
         conn,
-        "DELETE FROM issue_comments WHERE issue_id = ?1",
+        "DELETE FROM issue_comments WHERE issue_id = ?1 AND id NOT LIKE 'local:%'",
         params![issue_id],
         "delete comments for issue",
     )

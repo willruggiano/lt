@@ -1,23 +1,14 @@
-#![allow(dead_code)]
-
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde_json::json;
 
 use super::client::{GraphqlTransport, query_as};
+use super::inputs::IssueCreateInput;
 
 const ISSUE_UPDATE_MUTATION: &str = r"
 mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) {
     success
-    issue {
-      id
-      identifier
-      title
-      state { name }
-      priority
-      assignee { name }
-    }
   }
 }
 ";
@@ -30,9 +21,6 @@ mutation IssueCreate($input: IssueCreateInput!) {
       id
       identifier
       title
-      state { name }
-      priority
-      team { name }
     }
   }
 }
@@ -42,6 +30,13 @@ const COMMENT_CREATE_MUTATION: &str = r"
 mutation CommentCreate($input: CommentCreateInput!) {
   commentCreate(input: $input) {
     success
+    comment {
+      id
+      body
+      createdAt
+      updatedAt
+      user { name }
+    }
   }
 }
 ";
@@ -71,54 +66,29 @@ query WorkflowStates($teamId: String!) {
 }
 ";
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueState {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueUser {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueTeam {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct Issue {
-    pub id: String,
-    pub identifier: String,
-    pub title: String,
-    pub state: IssueState,
-    pub priority: u8,
-    pub assignee: Option<IssueUser>,
-}
-
+/// The fields the `issueCreate` response returns: enough to confirm success and
+/// reconcile the optimistic temp row with the server's id/identifier.
 #[derive(Deserialize, Debug, Clone)]
 pub struct CreatedIssue {
     pub id: String,
     pub identifier: String,
     pub title: String,
-    pub state: IssueState,
-    pub priority: u8,
-    pub team: IssueTeam,
 }
 
 #[derive(Deserialize)]
-struct IssueUpdatePayload {
-    issue: Issue,
+struct SuccessPayload {
+    success: bool,
 }
 
 #[derive(Deserialize)]
 struct IssueUpdateData {
     #[serde(rename = "issueUpdate")]
-    issue_update: IssueUpdatePayload,
+    issue_update: SuccessPayload,
 }
 
 #[derive(Deserialize)]
 struct IssueCreatePayload {
+    success: bool,
     issue: CreatedIssue,
 }
 
@@ -126,6 +96,36 @@ struct IssueCreatePayload {
 struct IssueCreateData {
     #[serde(rename = "issueCreate")]
     issue_create: IssueCreatePayload,
+}
+
+/// The created comment returned by `commentCreate`, used to replace the
+/// optimistic temp row on ack.
+#[derive(Deserialize, Debug, Clone)]
+pub struct CreatedComment {
+    pub id: String,
+    pub body: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    pub user: Option<CommentAuthor>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct CommentAuthor {
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+struct CommentCreatePayload {
+    success: bool,
+    comment: CreatedComment,
+}
+
+#[derive(Deserialize)]
+struct CommentCreateData {
+    #[serde(rename = "commentCreate")]
+    comment_create: CommentCreatePayload,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -167,53 +167,61 @@ struct TeamsData {
     teams: TeamConnection,
 }
 
-pub struct CreateIssueInput {
-    pub title: String,
-    pub team_id: String,
-    pub description: Option<String>,
-    pub state_id: Option<String>,
-    pub priority: Option<u8>,
-    pub assignee_id: Option<String>,
-}
+// ---------------------------------------------------------------------------
+// Mutation replay (driven by the outbox drainer)
+// ---------------------------------------------------------------------------
 
-/// Run the `issueUpdate` mutation for `id` with the given `input` payload.
-fn run_issue_update(
+/// Replay an `issueUpdate` from its stored variables. The drainer reconciles the
+/// base itself, so only success matters here.
+pub fn post_issue_update(
     transport: &dyn GraphqlTransport,
-    id: &str,
-    input: &serde_json::Value,
-) -> Result<Issue> {
-    let variables = json!({
-        "id": id,
-        "input": input,
-    });
+    variables: serde_json::Value,
+) -> Result<()> {
     let data: IssueUpdateData = query_as(transport, ISSUE_UPDATE_MUTATION, variables)?;
-    Ok(data.issue_update.issue)
+    if !data.issue_update.success {
+        bail!("issueUpdate returned success=false");
+    }
+    Ok(())
 }
 
-pub fn update_issue_state(
+/// Replay an `issueCreate` from its stored variables, returning the server's
+/// id/identifier for temp-row reconciliation.
+pub fn post_issue_create(
     transport: &dyn GraphqlTransport,
-    id: &str,
-    state_id: &str,
-) -> Result<Issue> {
-    run_issue_update(transport, id, &json!({ "stateId": state_id }))
+    variables: serde_json::Value,
+) -> Result<CreatedIssue> {
+    let data: IssueCreateData = query_as(transport, ISSUE_CREATE_MUTATION, variables)?;
+    if !data.issue_create.success {
+        bail!("issueCreate returned success=false");
+    }
+    Ok(data.issue_create.issue)
 }
 
-pub fn update_issue_priority(
+/// Replay a `commentCreate` from its stored variables, returning the server's
+/// comment so the optimistic temp row can be replaced.
+pub fn post_comment_create(
     transport: &dyn GraphqlTransport,
-    id: &str,
-    priority: u8,
-) -> Result<Issue> {
-    run_issue_update(transport, id, &json!({ "priority": priority }))
+    variables: serde_json::Value,
+) -> Result<CreatedComment> {
+    let data: CommentCreateData = query_as(transport, COMMENT_CREATE_MUTATION, variables)?;
+    if !data.comment_create.success {
+        bail!("commentCreate returned success=false");
+    }
+    Ok(data.comment_create.comment)
 }
 
-pub fn update_issue_assignee(
+/// Create an issue synchronously (the CLI `lt issues new` path, which is an
+/// inherently online command rather than a queued TUI edit).
+pub fn create_issue(
     transport: &dyn GraphqlTransport,
-    id: &str,
-    assignee_id: Option<String>,
-) -> Result<Issue> {
-    let assignee_id = assignee_id.map_or(serde_json::Value::Null, serde_json::Value::String);
-    run_issue_update(transport, id, &json!({ "assigneeId": assignee_id }))
+    input: &IssueCreateInput,
+) -> Result<CreatedIssue> {
+    post_issue_create(transport, json!({ "input": input }))
 }
+
+// ---------------------------------------------------------------------------
+// Modal data loads (online reads, used by the popup and new-issue modal)
+// ---------------------------------------------------------------------------
 
 pub fn fetch_workflow_states(
     transport: &dyn GraphqlTransport,
@@ -227,51 +235,6 @@ pub fn fetch_workflow_states(
 pub fn fetch_teams(transport: &dyn GraphqlTransport) -> Result<Vec<Team>> {
     let data: TeamsData = query_as(transport, TEAMS_QUERY, json!({}))?;
     Ok(data.teams.nodes)
-}
-
-pub fn create_comment(transport: &dyn GraphqlTransport, issue_id: &str, body: &str) -> Result<()> {
-    #[derive(Deserialize)]
-    struct CommentCreatePayload {
-        success: bool,
-    }
-    #[derive(Deserialize)]
-    struct CommentCreateData {
-        #[serde(rename = "commentCreate")]
-        comment_create: CommentCreatePayload,
-    }
-
-    let variables = json!({
-        "input": { "issueId": issue_id, "body": body },
-    });
-    let data: CommentCreateData = query_as(transport, COMMENT_CREATE_MUTATION, variables)?;
-    if !data.comment_create.success {
-        anyhow::bail!("commentCreate returned success=false");
-    }
-    Ok(())
-}
-
-pub fn create_issue(
-    transport: &dyn GraphqlTransport,
-    input: CreateIssueInput,
-) -> Result<CreatedIssue> {
-    let mut obj = serde_json::Map::new();
-    obj.insert("title".to_string(), json!(input.title));
-    obj.insert("teamId".to_string(), json!(input.team_id));
-    if let Some(desc) = input.description {
-        obj.insert("description".to_string(), json!(desc));
-    }
-    if let Some(state_id) = input.state_id {
-        obj.insert("stateId".to_string(), json!(state_id));
-    }
-    if let Some(priority) = input.priority {
-        obj.insert("priority".to_string(), json!(priority));
-    }
-    if let Some(assignee_id) = input.assignee_id {
-        obj.insert("assigneeId".to_string(), json!(assignee_id));
-    }
-    let variables = json!({ "input": obj });
-    let data: IssueCreateData = query_as(transport, ISSUE_CREATE_MUTATION, variables)?;
-    Ok(data.issue_create.issue)
 }
 
 #[cfg(test)]
@@ -292,16 +255,15 @@ mod tests {
     }
 
     #[test]
-    fn create_issue_builds_input_omitting_absent_optionals() {
+    fn create_issue_returns_server_identity() {
         let transport = FakeTransport::new(vec![json!({
-            "issueCreate": { "issue": {
-                "id": "i1", "identifier": "ENG-1", "title": "New",
-                "state": { "name": "Todo" }, "priority": 0, "team": { "name": "Eng" }
+            "issueCreate": { "success": true, "issue": {
+                "id": "i1", "identifier": "ENG-1", "title": "New"
             }}
         })]);
         let created = create_issue(
             &transport,
-            CreateIssueInput {
+            &IssueCreateInput {
                 title: "New".to_string(),
                 team_id: "t1".to_string(),
                 description: None,
@@ -317,31 +279,38 @@ mod tests {
         assert_eq!(input["title"], json!("New"));
         assert_eq!(input["teamId"], json!("t1"));
         assert_eq!(input["stateId"], json!("s1"));
-        // Absent optionals are not serialized into the input object.
         assert!(input.get("description").is_none());
         assert!(input.get("priority").is_none());
         assert!(input.get("assigneeId").is_none());
     }
 
     #[test]
-    fn create_comment_errors_on_unsuccessful_payload() {
-        let transport = FakeTransport::new(vec![json!({ "commentCreate": { "success": false } })]);
-        let err = create_comment(&transport, "i1", "hi")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("success=false"), "got: {err}");
+    fn post_comment_create_returns_server_comment() {
+        let transport = FakeTransport::new(vec![json!({
+            "commentCreate": { "success": true, "comment": {
+                "id": "c1", "body": "hi",
+                "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+                "user": { "name": "Ada" }
+            }}
+        })]);
+        let created = post_comment_create(
+            &transport,
+            json!({ "input": { "issueId": "i1", "body": "hi" } }),
+        )
+        .unwrap();
+        assert_eq!(created.id, "c1");
+        assert_eq!(created.user.unwrap().name, "Ada");
+        assert_eq!(transport.variables(0)["input"]["issueId"], json!("i1"));
     }
 
     #[test]
-    fn update_issue_state_sends_state_id_input() {
-        let transport = FakeTransport::new(vec![json!({
-            "issueUpdate": { "issue": {
-                "id": "i1", "identifier": "ENG-1", "title": "t",
-                "state": { "name": "Done" }, "priority": 1, "assignee": null
-            }}
-        })]);
-        let issue = update_issue_state(&transport, "i1", "s9").unwrap();
-        assert_eq!(issue.state.name, "Done");
+    fn post_issue_update_sends_variables_and_checks_success() {
+        let transport = FakeTransport::new(vec![json!({ "issueUpdate": { "success": true } })]);
+        post_issue_update(
+            &transport,
+            json!({ "id": "i1", "input": { "stateId": "s9" } }),
+        )
+        .unwrap();
         let vars = transport.variables(0);
         assert_eq!(vars["id"], json!("i1"));
         assert_eq!(vars["input"]["stateId"], json!("s9"));

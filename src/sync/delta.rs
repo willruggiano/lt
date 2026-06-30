@@ -54,6 +54,10 @@ pub fn run() -> Result<()> {
     let token = crate::auth::refresh::load_or_refresh_token()?;
     let transport = HttpTransport::new(token.access_token);
 
+    // Drain queued local mutations first so the base reflects acked edits before
+    // the delta fetch overwrites it.
+    super::drain::drain(&conn, &transport)?;
+
     super::sync_pages(&conn, |after| fetch_page(&transport, &since, after))
 }
 

@@ -1,6 +1,5 @@
 use std::sync::mpsc;
 
-use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::{App, CommentSyncEvent, Issue, Mode, Status};
@@ -137,12 +136,12 @@ impl App {
 
     // -- Comment input ---------------------------------------------------------
 
-    /// Submit the comment buffer to the Linear API.
+    /// Enqueue the comment buffer as a local create.
     ///
-    /// The comment is appended to the detail pane optimistically; a background
-    /// thread runs the commentCreate mutation, re-syncs the issue's comments,
-    /// and delivers the authoritative list via `detail_comment_rx`.  On error
-    /// the optimistic comment is dropped (see `poll_detail_comment_events`).
+    /// The comment is appended to the detail pane optimistically and written to
+    /// the local DB (an optimistic `local:` row plus a `commentCreate` outbox
+    /// command) in one transaction. No network: the sync drainer posts it and
+    /// reconciles the temp row with the server copy.
     pub(crate) fn submit_comment(&mut self) {
         let body = match self.comment_input.as_ref() {
             Some(b) => b.trim().to_string(),
@@ -156,13 +155,9 @@ impl App {
             Some(i) => i.id.clone(),
             None => return,
         };
-        let Ok(Some(token)) = crate::config::load_token() else {
-            self.footer_msg = Some("Not logged in".to_string());
-            return;
-        };
         self.comment_input = None;
 
-        // Optimistic: show the comment immediately.
+        // Optimistic: show the comment immediately in the open detail pane.
         if let Some(ref mut detail) = self.detail {
             detail.comments.nodes.push(crate::linear::types::Comment {
                 body: body.clone(),
@@ -174,29 +169,18 @@ impl App {
             });
         }
 
-        let (tx, rx) = mpsc::channel::<CommentSyncEvent>();
-        self.detail_comment_rx = Some(rx);
-
-        std::thread::spawn(move || {
-            let result = (|| -> Result<Vec<crate::linear::types::Comment>> {
-                let transport = HttpTransport::new(token.access_token);
-                crate::linear::mutations::create_comment(&transport, &issue_id, &body)?;
-                let conn = crate::db::open_db(crate::db::db_path()?)?;
-                crate::sync::comments::sync_comments(&conn, &transport, &issue_id)?;
-                Ok(crate::db::query_comments(&conn, &issue_id)?
-                    .into_iter()
-                    .map(Into::into)
-                    .collect())
-            })();
-            match result {
-                Ok(fresh) => {
-                    let _ = tx.send(CommentSyncEvent::Done(fresh));
-                }
-                Err(e) => {
-                    let _ = tx.send(CommentSyncEvent::PostError(e.to_string()));
-                }
-            }
-        });
+        let input = crate::linear::inputs::CommentCreateInput {
+            issue_id: issue_id.clone(),
+            body: body.clone(),
+        };
+        if let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) {
+            let _ = crate::db::outbox::enqueue_comment_create(
+                &conn,
+                &crate::db::outbox::temp_id(),
+                self.viewer_name.as_deref(),
+                &input,
+            );
+        }
     }
 }
 
@@ -301,21 +285,6 @@ pub(crate) fn poll_detail_comment_events(app: &mut App) {
         }
         Ok(CommentSyncEvent::Error(_msg)) => {
             // Non-fatal: keep whatever cached comments are already shown.
-            true
-        }
-        Ok(CommentSyncEvent::PostError(msg)) => {
-            // Posting failed: drop the optimistic comment by reloading the
-            // cached set, and surface the error in the footer.
-            let cached = app.selected_issue().map(|i| i.id.clone()).and_then(|id| {
-                crate::db::db_path()
-                    .and_then(crate::db::open_db)
-                    .and_then(|conn| crate::db::query_comments(&conn, &id))
-                    .ok()
-            });
-            if let (Some(detail), Some(comments)) = (app.detail.as_mut(), cached) {
-                detail.comments.nodes = comments.into_iter().map(Into::into).collect();
-            }
-            app.footer_msg = Some(format!("Failed to post comment: {msg}"));
             true
         }
         Err(mpsc::TryRecvError::Empty) => false,

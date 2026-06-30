@@ -6,8 +6,9 @@ use serde_json::json;
 
 use crate::config;
 use crate::linear::client::{HttpTransport, query_as};
+use crate::linear::inputs::IssueCreateInput;
 use crate::linear::mutations::{
-    CreateIssueInput, Team, WorkflowState, create_issue, fetch_teams, fetch_workflow_states,
+    Team, WorkflowState, create_issue, fetch_teams, fetch_workflow_states,
 };
 
 const VIEWER_QUERY: &str = r"
@@ -480,16 +481,20 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
         return Ok(());
     }
 
-    let input = CreateIssueInput {
+    let input = IssueCreateInput {
         title,
         team_id,
         description,
         state_id,
-        priority: if priority == 0 { None } else { Some(priority) },
+        priority: if priority == 0 {
+            None
+        } else {
+            Some(i32::from(priority))
+        },
         assignee_id,
     };
 
-    let issue = create_issue(&transport, input)?;
+    let issue = create_issue(&transport, &input)?;
     writeln!(out, "Created: {} - {}", issue.identifier, issue.title)?;
     writeln!(
         out,

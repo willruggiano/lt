@@ -15,15 +15,15 @@ check: ## Run formatter, linter, supply-chain, and dedup gates
 	nix fmt
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
-	cargo clippy --all-targets --features sim -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
 	GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null cargo deny check
 	cargo machete
 	cpd .
 	cargo dupes check --exclude-tests --min-nodes 25 --max-exact 0 --max-near 0
 
-test: ## Run the test suite (default and sim feature)
+test: ## Run the test suite (default + all features)
 	cargo test
-	cargo test --features sim
+	cargo test --all-features
 
 fix: ## Apply the fixable variants of the check gates
 	cargo fmt
@@ -41,4 +41,4 @@ cov-html: cov-collect ## Run the test suite under coverage and write an HTML rep
 cov-collect:
 	cargo llvm-cov clean --workspace
 	cargo llvm-cov --no-report
-	cargo llvm-cov --no-report --features sim
+	cargo llvm-cov --no-report --all-features

@@ -1,6 +1,7 @@
 pub mod comments;
 pub mod filters;
 pub mod issues;
+pub mod outbox;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -121,13 +122,14 @@ fn create_base_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Creates the relational entity tables, the issue/label join table, and the
-/// pending-overlay table if they are absent.
+/// Creates the relational entity tables, the issue/label join table, the
+/// pending-overlay table, and the mutation outbox if they are absent.
 ///
-/// These are the normalized "base" the sync layer populates from fetched issue
-/// fragments and the read model joins back into the fragment type.
+/// The entity tables are the normalized "base" the sync layer populates from
+/// fetched issue fragments and the read model joins back into the fragment type.
 /// `pending_overlay` is the local-intent half of the base/overlay split: a
-/// delta write touches only the base tables, never it.
+/// delta write touches only the base tables, never it. `outbox` is the
+/// paired command log the sync drainer replays against the API.
 fn create_relational_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, name TEXT NOT NULL);
@@ -148,6 +150,17 @@ fn create_relational_schema(conn: &Connection) -> Result<()> {
             value     TEXT,
             PRIMARY KEY (entity_id, field)
         );
+        CREATE TABLE IF NOT EXISTS outbox (
+            seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+            op_type    TEXT NOT NULL,
+            entity_id  TEXT NOT NULL,
+            variables  TEXT NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'pending',
+            attempts   INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox (status, seq);
         CREATE INDEX IF NOT EXISTS idx_issues_team_id   ON issues (team_id);
         CREATE INDEX IF NOT EXISTS idx_issues_state_id  ON issues (state_id);
         CREATE INDEX IF NOT EXISTS idx_issues_team_state ON issues (team_id, state_id);

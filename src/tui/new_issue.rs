@@ -217,13 +217,6 @@ impl super::App {
     }
 
     fn new_issue_submit(&mut self) {
-        let Ok(Some(token)) = crate::config::load_token() else {
-            if let Some(m) = self.new_issue_modal.as_mut() {
-                m.error = "Not logged in".to_string();
-            }
-            return;
-        };
-
         let Some(modal) = self.new_issue_modal.as_ref() else {
             return;
         };
@@ -247,22 +240,24 @@ impl super::App {
             return;
         };
 
-        let (input, display) = build_create_request(modal, team_id);
+        // Offline create: write an optimistic temp row and queue the command.
+        // The sync drainer posts it and reconciles the temp id with the server.
+        let (input, optimistic) = build_create_request(modal, team_id);
+        let result = crate::db::db_path()
+            .and_then(crate::db::open_db)
+            .and_then(|conn| crate::db::outbox::enqueue_issue_create(&conn, &optimistic, &input));
 
-        match crate::linear::mutations::create_issue(&HttpTransport::new(token.access_token), input)
-        {
-            Ok(created) => {
-                cache_created_issue(&created, display);
-                // Refresh list and highlight new issue.
-                let new_identifier = created.identifier.clone();
+        match result {
+            Ok(()) => {
+                let identifier = optimistic.identifier.clone();
                 self.mode = Mode::List;
                 self.new_issue_modal = None;
-                self.footer_msg = Some(format!("Created {}", created.identifier));
-                self.do_fetch_and_select(Some(new_identifier));
+                self.footer_msg = Some("Created issue (pending sync)".to_string());
+                self.do_fetch_and_select(Some(identifier));
             }
             Err(e) => {
                 if let Some(m) = self.new_issue_modal.as_mut() {
-                    m.error = format!("Failed to create issue: {e}");
+                    m.error = format!("Failed to queue issue: {e}");
                 }
             }
         }
@@ -317,113 +312,73 @@ pub(crate) struct Member {
     pub name: String,
 }
 
-/// Display fields captured from the new-issue modal, used to optimistically
-/// cache a freshly-created issue before the next sync overwrites it.
-struct CreatedIssueDisplay {
-    title: String,
-    priority_label: String,
-    state_id: Option<String>,
-    state_name: String,
-    assignee_id: Option<String>,
-    assignee_name: Option<String>,
-    team_name: String,
-    team_id: String,
-}
-
-/// Build the create-issue API input and the display fields used for optimistic
-/// caching from the modal's current selections. `team_id` is the resolved
-/// (validated) team id.
+/// Build the typed `issueCreate` input and the optimistic issue fragment from
+/// the modal's current selections. The optimistic fragment carries a `local:`
+/// temp id and a `NEW` placeholder identifier; the drainer rewrites both with
+/// the server's values on ack. `team_id` is the resolved (validated) team id.
 fn build_create_request(
     modal: &NewIssueModal,
     team_id: String,
 ) -> (
-    crate::linear::mutations::CreateIssueInput,
-    CreatedIssueDisplay,
-) {
-    let input = crate::linear::mutations::CreateIssueInput {
-        title: modal.title.value.trim().to_string(),
-        team_id: team_id.clone(),
-        description: if modal.description.trim().is_empty() {
-            None
-        } else {
-            Some(modal.description.trim().to_string())
-        },
-        state_id: modal
-            .states
-            .get(modal.state_selected)
-            .and_then(|s| s.id.clone()),
-        priority: modal
-            .priorities
-            .get(modal.priority_selected)
-            .and_then(|p| p.id.as_ref())
-            .and_then(|s| s.parse::<u8>().ok()),
-        assignee_id: modal
-            .assignees
-            .get(modal.assignee_selected)
-            .and_then(|a| a.id.clone()),
-    };
-
-    let display = CreatedIssueDisplay {
-        title: input.title.clone(),
-        priority_label: modal
-            .priorities
-            .get(modal.priority_selected)
-            .map_or_else(|| "No priority".to_string(), |p| p.label.clone()),
-        state_id: input.state_id.clone(),
-        state_name: modal
-            .states
-            .get(modal.state_selected)
-            .map_or_else(|| "Backlog".to_string(), |s| s.label.clone()),
-        assignee_id: input.assignee_id.clone(),
-        assignee_name: modal.assignees.get(modal.assignee_selected).and_then(|a| {
-            if a.id.is_some() {
-                Some(a.label.clone())
-            } else {
-                None
-            }
-        }),
-        team_name: modal
-            .teams
-            .get(modal.team_selected)
-            .map(|t| t.label.clone())
-            .unwrap_or_default(),
-        team_id,
-    };
-
-    (input, display)
-}
-
-/// Optimistically insert a freshly-created issue into the local SQLite cache.
-fn cache_created_issue(
-    created: &crate::linear::mutations::CreatedIssue,
-    display: CreatedIssueDisplay,
+    crate::linear::inputs::IssueCreateInput,
+    crate::linear::types::Issue,
 ) {
     use crate::linear::types;
-    let now = chrono::Utc::now().to_rfc3339();
-    // State/assignee fall back to a name-keyed id when the modal lacked one; the
-    // next real sync overwrites this optimistic row with server ids.
-    let assignee = match (display.assignee_id, display.assignee_name) {
-        (Some(id), Some(name)) => Some(types::User { id, name }),
-        _ => None,
+
+    let title = modal.title.value.trim().to_string();
+    let description = if modal.description.trim().is_empty() {
+        None
+    } else {
+        Some(modal.description.trim().to_string())
     };
-    let issue = types::Issue {
-        id: created.id.clone(),
-        identifier: created.identifier.clone(),
-        title: display.title,
-        priority: types::priority_label_to_u8(&display.priority_label),
-        priority_label: display.priority_label,
+    let state = modal.states.get(modal.state_selected);
+    let state_id = state.and_then(|s| s.id.clone());
+    let state_name = state.map_or_else(|| "Backlog".to_string(), |s| s.label.clone());
+    let priority = modal
+        .priorities
+        .get(modal.priority_selected)
+        .and_then(|p| p.id.as_ref())
+        .and_then(|s| s.parse::<u8>().ok());
+    let assignee = modal.assignees.get(modal.assignee_selected);
+    let assignee_id = assignee.and_then(|a| a.id.clone());
+    let team_name = modal
+        .teams
+        .get(modal.team_selected)
+        .map(|t| t.label.clone())
+        .unwrap_or_default();
+
+    let input = crate::linear::inputs::IssueCreateInput {
+        title: title.clone(),
+        team_id: team_id.clone(),
+        description: description.clone(),
+        state_id: state_id.clone(),
+        priority: priority.map(i32::from),
+        assignee_id: assignee_id.clone(),
+    };
+
+    let priority = priority.unwrap_or(0);
+    let now = chrono::Utc::now().to_rfc3339();
+    let optimistic = types::Issue {
+        id: crate::db::outbox::temp_id(),
+        identifier: "NEW".to_string(),
+        title,
+        priority,
+        priority_label: types::priority_u8_to_label(priority).to_string(),
+        // Fall back to a name-keyed id when the modal lacked one so the
+        // relational join still resolves a label.
         state: types::State {
-            id: display
-                .state_id
-                .unwrap_or_else(|| display.state_name.clone()),
-            name: display.state_name,
+            id: state_id.unwrap_or_else(|| state_name.clone()),
+            name: state_name,
         },
-        assignee,
+        assignee: assignee_id.map(|id| types::User {
+            id,
+            name: assignee.map(|a| a.label.clone()).unwrap_or_default(),
+        }),
         team: types::Team {
-            id: display.team_id,
-            name: display.team_name,
+            id: team_id,
+            name: team_name,
         },
-        description: None,
+        description,
         labels: types::LabelConnection { nodes: Vec::new() },
         project: None,
         cycle: None,
@@ -432,9 +387,8 @@ fn cache_created_issue(
         created_at: now.clone(),
         updated_at: now,
     };
-    if let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) {
-        let _ = crate::db::upsert_issues(&conn, &[issue]);
-    }
+
+    (input, optimistic)
 }
 
 /// Build the assignee popup items: "Me (name)" at top if the viewer is known,
