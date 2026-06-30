@@ -18,15 +18,48 @@ const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 /// while the TUI owns the terminal.
 pub fn run_non_interactive() -> Result<()> {
     let (client_id, client_secret) = resolve_credentials_non_interactive()?;
-    run_with_credentials(&client_id, &client_secret)
+    login_with(&client_id, &client_secret)
 }
 
 pub fn run() -> Result<()> {
     let (client_id, client_secret) = resolve_credentials()?;
-    run_with_credentials(&client_id, &client_secret)
+    login_with(&client_id, &client_secret)
 }
 
-fn run_with_credentials(client_id: &str, client_secret: &str) -> Result<()> {
+/// Run the OAuth flow with the production wiring and persist the token.
+fn login_with(client_id: &str, client_secret: &str) -> Result<()> {
+    let token = run_with_credentials(&production_flow(), client_id, client_secret)?;
+    config::save_token(&token)?;
+    info!("Logged in to Linear.");
+    Ok(())
+}
+
+/// The OAuth side effects `run_with_credentials` needs, injected so tests can
+/// drive the flow without a browser, TCP listener, or network.
+struct OauthFlow<'a> {
+    browser: &'a dyn Browser,
+    listener: &'a dyn CallbackListener,
+    exchanger: &'a dyn TokenExchanger,
+}
+
+/// Production wiring: real browser, TCP callback listener, ureq HTTP.
+fn production_flow() -> OauthFlow<'static> {
+    OauthFlow {
+        browser: &RealBrowser,
+        listener: &TcpCallbackListener,
+        exchanger: &UreqTokenExchanger,
+    }
+}
+
+/// Run the OAuth authorization-code-with-PKCE flow and return the token.
+///
+/// Persisting the token is the caller's responsibility, so this function stays
+/// free of profile/disk state and is drivable end-to-end in tests.
+fn run_with_credentials(
+    flow: &OauthFlow,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<AuthToken> {
     let (code_verifier, code_challenge) = generate_pkce();
     let state = random_base64(16);
     let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/callback");
@@ -36,26 +69,45 @@ fn run_with_credentials(client_id: &str, client_secret: &str) -> Result<()> {
     info!("Opening Linear authorization page in your browser...");
     info!("If the browser does not open, visit: {}", auth_url);
 
-    // Best-effort: ignore errors from open (headless environments, etc.)
-    let _ = open::that(&auth_url);
+    flow.browser.open(&auth_url);
 
-    let code = listen_for_callback(CALLBACK_PORT, &state).context("waiting for OAuth callback")?;
+    let code = flow
+        .listener
+        .wait_for_code(CALLBACK_PORT, &state)
+        .context("waiting for OAuth callback")?;
 
     info!("Authorization received. Exchanging for token...");
 
-    let token = exchange_code(&TokenExchange {
-        client_id,
-        client_secret,
-        code: &code,
-        redirect_uri: &redirect_uri,
-        code_verifier: &code_verifier,
-    })
-    .context("exchanging authorization code for token")?;
+    exchange_code(
+        flow.exchanger,
+        &TokenExchange {
+            client_id,
+            client_secret,
+            code: &code,
+            redirect_uri: &redirect_uri,
+            code_verifier: &code_verifier,
+        },
+    )
+    .context("exchanging authorization code for token")
+}
 
-    config::save_token(&token)?;
-    info!("Logged in to Linear.");
+// ---------------------------------------------------------------------------
+// Browser launch
+// ---------------------------------------------------------------------------
 
-    Ok(())
+/// Opens a URL in the user's browser. Seam so tests can drive login without
+/// spawning a browser.
+trait Browser {
+    fn open(&self, url: &str);
+}
+
+struct RealBrowser;
+
+impl Browser for RealBrowser {
+    fn open(&self, url: &str) {
+        // Best-effort: ignore errors from open (headless environments, etc.)
+        let _ = open::that(url);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -175,60 +227,99 @@ fn build_auth_url(
 // Local HTTP callback server
 // ---------------------------------------------------------------------------
 
-/// Bind a TCP listener on `port` and block until we receive a valid OAuth
-/// callback.  Returns the `code` query parameter.
-fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
-        .with_context(|| format!("binding callback listener on port {port}"))?;
+/// The result of parsing one inbound HTTP request to the callback server.
+enum CallbackOutcome {
+    /// Not the callback path (favicon, etc.) -- reply 404 and keep waiting.
+    Ignore,
+    /// A valid authorization code arrived.
+    Code(String),
+    /// The `state` parameter did not match (possible CSRF).
+    StateMismatch,
+    /// The provider reported an authorization error.
+    Denied(String),
+}
 
-    info!("Listening for callback on http://localhost:{}/ ...", port);
+/// Parse one raw HTTP request into a `CallbackOutcome`. Pure: no IO, so the
+/// CSRF / code / error branches are unit-testable with hand-built requests.
+fn parse_callback_request(raw: &str, expected_state: &str) -> CallbackOutcome {
+    // The request line is: GET /path?query HTTP/1.1
+    let request_line = raw.lines().next().unwrap_or("");
+    let path_and_query = request_line.split_whitespace().nth(1).unwrap_or("/");
 
-    loop {
-        let (mut stream, _peer) = listener.accept().context("accepting connection")?;
+    // Only handle the callback path; ignore /favicon.ico etc.
+    let (path, query) = match path_and_query.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (path_and_query, ""),
+    };
 
-        let mut buf = [0u8; 8192];
-        let n = stream.read(&mut buf).context("reading HTTP request")?;
-        let raw = std::str::from_utf8(&buf[..n]).unwrap_or("");
+    if path != "/callback" {
+        return CallbackOutcome::Ignore;
+    }
 
-        // The request line is: GET /path?query HTTP/1.1
-        let request_line = raw.lines().next().unwrap_or("");
-        let path_and_query = request_line.split_whitespace().nth(1).unwrap_or("/");
+    let params: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(query.as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
 
-        // Only handle the callback path; ignore /favicon.ico etc.
-        let (path, query) = match path_and_query.split_once('?') {
-            Some((p, q)) => (p, q),
-            None => (path_and_query, ""),
-        };
+    // CSRF check.
+    if params.get("state").map(String::as_str) != Some(expected_state) {
+        return CallbackOutcome::StateMismatch;
+    }
 
-        if path != "/callback" {
-            let _ = http_reply(&mut stream, 404, "Not found");
-            continue;
+    if let Some(code) = params.get("code") {
+        return CallbackOutcome::Code(code.clone());
+    }
+
+    let error = params.get("error").map_or("unknown error", String::as_str);
+    CallbackOutcome::Denied(error.to_string())
+}
+
+/// Blocks until a valid OAuth callback arrives and yields the `code`.
+trait CallbackListener {
+    fn wait_for_code(&self, port: u16, expected_state: &str) -> Result<String>;
+}
+
+/// Production listener: bind a local TCP socket and serve the callback,
+/// dispatching each request through the pure `parse_callback_request`.
+struct TcpCallbackListener;
+
+impl CallbackListener for TcpCallbackListener {
+    fn wait_for_code(&self, port: u16, expected_state: &str) -> Result<String> {
+        let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+            .with_context(|| format!("binding callback listener on port {port}"))?;
+
+        info!("Listening for callback on http://localhost:{}/ ...", port);
+
+        loop {
+            let (mut stream, _peer) = listener.accept().context("accepting connection")?;
+
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).context("reading HTTP request")?;
+            let raw = std::str::from_utf8(&buf[..n]).unwrap_or("");
+
+            match parse_callback_request(raw, expected_state) {
+                CallbackOutcome::Ignore => {
+                    let _ = http_reply(&mut stream, 404, "Not found");
+                }
+                CallbackOutcome::StateMismatch => {
+                    let _ = http_reply(&mut stream, 400, "State mismatch");
+                    return Err(anyhow!("state mismatch in OAuth callback (possible CSRF)"));
+                }
+                CallbackOutcome::Code(code) => {
+                    let _ = http_reply(
+                        &mut stream,
+                        200,
+                        "<html><body><h2>Authorization complete.</h2>\
+                         <p>You may close this tab.</p></body></html>",
+                    );
+                    return Ok(code);
+                }
+                CallbackOutcome::Denied(error) => {
+                    let _ = http_reply(&mut stream, 400, "Authorization failed");
+                    return Err(anyhow!("authorization denied: {error}"));
+                }
+            }
         }
-
-        // Parse query parameters.
-        let params: std::collections::HashMap<String, String> =
-            url::form_urlencoded::parse(query.as_bytes())
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect();
-
-        // CSRF check.
-        if params.get("state").map(String::as_str) != Some(expected_state) {
-            let _ = http_reply(&mut stream, 400, "State mismatch");
-            return Err(anyhow!("state mismatch in OAuth callback (possible CSRF)"));
-        }
-
-        if let Some(code) = params.get("code") {
-            let _ = http_reply(
-                &mut stream,
-                200,
-                "<html><body><h2>Authorization complete.</h2>\
-                 <p>You may close this tab.</p></body></html>",
-            );
-            return Ok(code.clone());
-        }
-        let error = params.get("error").map_or("unknown error", String::as_str);
-        let _ = http_reply(&mut stream, 400, "Authorization failed");
-        return Err(anyhow!("authorization denied: {error}"));
     }
 }
 
@@ -268,39 +359,57 @@ struct TokenExchange<'a> {
     code_verifier: &'a str,
 }
 
-fn exchange_code(exchange: &TokenExchange) -> Result<AuthToken> {
-    let params = [
+/// Build the form fields for the token-exchange POST. Pure.
+fn build_token_params<'a>(exchange: &TokenExchange<'a>) -> [(&'a str, &'a str); 6] {
+    [
         ("grant_type", "authorization_code"),
         ("client_id", exchange.client_id),
         ("client_secret", exchange.client_secret),
         ("code", exchange.code),
         ("redirect_uri", exchange.redirect_uri),
         ("code_verifier", exchange.code_verifier),
-    ];
+    ]
+}
 
-    let result = ureq::post(TOKEN_URL)
-        .config()
-        .http_status_as_error(false)
-        .build()
-        .send_form(params);
-
-    match result {
-        Ok(mut resp) => {
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.body_mut().read_to_string().unwrap_or_default();
-                return Err(anyhow!(
-                    "token exchange failed (HTTP {}): {}",
-                    status.as_u16(),
-                    body
-                ));
-            }
-            resp.body_mut()
-                .read_json::<AuthToken>()
-                .context("parsing token response")
-        }
-        Err(e) => Err(anyhow::Error::from(e)),
+/// Validate the HTTP status and deserialize the token body. Pure.
+fn parse_token_response(status: u16, body: &str) -> Result<AuthToken> {
+    if !(200..300).contains(&status) {
+        return Err(anyhow!("token exchange failed (HTTP {status}): {body}"));
     }
+    serde_json::from_str::<AuthToken>(body).context("parsing token response")
+}
+
+/// POSTs the token-exchange form and returns the HTTP status and raw body.
+trait TokenExchanger {
+    fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<(u16, String)>;
+}
+
+/// Production exchanger: send the form via ureq.
+struct UreqTokenExchanger;
+
+impl TokenExchanger for UreqTokenExchanger {
+    fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<(u16, String)> {
+        let result = ureq::post(url)
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send_form(params.iter().copied());
+
+        match result {
+            Ok(mut resp) => {
+                let status = resp.status().as_u16();
+                let body = resp.body_mut().read_to_string().unwrap_or_default();
+                Ok((status, body))
+            }
+            Err(e) => Err(anyhow::Error::from(e)),
+        }
+    }
+}
+
+fn exchange_code(exchanger: &dyn TokenExchanger, exchange: &TokenExchange) -> Result<AuthToken> {
+    let params = build_token_params(exchange);
+    let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
+    parse_token_response(status, &body)
 }
 
 #[cfg(test)]
