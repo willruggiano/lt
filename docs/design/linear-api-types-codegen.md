@@ -38,7 +38,7 @@ Two pieces of infrastructure already exist and shape every option below:
 82 `struct`/`enum` deserialization types carry the API layer
 (`grep -rE 'struct |enum ' $(grep -rl Deserialize src)`):
 
-```
+```text
 src/linear/types.rs          22   list Issue + envelope + IssueDetail/IssueRef
 src/linear/mutations.rs      19   IssueUpdate/IssueCreate/CommentCreate/Teams/WorkflowStates
 src/issues/new.rs             9   Viewer + TeamMembers (CLI)
@@ -59,7 +59,7 @@ the `Team*` family likewise. Every field carries a manual
 
 All operations flow through one object-safe trait and one free helper:
 
-```
+```text
 operation query string ─┐
 serde_json variables   ─┤
                         ▼
@@ -99,11 +99,11 @@ type Comment implements Node {
 The code uses three: `body`, `createdAt`, `user { name }`
 (`sync/comments.rs:18-30`). Whole-schema generation would emit 524 recursive,
 mostly-`Option`, mostly-unused structs with no representation for
-field-arguments — the opposite of `posture.md` §2 ("Minimum code… Nothing
+field-arguments — the opposite of [[posture.md#2. Simplicity First]] ("Minimum code… Nothing
 speculative"). The types the code wants are **shaped to the selection set of
 each operation**. That fact drives the whole design.
 
-```
+```text
    GraphQL object type (Comment: ~50 fields)   ──X── do NOT mirror
    Operation selection set ({ body createdAt user{name} })  ──> model THIS
 ```
@@ -116,9 +116,9 @@ One rule reorganizes the data flow: **the GraphQL API is reached only by the
 sync layer; the TUI/CLI read and write only the local SQLite database.** Today
 this is violated on the write path — the TUI spawns a worker that calls
 `HttpTransport` directly and reverts SQLite on failure
-(`src/tui/popup.rs:352-393`, `architecture.md:122-128`). The target:
+(`src/tui/popup.rs:352-393`, [[architecture.md]] §TUI). The target:
 
-```
+```text
             ┌──────────────── sync thread / `lt sync` ────────────────┐
             │                                                          │
    Linear GraphQL API ──(reads: fragment-typed responses)──> relational SQLite
@@ -140,6 +140,35 @@ reusable selection set. We make those fragments the single definition of:
 This is exactly the reuse the review asked for. The three pillars below realize
 it: the type layer (fragments + library choice), the storage layer (relational
 schema), and the write path (offline outbox).
+
+### Enforce the rule structurally, not by convention
+
+"The TUI never hits the API" is worthless as a comment and a grep. Make it a
+*compile error*. Split the single crate into a Cargo workspace where the
+dependency edges encode the rule:
+
+```text
+   lt-types   (cynic QueryFragment structs + schema module; the shared currency)
+      ▲   ▲
+      │   └──────────────┐
+   lt-db                 lt-sync ──depends on──> cynic / HttpTransport (the ONLY API edge)
+      ▲                     ▲
+      │                     │
+   lt-tui ──depends on──> lt-db        lt-tui has NO dependency on lt-sync or cynic
+   lt-cli ──┘
+```
+
+`lt-tui` not listing `lt-sync` or the GraphQL client in its `[dependencies]`
+means an API call from the render/event path *does not compile*. This is the
+systematic answer to "how do we prevent this class of error rather than
+best-effort": the cargo dependency graph is the enforcement mechanism, checked
+on every build. It also gives the type layer a natural home (`lt-types`) that
+both `lt-db` (read-model reconstruction) and `lt-sync` (fetch/decode) import
+without a cycle.
+
+The workspace split is larger than the type migration and is sequenced as its
+own PR in the stack (below); the architecture is designed for it from the start
+so the crate boundaries are not retrofitted.
 
 ---
 
@@ -182,7 +211,7 @@ struct is **ours**, it can carry methods and `From`/`Into` impls and be
 (`http.rs:101`), so the existing transport seam holds; we do not enable cynic's
 `http-*` features.
 
-```
+```text
   graphql_client                          cynic
   ──────────────                          ─────
   .graphql query ──derive──> module       struct + derive ──> GraphQL string
@@ -208,9 +237,12 @@ Honest costs of cynic:
   bootstraps from a query; net authoring is higher than graphql_client.
 - **A `use_schema!` module** must be generated from the snapshot
   (`lib.rs:18-22`) — one-time wiring.
-- **Custom scalars** (`DateTime`, `ID`) need `impl Scalar`/newtypes rather than
-  bare `String`; today the code uses `String` timestamps everywhere
-  (`types.rs:66-69`). This is a small, deliberate typing win, not free.
+- **Custom scalars** (`DateTime`, `ID`) get **newtypes** (`impl cynic::Scalar`),
+  not bare `String` — decided in review. Today every timestamp is a `String`
+  (`types.rs:66-69`) and ids are bare `String`; distinct types stop a raw id or
+  an unparsed timestamp being passed where the other is expected, per
+  [[posture.md]] ("distinct named types over bare primitives where they carry
+  meaning"). Small, deliberate, decided.
 - **One struct plays three roles** (wire selection + storage read model + view
   model). For a local-first cache this coupling is *desirable* — the cache
   stores exactly what the UI needs, sourced from exactly that selection — but a
@@ -255,7 +287,7 @@ The schema is natively relational. `Issue` references
 (`build/linear-schema-definition.graphql`, `type Issue`). Proposed tables, one
 per entity, FKs + indexes:
 
-```
+```text
 teams(id PK, key, name)
 users(id PK, name, email)
 workflow_states(id PK, team_id FK, name, type, position)
@@ -283,7 +315,7 @@ FTS5: issues_fts(identifier, title[, description]) external-content over issues 
 A fragment's selection set is the read contract; the DB layer reconstructs the
 fragment struct from a join. Example:
 
-```
+```text
 fragment IssueRow on Issue {            SELECT i.*, t.name, s.name, a.name, ...
   id identifier title priority           FROM issues i
   state { name }            ───────►     JOIN workflow_states s ON s.id = i.state_id
@@ -315,7 +347,7 @@ violating the target rule.
 
 Invert it with a durable **outbox**:
 
-```
+```text
    TUI write ──► (1) apply optimistically to entity tables
              └─► (2) INSERT into mutation_outbox   (local, no network)     ── UI thread ends here
 
@@ -325,7 +357,7 @@ Invert it with a durable **outbox**:
                                                 ─► failure: backoff + retry / surface permanent error
 ```
 
-```
+```text
 mutation_outbox(
   seq         INTEGER PK AUTOINCREMENT,   -- total order
   op_type     TEXT,                       -- IssueUpdate | IssueCreate | CommentCreate
@@ -364,21 +396,24 @@ the type and storage layers do not depend on it.
 | A. Whole-schema type generation | Rejected — the core constraint (524 unused recursive types) |
 | B. graphql_client (query-first) | Fallback — least effort, but per-op types can't be the DB↔TUI contract |
 | C. **cynic (struct-first, shared fragments)** | **Recommended** for the expanded architecture |
-| D. Extend `build.rs` to a custom operation→type mapper | Rejected — reimplements solved codegen (`type_qualifiers`, `enums`, inline fragments) for no payoff (`posture.md`) |
+| D. Extend `build.rs` to a custom operation→type mapper | Rejected — reimplements solved codegen (`type_qualifiers`, `enums`, inline fragments) for no payoff ([[posture.md]]) |
 
 ---
 
-## Migration plan
+## Migration plan — stacked PRs
 
-Phased; each phase compiles and passes `make test` + `make check` alone.
+Decided in review: commit to all three pillars, shipped as a **stack** of PRs,
+each rebasing on the one below. Each PR compiles and passes `make test` +
+`make check` on its own; the stack lets reviewers approve and merge incrementally
+without a single mega-diff.
 
-1. **Schema module + one fragment, prove the seam.** Add `cynic` (no `http-*`
+1. **`cynic` + schema module + one fragment.** Add `cynic` (no `http-*`
    features), `use_schema!` over the snapshot. Model **Viewer** as a
    `QueryFragment`; build the operation, POST via existing `HttpTransport`,
    decode through `query_as`. → verify: `fetch_viewer` test green
    (`viewer.rs:53-68`); `cargo deny` (`make check`).
-2. **Relational schema + sync upsert.** Add entity tables/indexes/migrations
-   (Pillar 2). Rewrite the sync upsert to populate entity tables from fetched
+2. **Relational schema + sync upsert** (Pillar 2). Entity tables/indexes/
+   migrations; rewrite the sync upsert to populate entity tables from fetched
    fragments instead of the flat row. Keep a compatibility read path until the
    query layer moves. → verify: existing fetcher tests with `FakeTransport`
    unchanged (`list.rs:180+`, `delta.rs:63+`, `comments.rs:123+`); new DB tests
@@ -389,21 +424,27 @@ Phased; each phase compiles and passes `make test` + `make check` alone.
    shared fragment types. Drop the flat `issues` columns. → verify: TUI/CLI
    snapshot tests (`insta`) re-accepted intentionally; `cpd`/`cargo dupes`
    confirm dedup.
-4. **Typed mutation inputs + outbox.** Model `IssueUpdateInput`/`IssueCreateInput`/
-   `CommentCreateInput` via cynic input objects; introduce `mutation_outbox`;
-   move API mutations behind the sync drainer; replace `popup.rs` direct-spawn
-   with enqueue (Pillar 3). → verify: mutation tests assert the same variables
-   JSON (`mutations.rs:294-324`); new outbox drain + reconcile tests; an
-   offline-write test (enqueue with no transport, drain later).
-5. **Delete the corpse.** Remove unused hand-written structs; `cargo machete`
+4. **Typed mutation inputs + outbox** (Pillar 3). Model `IssueUpdateInput`/
+   `IssueCreateInput`/`CommentCreateInput` via cynic input objects; introduce
+   `mutation_outbox`; move API mutations behind the sync drainer; replace
+   `popup.rs` direct-spawn with enqueue. → verify: mutation tests assert the same
+   variables JSON (`mutations.rs:294-324`); new outbox drain + reconcile tests;
+   an offline-write test (enqueue with no transport, drain later). *The
+   outbox/delta ordering model is under separate research (see Open questions);
+   its conclusion lands in this PR.*
+5. **Workspace split** (structural enforcement). Break the crate into
+   `lt-types` / `lt-db` / `lt-sync` / `lt-tui` / `lt-cli` so `lt-tui` cannot
+   depend on `cynic`/`HttpTransport`. → verify: the workspace builds; an API
+   import from `lt-tui` fails to compile.
+6. **Delete the corpse.** Remove unused hand-written structs; `cargo machete`
    clean.
 
 ### Success criteria
 
-- `make test` and `make test --features sim` green at every phase.
+- `make test` and `make test --features sim` green at every PR.
 - `make check` green (`cargo deny`, `cargo machete`, `cpd`, `cargo dupes`).
-- API calls originate **only** in the sync layer (grep: no `HttpTransport` use
-  under `src/tui/`); the TUI write path enqueues, never POSTs.
+- API calls originate **only** in `lt-sync` — enforced by the workspace
+  dependency graph (PR 5), not a grep.
 - A query/schema mismatch and a fragment-field-without-storage both fail fast.
 
 ---
@@ -419,21 +460,34 @@ Resolved (primary-source verified):
 - **graphql_client fragment sharing is per-operation?** Yes — `codegen.rs:248`.
 - **Whole-schema bloat?** Avoided by both (used-types-only / hand-authored).
 
-Open (to settle at/after review):
+Resolved in review:
+- **Supply chain — validated now, not deferred.** Ran `cargo deny check` against
+  this repo's exact `deny.toml` on a probe crate depending on `cynic` +
+  `cynic-codegen`: **licenses ok, bans ok, sources ok**. The cynic crates are
+  `MPL-2.0` (allowed, `deny.toml:18`); the transitive tree is entirely
+  `Apache-2.0`/`MIT`/`Unicode-3.0` (all allowed). No banned multiple-versions
+  error (the policy is `warn`), no unknown registry/git source. The `advisories`
+  check could not run in this environment (it fetches the RustSec git DB, which
+  the sandbox proxy blocks); it must be run in CI, but is orthogonal to crate
+  choice. Footprint note: cynic adds `cynic-parser`, `logos`, `lalrpop-util`,
+  `ouroboros`, `darling` at build time; `proc-macro2`/`syn`/`quote`/`serde`
+  overlap existing deps.
+- **Custom scalar policy → newtypes.** `DateTime`/`ID` become distinct
+  `impl Scalar` newtypes, not `String` (see [Pillar 1](#pillar-1) costs).
+- **`build.rs` unification → leave separate.** The search-grammar codegen and the
+  cynic schema module both read the snapshot; keep them separate for now, unify
+  later. (Confirmed.)
+
+Open — genuinely undecided:
 - **Outbox vs delta-sync ordering** — the central write-path correctness
-  question (Pillar 3). Must be specified before Phase 4.
-- **Custom scalar policy** — `DateTime`/`ID` newtypes vs `String`. Affects every
-  timestamp field.
-- **Supply chain** — `cynic` + `cynic-codegen` must pass `cargo deny`; confirm
-  empirically in Phase 1. Footprint (`cynic-parser`, `proc-macro2`, `syn`,
-  `quote`) overlaps existing build-deps. Fall back to graphql_client if rejected.
-- **`build.rs` unification** — the search-grammar codegen and the cynic schema
-  module both consume the snapshot. Leave separate for now; unify later.
+  question. Under active research (architecture fit, SQLite vs alternatives, and
+  how to make non-clobbering *structural* rather than best-effort); its
+  conclusion gates PR 4. This is the one open question with material risk.
 
-## Decisions required at review
+## Decisions (resolved in review)
 
-1. Architecture: adopt the **API-only-via-sync / TUI-only-via-DB** target?
-2. Type layer: **cynic** (shared owned fragment types, recommended) vs
-   graphql_client (types stay sync-internal)?
-3. Scope/sequencing: land Pillars 1–2 first and treat the outbox (Pillar 3) as a
-   follow-up, or commit to all three together?
+1. Architecture: **adopt** API-only-via-sync / TUI-only-via-DB, enforced
+   structurally by a Cargo **workspace split** (PR 5), not convention.
+2. Type layer: **cynic** (shared, owned, composable fragment types). Confirmed.
+3. Scope/sequencing: **all three pillars**, shipped as a **stack of PRs**
+   (see migration plan). Confirmed.
