@@ -464,10 +464,11 @@ incrementally without a single mega-diff.
    `IssueUpdateInput`/`IssueCreateInput`/`CommentCreateInput` via cynic input
    objects; the transactional outbox (overlay write + enqueue in one txn); move
    API mutations behind the single-writer sync drainer; replace `popup.rs`
-   direct-spawn with enqueue. Overlay granularity (per-field + per-entity
-   coalescing) follows the R&D conclusion. → verify: mutation tests assert the
-   same variables JSON (`mutations.rs:294-324`); outbox drain + reconcile +
-   offline-write tests.
+   direct-spawn with enqueue. Per-field overlay rows coalesce per entity into
+   one typed patch (the `Field<T>` model). → verify: mutation tests assert the
+   same variables JSON (`mutations.rs:294-324`); a coalescing test (multiple
+   per-field edits to one issue → one `issueUpdate` with `null` preserved);
+   outbox drain + reconcile + offline-write tests.
 5. **Workspace split** (structural enforcement). Break the crate into `lt-types`
    / `lt-db` / `lt-sync` / `lt-tui` / `lt-cli` so `lt-tui` cannot depend on
    `cynic`/`HttpTransport`. → verify: the workspace builds; an API import from
@@ -549,6 +550,19 @@ Resolved in review:
   confirmed.
 - **Conflict UX → deferred.** Conflict reconciliation is out of scope for the
   stack; the overlay default (overlay wins per field until ack) is already safe.
+- **Overlay granularity → per-field, with per-entity coalescing.** Research
+  confirmed it is feasible type-safely. `IssueUpdateInput` is a fully-optional
+  partial input (`build/linear-schema-definition.graphql:15321-15435`), so N
+  per-field edits to one issue collapse into one `issueUpdate`. cynic supports
+  type-safe partial inputs via `#[derive(InputObject)]` + per-field
+  `#[cynic(skip_serializing_if=...)]`. The one gap — neither cynic 3.13.2 nor
+  `graphql_client` 0.16.0 ships a three-valued optional, so a bare `Option<T>`
+  encodes only two of {absent, null, value} — is closed by a ~15-line
+  `Field<T> = Absent | Null | Value` newtype wired through that skip attribute.
+  Per-field overlay rows then fold deterministically into one typed patch per
+  entity, with `assigneeId: null` (clear) preserved while untouched fields are
+  omitted — exactly today's behavior at `mutations.rs:214`, now type-checked.
+  Per-op buys nothing and loses the natural per-field merge, so per-field wins.
 
 Follow-up (post-stack):
 
@@ -556,14 +570,18 @@ Follow-up (post-stack):
   changes (the overlay/outbox contents). Conflict reconciliation deferred with
   it.
 
-Open — genuinely undecided:
+Open — small verify items before PR 2/4:
 
-- **Overlay granularity (per-field vs per-op)** — under R&D. The decision hinges
-  on whether per-field overlay rows can be **coalesced per entity into a single
-  typed `issueUpdate`** (e.g. state + assignee + priority in one mutation) while
-  keeping compile-time type safety and the GraphQL absent-vs-null distinction.
-  If yes, per-field wins; if not clean, per-op is the pragmatic fallback.
-  Research in flight; its conclusion sets the overlay schema in PR 2.
+- **`null` = "clear" scope** — proven only for `assigneeId`
+  (`mutations.rs:214`). Confirm the same for the other nullable FK fields
+  (`cycleId`, `projectId`, `parentId`) against the live API before exposing a UI
+  "clear" for them, or gate `Field::Null` to assignee initially.
+- **Labels model** — `labelIds` (full replace) vs `addedLabelIds`/
+  `removedLabelIds` (incremental); the incremental pair maps poorly to one
+  `(entity, field)` overlay row. Pick a model for the labels field. Product
+  call.
+- **One compiling spike** — confirm cynic accepts `Field<T>` against a nullable
+  input field (expected, but exercise the derive's type-check once).
 
 ## Decisions (resolved in review)
 
