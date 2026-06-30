@@ -632,6 +632,17 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     // -----------------------------------------------------------------------
+    // Register the Linear schema with cynic
+    // -----------------------------------------------------------------------
+    // Makes the snapshot available to `#[cynic::schema("linear")]` and the
+    // `QueryFragment` derives, which read it from `$OUT_DIR/cynic-schemas`.
+    cynic_codegen::register_schema("linear")
+        .from_sdl_file(&schema_path)
+        .expect("registering Linear schema with cynic")
+        .as_default()
+        .expect("setting cynic default schema");
+
+    // -----------------------------------------------------------------------
     // Load the allowlist
     // -----------------------------------------------------------------------
     let toml_path = manifest.join("build/search_filter_fields.toml");

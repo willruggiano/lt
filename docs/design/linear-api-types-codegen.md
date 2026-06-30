@@ -13,7 +13,8 @@ Proposed — `Refs: ENG-31`
 > _Linear's GraphQL API is hit only by the sync thread; the TUI touches only the
 > local database._ This revision answers that. The type-codegen decision is now
 > one pillar of a local-first data architecture, and the recommendation changes
-> accordingly (cynic over `graphql_client` — see [Pillar 1](#pillar-1)).
+> accordingly (cynic over `graphql_client` — see
+> [Pillar 1](#pillar-1--shared-fragment-types-graphql_client-vs-cynic)).
 
 ## Context
 
@@ -171,8 +172,6 @@ own PR in the stack (below); the architecture is designed for it from the start
 so the crate boundaries are not retrofitted.
 
 ---
-
-<a id="pillar-1"></a>
 
 ## Pillar 1 — Shared fragment types: `graphql_client` vs cynic
 
@@ -513,7 +512,8 @@ Resolved in review:
   `ouroboros`, `darling` at build time; `proc-macro2`/`syn`/`quote`/`serde`
   overlap existing deps.
 - **Custom scalar policy → newtypes.** `DateTime`/`ID` become distinct
-  `impl Scalar` newtypes, not `String` (see [Pillar 1](#pillar-1) costs).
+  `impl Scalar` newtypes, not `String` (see
+  [Pillar 1](#pillar-1--shared-fragment-types-graphql_client-vs-cynic) costs).
 - **`build.rs` unification → leave separate.** The search-grammar codegen and
   the cynic schema module both read the snapshot; keep them separate for now,
   unify later. (Confirmed.)
