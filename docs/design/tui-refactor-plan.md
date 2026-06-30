@@ -71,11 +71,13 @@ Raised in review; tracked here, not done in the extraction PRs:
   Likely one SQLite-backed impl parameterized by path, replacing `RealDb`
   (`src/tui/mod.rs`) and the test `MemoryDb` (`src/tui/loop_tests.rs`).
   Architectural; do as its own change.
-- **Clock seam for `build_sync_status_label` (review #6).** It calls
-  `chrono::Utc::now()` directly (`src/tui/sync.rs`); per [[testing.md]]
-  wall-clock should be threaded as an explicit parameter (cf.
-  `relative_age(iso, now_secs)`) for determinism. Pre-existing behavior moved
-  verbatim; seam it separately.
+- [x] **Clock seam for `build_sync_status_label` (review #6).** Done in
+  add3bd1. The wall clock is a `Clock` enum on `App` (`Clock::System` in the
+  binary, `Clock::Fixed(instant)` `#[cfg]`'d in for tests) -- an enum, not a
+  threaded `DateTime` param or boxed closure, because the set of clocks is
+  closed. `build_sync_status_label` split into a pure `format_sync_label`
+  (covered by a fixed-clock test) plus a thin DB reader; the `last_synced_at`
+  read stays for the Database-seam item above.
 - **Align the `From<db::Issue>` placement with `From<db::Comment>`.** PR9 left
   the two rehydration impls on opposite sides: `From<db::Comment>` is db-side
   (`src/db/comments.rs`, `db -> linear`) but `From<db::Issue>` is on the
