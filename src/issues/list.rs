@@ -115,6 +115,74 @@ pub struct LabelConnection {
     pub nodes: Vec<LabelNode>,
 }
 
+/// Map a Linear priority label to its numeric level. Lossy: any unrecognised
+/// label (including "No priority") collapses to 0, so this is a parse, not a
+/// `From`.
+pub(crate) fn priority_label_to_u8(label: &str) -> u8 {
+    match label.to_lowercase().as_str() {
+        "urgent" => 1,
+        "high" => 2,
+        "normal" | "medium" => 3,
+        "low" => 4,
+        _ => 0,
+    }
+}
+
+/// Rehydrate a display `Issue` from a cached SQLite row. The row stores only
+/// names, so the id fields of nested records are left empty.
+impl From<db::Issue> for Issue {
+    fn from(src: db::Issue) -> Self {
+        Self {
+            id: src.id,
+            identifier: src.identifier,
+            title: src.title,
+            priority: priority_label_to_u8(&src.priority_label),
+            priority_label: src.priority_label,
+            state: State {
+                id: String::new(),
+                name: src.state_name,
+            },
+            assignee: src.assignee_name.map(|n| User {
+                id: String::new(),
+                name: n,
+            }),
+            team: Team {
+                id: src.team_key.unwrap_or_default(),
+                name: src.team_name,
+            },
+            created_at: src.created_at,
+            updated_at: src.updated_at,
+            description: src.description,
+            labels: LabelConnection {
+                nodes: src
+                    .labels
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|n| LabelNode {
+                        name: n.to_string(),
+                    })
+                    .collect(),
+            },
+            project: src.project_name.map(|n| Project {
+                id: String::new(),
+                name: n,
+            }),
+            cycle: src.cycle_name.map(|n| Cycle {
+                id: String::new(),
+                name: Some(n),
+            }),
+            creator: src.creator_name.map(|n| User {
+                id: String::new(),
+                name: n,
+            }),
+            parent: src.parent_id.map(|id| Parent {
+                id,
+                identifier: src.parent_identifier.unwrap_or_default(),
+            }),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct IssueConnection {
     nodes: Vec<Issue>,

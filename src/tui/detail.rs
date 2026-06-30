@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use super::{App, CommentSyncEvent, DbProvider, Issue, Mode, Status, db_comment_to_api};
+use super::{App, CommentSyncEvent, DbProvider, Issue, Mode, Status};
 use crate::linear::client::HttpTransport;
 
 impl App {
@@ -196,7 +196,7 @@ impl App {
                 crate::sync::comments::sync_comments(&conn, &transport, &issue_id)?;
                 Ok(crate::db::query_comments(&conn, &issue_id)?
                     .into_iter()
-                    .map(db_comment_to_api)
+                    .map(Into::into)
                     .collect())
             })();
             match result {
@@ -319,7 +319,7 @@ pub(crate) fn poll_detail_comment_events(app: &mut App) {
                     .ok()
             });
             if let (Some(detail), Some(comments)) = (app.detail.as_mut(), cached) {
-                detail.comments.nodes = comments.into_iter().map(db_comment_to_api).collect();
+                detail.comments.nodes = comments.into_iter().map(Into::into).collect();
             }
             app.footer_msg = Some(format!("Failed to post comment: {msg}"));
             true

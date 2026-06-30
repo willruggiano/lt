@@ -25,8 +25,11 @@ configs); full `make check` passes at the latest commit. `tui/mod.rs`: 4259 ->
       Member/CreatedIssueDisplay), fetch_team_members (re-exported for
       popup.rs), and handle_new_issue_key/handle_description_key. Zero pending
       snapshots.
-- [ ] PR8 split `ui.rs` -> `ui/` (strip any remaining tracker refs in ui.rs
-      here)
+- [x] PR8 split `ui.rs` -> `ui/` (b33be5d) — 1240 lines -> 10 files
+      (mod/util/chrome/table/detail/popup/new_issue/help/search/text_span),
+      largest 257. Cross-module helpers are `pub(super)` (ui-internal); only
+      `render()` stays `pub`. Render output byte-identical (zero pending
+      snapshots). Tracker refs stripped from the moved comments (review #3).
 - [ ] PR9 idiomatic conversions (review #1/#2/#7) — replace the free conversion
       helpers with `From` impls **placed with their destination types**:
       `impl From<db::Issue> for issues::list::Issue` in `src/issues/list.rs`,

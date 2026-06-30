@@ -1,4 +1,3 @@
-mod convert;
 mod detail;
 mod markdown;
 mod new_issue;
@@ -18,9 +17,6 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-#[cfg(all(test, feature = "sim"))]
-pub(crate) use convert::priority_label_to_u8;
-pub(crate) use convert::{db_comment_to_api, db_issue_to_list_issue};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
@@ -47,6 +43,8 @@ pub(crate) use text_input::TextInput;
 
 use crate::issues::IssueArgs;
 use crate::issues::list::Issue;
+#[cfg(all(test, feature = "sim"))]
+pub(crate) use crate::issues::list::priority_label_to_u8;
 use crate::linear::client::HttpTransport;
 use crate::linear::types::IssueDetail;
 use crate::linear::viewer::fetch_viewer;
@@ -550,7 +548,7 @@ impl App {
                 .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
             {
                 Ok(db_issues) => {
-                    self.issues = db_issues.into_iter().map(db_issue_to_list_issue).collect();
+                    self.issues = db_issues.into_iter().map(Into::into).collect();
                     self.pagination.has_next_page = false; // run_query has no pagination
                     self.pagination.end_cursor = None;
                     self.apply_fetched_selection(reset_selection);
@@ -573,7 +571,7 @@ impl App {
                 .and_then(|conn| crate::db::query_issues_page(&conn, &self.args, offset))
             {
                 Ok((issues, has_next_page)) => {
-                    self.issues = issues.into_iter().map(db_issue_to_list_issue).collect();
+                    self.issues = issues.into_iter().map(Into::into).collect();
                     self.pagination.has_next_page = has_next_page;
                     let limit = i64::from(self.args.limit.min(250));
                     self.pagination.end_cursor = if has_next_page {
@@ -685,7 +683,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
             } else {
                 None
             };
-            let issues = db_issues.into_iter().map(db_issue_to_list_issue).collect();
+            let issues = db_issues.into_iter().map(Into::into).collect();
             Ok((issues, has_next, end_cursor))
         })()
         .unwrap_or_default();

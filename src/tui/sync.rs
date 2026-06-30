@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::{App, Issue, IssueArgs, LoginEvent, Mode, Status, SyncEvent, db_issue_to_list_issue};
+use super::{App, Issue, IssueArgs, LoginEvent, Mode, Status, SyncEvent};
 use crate::linear::client::HttpTransport;
 use crate::linear::viewer::fetch_viewer;
 
@@ -78,7 +78,7 @@ pub(crate) fn spawn_sync_thread(
                     let conn = crate::db::open_db()?;
                     let db_issues = crate::db::query_issues(&conn, &args)?;
                     // Convert db::Issue -> issues::list::Issue.
-                    Ok(db_issues.into_iter().map(db_issue_to_list_issue).collect())
+                    Ok(db_issues.into_iter().map(Into::into).collect())
                 })();
                 // A successful sync implies a valid token, so the identity
                 // fetch is expected to succeed; failures leave the header

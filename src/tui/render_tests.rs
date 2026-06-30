@@ -16,7 +16,7 @@ fn sim_issues(seed: u64, size: usize) -> Vec<Issue> {
     crate::sim::generate(seed, size)
         .issues
         .into_iter()
-        .map(db_issue_to_list_issue)
+        .map(Into::into)
         .collect()
 }
 
@@ -196,7 +196,7 @@ fn db_to_api_and_list_conversions() {
         updated_at: "2026-01-01T00:00:00Z".to_string(),
         synced_at: String::new(),
     };
-    let api = db_comment_to_api(comment);
+    let api = crate::linear::types::Comment::from(comment);
     assert_eq!(api.author(), "Alice");
 
     let mut row = crate::db::Issue {
@@ -219,7 +219,7 @@ fn db_to_api_and_list_conversions() {
         parent_id: Some("9".to_string()),
         parent_identifier: Some("ENG-9".to_string()),
     };
-    let listed = db_issue_to_list_issue(row.clone());
+    let listed = crate::issues::list::Issue::from(row.clone());
     assert_eq!(listed.priority, 2);
     assert_eq!(listed.labels.nodes.len(), 2);
     assert_eq!(
@@ -229,7 +229,12 @@ fn db_to_api_and_list_conversions() {
 
     // Empty labels string yields no label nodes.
     row.labels = String::new();
-    assert!(db_issue_to_list_issue(row).labels.nodes.is_empty());
+    assert!(
+        crate::issues::list::Issue::from(row)
+            .labels
+            .nodes
+            .is_empty()
+    );
 }
 
 #[test]
