@@ -3,29 +3,41 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::{App, Issue, IssueArgs, LoginEvent, Mode, Status, SyncEvent};
+use super::{App, Clock, Issue, IssueArgs, LoginEvent, Mode, Status, SyncEvent};
 use crate::linear::client::HttpTransport;
 use crate::linear::viewer::fetch_viewer;
 
-/// Build a human-readable "synced X min ago" or "syncing..." label.
-pub(crate) fn build_sync_status_label(syncing: bool) -> String {
+/// Build a human-readable "synced X min ago" or "syncing..." label, reading
+/// `last_synced_at` from the database. The pure formatting lives in
+/// `format_sync_label`; this is only the impure DB read.
+pub(crate) fn build_sync_status_label(syncing: bool, clock: &Clock) -> String {
     if syncing {
-        return "syncing...".to_string();
+        return format_sync_label(true, None, clock);
     }
-    // Read last_synced_at from DB.
     let last = (|| -> Option<String> {
         let conn = crate::db::open_db().ok()?;
         crate::db::get_meta(&conn, "last_synced_at").ok()?
     })();
+    format_sync_label(false, last.as_deref(), clock)
+}
 
-    match last {
+/// Pure formatter for the sync status label. `clock` is read only when a
+/// `last_synced` timestamp parses, so the syncing / not-synced / parse-error
+/// branches never touch it -- which is what keeps the binary's wall clock and
+/// the tests' fixed clock interchangeable here.
+fn format_sync_label(syncing: bool, last_synced: Option<&str>, clock: &Clock) -> String {
+    if syncing {
+        return "syncing...".to_string();
+    }
+    match last_synced {
         None => "not synced".to_string(),
         Some(ts) => {
             // Parse RFC3339 and compute elapsed minutes.
-            match chrono::DateTime::parse_from_rfc3339(&ts) {
+            match chrono::DateTime::parse_from_rfc3339(ts) {
                 Ok(dt) => {
-                    let elapsed =
-                        chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc));
+                    let elapsed = clock
+                        .now()
+                        .signed_duration_since(dt.with_timezone(&chrono::Utc));
                     let mins = elapsed.num_minutes();
                     match mins {
                         ..=0 => "synced just now".to_string(),
@@ -153,7 +165,7 @@ pub(crate) fn poll_login_events(app: &mut App) {
             }
             app.session.not_authenticated = false;
             app.sync.syncing = true;
-            app.sync.sync_status_label = build_sync_status_label(true);
+            app.sync.sync_status_label = build_sync_status_label(true, &app.clock);
             app.sync.sync_rx = Some(spawn_sync_thread(
                 app.args.clone(),
                 false,
@@ -200,7 +212,7 @@ pub(crate) fn poll_sync_events(app: &mut App) {
                     app.do_fetch(false);
                 }
                 app.sync.syncing = false;
-                app.sync.sync_status_label = build_sync_status_label(false);
+                app.sync.sync_status_label = build_sync_status_label(false, &app.clock);
                 // Schedule next periodic delta sync in 30s.
                 app.sync.next_sync_at = Some(Instant::now() + Duration::from_secs(30));
                 got_event = true;
@@ -230,7 +242,7 @@ pub(crate) fn poll_sync_events(app: &mut App) {
             Err(mpsc::TryRecvError::Disconnected) => {
                 app.sync.syncing = false;
                 if app.sync.sync_status_label == "syncing..." {
-                    app.sync.sync_status_label = build_sync_status_label(false);
+                    app.sync.sync_status_label = build_sync_status_label(false, &app.clock);
                 }
                 got_event = true;
                 break;
@@ -241,5 +253,47 @@ pub(crate) fn poll_sync_events(app: &mut App) {
     // Put the receiver back if the thread may still send more messages.
     if !got_event || app.sync.syncing {
         app.sync.sync_rx = Some(rx);
+    }
+}
+
+#[cfg(all(test, feature = "sim"))]
+mod tests {
+    use super::{Clock, format_sync_label};
+
+    #[test]
+    fn format_sync_label_buckets_minutes_against_a_fixed_clock() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let clock = Clock::Fixed(now);
+        // `syncing` short-circuits regardless of the timestamp or clock.
+        assert_eq!(
+            format_sync_label(true, Some("2026-01-10T11:00:00Z"), &clock),
+            "syncing..."
+        );
+        // No recorded sync, and an unparseable timestamp, degrade gracefully.
+        assert_eq!(format_sync_label(false, None, &clock), "not synced");
+        assert_eq!(
+            format_sync_label(false, Some("not-a-date"), &clock),
+            "synced"
+        );
+        // Elapsed-minute buckets, all measured against the fixed clock.
+        assert_eq!(
+            format_sync_label(false, Some("2026-01-10T12:00:00Z"), &clock),
+            "synced just now"
+        );
+        assert_eq!(
+            format_sync_label(false, Some("2026-01-10T11:59:00Z"), &clock),
+            "synced 1 min ago"
+        );
+        assert_eq!(
+            format_sync_label(false, Some("2026-01-10T11:30:00Z"), &clock),
+            "synced 30 min ago"
+        );
+        // A future timestamp clamps to "just now" rather than reporting negative.
+        assert_eq!(
+            format_sync_label(false, Some("2026-01-10T12:05:00Z"), &clock),
+            "synced just now"
+        );
     }
 }
