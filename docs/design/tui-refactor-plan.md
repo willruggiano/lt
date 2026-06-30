@@ -4,7 +4,7 @@
 
 Done, each green under `cargo test` + `cargo test --features sim` + clippy (both
 configs); full `make check` passes at the latest commit. `tui/mod.rs`: 4259 ->
-2223 lines (-48%). Pushed.
+1542 lines (-64%). Pushed.
 
 - [x] PR1 `docs(testing)` — convention amendment (4217ab2)
 - [x] PR2 `render_tests`/`loop_tests` -> sibling files (41bb263)
@@ -15,11 +15,10 @@ configs); full `make check` passes at the latest commit. `tui/mod.rs`: 4259 ->
 - [x] CI fix: reflow testing.md for prettier proseWrap (7a5bffc)
 - [x] Review feedback: strip tracker refs, drop dead `as_str`,
       `format!`->`to_string` (7b27978)
-- [ ] PR6 `popup` subsystem — **delicate**:
-      PopupKind/PopupItem/HelpPopup/SearchOverlay are referenced by `ui.rs` via
-      `use super::{...}`; move them to `popup.rs` and re-export from `mod.rs` so
-      `ui.rs` is untouched. Methods open*\*\_popup/popup*\*, optimistic helpers,
-      search helpers, handle_popup/help/search_key.
+- [x] PR6 `popup` subsystem (ccdfcc3) — PopupKind/PopupItem/HelpPopup/
+      SearchOverlay re-exported from `mod.rs` so `ui.rs` was untouched; moved
+      open\_\*\_popup/popup\_\*, optimistic helpers, search helpers, and
+      handle_popup/help/search_key. Zero pending snapshots.
 - [ ] PR7 `new_issue` subsystem
 - [ ] PR8 split `ui.rs` -> `ui/` (strip any remaining tracker refs in ui.rs
       here)
