@@ -15,7 +15,7 @@ pub(crate) fn build_sync_status_label(syncing: bool, clock: &Clock) -> String {
         return format_sync_label(true, None, clock);
     }
     let last = (|| -> Option<String> {
-        let conn = crate::db::open_db().ok()?;
+        let conn = crate::db::open_db(crate::db::db_path().ok()?).ok()?;
         crate::db::get_meta(&conn, "last_synced_at").ok()?
     })();
     format_sync_label(false, last.as_deref(), clock)
@@ -87,7 +87,7 @@ pub(crate) fn spawn_sync_thread(
             Ok(()) => {
                 // Re-query SQLite for a fresh issue list to send to TUI.
                 let issues = (|| -> Result<Vec<Issue>> {
-                    let conn = crate::db::open_db()?;
+                    let conn = crate::db::open_db(crate::db::db_path()?)?;
                     let db_issues = crate::db::query_issues(&conn, &args)?;
                     // Rehydrate db rows into the API issue type.
                     Ok(db_issues.into_iter().map(Into::into).collect())

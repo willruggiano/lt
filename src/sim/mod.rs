@@ -308,7 +308,7 @@ pub struct SimArgs {
 /// assignee from the dataset) so the `--assignee=me` filter resolves.
 pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     let dataset = generate(args.seed, args.size);
-    let conn = db::open_db()?;
+    let conn = db::open_db(db::db_path()?)?;
     db::upsert_issues(&conn, &dataset.issues)?;
     db::upsert_comments(&conn, &dataset.comments)?;
     db::set_meta(&conn, "last_synced_at", &Utc::now().to_rfc3339())?;
