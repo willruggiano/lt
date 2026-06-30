@@ -136,9 +136,6 @@ pub struct Cycle {
     pub name: Option<String>,
 }
 
-/// An issue node from the `issues` list query. The display surfaces (TUI table,
-/// CLI table) render these; the local cache rehydrates them via
-/// `From<db::Issue>` (see `db::issues`).
 #[derive(Deserialize, Clone)]
 pub struct Issue {
     pub id: String,

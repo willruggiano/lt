@@ -31,13 +31,7 @@ impl App {
             .and_then(|conn| crate::db::query_comments(&conn, &issue.id))
             .unwrap_or_default()
             .into_iter()
-            .map(|c| crate::linear::types::Comment {
-                body: c.body,
-                created_at: c.created_at,
-                user: c
-                    .author_name
-                    .map(|n| crate::linear::types::CommentUser { name: n }),
-            })
+            .map(Into::into)
             .collect();
 
         self.detail = Some(build_cached_detail(&issue, cached_comments));
@@ -76,13 +70,7 @@ impl App {
                     let fresh = crate::db::query_comments(&conn, &issue_id)
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|c| crate::linear::types::Comment {
-                            body: c.body,
-                            created_at: c.created_at,
-                            user: c
-                                .author_name
-                                .map(|n| crate::linear::types::CommentUser { name: n }),
-                        })
+                        .map(Into::into)
                         .collect();
                     let _ = tx.send(CommentSyncEvent::Done(fresh));
                 }
