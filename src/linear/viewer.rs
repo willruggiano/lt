@@ -1,22 +1,33 @@
 //! Fetch the authenticated user's identity (viewer) from the Linear API.
 
 use anyhow::Result;
-use serde::Deserialize;
-use serde_json::json;
+use cynic::QueryBuilder;
 
 use super::client::{GraphqlTransport, query_as};
+use super::schema;
 
-const VIEWER_QUERY: &str = r"
-query Viewer {
-  viewer {
-    id
-    name
-    organization {
-      name
-    }
-  }
+/// `query Viewer { viewer { id name organization { name } } }`, modeled as a
+/// cynic `QueryFragment` and checked against the schema snapshot at compile
+/// time.
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "Query")]
+struct ViewerQuery {
+    viewer: ViewerUser,
 }
-";
+
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "User")]
+struct ViewerUser {
+    id: cynic::Id,
+    name: String,
+    organization: ViewerOrganization,
+}
+
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "Organization")]
+struct ViewerOrganization {
+    name: String,
+}
 
 /// The authenticated user's identity.
 pub struct Viewer {
@@ -27,24 +38,12 @@ pub struct Viewer {
 }
 
 pub fn fetch_viewer(transport: &dyn GraphqlTransport) -> Result<Viewer> {
-    #[derive(Deserialize)]
-    struct OrgNode {
-        name: String,
-    }
-    #[derive(Deserialize)]
-    struct ViewerNode {
-        id: String,
-        name: String,
-        organization: OrgNode,
-    }
-    #[derive(Deserialize)]
-    struct ViewerData {
-        viewer: ViewerNode,
-    }
+    let operation = ViewerQuery::build(());
+    let variables = serde_json::to_value(operation.variables)?;
 
-    let data: ViewerData = query_as(transport, VIEWER_QUERY, json!({}))?;
+    let data: ViewerQuery = query_as(transport, &operation.query, variables)?;
     Ok(Viewer {
-        id: data.viewer.id,
+        id: data.viewer.id.into_inner(),
         name: data.viewer.name,
         org_name: data.viewer.organization.name,
     })
@@ -52,6 +51,8 @@ pub fn fetch_viewer(transport: &dyn GraphqlTransport) -> Result<Viewer> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::linear::client::FakeTransport;
 
