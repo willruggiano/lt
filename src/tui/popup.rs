@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::widgets::TableState;
 
-use super::{
-    ALL_KEYBINDINGS, App, Mode, TextInput, db_issue_to_list_issue, fetch_team_members, search_query,
-};
+use super::{ALL_KEYBINDINGS, App, Mode, TextInput, fetch_team_members, search_query};
 use crate::linear::client::HttpTransport;
 
 /// Identifies which field a popup is editing.
@@ -176,7 +174,7 @@ impl SearchOverlay {
         };
         match crate::db::open_db().and_then(|conn| search_query::run_query(&conn, &parsed, limit)) {
             Ok(db_issues) => {
-                self.results = db_issues.into_iter().map(db_issue_to_list_issue).collect();
+                self.results = db_issues.into_iter().map(Into::into).collect();
                 if self.results.is_empty() {
                     self.table_state.select(None);
                 } else {

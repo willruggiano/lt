@@ -15,6 +15,20 @@ pub struct Comment {
     pub synced_at: String,
 }
 
+/// Rehydrate the API comment type shown in the detail pane from a cached row.
+/// The cache stores only the author's name, not the full user record.
+impl From<Comment> for crate::linear::types::Comment {
+    fn from(c: Comment) -> Self {
+        Self {
+            body: c.body,
+            created_at: c.created_at,
+            user: c
+                .author_name
+                .map(|name| crate::linear::types::CommentUser { name }),
+        }
+    }
+}
+
 /// Insert or replace a slice of comments, setting `synced_at` to now (UTC).
 pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
     let synced_at = Utc::now().to_rfc3339();
