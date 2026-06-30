@@ -259,13 +259,16 @@ pub(crate) fn populate_relations(
             .map(|c| crate::linear::types::IssueRef {
                 identifier: c.identifier,
                 title: c.title,
-                state_name: c.state_name,
+                state_name: c.state.name,
             })
             .collect();
     }
     // Look up parent.
     if let Some(ref parent) = issue.parent {
-        let parent_sql = "SELECT identifier, title, state_name FROM issues WHERE id = ?1";
+        let parent_sql = "SELECT i.identifier, i.title, s.name
+                          FROM issues i
+                          JOIN workflow_states s ON s.id = i.state_id
+                          WHERE i.id = ?1";
         if let Ok(mut stmt) = conn.prepare(parent_sql)
             && let Ok(row) = stmt.query_row(rusqlite::params![parent.id], |row| {
                 Ok(crate::linear::types::IssueRef {

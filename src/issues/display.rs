@@ -3,7 +3,7 @@ use std::io::Write;
 use anyhow::Result;
 
 use crate::linear::types::Issue;
-use crate::{db, text};
+use crate::text;
 
 const MAX_TITLE: usize = 40;
 
@@ -61,39 +61,9 @@ const HEADERS: [&str; 8] = [
     "UPDATED",
 ];
 
-/// Print a table of issues fetched from the local SQLite cache.
-pub fn print_table_cached(out: &mut dyn Write, issues: &[db::Issue], note: &str) -> Result<()> {
-    if issues.is_empty() {
-        writeln!(out, "No issues found.")?;
-        return Ok(());
-    }
-
-    let rows: Vec<[String; 8]> = issues
-        .iter()
-        .map(|i| {
-            [
-                i.identifier.clone(),
-                text::truncate(&i.title, MAX_TITLE),
-                i.state_name.clone(),
-                i.priority_label.clone(),
-                i.assignee_name.as_deref().unwrap_or("-").to_string(),
-                i.team_name.clone(),
-                date(&i.created_at).to_string(),
-                date(&i.updated_at).to_string(),
-            ]
-        })
-        .collect();
-
-    print_table_rows(out, &HEADERS, &rows)?;
-
-    if !note.is_empty() {
-        writeln!(out, "\n{note}")?;
-    }
-
-    Ok(())
-}
-
-pub fn print_table(out: &mut dyn Write, issues: &[Issue]) -> Result<()> {
+/// Print a table of issues, with an optional trailing `note` (e.g. cache age).
+/// Pass `""` for no note.
+pub fn print_table(out: &mut dyn Write, issues: &[Issue], note: &str) -> Result<()> {
     if issues.is_empty() {
         writeln!(out, "No issues found.")?;
         return Ok(());
@@ -118,7 +88,13 @@ pub fn print_table(out: &mut dyn Write, issues: &[Issue]) -> Result<()> {
         })
         .collect();
 
-    print_table_rows(out, &HEADERS, &rows)
+    print_table_rows(out, &HEADERS, &rows)?;
+
+    if !note.is_empty() {
+        writeln!(out, "\n{note}")?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -126,15 +102,15 @@ mod tests {
     use super::*;
     use crate::linear::types::{Label, LabelConnection, State, Team, User};
 
-    fn cached_to_string(issues: &[db::Issue], note: &str) -> String {
+    fn cached_to_string(issues: &[Issue], note: &str) -> String {
         let mut buf = Vec::new();
-        print_table_cached(&mut buf, issues, note).unwrap();
+        print_table(&mut buf, issues, note).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
     fn live_to_string(issues: &[Issue]) -> String {
         let mut buf = Vec::new();
-        print_table(&mut buf, issues).unwrap();
+        print_table(&mut buf, issues, "").unwrap();
         String::from_utf8(buf).unwrap()
     }
 

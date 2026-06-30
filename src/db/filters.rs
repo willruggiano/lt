@@ -32,7 +32,7 @@ pub fn build_sql_filter(args: &IssueArgs) -> Result<(String, Vec<Box<dyn ToSql>>
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
     if let Some(team) = &args.team {
-        clauses.push("(team_name LIKE ? OR team_key = ?)".to_string());
+        clauses.push("(t.name LIKE ? OR i.team_id = ?)".to_string());
         let pattern = format!("%{team}%");
         params.push(Box::new(pattern));
         params.push(Box::new(team.clone()));
@@ -42,56 +42,56 @@ pub fn build_sql_filter(args: &IssueArgs) -> Result<(String, Vec<Box<dyn ToSql>>
         if assignee.eq_ignore_ascii_case("me") {
             // "me" is resolved at the call site by the caller who has auth context;
             // we emit a placeholder that the caller must fill with the viewer name.
-            clauses.push("assignee_name = ?".to_string());
+            clauses.push("ua.name = ?".to_string());
             params.push(Box::new(assignee.clone()));
         } else {
-            clauses.push("assignee_name LIKE ?".to_string());
+            clauses.push("ua.name LIKE ?".to_string());
             let pattern = format!("%{assignee}%");
             params.push(Box::new(pattern));
         }
     } else if args.no_assignee {
-        clauses.push("assignee_name IS NULL".to_string());
+        clauses.push("i.assignee_id IS NULL".to_string());
     }
 
     if let Some(state) = &args.state {
-        clauses.push("state_name LIKE ?".to_string());
+        clauses.push("s.name LIKE ?".to_string());
         let pattern = format!("%{state}%");
         params.push(Box::new(pattern));
     }
 
     if let Some(priority_str) = &args.priority {
         let label = parse_priority_label(priority_str)?;
-        clauses.push("priority_label = ?".to_string());
+        clauses.push("i.priority_label = ?".to_string());
         params.push(Box::new(label));
     }
 
     if let Some(title) = &args.title {
-        clauses.push("title LIKE ?".to_string());
+        clauses.push("i.title LIKE ?".to_string());
         let pattern = format!("%{title}%");
         params.push(Box::new(pattern));
     }
 
     if let Some(date) = &args.created_after {
         let ts = parse_date(date, "created-after")?;
-        clauses.push("created_at >= ?".to_string());
+        clauses.push("i.created_at >= ?".to_string());
         params.push(Box::new(ts));
     }
 
     if let Some(date) = &args.created_before {
         let ts = parse_date(date, "created-before")?;
-        clauses.push("created_at < ?".to_string());
+        clauses.push("i.created_at < ?".to_string());
         params.push(Box::new(ts));
     }
 
     if let Some(date) = &args.updated_after {
         let ts = parse_date(date, "updated-after")?;
-        clauses.push("updated_at >= ?".to_string());
+        clauses.push("i.updated_at >= ?".to_string());
         params.push(Box::new(ts));
     }
 
     if let Some(date) = &args.updated_before {
         let ts = parse_date(date, "updated-before")?;
-        clauses.push("updated_at < ?".to_string());
+        clauses.push("i.updated_at < ?".to_string());
         params.push(Box::new(ts));
     }
 
@@ -99,20 +99,26 @@ pub fn build_sql_filter(args: &IssueArgs) -> Result<(String, Vec<Box<dyn ToSql>>
     Ok((sql, params))
 }
 
+/// The aliased ORDER BY column for a sort field, matching the read model's
+/// join aliases (`i` issues, `s` state, `t` team, `ua` assignee).
+pub fn sort_column(sort: &SortField) -> &'static str {
+    match sort {
+        SortField::Created => "i.created_at",
+        SortField::Updated => "i.updated_at",
+        SortField::Priority => "i.priority_label",
+        SortField::Title => "i.title",
+        SortField::Assignee => "ua.name",
+        SortField::State => "s.name",
+        SortField::Team => "t.name",
+    }
+}
+
 /// Build a SQL ORDER BY clause from `IssueArgs` sort fields.
 ///
-/// Returns a string like "`updated_at` DESC" or "title ASC".
+/// Returns a string like "`i.updated_at` DESC" or "`i.title` ASC".
 /// The caller is responsible for prepending "ORDER BY ".
 pub fn build_sql_order(args: &IssueArgs) -> String {
-    let col = match args.sort {
-        SortField::Created => "created_at",
-        SortField::Updated => "updated_at",
-        SortField::Priority => "priority_label",
-        SortField::Title => "title",
-        SortField::Assignee => "assignee_name",
-        SortField::State => "state_name",
-        SortField::Team => "team_name",
-    };
+    let col = sort_column(&args.sort);
     let dir = if args.desc { "DESC" } else { "ASC" };
     format!("{col} {dir}")
 }
@@ -139,7 +145,7 @@ mod tests {
         let mut args = default_args();
         args.team = Some("backend".to_string());
         let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "(team_name LIKE ? OR team_key = ?)");
+        assert_eq!(sql, "(t.name LIKE ? OR i.team_id = ?)");
         assert_eq!(params.len(), 2);
     }
 
@@ -148,7 +154,7 @@ mod tests {
         let mut args = default_args();
         args.no_assignee = true;
         let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "assignee_name IS NULL");
+        assert_eq!(sql, "i.assignee_id IS NULL");
         assert_eq!(params.len(), 0);
     }
 
@@ -157,7 +163,7 @@ mod tests {
         let mut args = default_args();
         args.assignee = Some("alice".to_string());
         let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "assignee_name LIKE ?");
+        assert_eq!(sql, "ua.name LIKE ?");
         assert_eq!(params.len(), 1);
     }
 
@@ -166,7 +172,7 @@ mod tests {
         let mut args = default_args();
         args.state = Some("in progress".to_string());
         let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "state_name LIKE ?");
+        assert_eq!(sql, "s.name LIKE ?");
         assert_eq!(params.len(), 1);
     }
 
@@ -175,7 +181,7 @@ mod tests {
         let mut args = default_args();
         args.priority = Some("high".to_string());
         let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "priority_label = ?");
+        assert_eq!(sql, "i.priority_label = ?");
         assert_eq!(params.len(), 1);
     }
 
@@ -184,7 +190,7 @@ mod tests {
         let mut args = default_args();
         args.priority = Some("2".to_string());
         let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "priority_label = ?");
+        assert_eq!(sql, "i.priority_label = ?");
         assert_eq!(params.len(), 1);
     }
 
@@ -193,7 +199,7 @@ mod tests {
         let mut args = default_args();
         args.title = Some("crash".to_string());
         let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "title LIKE ?");
+        assert_eq!(sql, "i.title LIKE ?");
         assert_eq!(params.len(), 1);
     }
 
@@ -202,7 +208,7 @@ mod tests {
         let mut args = default_args();
         args.created_after = Some("2025-01-01".to_string());
         let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "created_at >= ?");
+        assert_eq!(sql, "i.created_at >= ?");
         assert_eq!(params.len(), 1);
     }
 
@@ -220,7 +226,7 @@ mod tests {
         args.state = Some("todo".to_string());
         args.title = Some("bug".to_string());
         let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "state_name LIKE ? AND title LIKE ?");
+        assert_eq!(sql, "s.name LIKE ? AND i.title LIKE ?");
         assert_eq!(params.len(), 2);
     }
 
@@ -229,7 +235,7 @@ mod tests {
         let args = default_args();
         let order = build_sql_order(&args);
         // default: sort=Updated, desc=true
-        assert_eq!(order, "updated_at DESC");
+        assert_eq!(order, "i.updated_at DESC");
     }
 
     #[test]
@@ -238,7 +244,7 @@ mod tests {
         args.sort = SortField::Title;
         args.desc = false;
         let order = build_sql_order(&args);
-        assert_eq!(order, "title ASC");
+        assert_eq!(order, "i.title ASC");
     }
 
     #[test]
@@ -247,7 +253,7 @@ mod tests {
         args.sort = SortField::Priority;
         args.desc = false;
         let order = build_sql_order(&args);
-        assert_eq!(order, "priority_label ASC");
+        assert_eq!(order, "i.priority_label ASC");
     }
 
     #[test]
@@ -256,6 +262,6 @@ mod tests {
         args.sort = SortField::Assignee;
         args.desc = true;
         let order = build_sql_order(&args);
-        assert_eq!(order, "assignee_name DESC");
+        assert_eq!(order, "ua.name DESC");
     }
 }

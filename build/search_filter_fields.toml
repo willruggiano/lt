@@ -64,34 +64,34 @@ gql_type  = "NullableUserFilter"
 [[sort_field]]
 key       = "updated"
 gql_field = "updatedAt"
-sql_col   = "updated_at"
+sql_col   = "i.updated_at"
 
 [[sort_field]]
 key       = "created"
 gql_field = "createdAt"
-sql_col   = "created_at"
+sql_col   = "i.created_at"
 
 [[sort_field]]
 key       = "priority"
 gql_field = "priority"
-sql_col   = "priority_label"
+sql_col   = "i.priority_label"
 
 [[sort_field]]
 key       = "title"
 gql_field = "title"
-sql_col   = "title"
+sql_col   = "i.title"
 
 [[sort_field]]
 key       = "assignee"
 gql_field = "assignee"
-sql_col   = "assignee_name"
+sql_col   = "ua.name"
 
 [[sort_field]]
 key       = "state"
 gql_field = "workflowState"
-sql_col   = "state_name"
+sql_col   = "s.name"
 
 [[sort_field]]
 key       = "team"
 gql_field = "team"
-sql_col   = "team_name"
+sql_col   = "t.name"

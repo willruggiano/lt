@@ -6,7 +6,7 @@ use serde_json::json;
 use tracing::{error, info};
 
 use super::IssueArgs;
-use super::display::{print_table, print_table_cached};
+use super::display::print_table;
 use super::filter::build_filter;
 use super::sort::build_sort;
 use crate::db;
@@ -77,7 +77,7 @@ pub fn fetch_with(
 }
 
 /// Resolve `--assignee=me` to the viewer's actual name so the SQL filter can
-/// match the cached `assignee_name` column.  Uses the identity cached in
+/// match the joined assignee name.  Uses the identity cached in
 /// `sync_meta` when available, otherwise asks the Linear API and caches it.
 fn resolve_me(conn: &rusqlite::Connection, args: &mut IssueArgs) -> Result<()> {
     let is_me = args
@@ -103,7 +103,7 @@ pub fn run(out: &mut dyn Write, mut args: IssueArgs) -> Result<()> {
     // --live: bypass cache entirely.
     if args.live {
         let (issues, has_next_page, _) = fetch(&args, None)?;
-        print_table(out, &issues)?;
+        print_table(out, &issues, "")?;
         if has_next_page {
             writeln!(out, "\n+more issues")?;
         }
@@ -125,7 +125,7 @@ pub fn run(out: &mut dyn Write, mut args: IssueArgs) -> Result<()> {
             // Re-open after sync.
             let conn2 = db::open_db(db::db_path()?)?;
             let issues = db::query_issues(&conn2, &args)?;
-            print_table_cached(out, &issues, "(cached)")?;
+            print_table(out, &issues, "(cached)")?;
         }
         Some(ref ts) => {
             // Parse the timestamp and check age.
@@ -137,12 +137,12 @@ pub fn run(out: &mut dyn Write, mut args: IssueArgs) -> Result<()> {
                 // Fresh cache -- serve immediately.
                 let issues = db::query_issues(&conn, &args)?;
                 let note = format!("(cached, age {age_secs}s)");
-                print_table_cached(out, &issues, &note)?;
+                print_table(out, &issues, &note)?;
             } else {
                 // Stale cache -- serve immediately, then run delta sync in background.
                 let issues = db::query_issues(&conn, &args)?;
                 let note = format!("(stale cache, age {age_secs}s -- syncing in background)");
-                print_table_cached(out, &issues, &note)?;
+                print_table(out, &issues, &note)?;
 
                 // Trigger delta sync in a background thread; ignore join errors.
                 std::thread::spawn(|| {

@@ -40,7 +40,7 @@ pub struct CommentUser {
     pub name: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct Label {
     pub id: String,
     pub name: String,
@@ -90,7 +90,7 @@ pub struct IssueDetailTeam {
     pub name: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct LabelConnection {
     pub nodes: Vec<Label>,
 }
@@ -100,44 +100,44 @@ pub struct CommentConnection {
     pub nodes: Vec<Comment>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct Parent {
     pub id: String,
     pub identifier: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct State {
     pub id: String,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct User {
     pub id: String,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct Team {
     pub id: String,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct Project {
     pub id: String,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct Cycle {
     pub id: String,
     // Nullable in Linear's schema -- unnamed cycles identify by number.
     pub name: Option<String>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct Issue {
     pub id: String,
     pub identifier: String,

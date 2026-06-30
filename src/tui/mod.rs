@@ -31,7 +31,7 @@ pub(crate) use popup::{
     handle_search_key, poll_search_debounce, priority_popup_items,
 };
 #[cfg(all(test, feature = "sim"))]
-pub(crate) use popup::{apply_optimistic_in_memory, build_db_issue_optimistic};
+pub(crate) use popup::{apply_optimistic_in_memory, build_optimistic_issue};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::widgets::TableState;
@@ -558,8 +558,8 @@ impl App {
                 .connect()
                 .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
             {
-                Ok(db_issues) => {
-                    self.issues = db_issues.into_iter().map(Into::into).collect();
+                Ok(issues) => {
+                    self.issues = issues;
                     self.pagination.has_next_page = false; // run_query has no pagination
                     self.pagination.end_cursor = None;
                     self.apply_fetched_selection(reset_selection);
@@ -582,7 +582,7 @@ impl App {
                 .and_then(|conn| crate::db::query_issues_page(&conn, &self.args, offset))
             {
                 Ok((issues, has_next_page)) => {
-                    self.issues = issues.into_iter().map(Into::into).collect();
+                    self.issues = issues;
                     self.pagination.has_next_page = has_next_page;
                     let limit = i64::from(self.args.limit.min(250));
                     self.pagination.end_cursor = if has_next_page {
@@ -688,13 +688,12 @@ pub fn run(args: IssueArgs) -> Result<()> {
         (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
             let conn = crate::db::open_db(crate::db::db_path()?)?;
             let limit = i64::from(args.limit.min(250));
-            let (db_issues, has_next) = crate::db::query_issues_page(&conn, &args, 0)?;
+            let (issues, has_next) = crate::db::query_issues_page(&conn, &args, 0)?;
             let end_cursor = if has_next {
                 Some(limit.to_string())
             } else {
                 None
             };
-            let issues = db_issues.into_iter().map(Into::into).collect();
             Ok((issues, has_next, end_cursor))
         })()
         .unwrap_or_default();

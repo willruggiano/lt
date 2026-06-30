@@ -16,6 +16,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 use crate::db;
+use crate::linear::types;
 
 /// Linear's fixed priority vocabulary (matches the labels the TUI renders).
 const PRIORITIES: &[&str] = &["No priority", "Urgent", "High", "Normal", "Low"];
@@ -36,7 +37,7 @@ const BASE_SECS: i64 = 1_767_225_600;
 /// A generated, deterministic dataset ready to upsert into the local DB.
 #[derive(PartialEq)]
 pub struct Dataset {
-    pub issues: Vec<db::Issue>,
+    pub issues: Vec<types::Issue>,
     pub comments: Vec<db::Comment>,
 }
 
@@ -147,8 +148,9 @@ impl Generator {
         capitalize(&format!("{verb} {adj} {noun}"))
     }
 
-    /// A comma-joined set of 0-3 distinct word labels (matching the DB column).
-    fn labels(&mut self) -> String {
+    /// A set of 0-3 distinct word labels. The label id mirrors the name so the
+    /// relational upsert dedupes a shared label to one row.
+    fn labels(&mut self) -> Vec<types::Label> {
         let n = self.rng.random_range(0..4usize);
         let mut chosen: Vec<String> = Vec::with_capacity(n);
         for _ in 0..n {
@@ -157,7 +159,13 @@ impl Generator {
                 chosen.push(w);
             }
         }
-        chosen.join(",")
+        chosen
+            .into_iter()
+            .map(|name| types::Label {
+                id: name.clone(),
+                name,
+            })
+            .collect()
     }
 
     /// A markdown description (heading + paragraph + list) for ~80% of issues,
@@ -200,27 +208,34 @@ impl Generator {
     }
 
     /// Link ~15% of issues to an earlier issue on the same team as a parent,
-    /// guaranteeing every `parent_id` references an existing issue.
-    fn maybe_parent(
-        &mut self,
-        team_key: &str,
-        existing: &[db::Issue],
-    ) -> (Option<String>, Option<String>) {
+    /// guaranteeing every parent references an existing issue. The team id is
+    /// the team key (see [`Generator::issue`]).
+    fn maybe_parent(&mut self, team_key: &str, existing: &[types::Issue]) -> Option<types::Parent> {
         if !self.rng.random_ratio(3, 20) {
-            return (None, None);
+            return None;
         }
-        let candidates: Vec<&db::Issue> = existing
-            .iter()
-            .filter(|e| e.team_key.as_deref() == Some(team_key))
-            .collect();
+        let candidates: Vec<&types::Issue> =
+            existing.iter().filter(|e| e.team.id == team_key).collect();
         if candidates.is_empty() {
-            return (None, None);
+            return None;
         }
         let p = self.pick(&candidates);
-        (Some(p.id.clone()), Some(p.identifier.clone()))
+        Some(types::Parent {
+            id: p.id.clone(),
+            identifier: p.identifier.clone(),
+        })
     }
 
-    fn issue(&mut self, index: usize, existing: &[db::Issue]) -> db::Issue {
+    /// Wrap an optional name as a fragment user whose id mirrors the name, so
+    /// the relational upsert dedupes a person to one `users` row.
+    fn user(name: Option<String>) -> Option<types::User> {
+        name.map(|name| types::User {
+            id: name.clone(),
+            name,
+        })
+    }
+
+    fn issue(&mut self, index: usize, existing: &[types::Issue]) -> types::Issue {
         let team_idx = self.rng.random_range(0..self.teams.len());
         let (team_name, team_key) = self.teams[team_idx].clone();
         self.team_counters[team_idx] += 1;
@@ -228,35 +243,50 @@ impl Generator {
         let (created_at, updated_at) = self.timestamps();
         let title = self.title();
         let description = self.description(&title);
-        let assignee_name = self.maybe_user();
+        let assignee = Self::user(self.maybe_user());
         let labels = self.labels();
-        let project_name = self.maybe_project();
-        let cycle_name = self.maybe_cycle();
-        let creator_name = Some(self.name());
-        let (parent_id, parent_identifier) = self.maybe_parent(&team_key, existing);
-        db::Issue {
+        let project = self.maybe_project();
+        let cycle = self.maybe_cycle();
+        let creator = Self::user(Some(self.name()));
+        let parent = self.maybe_parent(&team_key, existing);
+        let priority_label = (*self.pick(PRIORITIES)).to_string();
+        let priority = types::priority_label_to_u8(&priority_label);
+        let state_name = (*self.pick(STATES)).to_string();
+        types::Issue {
             id: format!("sim-{:016x}-{index}", self.seed),
             identifier,
             title,
-            priority_label: (*self.pick(PRIORITIES)).to_string(),
-            state_name: (*self.pick(STATES)).to_string(),
-            assignee_name,
-            team_name,
-            team_key: Some(team_key),
+            priority,
+            // The team id is its key; entity ids mirror names so renamed-to-same
+            // values collapse to one row in the relational base.
+            state: types::State {
+                id: state_name.clone(),
+                name: state_name,
+            },
+            assignee,
+            team: types::Team {
+                id: team_key,
+                name: team_name,
+            },
+            description,
+            labels: types::LabelConnection { nodes: labels },
+            project: project.map(|name| types::Project {
+                id: name.clone(),
+                name,
+            }),
+            cycle: cycle.map(|name| types::Cycle {
+                id: name.clone(),
+                name: Some(name),
+            }),
+            creator,
+            parent,
+            priority_label,
             created_at,
             updated_at,
-            synced_at: String::new(),
-            description,
-            labels,
-            project_name,
-            cycle_name,
-            creator_name,
-            parent_id,
-            parent_identifier,
         }
     }
 
-    fn comments_for(&mut self, issue: &db::Issue) -> Vec<db::Comment> {
+    fn comments_for(&mut self, issue: &types::Issue) -> Vec<db::Comment> {
         let n = self.rng.random_range(0..4usize);
         let mut out = Vec::with_capacity(n);
         for c in 0..n {
@@ -312,7 +342,11 @@ pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     db::upsert_issues(&conn, &dataset.issues)?;
     db::upsert_comments(&conn, &dataset.comments)?;
     db::set_meta(&conn, "last_synced_at", &Utc::now().to_rfc3339())?;
-    if let Some(name) = dataset.issues.iter().find_map(|i| i.assignee_name.clone()) {
+    if let Some(name) = dataset
+        .issues
+        .iter()
+        .find_map(|i| i.assignee.as_ref().map(|u| u.name.clone()))
+    {
         db::set_meta(&conn, "viewer_name", &name)?;
     }
     writeln!(
@@ -362,9 +396,13 @@ mod tests {
         let d = generate(123, 200);
         let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.as_str()).collect();
         for issue in &d.issues {
-            if let Some(parent) = &issue.parent_id {
-                assert!(ids.contains(parent.as_str()), "dangling parent {parent}");
-                assert_ne!(&issue.id, parent, "issue is its own parent");
+            if let Some(parent) = &issue.parent {
+                assert!(
+                    ids.contains(parent.id.as_str()),
+                    "dangling parent {}",
+                    parent.id
+                );
+                assert_ne!(issue.id, parent.id, "issue is its own parent");
             }
         }
         for comment in &d.comments {
@@ -384,6 +422,7 @@ mod tests {
         crate::db::run_migrations(&conn).unwrap();
         db::upsert_issues(&conn, &d.issues).unwrap();
         db::upsert_comments(&conn, &d.comments).unwrap();
+        // sanity: relational base reconstructs the rows.
         let args = crate::issues::IssueArgs {
             limit: 250,
             ..Default::default()
