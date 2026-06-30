@@ -158,3 +158,46 @@ pub fn open_db() -> Result<Connection> {
     run_migrations(&conn)?;
     Ok(conn)
 }
+
+/// A handle to the issue database. The set of databases is closed -- the
+/// per-profile SQLite file in normal use, or an isolated in-memory database in
+/// tests -- so it is an enum rather than a trait with two impls (both are
+/// SQLite; they differ only in where they live). `connect()` opens a fresh
+/// connection to it.
+pub enum Database {
+    /// The per-profile SQLite file. Opening and migrating is deferred to
+    /// `connect()` (via `open_db`), so constructing this variant does no I/O.
+    Profile,
+    /// An isolated, shared-cache in-memory database for tests. SQLite destroys
+    /// a shared-cache in-memory database when its last connection closes, so
+    /// the handle holds one open connection for its own lifetime.
+    #[cfg(all(test, feature = "sim"))]
+    Memory { uri: String, _keepalive: Connection },
+}
+
+impl Database {
+    /// Build an isolated in-memory database, migrated and ready. Each call gets
+    /// a distinct shared cache so concurrent tests never share state.
+    #[cfg(all(test, feature = "sim"))]
+    pub fn memory() -> Result<Self> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let uri = format!("file:lt_memdb_{n}?mode=memory&cache=shared");
+        let keepalive = Connection::open(&uri)?;
+        run_migrations(&keepalive)?;
+        Ok(Self::Memory {
+            uri,
+            _keepalive: keepalive,
+        })
+    }
+
+    /// Open a fresh connection to this database.
+    pub fn connect(&self) -> Result<Connection> {
+        match self {
+            Database::Profile => open_db(),
+            #[cfg(all(test, feature = "sim"))]
+            Database::Memory { uri, .. } => Ok(Connection::open(uri)?),
+        }
+    }
+}

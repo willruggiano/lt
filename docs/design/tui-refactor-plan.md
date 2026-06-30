@@ -65,12 +65,14 @@ Lessons applied (for resuming):
 
 Raised in review; tracked here, not done in the extraction PRs:
 
-- **Collapse the DB seam (review #4).** Rename the `DbProvider` trait to
-  `Database` and stop modelling on-disk vs in-memory as two trait impls: both
-  are SQLite and should differ only by connection path (a file vs `:memory:`).
-  Likely one SQLite-backed impl parameterized by path, replacing `RealDb`
-  (`src/tui/mod.rs`) and the test `MemoryDb` (`src/tui/loop_tests.rs`).
-  Architectural; do as its own change.
+- [x] **Collapse the DB seam (review #4).** Done. The `DbProvider` trait,
+  `RealDb`, and the test `MemoryDb` are replaced by one `db::Database` enum
+  (`Profile` | `Memory { uri, keepalive }`, the latter `#[cfg]`'d to tests).
+  A closed two-case set is an enum, not a trait + impls, which drops the
+  `Arc<dyn>` (single owner) and the `Mutex` keepalive (`App` is already
+  `!Sync`). It lives in `src/db/` (the module that owns `open_db`); `App.db:
+  db::Database`. The `Profile` variant is lazy (delegates to `open_db` on
+  `connect`) so `App::new` stays infallible.
 - [x] **Clock seam for `build_sync_status_label` (review #6).** Done in
   add3bd1. The wall clock is a `Clock` enum on `App` (`Clock::System` in the
   binary, `Clock::Fixed(instant)` `#[cfg]`'d in for tests) -- an enum, not a
