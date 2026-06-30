@@ -11,6 +11,12 @@
   in {
     devshells.default.devshell.startup.install-git-hooks.text = config.pre-commit.shellHook;
 
+    # Standalone installer for the git hooks, decoupled from the devshell so a
+    # remote agent session can run it (see .claude/bin/install-pre-commit.sh):
+    # `nix print-dev-env` in setup.sh never runs the devshell startup above.
+    packages.install-pre-commit =
+      pkgs.writeShellScriptBin "install-pre-commit" config.pre-commit.installationScript;
+
     jail.additionalCombinators = cs:
       with cs; [
         (add-pkg-deps [cfg.settings.package])

@@ -39,6 +39,12 @@ flake.nix
     shell then runs inside the devshell toolchain.
 - Idempotent and a no-op outside `CLAUDE_CODE_REMOTE=true`, so it serves as both
   the cloud "Setup script" and a `SessionStart` hook.
+- `.claude/bin/install-pre-commit.sh` runs as a second `SessionStart` step,
+  after `setup.sh`, so agents commit through the same hooks CI enforces.
+  `nix print-dev-env` captures the env but does not run the devshell `startup`
+  scripts, so the `install-git-hooks` startup never fires on that path; the
+  script runs `nix run .#install-pre-commit` (the `installationScript`, exposed
+  as a package so it does not drag in the devshell's other inputs) instead.
 
 ## cargo-deny git proxy
 
