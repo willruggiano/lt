@@ -2,7 +2,7 @@
 
 A local-first [Linear] TUI for terminal power users.
 
-<img width="1921" height="1081" alt="It's not much... but it's mine :)" src="https://github.com/user-attachments/assets/bb8c14df-b1b2-45d5-a366-85f21a2a0d3f" />
+![It's not much... but it's mine :)](https://github.com/user-attachments/assets/bb8c14df-b1b2-45d5-a366-85f21a2a0d3f)
 
 Reads are instant; queries use a local SQLite cache, not the network.
 
@@ -70,7 +70,7 @@ or by adding `github:willruggiano/lt` as an input to your own Nix flake.
 You will need to create a Linear OAuth application following Linear's official
 documentation: <https://linear.app/developers/oauth-2-0-authentication>
 
-The redirect URI is: http://localhost:7342/callback
+The redirect URI is: <http://localhost:7342/callback>
 
 Then configure the relevant environment variables:
 

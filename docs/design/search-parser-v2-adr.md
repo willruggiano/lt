@@ -78,7 +78,7 @@ given the small output size).
 
 `build.rs` writes one file to `$OUT_DIR`:
 
-```
+```text
 $OUT_DIR/search_stems.rs    -- StemKey enum, StemKind enum, Chumsky parser fn
 ```
 
@@ -90,7 +90,7 @@ include!(concat!(env!("OUT_DIR"), "/search_stems.rs"));
 
 ### Build Pipeline
 
-```
+```text
 build/linear-schema-definition.graphql
 build/search_filter_fields.toml
               |
@@ -208,7 +208,7 @@ AST.
 For unknown stem keys, the parser collects candidates from the generated key
 list and picks the closest match by edit distance:
 
-```
+```text
 user types:   priorty:high
 parse error:  unknown filter key 'priorty' -- did you mean 'priority'?
 

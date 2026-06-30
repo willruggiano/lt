@@ -1,0 +1,20 @@
+{
+  // Lint the Markdown this project authors; vendored .claude/ skills are excluded.
+  "globs": ["README.md", "docs/**/*.md"],
+
+  // documentation.md: internal references must use [[file.md]] wiki-links.
+  "customRules": ["./tools/markdownlint/wiki-link.cjs"],
+
+  "config": {
+    // Disable rules that Prettier already owns.
+    "extends": "markdownlint/style/prettier",
+
+    // ADRs under docs/design/ repeat ### Analysis / ### Decision under each
+    // ## Decision N parent; only flag duplicates among sibling headings.
+    "MD024": { "siblings_only": true }, // no-duplicate-heading
+
+    // documentation.md: fenced code blocks must declare a language.
+    "MD040": { "language_only": true }, // fenced-code-language
+    "MD046": { "style": "fenced" }, // code-block-style
+  },
+}

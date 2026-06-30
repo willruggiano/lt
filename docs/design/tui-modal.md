@@ -13,7 +13,7 @@ a clearly labelled filter mode entered via `/`.
 
 ## Mode Taxonomy
 
-```
+```text
 +---------------------------------------------------------------------+
 |  NORMAL mode  (default)                                             |
 |    Navigation, selection, and action triggers.                      |
@@ -137,7 +137,7 @@ implemented.
 The bottom status bar should show the current mode name on the right-hand side
 so the user always knows which mode is active.
 
-```
+```text
 Proposed layout (Normal):
   [left]  q quit  / filter  j/k nav  <space> detail ...
   [right] NORMAL   synced 2 min ago  [1]

@@ -161,7 +161,7 @@ replacing the current `parse_query` free function.
 
 The parser is a single-pass, left-to-right byte scanner over the raw `&str`.
 
-```
+```rust
 fn parse_query_ast(raw: &str) -> QueryAst {
     let mut tokens = Vec::new();
     let mut pos = 0;
@@ -243,7 +243,7 @@ pub enum CompletionContext {
 
 ### Stem Key Candidates (static)
 
-```
+```text
 sort:    assignee:    priority:    state:    team:
 ```
 
@@ -264,7 +264,7 @@ candidates are filtered to those that start with the typed prefix
 
 Tab has two roles depending on context:
 
-```
+```text
 +-----------------------------+-----------------------------------------+
 | Context                     | Tab action                              |
 +-----------------------------+-----------------------------------------+
@@ -347,7 +347,7 @@ from the AST for the SQL query.
 
 ## Data Flow
 
-```
+```text
 User keystroke
       |
       v

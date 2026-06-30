@@ -1,3 +1,5 @@
+# Search Parser v2: Parser Generator Options
+
 Since you have the GraphQL schema at compile time and you are targeting a
 user-facing search bar, this completely solidifies your architectural path. You
 will want to use a **`build.rs` (build script)** to bridge the gap between your
@@ -10,7 +12,7 @@ you can generate **Rust source code** directly.
 Here is exactly how to execute this based on your constraints, using the SOTA
 tools:
 
-### Option 1: The Pest Route (Easiest to Generate)
+## Option 1: The Pest Route (Easiest to Generate)
 
 Because **Pest** relies on a standalone `.pest` file to define its PEG (Parsing
 Expression Grammar), it is remarkably easy to generate programmatically.
@@ -47,7 +49,7 @@ WHITESPACE   = _{ " " | "\t" }
 
 ---
 
-### Option 2: The Chumsky Route (Best User Experience)
+## Option 2: The Chumsky Route (Best User Experience)
 
 Since this is a user-facing search bar, error recovery is a massive priority. If
 a user types `assig:me`, you want the parser to know that `assig` is a field
@@ -101,7 +103,7 @@ pub fn search_parser<'a>() -> impl Parser<'a, &'a str, Vec<(SearchField, String)
 - **Cons:** Writing a build script that generates Rust code is more complex and
   fragile than generating a `.pest` text file.
 
-### The Verdict
+## The Verdict
 
 If you want to get this working quickly and cleanly, go with **Pest**. The build
 script is trivial to write, and PEG grammars map beautifully to search syntax.
