@@ -12,6 +12,7 @@ build: ## Build the binary
 	cargo build
 
 check: ## Run formatter, linter, supply-chain, and dedup gates
+	nix fmt
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 	cargo clippy --all-targets --features sim -- -D warnings
