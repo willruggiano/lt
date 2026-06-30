@@ -219,7 +219,7 @@ fn db_to_api_and_list_conversions() {
         parent_id: Some("9".to_string()),
         parent_identifier: Some("ENG-9".to_string()),
     };
-    let listed = crate::issues::list::Issue::from(row.clone());
+    let listed = crate::linear::types::Issue::from(row.clone());
     assert_eq!(listed.priority, 2);
     assert_eq!(listed.labels.nodes.len(), 2);
     assert_eq!(
@@ -230,7 +230,7 @@ fn db_to_api_and_list_conversions() {
     // Empty labels string yields no label nodes.
     row.labels = String::new();
     assert!(
-        crate::issues::list::Issue::from(row)
+        crate::linear::types::Issue::from(row)
             .labels
             .nodes
             .is_empty()

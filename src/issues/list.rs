@@ -12,7 +12,7 @@ use super::filter::build_filter;
 use super::sort::build_sort;
 use crate::db;
 use crate::linear::client::{GraphqlTransport, HttpTransport, query_as};
-use crate::linear::types::PageInfo;
+use crate::linear::types::{Issue, PageInfo};
 
 /// Cache TTL in seconds (5 minutes).
 const CACHE_TTL_SECS: i64 = 300;
@@ -43,146 +43,6 @@ query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after
 }
 ";
 
-#[derive(Deserialize, Clone)]
-pub struct Parent {
-    pub id: String,
-    pub identifier: String,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct State {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct User {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct Team {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct Project {
-    #[allow(unused)]
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct Cycle {
-    #[allow(unused)]
-    pub id: String,
-    // Nullable in Linear's schema -- unnamed cycles identify by number.
-    pub name: Option<String>,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct Issue {
-    pub id: String,
-    pub identifier: String,
-    pub title: String,
-    #[serde(rename = "priorityLabel")]
-    pub priority_label: String,
-    pub priority: u8,
-    pub state: State,
-    pub assignee: Option<User>,
-    pub team: Team,
-    pub description: Option<String>,
-    pub labels: LabelConnection,
-    pub project: Option<Project>,
-    pub cycle: Option<Cycle>,
-    pub creator: Option<User>,
-    pub parent: Option<Parent>,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: String,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct LabelNode {
-    pub name: String,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct LabelConnection {
-    pub nodes: Vec<LabelNode>,
-}
-
-/// Map a Linear priority label to its numeric level. Lossy: any unrecognised
-/// label (including "No priority") collapses to 0, so this is a parse, not a
-/// `From`.
-pub(crate) fn priority_label_to_u8(label: &str) -> u8 {
-    match label.to_lowercase().as_str() {
-        "urgent" => 1,
-        "high" => 2,
-        "normal" | "medium" => 3,
-        "low" => 4,
-        _ => 0,
-    }
-}
-
-/// Rehydrate a display `Issue` from a cached SQLite row. The row stores only
-/// names, so the id fields of nested records are left empty.
-impl From<db::Issue> for Issue {
-    fn from(src: db::Issue) -> Self {
-        Self {
-            id: src.id,
-            identifier: src.identifier,
-            title: src.title,
-            priority: priority_label_to_u8(&src.priority_label),
-            priority_label: src.priority_label,
-            state: State {
-                id: String::new(),
-                name: src.state_name,
-            },
-            assignee: src.assignee_name.map(|n| User {
-                id: String::new(),
-                name: n,
-            }),
-            team: Team {
-                id: src.team_key.unwrap_or_default(),
-                name: src.team_name,
-            },
-            created_at: src.created_at,
-            updated_at: src.updated_at,
-            description: src.description,
-            labels: LabelConnection {
-                nodes: src
-                    .labels
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(|n| LabelNode {
-                        name: n.to_string(),
-                    })
-                    .collect(),
-            },
-            project: src.project_name.map(|n| Project {
-                id: String::new(),
-                name: n,
-            }),
-            cycle: src.cycle_name.map(|n| Cycle {
-                id: String::new(),
-                name: Some(n),
-            }),
-            creator: src.creator_name.map(|n| User {
-                id: String::new(),
-                name: n,
-            }),
-            parent: src.parent_id.map(|id| Parent {
-                id,
-                identifier: src.parent_identifier.unwrap_or_default(),
-            }),
-        }
-    }
-}
-
 #[derive(Deserialize)]
 struct IssueConnection {
     nodes: Vec<Issue>,
@@ -193,37 +53,6 @@ struct IssueConnection {
 #[derive(Deserialize)]
 struct IssuesData {
     issues: IssueConnection,
-}
-
-/// Convert a fetched `Issue` into a `db::Issue` for caching.
-pub(crate) fn to_db_issue(src: &Issue) -> db::Issue {
-    let labels = src
-        .labels
-        .nodes
-        .iter()
-        .map(|l| l.name.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
-    db::Issue {
-        id: src.id.clone(),
-        identifier: src.identifier.clone(),
-        title: src.title.clone(),
-        priority_label: src.priority_label.clone(),
-        state_name: src.state.name.clone(),
-        assignee_name: src.assignee.as_ref().map(|u| u.name.clone()),
-        team_name: src.team.name.clone(),
-        team_key: Some(src.team.id.clone()),
-        created_at: src.created_at.clone(),
-        updated_at: src.updated_at.clone(),
-        synced_at: String::new(), // filled by upsert_issues
-        description: src.description.clone(),
-        labels,
-        project_name: src.project.as_ref().map(|p| p.name.clone()),
-        cycle_name: src.cycle.as_ref().and_then(|c| c.name.clone()),
-        creator_name: src.creator.as_ref().map(|u| u.name.clone()),
-        parent_id: src.parent.as_ref().map(|p| p.id.clone()),
-        parent_identifier: src.parent.as_ref().map(|p| p.identifier.clone()),
-    }
 }
 
 pub fn fetch(args: &IssueArgs, after: Option<&str>) -> Result<(Vec<Issue>, bool, Option<String>)> {
@@ -363,12 +192,6 @@ mod tests {
     use super::*;
     use crate::linear::client::FakeTransport;
 
-    fn label(name: &str) -> LabelNode {
-        LabelNode {
-            name: name.to_string(),
-        }
-    }
-
     #[test]
     fn fetch_with_maps_nodes_and_sends_pagination_vars() {
         let transport = FakeTransport::new(vec![serde_json::json!({
@@ -387,99 +210,5 @@ mod tests {
         let vars = transport.variables(0);
         assert_eq!(vars["first"], serde_json::json!(50));
         assert_eq!(vars["after"], serde_json::json!("0"));
-    }
-
-    #[test]
-    fn to_db_issue_maps_and_joins_labels() {
-        let issue = Issue {
-            id: "1".to_string(),
-            identifier: "ENG-1".to_string(),
-            title: "Wire it up".to_string(),
-            priority_label: "High".to_string(),
-            priority: 2,
-            state: State {
-                id: "s1".to_string(),
-                name: "In Progress".to_string(),
-            },
-            assignee: Some(User {
-                id: "u1".to_string(),
-                name: "Alice".to_string(),
-            }),
-            team: Team {
-                id: "ENG".to_string(),
-                name: "Engineering".to_string(),
-            },
-            description: Some("body".to_string()),
-            labels: LabelConnection {
-                nodes: vec![label("bug"), label("backend")],
-            },
-            project: Some(Project {
-                id: "p1".to_string(),
-                name: "Platform".to_string(),
-            }),
-            cycle: Some(Cycle {
-                id: "c1".to_string(),
-                name: Some("Cycle 7".to_string()),
-            }),
-            creator: Some(User {
-                id: "u2".to_string(),
-                name: "Carol".to_string(),
-            }),
-            parent: Some(Parent {
-                id: "9".to_string(),
-                identifier: "ENG-9".to_string(),
-            }),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-02T00:00:00Z".to_string(),
-        };
-
-        let row = to_db_issue(&issue);
-        assert_eq!(row.identifier, "ENG-1");
-        assert_eq!(row.assignee_name.as_deref(), Some("Alice"));
-        assert_eq!(row.team_key.as_deref(), Some("ENG"));
-        assert_eq!(row.labels, "bug,backend");
-        assert_eq!(row.project_name.as_deref(), Some("Platform"));
-        assert_eq!(row.cycle_name.as_deref(), Some("Cycle 7"));
-        assert_eq!(row.creator_name.as_deref(), Some("Carol"));
-        assert_eq!(row.parent_id.as_deref(), Some("9"));
-        assert_eq!(row.parent_identifier.as_deref(), Some("ENG-9"));
-        // synced_at is filled by upsert_issues, not the mapper.
-        assert!(row.synced_at.is_empty());
-    }
-
-    #[test]
-    fn to_db_issue_handles_absent_optionals() {
-        let issue = Issue {
-            id: "2".to_string(),
-            identifier: "ENG-2".to_string(),
-            title: "t".to_string(),
-            priority_label: "No priority".to_string(),
-            priority: 0,
-            state: State {
-                id: "s".to_string(),
-                name: "Todo".to_string(),
-            },
-            assignee: None,
-            team: Team {
-                id: "ENG".to_string(),
-                name: "Engineering".to_string(),
-            },
-            description: None,
-            labels: LabelConnection { nodes: Vec::new() },
-            project: None,
-            cycle: None,
-            creator: None,
-            parent: None,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
-        };
-
-        let row = to_db_issue(&issue);
-        assert!(row.assignee_name.is_none());
-        assert_eq!(row.labels, "");
-        assert!(row.project_name.is_none());
-        assert!(row.cycle_name.is_none());
-        assert!(row.creator_name.is_none());
-        assert!(row.parent_id.is_none());
     }
 }

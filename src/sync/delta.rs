@@ -3,9 +3,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::db;
-use crate::issues::list::{ISSUES_QUERY, Issue};
+use crate::issues::list::ISSUES_QUERY;
 use crate::linear::client::{GraphqlTransport, HttpTransport, query_as};
-use crate::linear::types::PageInfo;
+use crate::linear::types::{Issue, PageInfo};
 
 #[derive(Deserialize)]
 struct IssueConnection {

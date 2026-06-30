@@ -3,7 +3,7 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
-use crate::issues::list::Issue;
+use crate::linear::types::Issue;
 
 /// Saturating conversion of a length/index to a terminal coordinate.
 pub(super) fn to_u16(n: usize) -> u16 {

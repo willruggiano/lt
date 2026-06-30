@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 
-use super::list::Issue;
+use crate::linear::types::Issue;
 use crate::{db, text};
 
 const MAX_TITLE: usize = 40;
@@ -124,7 +124,7 @@ pub fn print_table(out: &mut dyn Write, issues: &[Issue]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::issues::list::{LabelConnection, LabelNode, State, Team, User};
+    use crate::linear::types::{Label, LabelConnection, State, Team, User};
 
     fn cached_to_string(issues: &[db::Issue], note: &str) -> String {
         let mut buf = Vec::new();
@@ -193,7 +193,7 @@ mod tests {
                 },
                 description: None,
                 labels: LabelConnection {
-                    nodes: vec![LabelNode { name: "bug".into() }],
+                    nodes: vec![Label { name: "bug".into() }],
                 },
                 project: None,
                 cycle: None,

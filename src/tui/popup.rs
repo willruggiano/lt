@@ -101,7 +101,7 @@ pub struct SearchOverlay {
     /// Current query typed by the user.
     pub query: TextInput,
     /// Issues returned by the last FTS query.
-    pub results: Vec<crate::issues::list::Issue>,
+    pub results: Vec<crate::linear::types::Issue>,
     /// Table selection state for the results list.
     pub table_state: TableState,
     /// When the query was last modified (used for 150ms debounce).
@@ -346,7 +346,7 @@ impl super::App {
         let issue_id: String = issue.id.clone();
         let kind2: PopupKind = kind.clone();
         let item2: PopupItem = item.clone();
-        let orig_issue: crate::issues::list::Issue = issue.clone();
+        let orig_issue: crate::linear::types::Issue = issue.clone();
 
         std::thread::spawn(move || {
             let Ok(Some(token)) = crate::config::load_token() else {
@@ -401,7 +401,7 @@ impl super::App {
 // ---------------------------------------------------------------------------
 
 fn optimistic_update_sqlite(
-    issue: &crate::issues::list::Issue,
+    issue: &crate::linear::types::Issue,
     kind: &PopupKind,
     item: &PopupItem,
 ) {
@@ -412,7 +412,7 @@ fn optimistic_update_sqlite(
     let _ = crate::db::upsert_issues(&conn, &[db_issue]);
 }
 
-fn revert_sqlite(orig: &crate::issues::list::Issue, _kind: &PopupKind) {
+fn revert_sqlite(orig: &crate::linear::types::Issue, _kind: &PopupKind) {
     let Ok(conn) = crate::db::open_db() else {
         return;
     };
@@ -446,7 +446,7 @@ fn revert_sqlite(orig: &crate::issues::list::Issue, _kind: &PopupKind) {
 }
 
 pub(crate) fn build_db_issue_optimistic(
-    issue: &crate::issues::list::Issue,
+    issue: &crate::linear::types::Issue,
     kind: &PopupKind,
     item: &PopupItem,
 ) -> crate::db::Issue {
@@ -517,7 +517,7 @@ pub(crate) fn apply_optimistic_in_memory(app: &mut App, kind: &PopupKind, item: 
             if item.id.is_none() {
                 issue.assignee = None;
             } else {
-                issue.assignee = Some(crate::issues::list::User {
+                issue.assignee = Some(crate::linear::types::User {
                     id: item.id.clone().unwrap_or_default(),
                     name: item.label.clone(),
                 });

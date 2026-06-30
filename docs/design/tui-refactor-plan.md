@@ -80,16 +80,16 @@ Raised in review; tracked here, not done in the extraction PRs:
   closed. `build_sync_status_label` split into a pure `format_sync_label`
   (covered by a fixed-clock test) plus a thin DB reader; the `last_synced_at`
   read stays for the Database-seam item above.
-- **Align the `From<db::Issue>` placement with `From<db::Comment>`.** PR9 left
-  the two rehydration impls on opposite sides: `From<db::Comment>` is db-side
-  (`src/db/comments.rs`, `db -> linear`) but `From<db::Issue>` is on the
-  destination side (`src/issues/list.rs`, `issues -> db`). The consistent
-  end-state is **both** db-side: move `From<db::Issue>` (and
-  `priority_label_to_u8`) into `src/db/issues.rs`, inverting to
-  `db -> issues::list` like `db/comments`. Precondition: `issues::list`
-  currently imports `crate::db` for its query/print helpers, so adding
-  `db -> issues::list` today creates an `issues <-> db` cycle. First make
-  `issues::list` a leaf (relocate its db-querying code), then invert the arrow.
+- [x] **Align the `From<db::Issue>` placement with `From<db::Comment>`.** Done.
+  The display `Issue` (and its nested `State`/`User`/`Team`/`Project`/`Cycle`/
+  `Parent`, reusing the existing `Label`/`LabelConnection`) and
+  `priority_label_to_u8` moved from `src/issues/list.rs` to `crate::linear::types`
+  -- it is a Linear API DTO, the same category as `Comment`. Both cache
+  conversions now live in `src/db/issues.rs`, anchored on the API type (cf.
+  `db/comments`): `From<db::Issue> for linear::Issue` (rehydrate) and
+  `Into<db::Issue> for linear::Issue` (ingest, with an `#[allow(from_over_into)]`
+  since the pair is deliberately anchored on the DTO). `to_db_issue` is gone;
+  `sync` calls `.into()`. `issues::list` keeps only the list command + fetch.
   Bigger than a move; do as its own change.
 
 ## Context
