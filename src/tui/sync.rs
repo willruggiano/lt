@@ -88,9 +88,7 @@ pub(crate) fn spawn_sync_thread(
                 // Re-query SQLite for a fresh issue list to send to TUI.
                 let issues = (|| -> Result<Vec<Issue>> {
                     let conn = crate::db::open_db(crate::db::db_path()?)?;
-                    let db_issues = crate::db::query_issues(&conn, &args)?;
-                    // Rehydrate db rows into the API issue type.
-                    Ok(db_issues.into_iter().map(Into::into).collect())
+                    crate::db::query_issues(&conn, &args)
                 })();
                 // A successful sync implies a valid token, so the identity
                 // fetch is expected to succeed; failures leave the header

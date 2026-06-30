@@ -4,7 +4,8 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::db;
-use crate::issues::display::print_table_cached;
+use crate::issues::display::print_table;
+use crate::linear::types::Issue;
 
 #[derive(Args, Clone)]
 pub struct SearchArgs {
@@ -43,41 +44,17 @@ pub fn run(out: &mut dyn Write, args: &SearchArgs) -> Result<()> {
 
     let note;
 
-    let issues: Vec<db::Issue> = if fts_count == 0 {
+    let issues: Vec<Issue> = if fts_count == 0 {
         // FTS index is empty -- fall back to LIKE search on title.
         note = "Note: FTS index is empty or stale. Run 'lt sync full' to rebuild it. \
                 Showing approximate results from title search."
             .to_string();
-        let like_pattern = format!("%{}%", args.query);
-        let sql = format!(
-            "SELECT id, identifier, title, priority_label, state_name,
-                    assignee_name, team_name, team_key, created_at, updated_at, synced_at,
-                    description, labels, project_name, cycle_name, creator_name,
-                    parent_id, parent_identifier
-             FROM issues
-             WHERE title LIKE ?1
-             LIMIT {}",
-            args.limit
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .context("failed to prepare fallback search statement")?;
-        let rows = stmt
-            .query_map([&like_pattern], db::issue_from_row)
-            .context("failed to execute fallback search")?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.context("failed to read fallback row")?);
-        }
-        result
+        db::search_issues_like(&conn, &args.query, args.limit)?
     } else {
         note = String::new();
-        let mut all = db::search_issues(&conn, &args.query)?;
-        all.truncate(args.limit);
-        all
+        db::search_issues(&conn, &args.query, args.limit)?
     };
 
-    print_table_cached(out, &issues, &note)?;
+    print_table(out, &issues, &note)?;
     Ok(())
 }

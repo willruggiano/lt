@@ -322,10 +322,12 @@ pub(crate) struct Member {
 struct CreatedIssueDisplay {
     title: String,
     priority_label: String,
+    state_id: Option<String>,
     state_name: String,
+    assignee_id: Option<String>,
     assignee_name: Option<String>,
     team_name: String,
-    team_key: String,
+    team_id: String,
 }
 
 /// Build the create-issue API input and the display fields used for optimistic
@@ -367,10 +369,12 @@ fn build_create_request(
             .priorities
             .get(modal.priority_selected)
             .map_or_else(|| "No priority".to_string(), |p| p.label.clone()),
+        state_id: input.state_id.clone(),
         state_name: modal
             .states
             .get(modal.state_selected)
             .map_or_else(|| "Backlog".to_string(), |s| s.label.clone()),
+        assignee_id: input.assignee_id.clone(),
         assignee_name: modal.assignees.get(modal.assignee_selected).and_then(|a| {
             if a.id.is_some() {
                 Some(a.label.clone())
@@ -383,7 +387,7 @@ fn build_create_request(
             .get(modal.team_selected)
             .map(|t| t.label.clone())
             .unwrap_or_default(),
-        team_key: team_id,
+        team_id,
     };
 
     (input, display)
@@ -394,29 +398,42 @@ fn cache_created_issue(
     created: &crate::linear::mutations::CreatedIssue,
     display: CreatedIssueDisplay,
 ) {
+    use crate::linear::types;
     let now = chrono::Utc::now().to_rfc3339();
-    let db_issue = crate::db::Issue {
+    // State/assignee fall back to a name-keyed id when the modal lacked one; the
+    // next real sync overwrites this optimistic row with server ids.
+    let assignee = match (display.assignee_id, display.assignee_name) {
+        (Some(id), Some(name)) => Some(types::User { id, name }),
+        _ => None,
+    };
+    let issue = types::Issue {
         id: created.id.clone(),
         identifier: created.identifier.clone(),
         title: display.title,
+        priority: types::priority_label_to_u8(&display.priority_label),
         priority_label: display.priority_label,
-        state_name: display.state_name,
-        assignee_name: display.assignee_name,
-        team_name: display.team_name,
-        team_key: Some(display.team_key),
+        state: types::State {
+            id: display
+                .state_id
+                .unwrap_or_else(|| display.state_name.clone()),
+            name: display.state_name,
+        },
+        assignee,
+        team: types::Team {
+            id: display.team_id,
+            name: display.team_name,
+        },
+        description: None,
+        labels: types::LabelConnection { nodes: Vec::new() },
+        project: None,
+        cycle: None,
+        creator: None,
+        parent: None,
         created_at: now.clone(),
         updated_at: now,
-        synced_at: chrono::Utc::now().to_rfc3339(),
-        description: None,
-        labels: String::new(),
-        project_name: None,
-        cycle_name: None,
-        creator_name: None,
-        parent_id: None,
-        parent_identifier: None,
     };
     if let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) {
-        let _ = crate::db::upsert_issues(&conn, &[db_issue]);
+        let _ = crate::db::upsert_issues(&conn, &[issue]);
     }
 }
 

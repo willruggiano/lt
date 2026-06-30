@@ -36,8 +36,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 use tracing::warn;
 
-use crate::db::Issue;
 use crate::issues::{IssueArgs, SortField};
+use crate::linear::types::Issue;
 
 // ---------------------------------------------------------------------------
 // Generated parser (bd-1pl): StemKey, StemKind, parse_query_ast_impl,
@@ -333,17 +333,17 @@ fn normalise_priority(s: &str) -> Option<&'static str> {
 ///
 /// Returns an error if the SQLite query fails (e.g. FTS index unavailable).
 // Build the structured WHERE conditions and their bound parameters from a
-// parsed query. Each filter stem maps to one or more SQLite conditions:
-//   assignee: LOWER(COALESCE(assignee_name,'')) LIKE '%<val>%'
-//             Special case: value "me" -> LOWER(assignee_name) = 'me'
-//   priority: priority_label = <normalised-label>
+// parsed query. Conditions reference the read model's join aliases (`i` issues,
+// `s` state, `t` team, `ua` assignee, `uc` creator, `p` project, `c` cycle).
+// Each filter stem maps to one or more SQLite conditions:
+//   assignee: LOWER(COALESCE(ua.name,'')) LIKE '%<val>%'
+//             Special case: value "me" -> LOWER(ua.name) = 'me'
+//   priority: i.priority_label = <normalised-label>
 //             Value is normalised via normalise_priority() before binding;
 //             unrecognised values are silently skipped.
-//   state:    LOWER(state_name) LIKE '%<val>%'
-//   team:     LOWER(team_name) LIKE '%<val>%'
-//             OR LOWER(COALESCE(team_key,'')) LIKE '%<val>%'
-//   label:    LOWER(COALESCE(labels,'')) LIKE '%<val>%'
-//             (column is 'labels', not 'label_names')
+//   state:    LOWER(s.name) LIKE '%<val>%'
+//   team:     LOWER(t.name) LIKE '%<val>%' OR LOWER(COALESCE(i.team_id,'')) LIKE '%<val>%'
+//   label:    EXISTS join over issue_labels/labels matching LOWER(l.name)
 fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::types::ToSql>>) {
     let mut conditions: Vec<String> = Vec::new();
     // rusqlite requires heterogeneous param lists via the params! macro or by
@@ -355,9 +355,9 @@ fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::type
         if a == "me" {
             // "me" without auth context: match the literal string "me" -- callers
             // that have a viewer name should resolve it before calling run_query.
-            conditions.push("LOWER(assignee_name) = 'me'".to_string());
+            conditions.push("LOWER(ua.name) = 'me'".to_string());
         } else {
-            conditions.push("LOWER(COALESCE(assignee_name,'')) LIKE ?".to_string());
+            conditions.push("LOWER(COALESCE(ua.name,'')) LIKE ?".to_string());
             bind.push(Box::new(format!("%{a}%")));
         }
     }
@@ -366,7 +366,7 @@ fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::type
     if let Some(ref p) = q.priority
         && let Some(label) = normalise_priority(p)
     {
-        conditions.push("priority_label = ?".to_string());
+        conditions.push("i.priority_label = ?".to_string());
         bind.push(Box::new(label.to_string()));
     }
     // Unknown priority string: skip the filter silently so partial typing
@@ -374,14 +374,14 @@ fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::type
 
     // -- state --
     if let Some(ref s) = q.state {
-        conditions.push("LOWER(state_name) LIKE ?".to_string());
+        conditions.push("LOWER(s.name) LIKE ?".to_string());
         bind.push(Box::new(format!("%{s}%")));
     }
 
     // -- team --
     if let Some(ref t) = q.team {
         conditions
-            .push("(LOWER(team_name) LIKE ? OR LOWER(COALESCE(team_key,'')) LIKE ?)".to_string());
+            .push("(LOWER(t.name) LIKE ? OR LOWER(COALESCE(i.team_id,'')) LIKE ?)".to_string());
         let pat = format!("%{}%", t.to_lowercase());
         bind.push(Box::new(pat.clone()));
         bind.push(Box::new(pat));
@@ -389,25 +389,29 @@ fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::type
 
     // -- label --
     if let Some(ref l) = q.label {
-        conditions.push("LOWER(COALESCE(labels,'')) LIKE ?".to_string());
+        conditions.push(
+            "EXISTS (SELECT 1 FROM issue_labels il JOIN labels lb ON lb.id = il.label_id
+                     WHERE il.issue_id = i.id AND LOWER(lb.name) LIKE ?)"
+                .to_string(),
+        );
         bind.push(Box::new(format!("%{l}%")));
     }
 
     // -- project --
     if let Some(ref p) = q.project {
-        conditions.push("LOWER(COALESCE(project_name,'')) LIKE ?".to_string());
+        conditions.push("LOWER(COALESCE(p.name,'')) LIKE ?".to_string());
         bind.push(Box::new(format!("%{p}%")));
     }
 
     // -- cycle --
     if let Some(ref c) = q.cycle {
-        conditions.push("LOWER(COALESCE(cycle_name,'')) LIKE ?".to_string());
+        conditions.push("LOWER(COALESCE(c.name,'')) LIKE ?".to_string());
         bind.push(Box::new(format!("%{c}%")));
     }
 
     // -- creator --
     if let Some(ref c) = q.creator {
-        conditions.push("LOWER(COALESCE(creator_name,'')) LIKE ?".to_string());
+        conditions.push("LOWER(COALESCE(uc.name,'')) LIKE ?".to_string());
         bind.push(Box::new(format!("%{c}%")));
     }
 
@@ -423,8 +427,11 @@ fn build_sql(q: &ParsedQuery, conditions: &[String], limit: usize) -> String {
             sort_col(field),
             if *dir == SortDir::Desc { "DESC" } else { "ASC" },
         ),
-        None => ("updated_at", "DESC"),
+        None => ("i.updated_at", "DESC"),
     };
+
+    let cols = crate::db::ISSUE_COLUMNS;
+    let joins = crate::db::ISSUE_JOINS;
 
     if q.fts_terms.is_empty() {
         let where_clause = if conditions.is_empty() {
@@ -433,11 +440,9 @@ fn build_sql(q: &ParsedQuery, conditions: &[String], limit: usize) -> String {
             format!("WHERE {}", conditions.join(" AND "))
         };
         format!(
-            "SELECT id, identifier, title, priority_label, state_name,
-                    assignee_name, team_name, team_key, created_at, updated_at, synced_at,
-                    description, labels, project_name, cycle_name, creator_name,
-                    parent_id, parent_identifier
-             FROM issues
+            "SELECT {cols}
+             FROM issues i
+             {joins}
              {where_clause}
              ORDER BY {order_col} {order_dir}
              LIMIT {limit}",
@@ -450,13 +455,10 @@ fn build_sql(q: &ParsedQuery, conditions: &[String], limit: usize) -> String {
             format!(" AND {}", conditions.join(" AND "))
         };
         format!(
-            "SELECT i.id, i.identifier, i.title, i.priority_label, i.state_name,
-                    i.assignee_name, i.team_name, i.team_key, i.created_at, i.updated_at,
-                    i.synced_at, i.description, i.labels,
-                    i.project_name, i.cycle_name, i.creator_name,
-                    i.parent_id, i.parent_identifier
+            "SELECT {cols}
              FROM issues i
              JOIN issues_fts ON issues_fts.rowid = i.rowid
+             {joins}
              WHERE issues_fts MATCH ?{extra_cond}
              ORDER BY {order_col} {order_dir}
              LIMIT {limit}",
@@ -2170,29 +2172,47 @@ mod run_query_tests {
     use rusqlite::Connection;
 
     use super::*;
-    use crate::db::{self, Issue};
+    use crate::db;
+    use crate::linear::types;
 
-    /// A baseline issue; tests override only the columns a filter targets.
+    fn user(name: &str) -> types::User {
+        types::User {
+            id: name.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn state(name: &str) -> types::State {
+        types::State {
+            id: name.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// A baseline issue; tests override only the fields a filter targets. Entity
+    /// ids mirror names (the team id is its key) so the relational upsert
+    /// reconstructs them.
     fn issue(id: &str, title: &str) -> Issue {
         Issue {
             id: id.to_string(),
             identifier: format!("ENG-{id}"),
             title: title.to_string(),
             priority_label: "Medium".to_string(),
-            state_name: "Todo".to_string(),
-            assignee_name: None,
-            team_name: "Engineering".to_string(),
-            team_key: Some("ENG".to_string()),
+            priority: 3,
+            state: state("Todo"),
+            assignee: None,
+            team: types::Team {
+                id: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            description: None,
+            labels: types::LabelConnection { nodes: Vec::new() },
+            project: None,
+            cycle: None,
+            creator: None,
+            parent: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
-            synced_at: String::new(),
-            description: None,
-            labels: String::new(),
-            project_name: None,
-            cycle_name: None,
-            creator_name: None,
-            parent_id: None,
-            parent_identifier: None,
         }
     }
 
@@ -2202,24 +2222,43 @@ mod run_query_tests {
 
         let mut r1 = issue("1", "fix oauth login");
         r1.priority_label = "Urgent".to_string();
-        r1.assignee_name = Some("Alice".to_string());
+        r1.assignee = Some(user("Alice"));
         r1.updated_at = "2026-01-05T00:00:00Z".to_string();
 
         let mut r2 = issue("2", "render markdown");
         r2.priority_label = "High".to_string();
-        r2.state_name = "In Progress".to_string();
-        r2.assignee_name = Some("Bob".to_string());
-        r2.team_name = "Design".to_string();
-        r2.team_key = Some("DES".to_string());
+        r2.state = state("In Progress");
+        r2.assignee = Some(user("Bob"));
+        r2.team = types::Team {
+            id: "DES".to_string(),
+            name: "Design".to_string(),
+        };
         r2.updated_at = "2026-01-04T00:00:00Z".to_string();
-        r2.labels = "backend,urgent".to_string();
-        r2.project_name = Some("Platform".to_string());
-        r2.cycle_name = Some("Cycle 7".to_string());
-        r2.creator_name = Some("Carol".to_string());
+        r2.labels = types::LabelConnection {
+            nodes: vec![
+                types::Label {
+                    id: "backend".to_string(),
+                    name: "backend".to_string(),
+                },
+                types::Label {
+                    id: "urgent".to_string(),
+                    name: "urgent".to_string(),
+                },
+            ],
+        };
+        r2.project = Some(types::Project {
+            id: "Platform".to_string(),
+            name: "Platform".to_string(),
+        });
+        r2.cycle = Some(types::Cycle {
+            id: "Cycle 7".to_string(),
+            name: Some("Cycle 7".to_string()),
+        });
+        r2.creator = Some(user("Carol"));
 
         let mut r3 = issue("3", "oauth token refresh");
         r3.priority_label = "Low".to_string();
-        r3.state_name = "Done".to_string();
+        r3.state = state("Done");
         r3.updated_at = "2026-01-03T00:00:00Z".to_string();
 
         db::upsert_issues(&conn, &[r1, r2, r3]).unwrap();

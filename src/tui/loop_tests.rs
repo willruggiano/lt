@@ -33,33 +33,39 @@ fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
 
-/// A `db::Issue` row with a deterministic `updated_at` so DESC ordering is
-/// stable across the page boundary.
-fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> crate::db::Issue {
-    crate::db::Issue {
+/// A list issue with a deterministic `updated_at` so DESC ordering is stable
+/// across the page boundary. State/team ids mirror their names so the
+/// relational upsert reconstructs them.
+fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> crate::linear::types::Issue {
+    use crate::linear::types;
+    types::Issue {
         id: id.to_string(),
         identifier: ident.to_string(),
         title: format!("issue {ident}"),
         priority_label: "No priority".to_string(),
-        state_name: state.to_string(),
-        assignee_name: None,
-        team_name: "Engineering".to_string(),
-        team_key: Some("ENG".to_string()),
+        priority: 0,
+        state: types::State {
+            id: state.to_string(),
+            name: state.to_string(),
+        },
+        assignee: None,
+        team: types::Team {
+            id: "ENG".to_string(),
+            name: "Engineering".to_string(),
+        },
+        description: None,
+        labels: types::LabelConnection { nodes: Vec::new() },
+        project: None,
+        cycle: None,
+        creator: None,
+        parent: None,
         created_at: format!("2026-01-{day:02}T00:00:00Z"),
         updated_at: format!("2026-01-{day:02}T00:00:00Z"),
-        synced_at: String::new(),
-        description: None,
-        labels: String::new(),
-        project_name: None,
-        cycle_name: None,
-        creator_name: None,
-        parent_id: None,
-        parent_identifier: None,
     }
 }
 
 /// Build an `App` backed by a fresh in-memory `Database` seeded with `rows`.
-fn app_with_db(rows: &[crate::db::Issue]) -> Result<App> {
+fn app_with_db(rows: &[crate::linear::types::Issue]) -> Result<App> {
     let db = Database::memory()?;
     {
         let conn = db.connect()?;
@@ -181,11 +187,14 @@ fn populate_relations_fills_parent_and_children() {
     let mut parent = db_issue("p1", "ENG-9", "Todo", 9);
     parent.title = "the parent".to_string();
     let mut child = db_issue("c1", "ENG-10", "Done", 8);
-    child.parent_id = Some("p1".to_string());
+    child.parent = Some(crate::linear::types::Parent {
+        id: "p1".to_string(),
+        identifier: "ENG-9".to_string(),
+    });
     let app = app_with_db(&[parent, child]).unwrap();
 
     // The issue whose relations we resolve; populate_relations keys off its id.
-    let mut issue: crate::linear::types::Issue = db_issue("c1", "ENG-10", "Done", 8).into();
+    let mut issue: crate::linear::types::Issue = db_issue("c1", "ENG-10", "Done", 8);
     let mut detail = build_cached_detail(&issue, Vec::new());
 
     // Seed the issue under a parent so query_children finds it.
@@ -294,7 +303,7 @@ fn poll_sync_events_done_refreshes_and_sets_identity() {
 
 #[test]
 fn poll_detail_comment_events_done_updates_detail() {
-    let issue: crate::linear::types::Issue = db_issue("c1", "ENG-1", "Todo", 5).into();
+    let issue: crate::linear::types::Issue = db_issue("c1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(&[]).unwrap();
     app.detail = Some(build_cached_detail(&issue, Vec::new()));
     let (tx, rx) = mpsc::channel();

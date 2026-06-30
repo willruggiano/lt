@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 pub use comments::{Comment, delete_comments_for_issue, query_comments, upsert_comments};
-pub(crate) use issues::issue_from_row;
+pub(crate) use issues::{ISSUE_COLUMNS, ISSUE_JOINS, issue_from_row};
 pub use issues::{
-    Issue, get_meta, query_children, query_issues, query_issues_page, search_issues, set_meta,
-    upsert_issue_graph, upsert_issues,
+    get_meta, query_children, query_issues, query_issues_page, search_issues, search_issues_like,
+    set_meta, upsert_issues,
 };
 use rusqlite::{Connection, Params};
 
@@ -33,24 +33,41 @@ pub(crate) fn db_path() -> Result<PathBuf> {
     Ok(lt_dir.join("lt.db"))
 }
 
+/// Whether `column` exists on the `issues` table.
+fn issues_has_column(conn: &Connection, column: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name=?1",
+        [column],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
 /// Adds a column to the `issues` table if it does not already exist.
 fn add_column_if_absent(conn: &Connection, column: &str, alter_sql: &str) -> Result<()> {
-    let exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name=?1",
-            [column],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
-    if !exists {
+    if !issues_has_column(conn, column) {
         conn.execute_batch(alter_sql)
             .with_context(|| format!("failed to add {column} column"))?;
     }
     Ok(())
 }
 
+/// Drops a denormalized name column left over from the flat `issues` schema.
+/// No-op on a fresh database that never had it.
+fn drop_column_if_present(conn: &Connection, column: &str) -> Result<()> {
+    if issues_has_column(conn, column) {
+        conn.execute_batch(&format!("ALTER TABLE issues DROP COLUMN {column};"))
+            .with_context(|| format!("failed to drop {column} column"))?;
+    }
+    Ok(())
+}
+
 /// Creates the base schema (tables, FTS index, and triggers) if it is absent.
+///
+/// `issues` holds only the issue's intrinsic columns plus FK columns (added by
+/// migrations); referenced entity names live in their own tables and are joined
+/// back into the fragment read model.
 fn create_base_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS issues (
@@ -58,10 +75,6 @@ fn create_base_schema(conn: &Connection) -> Result<()> {
             identifier       TEXT NOT NULL,
             title            TEXT NOT NULL,
             priority_label   TEXT NOT NULL,
-            state_name       TEXT NOT NULL,
-            assignee_name    TEXT,
-            team_name        TEXT NOT NULL,
-            team_key         TEXT,
             created_at       TEXT NOT NULL,
             updated_at       TEXT NOT NULL,
             synced_at        TEXT NOT NULL
@@ -112,9 +125,9 @@ fn create_base_schema(conn: &Connection) -> Result<()> {
 /// pending-overlay table if they are absent.
 ///
 /// These are the normalized "base" the sync layer populates from fetched issue
-/// fragments; the flat `issues` columns remain the read path until the query
-/// layer moves onto joins. `pending_overlay` is the local-intent half of the
-/// base/overlay split: a delta write touches only the base tables, never it.
+/// fragments and the read model joins back into the fragment type.
+/// `pending_overlay` is the local-intent half of the base/overlay split: a
+/// delta write touches only the base tables, never it.
 fn create_relational_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, name TEXT NOT NULL);
@@ -147,7 +160,7 @@ fn create_relational_schema(conn: &Connection) -> Result<()> {
 pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     create_base_schema(conn)?;
 
-    // Migrations: add columns that were introduced after the initial schema.
+    // Intrinsic columns added after the initial schema.
     add_column_if_absent(
         conn,
         "description",
@@ -155,38 +168,12 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     )?;
     add_column_if_absent(
         conn,
-        "labels",
-        "ALTER TABLE issues ADD COLUMN labels TEXT NOT NULL DEFAULT '';",
-    )?;
-    add_column_if_absent(
-        conn,
-        "project_name",
-        "ALTER TABLE issues ADD COLUMN project_name TEXT;",
-    )?;
-    add_column_if_absent(
-        conn,
-        "cycle_name",
-        "ALTER TABLE issues ADD COLUMN cycle_name TEXT;",
-    )?;
-    add_column_if_absent(
-        conn,
-        "creator_name",
-        "ALTER TABLE issues ADD COLUMN creator_name TEXT;",
-    )?;
-    add_column_if_absent(
-        conn,
         "parent_id",
         "ALTER TABLE issues ADD COLUMN parent_id TEXT;",
     )?;
-    add_column_if_absent(
-        conn,
-        "parent_identifier",
-        "ALTER TABLE issues ADD COLUMN parent_identifier TEXT;",
-    )?;
 
-    // Relational FK columns: populated by the sync layer alongside the flat
-    // name columns. The flat columns stay the read path until the query layer
-    // moves onto joins.
+    // Relational FK columns: the read model joins through these to the entity
+    // tables instead of reading denormalized name columns.
     for (col, sql) in [
         ("team_id", "ALTER TABLE issues ADD COLUMN team_id TEXT;"),
         ("state_id", "ALTER TABLE issues ADD COLUMN state_id TEXT;"),
@@ -208,6 +195,22 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     }
 
     create_relational_schema(conn)?;
+
+    // Drop the denormalized name columns now that the read model joins. A fresh
+    // database never had them; an existing one is migrated in place.
+    for col in [
+        "state_name",
+        "assignee_name",
+        "team_name",
+        "team_key",
+        "labels",
+        "project_name",
+        "cycle_name",
+        "creator_name",
+        "parent_identifier",
+    ] {
+        drop_column_if_present(conn, col)?;
+    }
 
     Ok(())
 }

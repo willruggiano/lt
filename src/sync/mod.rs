@@ -27,12 +27,7 @@ where
         let (issues, has_next, end_cursor) = fetch_page(after)?;
 
         if !issues.is_empty() {
-            // Flat write (compatibility read path) plus the normalized base the
-            // query layer will move onto. The flat row must land first: the
-            // graph upsert fills FK columns on the existing row.
-            let db_issues: Vec<db::Issue> = issues.iter().cloned().map(Into::into).collect();
-            db::upsert_issues(conn, &db_issues)?;
-            db::upsert_issue_graph(conn, &issues)?;
+            db::upsert_issues(conn, &issues)?;
         }
 
         if !has_next {

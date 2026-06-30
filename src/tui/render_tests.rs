@@ -11,13 +11,9 @@ use ratatui::backend::TestBackend;
 
 use super::*;
 
-/// Convert a seeded `sim` dataset into the list issues the TUI renders.
+/// The seeded `sim` dataset's list issues, which the TUI renders.
 fn sim_issues(seed: u64, size: usize) -> Vec<Issue> {
-    crate::sim::generate(seed, size)
-        .issues
-        .into_iter()
-        .map(Into::into)
-        .collect()
+    crate::sim::generate(seed, size).issues
 }
 
 /// Draw one frame at `w`x`h` and return the rendered buffer as text.
@@ -186,7 +182,7 @@ fn priority_label_to_u8_maps_levels() {
 }
 
 #[test]
-fn db_to_api_and_list_conversions() {
+fn db_comment_to_api_conversion() {
     let comment = crate::db::Comment {
         id: "c1".to_string(),
         issue_id: "i1".to_string(),
@@ -198,43 +194,6 @@ fn db_to_api_and_list_conversions() {
     };
     let api = crate::linear::types::Comment::from(comment);
     assert_eq!(api.author(), "Alice");
-
-    let mut row = crate::db::Issue {
-        id: "1".to_string(),
-        identifier: "ENG-1".to_string(),
-        title: "t".to_string(),
-        priority_label: "High".to_string(),
-        state_name: "Todo".to_string(),
-        assignee_name: Some("Bob".to_string()),
-        team_name: "Eng".to_string(),
-        team_key: Some("ENG".to_string()),
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        updated_at: "2026-01-02T00:00:00Z".to_string(),
-        synced_at: String::new(),
-        description: Some("d".to_string()),
-        labels: "bug,backend".to_string(),
-        project_name: None,
-        cycle_name: None,
-        creator_name: None,
-        parent_id: Some("9".to_string()),
-        parent_identifier: Some("ENG-9".to_string()),
-    };
-    let listed = crate::linear::types::Issue::from(row.clone());
-    assert_eq!(listed.priority, 2);
-    assert_eq!(listed.labels.nodes.len(), 2);
-    assert_eq!(
-        listed.parent.as_ref().map(|p| p.identifier.as_str()),
-        Some("ENG-9")
-    );
-
-    // Empty labels string yields no label nodes.
-    row.labels = String::new();
-    assert!(
-        crate::linear::types::Issue::from(row)
-            .labels
-            .nodes
-            .is_empty()
-    );
 }
 
 #[test]
@@ -242,10 +201,11 @@ fn optimistic_builders_apply_popup_choice() {
     let mut app = app_with_issues(0, 1);
     let issue = app.issues[0].clone();
 
-    let db = build_db_issue_optimistic(&issue, &PopupKind::Priority, &item("Urgent", Some("1")));
-    assert_eq!(db.priority_label, "Urgent");
-    let unassigned = build_db_issue_optimistic(&issue, &PopupKind::Assignee, &item("x", None));
-    assert!(unassigned.assignee_name.is_none());
+    let built = build_optimistic_issue(&issue, &PopupKind::Priority, &item("Urgent", Some("1")));
+    assert_eq!(built.priority_label, "Urgent");
+    assert_eq!(built.priority, 1);
+    let unassigned = build_optimistic_issue(&issue, &PopupKind::Assignee, &item("x", None));
+    assert!(unassigned.assignee.is_none());
 
     app.table_state.select(Some(0));
     apply_optimistic_in_memory(&mut app, &PopupKind::Priority, &item("Urgent", Some("1")));

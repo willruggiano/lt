@@ -176,8 +176,8 @@ impl SearchOverlay {
             .and_then(crate::db::open_db)
             .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
         {
-            Ok(db_issues) => {
-                self.results = db_issues.into_iter().map(Into::into).collect();
+            Ok(issues) => {
+                self.results = issues;
                 if self.results.is_empty() {
                     self.table_state.select(None);
                 } else {
@@ -411,98 +411,19 @@ fn optimistic_update_sqlite(
     let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) else {
         return;
     };
-    let db_issue = build_db_issue_optimistic(issue, kind, item);
-    let _ = crate::db::upsert_issues(&conn, &[db_issue]);
+    let _ = crate::db::upsert_issues(&conn, &[build_optimistic_issue(issue, kind, item)]);
 }
 
 fn revert_sqlite(orig: &crate::linear::types::Issue, _kind: &PopupKind) {
     let Ok(conn) = crate::db::db_path().and_then(crate::db::open_db) else {
         return;
     };
-    let db_issue = crate::db::Issue {
-        id: orig.id.clone(),
-        identifier: orig.identifier.clone(),
-        title: orig.title.clone(),
-        priority_label: orig.priority_label.clone(),
-        state_name: orig.state.name.clone(),
-        assignee_name: orig.assignee.as_ref().map(|a| a.name.clone()),
-        team_name: orig.team.name.clone(),
-        team_key: Some(orig.team.id.clone()),
-        created_at: orig.created_at.clone(),
-        updated_at: orig.updated_at.clone(),
-        synced_at: chrono::Utc::now().to_rfc3339(),
-        description: orig.description.clone(),
-        labels: orig
-            .labels
-            .nodes
-            .iter()
-            .map(|l| l.name.as_str())
-            .collect::<Vec<_>>()
-            .join(","),
-        project_name: orig.project.as_ref().map(|p| p.name.clone()),
-        cycle_name: orig.cycle.as_ref().and_then(|c| c.name.clone()),
-        creator_name: orig.creator.as_ref().map(|u| u.name.clone()),
-        parent_id: orig.parent.as_ref().map(|p| p.id.clone()),
-        parent_identifier: orig.parent.as_ref().map(|p| p.identifier.clone()),
-    };
-    let _ = crate::db::upsert_issues(&conn, &[db_issue]);
+    let _ = crate::db::upsert_issues(&conn, std::slice::from_ref(orig));
 }
 
-pub(crate) fn build_db_issue_optimistic(
-    issue: &crate::linear::types::Issue,
-    kind: &PopupKind,
-    item: &PopupItem,
-) -> crate::db::Issue {
-    let priority_label = match kind {
-        PopupKind::Priority => item.label.clone(),
-        _ => issue.priority_label.clone(),
-    };
-    let state_name = match kind {
-        PopupKind::State => item.label.clone(),
-        _ => issue.state.name.clone(),
-    };
-    let assignee_name = match kind {
-        PopupKind::Assignee => {
-            if item.id.is_none() {
-                None
-            } else {
-                Some(item.label.clone())
-            }
-        }
-        _ => issue.assignee.as_ref().map(|a| a.name.clone()),
-    };
-    crate::db::Issue {
-        id: issue.id.clone(),
-        identifier: issue.identifier.clone(),
-        title: issue.title.clone(),
-        priority_label,
-        state_name,
-        assignee_name,
-        team_name: issue.team.name.clone(),
-        team_key: Some(issue.team.id.clone()),
-        created_at: issue.created_at.clone(),
-        updated_at: issue.updated_at.clone(),
-        synced_at: chrono::Utc::now().to_rfc3339(),
-        description: issue.description.clone(),
-        labels: issue
-            .labels
-            .nodes
-            .iter()
-            .map(|l| l.name.as_str())
-            .collect::<Vec<_>>()
-            .join(","),
-        project_name: issue.project.as_ref().map(|p| p.name.clone()),
-        cycle_name: issue.cycle.as_ref().and_then(|c| c.name.clone()),
-        creator_name: issue.creator.as_ref().map(|u| u.name.clone()),
-        parent_id: issue.parent.as_ref().map(|p| p.id.clone()),
-        parent_identifier: issue.parent.as_ref().map(|p| p.identifier.clone()),
-    }
-}
-
-pub(crate) fn apply_optimistic_in_memory(app: &mut App, kind: &PopupKind, item: &PopupItem) {
-    let Some(issue) = app.selected_issue_mut() else {
-        return;
-    };
+/// Apply a popup choice to an issue fragment in place. Shared by the in-memory
+/// update and the optimistic DB write so they never diverge.
+fn apply_change(issue: &mut crate::linear::types::Issue, kind: &PopupKind, item: &PopupItem) {
     match kind {
         PopupKind::State => {
             issue.state.name.clone_from(&item.label);
@@ -526,6 +447,24 @@ pub(crate) fn apply_optimistic_in_memory(app: &mut App, kind: &PopupKind, item: 
                 });
             }
         }
+    }
+}
+
+/// The optimistic issue fragment a popup choice produces: the selected issue
+/// with the chosen field applied.
+pub(crate) fn build_optimistic_issue(
+    issue: &crate::linear::types::Issue,
+    kind: &PopupKind,
+    item: &PopupItem,
+) -> crate::linear::types::Issue {
+    let mut updated = issue.clone();
+    apply_change(&mut updated, kind, item);
+    updated
+}
+
+pub(crate) fn apply_optimistic_in_memory(app: &mut App, kind: &PopupKind, item: &PopupItem) {
+    if let Some(issue) = app.selected_issue_mut() {
+        apply_change(issue, kind, item);
     }
 }
 
