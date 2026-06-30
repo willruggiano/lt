@@ -30,20 +30,21 @@ posture is in [[contributing.md#Strictness]]; engineering principles in
 - There is no `tests/` directory. Files under `tests/` compile as separate
   crates and reach only the public API; our tests assert on private seams (the
   render path into a buffer, private `App` and parser internals), so they must
-  stay crate-internal. Rule of thumb: a test that needs a private item is inline;
-  only public-API behavior would belong under `tests/`, and we expose no such
-  surface.
+  stay crate-internal. Rule of thumb: a test that needs a private item is
+  inline; only public-API behavior would belong under `tests/`, and we expose no
+  such surface.
 - When a module's inline tests dominate its file size, the `#[cfg(test)] mod`
   may move to an in-crate sibling `*_tests.rs` file, which keeps private access:
   - from a `mod.rs`: `#[cfg(test)] mod foo_tests;` resolving to `foo_tests.rs`;
-  - from any other file:
-    `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;` — the `#[path]` keeps
-    it a child module; a bare `mod` would be a sibling and see only `pub` items
+  - from any other file: `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;`
+    — the `#[path]` keeps it a child module; a bare `mod` would be a sibling and
+    see only `pub` items
     ([Rust Reference: Modules](https://doc.rust-lang.org/reference/items/modules.html)).
 
   This is a readability lever only: the `#[cfg(test)]` gate already keeps tests
-  out of `cargo build`, so moving them changes no compile time. Prefer inline for
-  normally-sized modules.
+  out of `cargo build`, so moving them changes no compile time. Prefer inline
+  for normally-sized modules.
+
 - Shared fixtures and helpers go at the top of the test module — e.g. `draw`,
   `sim_issues`, `app_with_issues` in `src/tui/mod.rs`.
 - A test that needs the seeded data generator is gated
