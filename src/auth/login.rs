@@ -479,4 +479,191 @@ mod tests {
                 .starts_with("HTTP/1.1 404 Not Found\r\n")
         );
     }
+
+    // -- Token exchange (pure) ------------------------------------------------
+
+    fn exchange<'a>() -> TokenExchange<'a> {
+        TokenExchange {
+            client_id: "cid",
+            client_secret: "csecret",
+            code: "the-code",
+            redirect_uri: "http://localhost:7342/callback",
+            code_verifier: "verifier",
+        }
+    }
+
+    #[test]
+    fn build_token_params_carries_grant_and_credentials() {
+        let params = build_token_params(&exchange());
+        let map: std::collections::HashMap<_, _> = params.iter().copied().collect();
+        assert_eq!(map.get("grant_type").copied(), Some("authorization_code"));
+        assert_eq!(map.get("client_id").copied(), Some("cid"));
+        assert_eq!(map.get("client_secret").copied(), Some("csecret"));
+        assert_eq!(map.get("code").copied(), Some("the-code"));
+        assert_eq!(map.get("code_verifier").copied(), Some("verifier"));
+    }
+
+    #[test]
+    fn parse_token_response_deserializes_success_body() {
+        let token =
+            parse_token_response(200, r#"{"access_token":"tok","token_type":"Bearer"}"#).unwrap();
+        assert_eq!(token.access_token, "tok");
+        assert_eq!(token.token_type, "Bearer");
+    }
+
+    #[test]
+    fn parse_token_response_rejects_non_2xx_with_body() {
+        let err = parse_token_response(400, "invalid_grant").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("HTTP 400"));
+        assert!(msg.contains("invalid_grant"));
+    }
+
+    #[test]
+    fn parse_token_response_rejects_malformed_json() {
+        assert!(parse_token_response(200, "not json").is_err());
+    }
+
+    // -- Callback parsing (pure) ----------------------------------------------
+
+    fn request(path_and_query: &str) -> String {
+        format!("GET {path_and_query} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    }
+
+    #[test]
+    fn parse_callback_request_returns_code_on_match() {
+        let raw = request("/callback?state=st&code=abc123");
+        match parse_callback_request(&raw, "st") {
+            CallbackOutcome::Code(c) => assert_eq!(c, "abc123"),
+            _ => panic!("expected Code"),
+        }
+    }
+
+    #[test]
+    fn parse_callback_request_ignores_other_paths() {
+        let raw = request("/favicon.ico");
+        assert!(matches!(
+            parse_callback_request(&raw, "st"),
+            CallbackOutcome::Ignore
+        ));
+    }
+
+    #[test]
+    fn parse_callback_request_detects_state_mismatch() {
+        let raw = request("/callback?state=wrong&code=abc");
+        assert!(matches!(
+            parse_callback_request(&raw, "st"),
+            CallbackOutcome::StateMismatch
+        ));
+    }
+
+    #[test]
+    fn parse_callback_request_surfaces_provider_error() {
+        let raw = request("/callback?state=st&error=access_denied");
+        match parse_callback_request(&raw, "st") {
+            CallbackOutcome::Denied(e) => assert_eq!(e, "access_denied"),
+            _ => panic!("expected Denied"),
+        }
+    }
+
+    #[test]
+    fn parse_callback_request_denies_when_no_code_or_error() {
+        let raw = request("/callback?state=st");
+        match parse_callback_request(&raw, "st") {
+            CallbackOutcome::Denied(e) => assert_eq!(e, "unknown error"),
+            _ => panic!("expected Denied"),
+        }
+    }
+
+    // -- run_with_credentials end-to-end (fakes; no browser/TCP/network) ------
+
+    struct FakeBrowser {
+        opened: std::cell::RefCell<Vec<String>>,
+    }
+    impl Browser for FakeBrowser {
+        fn open(&self, url: &str) {
+            self.opened.borrow_mut().push(url.to_string());
+        }
+    }
+
+    struct ScriptedCallbackListener {
+        code: String,
+    }
+    impl CallbackListener for ScriptedCallbackListener {
+        fn wait_for_code(&self, _port: u16, _expected_state: &str) -> Result<String> {
+            Ok(self.code.clone())
+        }
+    }
+
+    struct FakeTokenExchanger {
+        status: u16,
+        body: String,
+        calls: std::cell::RefCell<Vec<Vec<(String, String)>>>,
+    }
+    impl TokenExchanger for FakeTokenExchanger {
+        fn post_form(&self, _url: &str, params: &[(&str, &str)]) -> Result<(u16, String)> {
+            self.calls.borrow_mut().push(
+                params
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect(),
+            );
+            Ok((self.status, self.body.clone()))
+        }
+    }
+
+    #[test]
+    fn run_with_credentials_drives_the_full_flow() {
+        let browser = FakeBrowser {
+            opened: std::cell::RefCell::new(Vec::new()),
+        };
+        let listener = ScriptedCallbackListener {
+            code: "auth-code".to_string(),
+        };
+        let exchanger = FakeTokenExchanger {
+            status: 200,
+            body: r#"{"access_token":"final-token","token_type":"Bearer"}"#.to_string(),
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+        let flow = OauthFlow {
+            browser: &browser,
+            listener: &listener,
+            exchanger: &exchanger,
+        };
+
+        let token = run_with_credentials(&flow, "cid", "csecret").unwrap();
+        assert_eq!(token.access_token, "final-token");
+
+        // The browser was sent the authorization URL.
+        let opened = browser.opened.borrow();
+        assert_eq!(opened.len(), 1);
+        assert!(opened[0].contains("linear.app"));
+
+        // The exchange POSTed the code from the listener and our credentials.
+        let calls = exchanger.calls.borrow();
+        let sent: std::collections::HashMap<_, _> = calls[0].iter().cloned().collect();
+        assert_eq!(sent.get("code").map(String::as_str), Some("auth-code"));
+        assert_eq!(sent.get("client_id").map(String::as_str), Some("cid"));
+    }
+
+    #[test]
+    fn run_with_credentials_propagates_exchange_failure() {
+        let browser = FakeBrowser {
+            opened: std::cell::RefCell::new(Vec::new()),
+        };
+        let listener = ScriptedCallbackListener {
+            code: "auth-code".to_string(),
+        };
+        let exchanger = FakeTokenExchanger {
+            status: 401,
+            body: "unauthorized".to_string(),
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+        let flow = OauthFlow {
+            browser: &browser,
+            listener: &listener,
+            exchanger: &exchanger,
+        };
+        assert!(run_with_credentials(&flow, "cid", "csecret").is_err());
+    }
 }
