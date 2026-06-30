@@ -360,7 +360,7 @@ fn poll_modal_events_applies_loaded_data() {
     .unwrap();
     app.new_issue_modal = Some(NewIssueModal {
         focused_field: NewIssueField::Title,
-        title: TextInput::from_string(String::new()),
+        title: TextInput::from(String::new()),
         description: String::new(),
         teams: Vec::new(),
         team_selected: 0,

@@ -122,7 +122,7 @@ impl SearchOverlay {
         // Pre-populate the query bar with the default sort stem.
         let default_q = search_query::DEFAULT_QUERY.to_string();
         let ast = search_query::parse_query_ast(&default_q);
-        let query = TextInput::from_string(default_q);
+        let query = TextInput::from(default_q);
         let mut completer = search_query::Completer::new();
         // Initialize completer so ghost text and Tab work immediately.
         completer.update(&ast, query.cursor);
@@ -589,7 +589,7 @@ pub(crate) fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModi
         KeyCode::Char('c') if ctrl => {
             // Ctrl+C resets the search query back to the default.
             if let Some(ref mut overlay) = app.search_overlay {
-                overlay.query = TextInput::from_string(search_query::DEFAULT_QUERY.to_string());
+                overlay.query = TextInput::from(search_query::DEFAULT_QUERY.to_string());
                 overlay.last_changed = Some(Instant::now());
             }
         }

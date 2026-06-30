@@ -340,7 +340,7 @@ fn new_issue_modal() {
     let mut app = app_with_issues(0, 12);
     app.new_issue_modal = Some(NewIssueModal {
         focused_field: NewIssueField::Title,
-        title: TextInput::from_string("Fix the renderer".to_string()),
+        title: TextInput::from("Fix the renderer".to_string()),
         description: "Some description.".to_string(),
         teams: vec![PopupItem {
             label: "Engineering".to_string(),

@@ -886,7 +886,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             // Restore active filter when re-opening, unless it is just the
             // default sort stem.
             if app.active_filter.raw != search_query::DEFAULT_QUERY {
-                overlay.query = TextInput::from_string(app.active_filter.raw.clone());
+                overlay.query = TextInput::from(app.active_filter.raw.clone());
                 overlay.ast = app.active_filter.clone();
                 overlay.last_changed = Some(Instant::now());
             }
