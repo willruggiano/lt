@@ -4,7 +4,7 @@
 
 Done, each green under `cargo test` + `cargo test --features sim` + clippy (both
 configs); full `make check` passes at the latest commit. `tui/mod.rs`: 4259 ->
-1542 lines (-64%). Pushed.
+905 lines (-79%). Pushed.
 
 - [x] PR1 `docs(testing)` — convention amendment (4217ab2)
 - [x] PR2 `render_tests`/`loop_tests` -> sibling files (41bb263)
@@ -19,7 +19,12 @@ configs); full `make check` passes at the latest commit. `tui/mod.rs`: 4259 ->
       SearchOverlay re-exported from `mod.rs` so `ui.rs` was untouched; moved
       open\_\*\_popup/popup\_\*, optimistic helpers, search helpers, and
       handle_popup/help/search_key. Zero pending snapshots.
-- [ ] PR7 `new_issue` subsystem
+- [x] PR7 `new_issue` subsystem (bca06f9) — NewIssueField/ModalEvent/
+      NewIssueModal re-exported; moved modal lifecycle methods, issue-creation
+      free fns (build_create_request/cache_created_issue/build_assignee_items +
+      Member/CreatedIssueDisplay), fetch_team_members (re-exported for
+      popup.rs), and handle_new_issue_key/handle_description_key. Zero pending
+      snapshots.
 - [ ] PR8 split `ui.rs` -> `ui/` (strip any remaining tracker refs in ui.rs
       here)
 - [ ] PR9 idiomatic conversions (review #1/#2/#7) — replace the free conversion
