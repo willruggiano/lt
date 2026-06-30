@@ -82,13 +82,13 @@ pub enum Status {
 }
 
 // ---------------------------------------------------------------------------
-// Background sync events (bd-25j)
+// Background sync events
 // ---------------------------------------------------------------------------
 
 /// Events sent from the background sync thread to the TUI event loop.
 pub enum SyncEvent {
     /// Sync completed successfully; includes the refreshed issue list and,
-    /// when requested, the authenticated identity for the header (bd-185).
+    /// when requested, the authenticated identity for the header.
     Done(Vec<Issue>, Option<crate::linear::viewer::Viewer>),
     /// Sync encountered an error.
     Error(String),
@@ -97,7 +97,7 @@ pub enum SyncEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Background comment sync events (bd-2mx)
+// Background comment sync events
 // ---------------------------------------------------------------------------
 
 /// Events sent from the background comment-sync thread to the TUI event loop.
@@ -126,7 +126,7 @@ pub enum LoginEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Popup support (bd-3dz)
+// Popup support
 // ---------------------------------------------------------------------------
 
 /// Identifies which field a popup is editing.
@@ -179,20 +179,20 @@ fn priority_popup_items() -> Vec<PopupItem> {
 pub enum Mode {
     /// Normal list browsing mode.
     List,
-    /// Detail pane showing full issue content (bd-2g8).
+    /// Detail pane showing full issue content.
     Detail,
-    /// A generic list-picker popup is open (bd-3dz).
+    /// A generic list-picker popup is open.
     Popup(PopupKind),
-    /// New-issue modal form (bd-l6r).
+    /// New-issue modal form.
     NewIssue,
-    /// Searchable help popup (bd-5lz).
+    /// Searchable help popup.
     Help,
-    /// FTS incremental search overlay (bd-2g4).
+    /// FTS incremental search overlay.
     Search,
 }
 
 // ---------------------------------------------------------------------------
-// Help popup state (bd-5lz)
+// Help popup state
 // ---------------------------------------------------------------------------
 
 /// A single keybinding entry shown in the help popup.
@@ -342,7 +342,7 @@ impl HelpPopup {
 }
 
 // ---------------------------------------------------------------------------
-// FTS search overlay state (bd-2g4)
+// FTS search overlay state
 // ---------------------------------------------------------------------------
 
 /// Mutable state for the FTS search overlay.
@@ -357,23 +357,23 @@ pub struct SearchOverlay {
     pub last_changed: Option<Instant>,
     /// True when FTS index is unavailable (no sync yet).
     pub fts_unavailable: bool,
-    /// True once `run_search()` has been called at least once (bd-zjy).
+    /// True once `run_search()` has been called at least once.
     /// Used by the renderer to distinguish "never searched" from "searched, no results".
     pub has_searched: bool,
-    /// Parsed AST of the current query string (bd-3qb).
+    /// Parsed AST of the current query string.
     pub ast: search_query::QueryAst,
-    /// Tab-completion state (bd-3qb).
+    /// Tab-completion state.
     pub completer: search_query::Completer,
 }
 
 impl SearchOverlay {
     pub fn new() -> Self {
-        // Pre-populate the query bar with the default sort stem (bd-7qo).
+        // Pre-populate the query bar with the default sort stem.
         let default_q = search_query::DEFAULT_QUERY.to_string();
         let ast = search_query::parse_query_ast(&default_q);
         let query = TextInput::from_string(default_q);
         let mut completer = search_query::Completer::new();
-        // Initialize completer so ghost text and Tab work immediately (bd-1dt).
+        // Initialize completer so ghost text and Tab work immediately.
         completer.update(&ast, query.cursor);
         Self {
             query,
@@ -387,7 +387,7 @@ impl SearchOverlay {
         }
     }
 
-    /// Run the structured search query and refresh results (bd-7qo).
+    /// Run the structured search query and refresh results.
     ///
     /// The query string is parsed into stems (sort:, assignee:, priority:,
     /// state:, team:) plus optional free-text FTS terms.  The default query
@@ -396,7 +396,7 @@ impl SearchOverlay {
     /// `viewport_rows` is the number of visible rows in the content area
     /// (excluding the table header).  The result set is capped at this value
     /// so that the search overlay never grows taller than the normal list
-    /// (bd-2qr).
+    ///.
     pub fn run_search(&mut self, viewport_rows: u16, list_limit: usize) {
         self.fts_unavailable = false;
         self.has_searched = true;
@@ -436,7 +436,7 @@ impl SearchOverlay {
                 // no sync has been done yet).  A query-syntax error caused by
                 // an incomplete stem token must NOT set fts_unavailable -- that
                 // would show the misleading "run lt sync first" banner while
-                // the user is still typing (bd-3q0).
+                // the user is still typing.
                 let msg = e.to_string().to_lowercase();
                 let is_missing = msg.contains("issues_fts")
                     || msg.contains("no such table")
@@ -466,7 +466,7 @@ impl SearchOverlay {
 }
 
 // ---------------------------------------------------------------------------
-// New-issue modal state (bd-l6r)
+// New-issue modal state
 // ---------------------------------------------------------------------------
 
 /// Which field of the new-issue form is currently focused.
@@ -504,7 +504,7 @@ impl NewIssueField {
 }
 
 // ---------------------------------------------------------------------------
-// Events for modal background loading (bd-vfi)
+// Events for modal background loading
 // ---------------------------------------------------------------------------
 
 /// Events sent from background threads that load modal picker data.
@@ -543,7 +543,7 @@ pub struct NewIssueModal {
     /// Non-empty when a load or submit error occurred.
     pub error: String,
 
-    /// Receiver for background-loaded modal data (bd-vfi).
+    /// Receiver for background-loaded modal data.
     pub modal_rx: Option<mpsc::Receiver<ModalEvent>>,
 }
 
@@ -555,7 +555,7 @@ pub struct Pagination {
     pub end_cursor: Option<String>,
 }
 
-/// Background sync state (bd-25j).
+/// Background sync state.
 pub struct SyncState {
     /// Receiver for background sync events.
     pub sync_rx: Option<mpsc::Receiver<SyncEvent>>,
@@ -593,26 +593,26 @@ pub struct App {
     // -- mode -----------------------------------------------------------------
     pub mode: Mode,
 
-    // -- detail pane (bd-2g8) -------------------------------------------------
+    // -- detail pane -------------------------------------------------
     /// Loaded detail for the currently-open issue.
     pub detail: Option<IssueDetail>,
     /// Vertical scroll offset inside the detail pane (in lines).
     pub detail_scroll: u16,
 
-    // -- popup state (bd-3dz) -------------------------------------------------
+    // -- popup state -------------------------------------------------
     pub popup_items: Vec<PopupItem>,
     pub popup_selected: usize,
 
-    // -- footer message (bd-3dz) ----------------------------------------------
+    // -- footer message ----------------------------------------------
     pub footer_msg: Option<String>,
 
-    // -- new-issue modal (bd-l6r) --------------------------------------------
+    // -- new-issue modal --------------------------------------------
     pub new_issue_modal: Option<NewIssueModal>,
 
-    // -- background sync (bd-25j) --------------------------------------------
+    // -- background sync --------------------------------------------
     pub sync: SyncState,
 
-    // -- background comment sync (bd-2mx) ------------------------------------
+    // -- background comment sync ------------------------------------
     /// Receiver for background comment-sync events.
     pub detail_comment_rx: Option<mpsc::Receiver<CommentSyncEvent>>,
 
@@ -625,36 +625,36 @@ pub struct App {
     /// Terminal/session capability flags.
     pub session: Session,
 
-    // -- help popup (bd-5lz) -------------------------------------------------
+    // -- help popup -------------------------------------------------
     pub help_popup: Option<HelpPopup>,
 
-    // -- FTS search overlay (bd-2g4) -------------------------------------------
+    // -- FTS search overlay -------------------------------------------
     pub search_overlay: Option<SearchOverlay>,
 
-    // -- popup anchor (bd-116) ------------------------------------------------
+    // -- popup anchor ------------------------------------------------
     /// Screen rect of the cell that triggered the popup, used to position it.
     pub popup_anchor: Option<ratatui::layout::Rect>,
 
-    // -- active filter AST (bd-rbm) -------------------------------------------
+    // -- active filter AST -------------------------------------------
     /// Single source of truth for the active filter/search state.
     /// Updated on Enter (confirm search), double-esc (reset), and sort shortcuts.
     pub active_filter: search_query::QueryAst,
     /// Snapshot of the filter at startup; used to reset on double-esc.
     pub initial_filter: search_query::QueryAst,
 
-    // -- identity info (bd-185) -----------------------------------------------
+    // -- identity info -----------------------------------------------
     /// Authenticated user's display name.
     pub viewer_name: Option<String>,
     /// Linear organization (workspace) name.
     pub org_name: Option<String>,
 
-    // -- double-esc reset (bd-1jt) --------------------------------------------
+    // -- double-esc reset --------------------------------------------
     /// The args as passed at startup; used to restore state on double-esc.
     pub initial_args: IssueArgs,
     /// Timestamp of the last Esc keypress (used to detect double-esc).
     pub last_esc_time: Option<Instant>,
 
-    // -- re-auth (bd-vhp) -----------------------------------------------------
+    // -- re-auth -----------------------------------------------------
     /// Receiver for the background login thread, if one is in progress.
     pub login_rx: Option<mpsc::Receiver<LoginEvent>>,
 
@@ -735,7 +735,7 @@ impl App {
         app
     }
 
-    /// Keep app.args.sort/desc in sync with `active_filter` (bd-rbm).
+    /// Keep app.args.sort/desc in sync with `active_filter`.
     /// Called after `active_filter` is updated so that `do_fetch()` and the
     /// table sort-column marker reflect the confirmed filter state.
     fn sync_args_from_filter(&mut self) {
@@ -747,7 +747,7 @@ impl App {
     }
 
     /// Produce a new `QueryAst` with the sort: token replaced to match
-    /// self.args.sort/desc.  Used by `cycle_sort` and `toggle_desc` (bd-rbm).
+    /// self.args.sort/desc.  Used by `cycle_sort` and `toggle_desc`.
     fn replace_sort_in_filter(&self) -> search_query::QueryAst {
         let dir = if self.args.desc { "-" } else { "+" };
         let new_sort = format!("sort:{}{}", self.args.sort.label(), dir);
@@ -820,7 +820,7 @@ impl App {
 
         if parsed.has_filters() {
             // Active filter has constraints beyond sort -- use run_query to
-            // preserve them (bd-2i0).
+            // preserve them.
             let limit = self.args.limit.min(250) as usize;
             match self
                 .db
@@ -884,7 +884,7 @@ impl App {
         self.status = Status::Idle;
     }
 
-    /// Fetch and then seek to the newly created issue by identifier (bd-3ba).
+    /// Fetch and then seek to the newly created issue by identifier.
     fn do_fetch_and_select(&mut self, target_identifier: Option<String>) {
         self.do_fetch(true);
         if let Some(id) = target_identifier
@@ -945,7 +945,7 @@ impl App {
         self.do_fetch(true);
     }
 
-    // -- Popup helpers (bd-3dz) -----------------------------------------------
+    // -- Popup helpers -----------------------------------------------
 
     fn open_state_popup(&mut self) {
         let issue = match self.selected_issue() {
@@ -1121,7 +1121,7 @@ impl App {
         self.popup_anchor = None;
     }
 
-    // -- New-issue modal (bd-l6r) --------------------------------------------
+    // -- New-issue modal --------------------------------------------
 
     fn open_new_issue_modal(&mut self) {
         let Ok(Some(token)) = crate::config::load_token() else {
@@ -1180,7 +1180,7 @@ impl App {
         self.new_issue_modal = Some(modal);
     }
 
-    /// Kick off background loading of states and assignees for the selected team (bd-vfi).
+    /// Kick off background loading of states and assignees for the selected team.
     fn new_issue_load_states_and_assignees_bg(&mut self) {
         let Some(modal) = self.new_issue_modal.as_mut() else {
             return;
@@ -1207,7 +1207,7 @@ impl App {
 
             let transport = HttpTransport::new(token.access_token);
 
-            // Fetch viewer for "me" shortcut (bd-1fz).
+            // Fetch viewer for "me" shortcut.
             let viewer = fetch_viewer(&transport).ok();
 
             // Fetch states.
@@ -1282,7 +1282,7 @@ impl App {
         {
             Ok(created) => {
                 cache_created_issue(&created, display);
-                // Refresh list and highlight new issue (bd-3ba).
+                // Refresh list and highlight new issue.
                 let new_identifier = created.identifier.clone();
                 self.mode = Mode::List;
                 self.new_issue_modal = None;
@@ -1297,7 +1297,7 @@ impl App {
         }
     }
 
-    /// Poll modal background channel and update modal state (bd-vfi).
+    /// Poll modal background channel and update modal state.
     fn poll_modal_events(&mut self) {
         // Collect events before mutating -- avoids borrow issues.
         let events: Vec<ModalEvent> = {
@@ -1535,7 +1535,7 @@ query TeamMembers($teamId: String!) {
 }
 
 // ---------------------------------------------------------------------------
-// Optimistic SQLite helpers (bd-3dz)
+// Optimistic SQLite helpers
 // ---------------------------------------------------------------------------
 
 fn optimistic_update_sqlite(
@@ -1703,7 +1703,7 @@ pub fn run(args: IssueArgs) -> Result<()> {
 
     let sync_status_label = build_sync_status_label(syncing);
 
-    // Fetch viewer identity for header display (bd-185).
+    // Fetch viewer identity for header display.
     let viewer = crate::config::load_token()
         .ok()
         .flatten()
@@ -1768,7 +1768,7 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     loop {
-        // Poll background sync channel (bd-25j).
+        // Poll background sync channel.
         poll_sync_events(app);
 
         // Periodic delta sync: fire every 30s when authenticated.
@@ -1787,16 +1787,16 @@ where
             app.sync.next_sync_at = None;
         }
 
-        // Poll modal background loader channel (bd-vfi).
+        // Poll modal background loader channel.
         app.poll_modal_events();
 
-        // Poll background comment-sync channel (bd-2mx).
+        // Poll background comment-sync channel.
         poll_detail_comment_events(app);
 
-        // Poll FTS search debounce (bd-2g4).
+        // Poll FTS search debounce.
         poll_search_debounce(app);
 
-        // Poll background login channel (bd-vhp).
+        // Poll background login channel.
         poll_login_events(app);
 
         terminal.draw(|frame| ui::render(frame, app))?;
@@ -1818,7 +1818,7 @@ where
     }
 }
 
-// -- New-issue modal key handler (bd-l6r) ------------------------------------
+// -- New-issue modal key handler ------------------------------------
 
 fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
@@ -1862,7 +1862,7 @@ fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             let field = field.clone();
             match code {
                 KeyCode::Tab if !shift => {
-                    // When leaving Team field, pre-load states and assignees in background (bd-vfi).
+                    // When leaving Team field, pre-load states and assignees in background.
                     if field == NewIssueField::Team {
                         let next = modal.focused_field.next();
                         modal.focused_field = next;
@@ -1886,7 +1886,7 @@ fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                     let (_items_len, selected) = new_issue_picker_state(modal, &field);
                     *selected = selected.saturating_sub(1);
                 }
-                // "m" shortcut: select "Me (...)" entry in Assignee picker (bd-1fz).
+                // "m" shortcut: select "Me (...)" entry in Assignee picker.
                 KeyCode::Char('m') if field == NewIssueField::Assignee => {
                     // The "Me (name)" entry is always at index 0 when present.
                     if let Some(first) = modal.assignees.first()
@@ -1968,7 +1968,7 @@ fn new_issue_picker_state<'a>(
     }
 }
 
-// -- Popup key handler (bd-3dz) ----------------------------------------------
+// -- Popup key handler ----------------------------------------------
 
 fn handle_popup_key(app: &mut App, code: KeyCode) {
     match code {
@@ -1988,7 +1988,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Esc => {
             // Double-esc (within 500ms) resets sort, filters, and search query
-            // back to the state the TUI was launched with (bd-1jt).
+            // back to the state the TUI was launched with.
             let now = Instant::now();
             let is_double_esc = app
                 .last_esc_time
@@ -2007,7 +2007,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 app.do_fetch(true);
             }
         }
-        // Open detail pane (bd-2g8, bd-22j: space opens detail)
+        // Open detail pane (space opens detail)
         KeyCode::Char(' ') => app.open_detail(),
         KeyCode::Char('j') | KeyCode::Down => app.move_down(),
         KeyCode::Char('k') | KeyCode::Up => app.move_up(),
@@ -2032,7 +2032,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('/') => {
             let mut overlay = SearchOverlay::new();
             // Restore active filter when re-opening, unless it is just the
-            // default sort stem (bd-rbm).
+            // default sort stem.
             if app.active_filter.raw != search_query::DEFAULT_QUERY {
                 overlay.query = TextInput::from_string(app.active_filter.raw.clone());
                 overlay.ast = app.active_filter.clone();
@@ -2041,18 +2041,18 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             app.search_overlay = Some(overlay);
             app.mode = Mode::Search;
         }
-        // Write op keybindings (bd-3dz)
+        // Write op keybindings
         KeyCode::Char('s') => app.open_state_popup(),
         KeyCode::Char('p') => app.open_priority_popup(),
         KeyCode::Char('a') => app.open_assignee_popup(),
-        // New issue modal (bd-l6r)
+        // New issue modal
         KeyCode::Char('n') => app.open_new_issue_modal(),
-        // Help popup (bd-5lz)
+        // Help popup
         KeyCode::Char('?') => {
             app.help_popup = Some(HelpPopup::new());
             app.mode = Mode::Help;
         }
-        // Re-authenticate (bd-vhp): background OAuth login.
+        // Re-authenticate: background OAuth login.
         KeyCode::Char('L') if app.login_rx.is_none() => {
             app.login_rx = Some(spawn_login_thread());
             app.sync.sync_status_label =
@@ -2062,7 +2062,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     }
 }
 
-// -- Help popup key handler (bd-5lz) -----------------------------------------
+// -- Help popup key handler -----------------------------------------
 
 fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
@@ -2096,7 +2096,7 @@ fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     }
 }
 
-// -- FTS search overlay key handler (bd-2g4) --------------------------------
+// -- FTS search overlay key handler --------------------------------
 
 fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
@@ -2153,7 +2153,7 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 }
             }
         }
-        // Tab / Shift-Tab: apply stem-key completion (bd-3qb).
+        // Tab / Shift-Tab: apply stem-key completion.
         // These must NOT be forwarded to TextInput::handle_key.
         KeyCode::Tab => apply_completion_tab(app, true),
         KeyCode::BackTab => apply_completion_tab(app, false),
@@ -2173,14 +2173,14 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 fn confirm_search(app: &mut App) {
     if let Some(ref mut overlay) = app.search_overlay {
         // Flush any pending debounce so the AST and results reflect every
-        // character the user typed before hitting Enter (bd-3r1).
+        // character the user typed before hitting Enter.
         if overlay.last_changed.is_some() {
             overlay.last_changed = None;
             overlay.run_search(app.viewport_height, app.args.limit as usize);
         }
         let results = std::mem::take(&mut overlay.results);
         let selected = overlay.table_state.selected();
-        // AST is the single source of truth (bd-rbm).
+        // AST is the single source of truth.
         app.active_filter = overlay.ast.clone();
         app.sync_args_from_filter();
         app.issues = results;

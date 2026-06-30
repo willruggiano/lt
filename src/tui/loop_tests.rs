@@ -1,4 +1,4 @@
-// Event-loop tests (B10)
+// Event-loop tests
 //
 // These drive the DB- and event-coupled surface that the render tests skip:
 // `do_fetch` and pagination against a shared in-memory SQLite, `run_app`

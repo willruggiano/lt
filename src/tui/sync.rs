@@ -39,7 +39,7 @@ pub(crate) fn build_sync_status_label(syncing: bool) -> String {
     }
 }
 
-/// Spawn a background sync thread and return the receiver (bd-25j).
+/// Spawn a background sync thread and return the receiver.
 ///
 /// When `full` is true the thread runs a full sync (re-fetches every issue);
 /// otherwise it runs a delta sync (only issues updated since last sync).
@@ -117,7 +117,7 @@ pub(crate) fn spawn_login_thread() -> mpsc::Receiver<LoginEvent> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || match crate::auth::login_non_interactive() {
         Ok(()) => {
-            // Fetch viewer identity while the token is fresh (bd-3jl).
+            // Fetch viewer identity while the token is fresh.
             let viewer = crate::config::load_token()
                 .ok()
                 .flatten()
@@ -172,7 +172,7 @@ pub(crate) fn poll_login_events(app: &mut App) {
     }
 }
 
-/// Non-blocking poll of the background sync channel (bd-25j).
+/// Non-blocking poll of the background sync channel.
 pub(crate) fn poll_sync_events(app: &mut App) {
     // Take the receiver out temporarily so we can mutate app freely.
     let Some(rx) = app.sync.sync_rx.take() else {
