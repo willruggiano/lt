@@ -306,15 +306,17 @@ fn query_issues_one(
 /// `query` supports FTS5 syntax: prefix queries (`oauth*`), phrase queries
 /// (`"oauth token"`), and boolean operators (`oauth AND token`).
 ///
-/// Results are returned ordered by FTS5 rank (best match first).
-pub fn search_issues(conn: &Connection, query: &str) -> Result<Vec<types::Issue>> {
+/// Results are returned ordered by FTS5 rank (best match first), capped at
+/// `limit` rows.
+pub fn search_issues(conn: &Connection, query: &str, limit: usize) -> Result<Vec<types::Issue>> {
     let sql = format!(
         "SELECT {ISSUE_COLUMNS}
          FROM issues i
          JOIN issues_fts ON issues_fts.rowid = i.rowid
          {ISSUE_JOINS}
          WHERE issues_fts MATCH ?1
-         ORDER BY rank"
+         ORDER BY rank
+         LIMIT {limit}"
     );
     query_issues_one(conn, &sql, query, "search_issues")
 }

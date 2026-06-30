@@ -27,7 +27,6 @@ where
         let (issues, has_next, end_cursor) = fetch_page(after)?;
 
         if !issues.is_empty() {
-            // Upsert fetched fragments into the normalized relational base.
             db::upsert_issues(conn, &issues)?;
         }
 

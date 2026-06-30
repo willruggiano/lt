@@ -52,9 +52,7 @@ pub fn run(out: &mut dyn Write, args: &SearchArgs) -> Result<()> {
         db::search_issues_like(&conn, &args.query, args.limit)?
     } else {
         note = String::new();
-        let mut all = db::search_issues(&conn, &args.query)?;
-        all.truncate(args.limit);
-        all
+        db::search_issues(&conn, &args.query, args.limit)?
     };
 
     print_table(out, &issues, &note)?;
