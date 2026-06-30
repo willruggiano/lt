@@ -4,6 +4,17 @@
 
 Proposed — `Refs: ENG-31`
 
+> **Revision (PR #26 review).** The first draft scoped this to "stop
+> hand-writing response structs." The review pushed back on one line —
+> *"per-operation modules re-emit small nested structs, so cross-operation
+> sharing is lost"* — and asked us to do better, with three threads: a
+> relational DB schema, offline-capable mutations, and **GraphQL fragments as
+> the shared type at the `tui <-> db/api` boundary**, all under one rule:
+> *Linear's GraphQL API is hit only by the sync thread; the TUI touches only the
+> local database.* This revision answers that. The type-codegen decision is now
+> one pillar of a local-first data architecture, and the recommendation changes
+> accordingly (cynic over graphql_client — see [Pillar 1](#pillar-1)).
+
 ## Context
 
 The Linear API response/variable types are hand-written serde structs scattered
@@ -18,14 +29,14 @@ Two pieces of infrastructure already exist and shape every option below:
 - A `build.rs` codegen seam that already parses that schema with
   `graphql-parser` and emits Rust via `quote`/`syn`/`prettyplease` into
   `OUT_DIR` (`build.rs:12`, `build.rs:63-81`, `build.rs:786-796`). It currently
-  generates only the **search grammar** (filter/sort stems) and validates the
-  TOML allowlist against `IssueFilter`/`IssueSortInput`
-  (`build.rs:656-689`). It does **not** generate any API response types.
+  generates only the **search grammar** and validates the TOML allowlist against
+  `IssueFilter`/`IssueSortInput` (`build.rs:656-689`). It generates no API
+  response types.
 
 ### Current hand-written type surface
 
 82 `struct`/`enum` deserialization types carry the API layer
-(`grep -rE 'struct |enum ' $(grep -rl Deserialize src)`). The concentration:
+(`grep -rE 'struct |enum ' $(grep -rl Deserialize src)`):
 
 ```
 src/linear/types.rs          22   list Issue + envelope + IssueDetail/IssueRef
@@ -38,365 +49,391 @@ src/linear/viewer.rs          4   Viewer (inline)
 src/auth/status.rs            3   viewer status (inline)
 ```
 
-There are ~13 GraphQL operations across 7 files, each redeclaring its own
-response shape. The duplication is acute for trivial wrappers: `State`,
-`IssueState`, `IssueDetailState`, `NotificationIssueState` are all
-`{ name: String }` or `{ id, name }`; `Team`/`IssueTeam`/`IssueDetailTeam`/
-`NotificationIssueTeam` likewise; `PageInfo` is shared by hand
-(`types.rs:16-22`), the rest are copies. Every field carries a manual
-`#[serde(rename = "camelCase")]` (e.g. `types.rs:60`, `notifications.rs:58-63`).
+~13 operations across 7 files, each redeclaring its own response shape. The
+duplication is acute for trivial wrappers: `State`, `IssueState`,
+`IssueDetailState`, `NotificationIssueState` are all `{ name }` or `{ id, name }`;
+the `Team*` family likewise. Every field carries a manual
+`#[serde(rename = "camelCase")]` (`types.rs:60`, `notifications.rs:58-63`).
 
-### The transport seam (unaffected by this work)
+### The transport seam (preserved by every option below)
 
 All operations flow through one object-safe trait and one free helper:
 
 ```
-operation const &str ──┐
-serde_json variables ──┤
-                       ▼
-        GraphqlTransport::query(query, vars) -> Value     (client.rs:14-18)
-                       │  unwraps { data, errors } envelope (client.rs:59-71)
-                       ▼
-        query_as::<T>(...) -> T   serde_json::from_value    (client.rs:75-82)
+operation query string ─┐
+serde_json variables   ─┤
+                        ▼
+   GraphqlTransport::query(query, vars) -> Value   (client.rs:14-18)
+                        │  unwraps { data, errors } envelope  (client.rs:59-71)
+                        ▼
+   query_as::<T: DeserializeOwned>(...) -> T   serde_json::from_value  (client.rs:75-82)
 ```
 
-`query_as` is generic over any `DeserializeOwned`. **Whatever generates `T` is
-orthogonal to the transport.** This is the seam every option plugs into; none of
-the options below touch `client.rs`, `HttpTransport`, or `FakeTransport`.
-
-### Not every "type" is an API type
-
-Three categories masquerade as API types but are **domain/view types** assembled
-locally, not deserialized from any response:
-
-- `IssueDetail` / `IssueRef` (`types.rs:48-75`) are built from the **SQLite
-  cache**, not a GraphQL detail query (`src/tui/detail.rs:206-243`,
-  `populate_relations` at `detail.rs:245-280`).
-- `Viewer` (`viewer.rs:21-27`) is a flattened projection of `ViewerData`.
-- `db::Issue` (`src/db/issues.rs:8-27`) is the row type, bridged to the API
-  `Issue` by hand-written `From` impls (`db/issues.rs:29-81`).
-
-These must **stay hand-written**. Generation targets only the
-deserialized-from-the-wire response shapes and the typed variable inputs.
+`query_as` is generic over any `DeserializeOwned`. **Whatever produces `T` is
+orthogonal to the transport.** Verified for both candidate libraries: their
+generated types are plain serde types (graphql_client emits
+`Serialize`/`Deserialize`; cynic's `GraphQlResponse<ResponseData>` is bounded
+`ResponseData: DeserializeOwned` and decoded with `serde_json`,
+`cynic-3.13.2/src/http.rs:101,222`). Neither requires adopting its bundled HTTP
+client; both build a query string + variables we feed to `HttpTransport`. **No
+option touches `client.rs`.**
 
 ---
 
 ## The core constraint: usage is selection-shaped, not type-shaped
 
-The naive reading of ENG-31 — "generate a Rust type per GraphQL type" — is
-wrong, and the schema proves it. The `Comment` object type in the schema
+The naive reading of ENG-31 — "one Rust type per GraphQL type" — is wrong, and
+the schema proves it. The `Comment` object type
 (`build/linear-schema-definition.graphql:2829`) has dozens of fields, many of
-which are themselves paginated sub-connections taking arguments:
+them paginated sub-connections taking arguments:
 
 ```graphql
 type Comment implements Node {
   agentSession: AgentSession
-  agentSessions(after: String, before: String, first: Int, ...): AgentSessionConnection!
-  aiPromptProgresses(after: String, filter: AiPromptProgressFilter, ...): AiPromptProgressConnection!
+  agentSessions(after: String, first: Int, ...): AgentSessionConnection!
+  aiPromptProgresses(filter: AiPromptProgressFilter, ...): AiPromptProgressConnection!
   ... (dozens more)
 }
 ```
 
-The code that consumes a comment uses exactly three fields — `body`,
-`createdAt`, `user { name }` (`sync/comments.rs:18-30`, `types.rs:24-41`).
-
-A whole-schema generator would emit 524 structs — recursive, almost entirely
-`Option`, almost entirely unused — which is the precise opposite of the
-posture this repo mandates: "Minimum code that solves the problem. Nothing
-speculative." (`docs/rules/posture.md` §2). It would also have to invent a
-policy for field-arguments, which have no struct representation.
-
-The types the codebase actually wants are **shaped to the selection set of each
-operation** — the same shape they have today, minus the hand-maintenance. That
-is the design target, and it determines the tool choice.
+The code uses three: `body`, `createdAt`, `user { name }`
+(`sync/comments.rs:18-30`). Whole-schema generation would emit 524 recursive,
+mostly-`Option`, mostly-unused structs with no representation for
+field-arguments — the opposite of `posture.md` §2 ("Minimum code… Nothing
+speculative"). The types the code wants are **shaped to the selection set of
+each operation**. That fact drives the whole design.
 
 ```
    GraphQL object type (Comment: ~50 fields)   ──X── do NOT mirror
-   Operation selection set ({ body createdAt user{name} })  ──> generate THIS
+   Operation selection set ({ body createdAt user{name} })  ──> model THIS
 ```
 
 ---
 
-## Goals / Non-goals
+## Target architecture (per review)
 
-**Goals**
+One rule reorganizes the data flow: **the GraphQL API is reached only by the
+sync layer; the TUI/CLI read and write only the local SQLite database.** Today
+this is violated on the write path — the TUI spawns a worker that calls
+`HttpTransport` directly and reverts SQLite on failure
+(`src/tui/popup.rs:352-393`, `architecture.md:122-128`). The target:
 
-- Replace the hand-written response structs and `#[serde(rename)]` churn with
-  types generated from operations + the committed schema.
-- Validate every operation against the schema at build time; a drift between a
-  query and the schema fails the build (parity with the existing allowlist
-  gate, `build.rs:684-689`).
-- Generate typed **variable inputs** for the mutations currently built with
-  untyped `serde_json::json!` maps (`mutations.rs:257-272`).
-- Generate the closed **enums** the code currently stringly-types — notably
-  `PaginationSortOrder { Ascending, Descending }`
-  (`build/linear-schema-definition.graphql:22406`), hardcoded as `"Ascending"`/
-  `"Descending"` in `build_sort` (`build.rs:606-612`).
-- Preserve the `GraphqlTransport` / `query_as` seam unchanged.
+```
+            ┌──────────────── sync thread / `lt sync` ────────────────┐
+            │                                                          │
+   Linear GraphQL API ──(reads: fragment-typed responses)──> relational SQLite
+            ▲                                                          │
+            │                                                          ▼
+            └──(writes: drain mutation outbox)────────────  TUI / CLI read model
+                                                                       ▲
+   TUI / CLI ──read──>  DB query layer ──(fragment types)─────────────┘
+   TUI / CLI ──write──> mutation outbox table (local, no network)
+```
 
-**Non-goals**
+**Fragment types are the shared currency.** A GraphQL fragment is a named,
+reusable selection set. We make those fragments the single definition of:
 
-- Generating the whole schema (rejected above).
-- Generating domain/view types (`IssueDetail`, `IssueRef`, `Viewer`,
-  `db::Issue`) — they are not wire types.
-- Replacing the search-grammar codegen (`search_stems.rs`); that is a separate
-  concern and can be unified later, not now.
-- Changing the HTTP client or the optimistic-write model.
+1. what the sync layer **fetches** from Linear,
+2. what the relational schema must **store** to satisfy a read,
+3. what the DB query layer **returns** and the TUI **renders**.
+
+This is exactly the reuse the review asked for. The three pillars below realize
+it: the type layer (fragments + library choice), the storage layer (relational
+schema), and the write path (offline outbox).
 
 ---
 
-## Options considered
+<a id="pillar-1"></a>
+## Pillar 1 — Shared fragment types: graphql_client vs cynic
 
-### A. Whole-schema type generation — rejected
+The review's specific objection — *cross-operation struct sharing is lost* — is
+real and library-dependent. Primary evidence from the vendored sources:
 
-Emit one Rust type per schema type. Rejected by the core constraint above: 524
-recursive, mostly-`Option`, mostly-unused structs; no answer for
-field-arguments; violates `posture.md` §2. This is the literal reading of the
-issue and it is the wrong one.
+**graphql_client (0.16.0)** is *query-first*: a `#[derive(GraphQLQuery)]` marker
+struct points at a `.graphql` file + schema, and codegen emits a module of
+response types shaped to the selection set. It generates only used types
+(`codegen/enums.rs:30`), maps nullability/list to `Option`/`Vec`
+(`type_qualifiers.rs:1-10`), auto-emits serde renames (`codegen/shared.rs:26-32`),
+gives enums an `Other(String)` forward-compat fallback (`codegen/enums.rs:62-95`),
+and supports inline fragments (`query/selection.rs:18,68`) — needed for the
+Notifications `... on IssueNotification` (`notifications.rs:19-21`). **But
+fragments are rendered per `BoundQuery`** — `generate_fragment_definitions`
+iterates one operation's `all_used_types.fragment_ids()` (`codegen.rs:248-252`).
+A fragment used by two separate derives is emitted twice, in two modules. The
+only way to share is to put every operation in one document under one derive;
+even then the types are codegen-named, deeply nested, and `Deserialize`-only —
+awkward to *construct* from DB rows, which the read model requires.
 
-### B. `graphql_client` (operation-first codegen) — recommended
+**cynic (3.13.2)** is *struct-first* ("a bring your own types GraphQL client",
+`cynic-3.13.2/README.md`). You hand-author a struct and
+`#[derive(cynic::QueryFragment)]`; cynic checks it against the schema and
+generates the GraphQL from it. The decisive property, from the crate docs
+(`cynic-3.13.2/src/lib.rs:54-67`):
 
-`graphql_client` generates a module per operation from a `.graphql` query file +
-the schema, with types shaped exactly to the selection set. Primary evidence
-from the vendored source
-(`~/.cargo/registry/.../graphql_client_codegen-0.16.0`):
+> This `Film` struct can now be used as the type of a field on **any other**
+> `QueryFragment` struct…
 
-- **Operation-first, used-types-only.** Enums and input objects are generated
-  only when an operation references them, via `all_used_types`
-  (`codegen/enums.rs:30`, `codegen.rs:27`). No unused surface.
-- **Selection-shaped responses.** Nullability → `Option`, list → `Vec` via the
-  `Required`/`List` type qualifiers (`type_qualifiers.rs:1-10`).
-- **Automatic serde rename.** `camelCase` → `snake_case` emits
-  `#[serde(rename = ...)]` only when needed (`codegen/shared.rs:26-32`) —
-  deletes every manual rename we maintain today.
-- **Forward-compatible enums.** Generated enums carry an `Other(String)`
-  catch-all and a hand-rolled de/serialize, so a new server enum value does not
-  break deserialization (`codegen/enums.rs:62-95`). This matters: see
-  `notifications.rs:56` where `type` is already kept as a bare `String` to dodge
-  exactly this.
-- **Inline fragments.** Supported (`query/selection.rs:18,68`,
-  `query/validation.rs:8-16`), which the Notifications operation requires
-  (`... on IssueNotification`, `notifications.rs:19-21`).
-
-Mechanism: a `#[derive(GraphQLQuery)]` proc-macro on a marker struct with
-`#[graphql(schema_path=..., query_path=...)]` (`graphql_client/src/lib.rs`).
-Queries move from inline `const &str` into `.graphql` files (required by
-`query_path`).
-
-Interop with the existing transport is clean — `query_as` already takes any
-`DeserializeOwned`:
+That is first-class cross-operation sharing: define `IssueRow` once, reuse it as
+a field in the list query, the delta query, and the detail query. Because the
+struct is **ours**, it can carry methods and `From`/`Into` impls and be
+**constructed by hand from a SQL join** — which is precisely what the
+"DB returns fragment types" contract needs. Interfaces/unions are supported
+(README features; the Notifications case). Responses are serde-decoded
+(`http.rs:101`), so the existing transport seam holds; we do not enable cynic's
+`http-*` features.
 
 ```
-   marker struct  ──derive──>  module { ResponseData, Variables, QUERY const }
-                                          │
-   Op::build_query(vars) -> QueryBody { query, variables }   (graphql_client trait)
-                                          │
-   transport.query(body.query, to_value(body.variables)) -> Value   (UNCHANGED)
-                                          │
-   serde_json::from_value::<ResponseData>(...)                       (query_as, UNCHANGED)
+  graphql_client                          cynic
+  ──────────────                          ─────
+  .graphql query ──derive──> module       struct + derive ──> GraphQL string
+  types: codegen-owned, per-op            types: hand-owned, shared across ops
+  share: only within one document         share: any struct as any field
+  construct from DB row: awkward          construct from DB row: plain struct
+  author cost: write .graphql only        author cost: write structs (querygen helps)
 ```
 
-Cost / cons:
-- New deps: `graphql_client` (runtime trait crate) + `graphql_client_codegen` +
-  `graphql_query_derive`. Footprint largely overlaps existing build-deps
-  (`graphql-parser`, `syn`, `quote`, `proc-macro2` are already present;
-  `Cargo.toml:34-40`). Disable the `reqwest` feature — we keep our own client.
-  Must clear `cargo deny` (`make check`).
-- Per-operation modules re-emit small nested structs (each query gets its own
-  `State`), so cross-operation struct *sharing* is lost. In exchange the shapes
-  are guaranteed correct against the schema and free to maintain. Shared
-  projections (e.g. mapping into `db::Issue`) live in our `From` impls, not in
-  shared response types.
-- Two codegen mechanisms in the tree (this + the search `build.rs`). They serve
-  different concerns; unification is a later, optional step.
+### Recommendation: cynic
 
-### C. `cynic` — rejected for this issue
+For the *original* narrow scope (kill hand-written response structs, types stay
+inside the sync layer), graphql_client is the lower-effort win and was the first
+draft's pick. For the *expanded* architecture — where fragment types are the
+durable, shared, hand-constructed contract between DB and TUI — cynic is the
+right tool, because it makes the fragment type a normal owned Rust struct usable
+in all three roles (fetch / store-read / render). graphql_client's per-operation,
+codegen-owned, Deserialize-only types cannot fill the DB-return role without a
+second hand-written domain layer, which defeats the point.
 
-`cynic` is "bring your own types": you write Rust structs with
-`#[derive(QueryFragment)]` and it generates **GraphQL from them**, checking
-against a registered schema (`cynic-3.13.2/README.md`, "uses Rust structs to
-define queries and generates GraphQL from them"). That is the inverse of
-"generate types from the spec." It gives more cross-query struct reuse but adds
-a schema-registration model and keeps the structs hand-written — more
-boilerplate, less aligned with ENG-31. Reasonable for a query-authoring DX
-overhaul; not what this issue asks for.
+Honest costs of cynic:
+- **Structs are hand-authored** (cynic verifies, doesn't write them). `querygen`
+  bootstraps from a query; net authoring is higher than graphql_client.
+- **A `use_schema!` module** must be generated from the snapshot
+  (`lib.rs:18-22`) — one-time wiring.
+- **Custom scalars** (`DateTime`, `ID`) need `impl Scalar`/newtypes rather than
+  bare `String`; today the code uses `String` timestamps everywhere
+  (`types.rs:66-69`). This is a small, deliberate typing win, not free.
+- **One struct plays three roles** (wire selection + storage read model + view
+  model). For a local-first cache this coupling is *desirable* — the cache
+  stores exactly what the UI needs, sourced from exactly that selection — but a
+  change to the UI's needs deliberately ripples to the fetch selection and the
+  storage contract. We accept that as the single-source-of-truth property.
 
-### D. Extend the existing `build.rs` to generate operation types — alternative
+graphql_client remains the fallback if hand-authoring is rejected, in which case
+fragment types stay a sync-internal concern and the TUI↔DB contract is a
+separate hand-written domain layer (status quo, minus the response-struct
+churn).
 
-Keep a single codegen mechanism: teach `build.rs` to parse our `.graphql`
-operations and emit selection-shaped response + variable types into `OUT_DIR`,
-consumed via `include!` (the model already used for `search_stems.rs`,
-`build.rs:794`). No new runtime deps; full control; consistent with the repo's
-existing codegen culture.
+### Not every "type" is a fragment type
 
-The honest cost: a correct operation→Rust mapper is materially harder than the
-current allowlist extractor (`build.rs:63-81`, which only reads input-object
-field name→type pairs). It must handle selection sets, nested objects,
-nullability/list wrapping, naming/dedup, enum generation with a fallback
-variant, and **inline fragments on interfaces** (the Notifications case). That
-is precisely the logic `graphql_client_codegen` already implements and tests
-(`type_qualifiers.rs`, `codegen/enums.rs`, `query/selection.rs`). Reimplementing
-it is the "clever abstraction without a real payoff" `posture.md` warns against
-— unless avoiding the dependency is judged worth the maintenance.
-
-### Recommendation
-
-**Option B (`graphql_client`).** It matches the actual usage shape, generates
-only what operations use, deletes the entire manual-rename burden, gives
-forward-compatible enums, supports the one inline-fragment operation, and plugs
-into the existing transport without touching it. Option D is the fallback if the
-dependency is rejected at review; its cost is reimplementing a solved problem.
-
-The decision to settle at review:
-
-| Axis                    | B `graphql_client` | D extend `build.rs` |
-|-------------------------|--------------------|---------------------|
-| New runtime deps        | yes (3, overlapping)| none               |
-| Code we maintain        | `.graphql` files    | mapper + `.graphql` |
-| Schema-drift gate       | built in            | we build it         |
-| Inline fragments        | done                | we build it         |
-| Enum fwd-compat         | done                | we build it         |
-| Codegen mechanisms      | 2                   | 1                   |
+Wire-sourced selections become fragment types. Locally-assembled types stay
+hand-written: `IssueDetail`/`IssueRef` are built from the cache, not a query
+(`tui/detail.rs:206-280`); `Viewer` (`viewer.rs:21-27`) is a projection;
+`db::Issue` (`db/issues.rs:8-27`) is the row type. Under the new architecture
+several of these *become* DB-returned fragment types (e.g. the issue read
+model), but the principle stands: generation/codegen targets wire selections,
+not local projections.
 
 ---
 
-## Detailed design (Option B)
+## Pillar 2 — Relational schema
 
-### Layout
+Today there is one denormalized table. `issues` flattens every relation into
+name strings — `state_name`, `assignee_name`, `team_name`, `team_key`,
+`project_name`, `cycle_name`, `creator_name`, and `labels` as a comma-joined
+blob (`db/mod.rs:56-68`, migrations `db/mod.rs:114-150`; labels join
+`db/issues.rs:54-63`). Comments are the only related entity with its own table
+(`db/mod.rs:93-105`). FTS5 mirrors `issues(identifier, title)` via triggers
+(`db/mod.rs:73-92`).
 
-```
-build/linear-schema-definition.graphql      (existing snapshot, reused)
-src/linear/operations/
-  issues.graphql            Issues(list) + Issues(delta share the doc)
-  issue_comments.graphql
-  notifications.graphql
-  viewer.graphql
-  teams.graphql
-  workflow_states.graphql
-  team_members.graphql
-  issue_update.graphql      mutation
-  issue_create.graphql      mutation
-  comment_create.graphql    mutation
-src/linear/operations.rs    marker structs, one per operation, #[derive(GraphQLQuery)]
-```
+Costs of the flat model: no identity for related entities (the `From<db::Issue>`
+synthesizes empty ids, `db/issues.rs:38-46`); labels unsearchable/filterable
+relationally; a renamed team/user must be rewritten across every issue row; no
+foundation for storing the other entities the API already returns.
 
-Each marker:
-
-```rust
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "build/linear-schema-definition.graphql",
-    query_path  = "src/linear/operations/issues.graphql",
-    response_derives = "Debug, Clone, PartialEq"
-)]
-pub struct Issues;
-```
-
-### What gets generated vs kept
+The schema is natively relational. `Issue` references
+`team: Team!`, `state: WorkflowState!`, `assignee: User`, `creator: User`,
+`project: Project`, `cycle: Cycle`, `parent: Issue`, and `labels` (a connection)
+(`build/linear-schema-definition.graphql`, `type Issue`). Proposed tables, one
+per entity, FKs + indexes:
 
 ```
-GENERATED (replaces hand-written):
-  response structs for all 13 operations  ── types.rs / mutations.rs /
-                                              notifications.rs / viewer.rs /
-                                              comments.rs / new.rs response halves
-  typed Variables structs                  ── replaces serde_json::json! maps
-  input objects (IssueUpdateInput, IssueCreateInput, CommentCreateInput)
-  enums referenced by ops (PaginationSortOrder, WorkflowState type, ...)
-
-KEPT (hand-written, adapted):
-  GraphqlTransport / query_as / HttpTransport / FakeTransport   (client.rs)
-  IssueDetail, IssueRef                                          (view types)
-  Viewer projection
-  db::Issue + From<db::Issue> for <generated Issue node>         (db/issues.rs)
-  priority_label_to_u8                                           (types.rs:178)
+teams(id PK, key, name)
+users(id PK, name, email)
+workflow_states(id PK, team_id FK, name, type, position)
+projects(id PK, name)
+cycles(id PK, number, name NULL)
+labels(id PK, name)
+issues(id PK,
+       identifier, number, title, description, priority, priority_label,
+       team_id  FK -> teams,
+       state_id FK -> workflow_states,
+       assignee_id FK -> users   NULL,
+       creator_id  FK -> users   NULL,
+       project_id  FK -> projects NULL,
+       cycle_id    FK -> cycles   NULL,
+       parent_id   FK -> issues   NULL,
+       created_at, updated_at, synced_at)
+issue_labels(issue_id FK, label_id FK, PRIMARY KEY(issue_id, label_id))
+comments(id PK, issue_id FK -> issues, user_id FK -> users NULL, body, created_at, updated_at, synced_at)
+indexes: every FK column; issues(updated_at); issues(team_id, state_id)
+FTS5: issues_fts(identifier, title[, description]) external-content over issues (kept)
 ```
 
-### Bridging generated types to domain types
+### How fragment types bind to the relational schema
 
-The `From` impls in `db/issues.rs:29-81` and the `.into()` conversions
-(`render_tests.rs:222`, `loop_tests.rs:188`) currently target
-`crate::linear::types::Issue`. They retarget to the generated `issues::IssuesIssuesNodes`
-(or a re-export aliasing it to a stable name). The conversion logic is
-unchanged; only the type path moves. `priority_label_to_u8` stays as the
-lossy label→u8 parse it is today (`types.rs:175-186`).
+A fragment's selection set is the read contract; the DB layer reconstructs the
+fragment struct from a join. Example:
 
-### Sort order enum
+```
+fragment IssueRow on Issue {            SELECT i.*, t.name, s.name, a.name, ...
+  id identifier title priority           FROM issues i
+  state { name }            ───────►     JOIN workflow_states s ON s.id = i.state_id
+  assignee { name }                      JOIN teams t           ON t.id = i.team_id
+  team { key name }                      LEFT JOIN users a      ON a.id = i.assignee_id
+  labels { nodes { name } }              LEFT JOIN issue_labels … (aggregated)
+}                                        → build IssueRow { … } in Rust
+```
 
-`build_sort` hardcodes `"Ascending"`/`"Descending"` (`build.rs:606-612`). Once
-`IssueSortInput` variables are generated, that string pair becomes the generated
-`PaginationSortOrder` enum, removing a stringly-typed value. This is an
-incidental win, not a forcing function; the search-grammar codegen can keep its
-own copy until a later unification.
+Nested fragments (`StateName on WorkflowState { name }`, `Actor on User { name }`)
+map to joined columns and are the reuse units across the list/delta/detail
+read models. This makes the relational schema's coverage a checkable property:
+**every field any fragment selects must have a column or join** — a drift gate
+analogous to the existing allowlist gate (`build.rs:684-689`).
+
+The sync layer performs the inverse: a fetched `IssueRow` (and its nested
+entities) is **upserted into the entity tables**, not flattened — so a team
+rename touches one `teams` row, and entities the UI later needs are already
+stored.
 
 ---
 
-## Schema provenance
+## Pillar 3 — Offline-capable mutations (outbox)
 
-The snapshot `build/linear-schema-definition.graphql` is committed and is the
-single source of truth for both this codegen and the existing allowlist gate
-(`docs/architecture.md:97-100`). There is currently **no documented refresh
-procedure**. This ADR adds one as a follow-up note (out of scope to implement
-here): a `make` target that re-downloads the schema via introspection, so the
-snapshot is reproducible rather than mystery-committed. Generation correctness is
-pinned to whatever snapshot is committed, which is the desired property —
-generation is deterministic and offline, consistent with the test posture
-("Tests touch no network", `docs/rules/testing.md`).
+Current writes are optimistic but **online-required**: the TUI updates SQLite,
+spawns a thread that calls the API, and reverts SQLite if the call fails
+(`popup.rs:352-393`). Offline = guaranteed revert; and the TUI talks to the API,
+violating the target rule.
+
+Invert it with a durable **outbox**:
+
+```
+   TUI write ──► (1) apply optimistically to entity tables
+             └─► (2) INSERT into mutation_outbox   (local, no network)     ── UI thread ends here
+
+   sync thread / `lt sync` ──► drain outbox in order:
+        pending ─► call mutations.rs (existing fns) ─► success: mark applied,
+                                                       reconcile returned entity into tables
+                                                ─► failure: backoff + retry / surface permanent error
+```
+
+```
+mutation_outbox(
+  seq         INTEGER PK AUTOINCREMENT,   -- total order
+  op_type     TEXT,                       -- IssueUpdate | IssueCreate | CommentCreate
+  entity_id   TEXT,                       -- target (or client temp id for creates)
+  variables   TEXT,                       -- JSON: the typed Variables payload
+  status      TEXT,                       -- pending | in_flight | failed
+  attempts    INTEGER, last_error TEXT,
+  created_at  TEXT)
+```
+
+Design points / correctness concerns to settle:
+
+- **No UI-thread network.** Step (2) replaces the `spawn → HttpTransport` in
+  `popup.rs`; the existing `mutations.rs` functions move behind the sync drainer.
+  This is the change that actually enforces "TUI only hits the DB."
+- **Ordering vs delta sync.** A delta pull must not clobber a row that has
+  un-acked outbox entries. Options: (a) apply outbox *after* each delta merge so
+  local intent re-wins; (b) skip overwriting rows with pending mutations;
+  (c) reconcile by `updatedAt`. Server remains source of truth once a mutation
+  acks. This is the central correctness question and must be specified before
+  implementation.
+- **Creates need temp ids.** `IssueCreate` has no server id until acked; the
+  outbox carries a client temp id, and reconciliation rewrites FKs on ack.
+- **Idempotency / retries.** Retries must not double-apply; key on `seq` and
+  treat a confirmed server state as terminal.
+
+This pillar is the largest behavioral change and can land **after** Pillars 1–2;
+the type and storage layers do not depend on it.
+
+---
+
+## Options considered (type layer)
+
+| Option | Verdict |
+|---|---|
+| A. Whole-schema type generation | Rejected — the core constraint (524 unused recursive types) |
+| B. graphql_client (query-first) | Fallback — least effort, but per-op types can't be the DB↔TUI contract |
+| C. **cynic (struct-first, shared fragments)** | **Recommended** for the expanded architecture |
+| D. Extend `build.rs` to a custom operation→type mapper | Rejected — reimplements solved codegen (`type_qualifiers`, `enums`, inline fragments) for no payoff (`posture.md`) |
 
 ---
 
 ## Migration plan
 
-Phased, each phase compiles and passes `make test` + `make check` on its own.
+Phased; each phase compiles and passes `make test` + `make check` alone.
 
-1. **Add the dep, prove the seam.** Add `graphql_client` (no `reqwest`
-   feature). Migrate the **Viewer** operation only (smallest, 4 types). Wire
-   `Viewer::build_query` → existing transport. Verify `fetch_viewer` test still
-   passes (`viewer.rs:53-68`). → verify: `make test`, `make check` (deny gate).
-2. **Migrate read operations.** Issues(list+delta), IssueComments,
-   Notifications (exercises inline fragments), Teams, WorkflowStates,
-   TeamMembers. Retarget `From`/`.into()` bridges. → verify: existing fetcher
-   tests with `FakeTransport` are unchanged and green
-   (`list.rs:180+`, `delta.rs:63+`, `comments.rs:123+`, `notifications.rs:149+`).
-3. **Migrate mutations + typed inputs.** IssueUpdate, IssueCreate,
-   CommentCreate; replace the `serde_json::json!` input builders
-   (`mutations.rs:257-272`) with generated `*Input` structs. → verify: mutation
-   tests assert the same variables JSON (`mutations.rs:294-324`).
-4. **Delete the corpse.** Remove the now-unused hand-written structs from
-   `types.rs`/`mutations.rs`/etc. Keep only view/domain types and helpers.
-   → verify: `cargo machete` (unused dep gate) + `cpd`/`cargo dupes`
-   (`make check`) confirm the duplication is gone.
-
-Rollback per phase is a revert; the transport seam never changes, so phases are
-independent.
+1. **Schema module + one fragment, prove the seam.** Add `cynic` (no `http-*`
+   features), `use_schema!` over the snapshot. Model **Viewer** as a
+   `QueryFragment`; build the operation, POST via existing `HttpTransport`,
+   decode through `query_as`. → verify: `fetch_viewer` test green
+   (`viewer.rs:53-68`); `cargo deny` (`make check`).
+2. **Relational schema + sync upsert.** Add entity tables/indexes/migrations
+   (Pillar 2). Rewrite the sync upsert to populate entity tables from fetched
+   fragments instead of the flat row. Keep a compatibility read path until the
+   query layer moves. → verify: existing fetcher tests with `FakeTransport`
+   unchanged (`list.rs:180+`, `delta.rs:63+`, `comments.rs:123+`); new DB tests
+   for joins.
+3. **Read model = fragment types.** Reconstruct `IssueRow`/comment fragments
+   from joins; retarget TUI/CLI render + `From`/`.into()` bridges
+   (`db/issues.rs:29-81`, `render_tests.rs:222`, `loop_tests.rs:188`) onto the
+   shared fragment types. Drop the flat `issues` columns. → verify: TUI/CLI
+   snapshot tests (`insta`) re-accepted intentionally; `cpd`/`cargo dupes`
+   confirm dedup.
+4. **Typed mutation inputs + outbox.** Model `IssueUpdateInput`/`IssueCreateInput`/
+   `CommentCreateInput` via cynic input objects; introduce `mutation_outbox`;
+   move API mutations behind the sync drainer; replace `popup.rs` direct-spawn
+   with enqueue (Pillar 3). → verify: mutation tests assert the same variables
+   JSON (`mutations.rs:294-324`); new outbox drain + reconcile tests; an
+   offline-write test (enqueue with no transport, drain later).
+5. **Delete the corpse.** Remove unused hand-written structs; `cargo machete`
+   clean.
 
 ### Success criteria
 
-- `make test` and `make test --features sim` green at every phase
-  (`docs/rules/testing.md`).
-- `make check` green, including `cargo deny`, `cargo machete`, `cpd`,
-  `cargo dupes` (`Makefile:12-22`).
-- Net deletion in the API type layer; the 82-type hand-written surface drops to
-  view/domain types + helpers only.
-- A deliberate query/schema mismatch fails the build (drift gate).
+- `make test` and `make test --features sim` green at every phase.
+- `make check` green (`cargo deny`, `cargo machete`, `cpd`, `cargo dupes`).
+- API calls originate **only** in the sync layer (grep: no `HttpTransport` use
+  under `src/tui/`); the TUI write path enqueues, never POSTs.
+- A query/schema mismatch and a fragment-field-without-storage both fail fast.
 
 ---
 
-## Risks / open questions (resolved)
+## Risks / open questions
 
-- **Does `graphql_client` handle the inline-fragment notification query?** Yes —
-  `query/selection.rs:18,68`, `query/validation.rs:8-16`. (Verified in source.)
-- **Does it bloat the build with the whole schema?** No — used-types-only
-  (`codegen/enums.rs:30`). (Verified.)
-- **Will new server enum values break deserialization?** No — `Other(String)`
-  fallback (`codegen/enums.rs:62-95`). (Verified.)
-- **Does the transport need changes?** No — `query_as` is generic over
-  `DeserializeOwned` (`client.rs:75-82`); generated `ResponseData` plugs in.
-- **Supply chain.** New deps must pass `cargo deny`; footprint overlaps existing
-  build-deps. To be confirmed empirically in Phase 1 — if `deny` rejects them,
-  fall back to Option D.
+Resolved (primary-source verified):
+- **cynic shares structs across operations?** Yes — `lib.rs:54-67`.
+- **cynic decodes via serde, so the transport survives?** Yes — `http.rs:101,222`
+  (`DeserializeOwned`); we skip its `http-*` features.
+- **Inline fragments / unions (Notifications)?** Yes — cynic README features;
+  graphql_client `query/selection.rs:18`.
+- **graphql_client fragment sharing is per-operation?** Yes — `codegen.rs:248`.
+- **Whole-schema bloat?** Avoided by both (used-types-only / hand-authored).
 
-## Decision required at review
+Open (to settle at/after review):
+- **Outbox vs delta-sync ordering** — the central write-path correctness
+  question (Pillar 3). Must be specified before Phase 4.
+- **Custom scalar policy** — `DateTime`/`ID` newtypes vs `String`. Affects every
+  timestamp field.
+- **Supply chain** — `cynic` + `cynic-codegen` must pass `cargo deny`; confirm
+  empirically in Phase 1. Footprint (`cynic-parser`, `proc-macro2`, `syn`,
+  `quote`) overlaps existing build-deps. Fall back to graphql_client if rejected.
+- **`build.rs` unification** — the search-grammar codegen and the cynic schema
+  module both consume the snapshot. Leave separate for now; unify later.
 
-1. Option **B** (`graphql_client`, recommended) vs **D** (extend `build.rs`).
-2. If B: accept the three new dependencies pending the Phase-1 `cargo deny`
-   check.
+## Decisions required at review
+
+1. Architecture: adopt the **API-only-via-sync / TUI-only-via-DB** target?
+2. Type layer: **cynic** (shared owned fragment types, recommended) vs
+   graphql_client (types stay sync-internal)?
+3. Scope/sequencing: land Pillars 1–2 first and treat the outbox (Pillar 3) as a
+   follow-up, or commit to all three together?
