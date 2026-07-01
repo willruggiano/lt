@@ -583,6 +583,28 @@ Resolved in PR 4:
   (the one UI "clear", via the unassign popup). The other nullable FK fields are
   not yet editable, so the live-API confirmation is deferred until they are.
 
+Resolved in PR 5:
+
+- **Workspace split shipped** — the crate is now
+  `crates/{lt-config,lt-types,lt-storage,lt-upstream,lt-tui,lt-cli}`. The cynic
+  schema module + `QueryFragment` structs + input objects live in `lt-types`
+  (which owns the sole `cynic` dependency); the relational store, read model,
+  generated search/sort codegen, and the `IssueQuery` filter spec in
+  `lt-storage`; the API edge in `lt-upstream`, organized into domain modules
+  (`auth`, `viewer`, `issues`, `comments`, `teams`, `states`, `members`,
+  `notifications`, `sync`) so call sites read `upstream::teams::fetch()`.
+- **TUI ⊥ API enforced structurally** — `lt-tui` lists neither `lt-upstream` nor
+  `cynic` in its manifest, so an API call from the render/event path does not
+  compile. The TUI drives sync/login and live modal reads through a
+  `SyncService` port (`lt-storage`), with the `lt-upstream`-backed adapter
+  injected by `lt-cli` at `lt_tui::run`. Writes flow through the outbox (PR 4).
+- **Viewer baked into the DB** — a database tracks one viewer by definition, so
+  the sync engine persists the viewer identity into `sync_meta`; cached reads
+  resolve `--assignee me` locally with no network round-trip.
+- **`clap` kept out of the data layer** — the generated `SortField` is clap-free
+  (a `from_key` value-parser lives in `lt-cli`); `IssueArgs` (clap) lowers into
+  `lt-storage`'s `IssueQuery`.
+
 Still open (deferred):
 
 - **Labels model** — `labelIds` (full replace) vs `addedLabelIds`/

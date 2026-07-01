@@ -1418,37 +1418,104 @@ dependencies = [
 ]
 
 [[package]]
-name = "lt"
+name = "lt-cli"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "insta",
+ "lt-config",
+ "lt-storage",
+ "lt-tui",
+ "lt-types",
+ "lt-upstream",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lt-config"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lt-storage"
 version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64",
  "chrono",
  "chumsky",
- "clap",
- "crossterm",
- "cynic",
- "cynic-codegen",
  "dirs",
  "fake",
  "graphql-parser",
- "insta",
- "open",
+ "lt-config",
+ "lt-types",
  "prettyplease",
  "proc-macro2",
- "pulldown-cmark",
  "quote",
  "rand 0.10.1",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "syn 2.0.118",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "lt-tui"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crossterm",
+ "insta",
+ "lt-storage",
+ "lt-types",
+ "open",
+ "pulldown-cmark",
  "ratatui",
+ "rusqlite",
+]
+
+[[package]]
+name = "lt-types"
+version = "0.4.0"
+dependencies = [
+ "cynic",
+ "cynic-codegen",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lt-upstream"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "lt-config",
+ "lt-storage",
+ "lt-types",
+ "open",
+ "rand 0.10.1",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "syn 2.0.118",
- "toml",
  "tracing",
- "tracing-appender",
- "tracing-subscriber",
  "ureq",
  "url",
 ]

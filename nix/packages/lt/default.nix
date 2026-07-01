@@ -32,20 +32,21 @@
           cargo = config.packages.toolchain;
           rustc = config.packages.toolchain;
         };
-        cargoToml = builtins.fromTOML (builtins.readFile "${inputs.self}/Cargo.toml");
+        workspaceToml = builtins.fromTOML (builtins.readFile "${inputs.self}/Cargo.toml");
+        cliToml = builtins.fromTOML (builtins.readFile "${inputs.self}/crates/lt-cli/Cargo.toml");
       in
         rustPlatform.buildRustPackage {
-          pname = cargoToml.package.name;
-          inherit (cargoToml.package) version;
+          pname = "lt";
+          inherit (workspaceToml.workspace.package) version;
           src = lib.fileset.toSource {
             root = ../../..;
             fileset = inputs.globset.lib.globs ../../.. [
               "**/*.rs"
               "**/*.snap" # insta snapshots; the package build's tests read these
+              "**/Cargo.toml" # workspace root + every member crate manifest
               "build/*.graphql"
               "build/*.toml"
               "Cargo.lock"
-              "Cargo.toml"
               "clippy.toml"
               "README.md"
             ];
@@ -66,7 +67,8 @@
             pkg-config
           ];
           meta = {
-            inherit (cargoToml.package) description homepage;
+            inherit (cliToml.package) description;
+            inherit (workspaceToml.workspace.package) homepage;
             license = with lib.licenses; [mit];
             mainProgram = "lt";
           };

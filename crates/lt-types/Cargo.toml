@@ -1,0 +1,19 @@
+[package]
+name = "lt-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# Crate-specific: the GraphQL schema and query/input types live only here.
+cynic = { version = "3.13", default-features = false }
+
+[build-dependencies]
+# Crate-specific: only lt-types registers the cynic schema.
+cynic-codegen = "3.13"
+
+[lints]
+workspace = true

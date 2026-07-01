@@ -1,0 +1,28 @@
+[package]
+name = "lt-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+lt-types.workspace = true
+lt-storage.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+open.workspace = true
+rusqlite.workspace = true
+# Crate-specific: only the TUI renders and reads the terminal.
+crossterm = "0.29"
+pulldown-cmark = { version = "0.13.4", default-features = false }
+ratatui = "0.30.0"
+
+[dev-dependencies]
+insta.workspace = true
+lt-storage = { workspace = true, features = ["test-util"] }
+
+[features]
+sim = ["lt-storage/sim"]
+
+[lints]
+workspace = true

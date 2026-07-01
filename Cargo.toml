@@ -1,68 +1,55 @@
-[package]
-name = "lt"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.4.0"
 edition = "2024"
-description = "A local-first Linear TUI for terminal power users"
 license = "MIT"
 homepage = "https://github.com/willruggiano/lt"
 repository = "https://github.com/willruggiano/lt"
-readme = "README.md"
-keywords = ["linear", "tui", "terminal", "productivity"]
-categories = ["command-line-utilities"]
 
-# chumsky is used only by the parser generated into OUT_DIR/search_stems.rs,
-# which cargo-machete does not scan, so it would otherwise read as unused.
-[package.metadata.cargo-machete]
-ignored = ["chumsky"]
+[workspace.dependencies]
+# Internal crates
+lt-config = { path = "crates/lt-config" }
+lt-types = { path = "crates/lt-types" }
+lt-storage = { path = "crates/lt-storage" }
+lt-upstream = { path = "crates/lt-upstream" }
+lt-tui = { path = "crates/lt-tui" }
 
-[features]
-# Deterministic simulation testing. See docs/design/dst.md.
-sim = ["dep:fake"]
-
-[dependencies]
+# Third-party shared by more than one crate. Single-consumer dependencies are
+# defined in the crate that uses them, not here.
 anyhow = "1"
-crossterm = "0.29"
-cynic = { version = "3.13", default-features = false }
 base64 = "0.22"
-clap = { version = "4.6", features = ["derive"] }
+chrono = { version = "0.4", features = ["clock"] }
 dirs = "6"
 open = "5"
 rand = "0.10"
-ratatui = "0.30.0"
 rusqlite = { version = "0.40", features = ["bundled"] }
-chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11"
-ureq = { version = "3", features = ["json"] }
 tracing = "0.1"
-tracing-appender = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = "2"
-chumsky = "0.13"
-pulldown-cmark = { version = "0.13.4", default-features = false }
-fake = { version = "5.1.0", default-features = false, optional = true }
 
-[build-dependencies]
-cynic-codegen = "3.13"
-graphql-parser = "0.4"
-toml = "1"
-serde = { version = "1", features = ["derive"] }
-quote = "1"
-proc-macro2 = "1"
-syn = { version = "2", default-features = false, features = ["full", "parsing"] }
-prettyplease = "0.2"
+# Dev dependencies
+insta = "1.48.0"
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 unused = { level = "deny", priority = -1 }
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 # Transitive dependencies pull in duplicate versions we do not control.
 multiple_crate_versions = { level = "allow", priority = 1 }
+# Internal workspace crates are not published; publishing metadata is noise.
+cargo_common_metadata = { level = "allow", priority = 1 }
+# The crates form an internal workspace API, not a published library, so the
+# public-API doc/annotation polish lints below are noise for that audience.
+missing_errors_doc = { level = "allow", priority = 1 }
+missing_panics_doc = { level = "allow", priority = 1 }
+must_use_candidate = { level = "allow", priority = 1 }
 # Complexity gates (nursery lints enabled individually rather than the whole
 # noisy group); thresholds live in clippy.toml.
 cognitive_complexity = "deny"
@@ -77,6 +64,3 @@ unimplemented = "deny"
 dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
-
-[dev-dependencies]
-insta = "1.48.0"

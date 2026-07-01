@@ -1,0 +1,46 @@
+[package]
+name = "lt-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata.cargo-machete]
+# chumsky is used only by the parser generated into OUT_DIR/search_stems.rs,
+# which cargo-machete does not scan, so it would otherwise read as unused.
+ignored = ["chumsky"]
+
+[dependencies]
+lt-config.workspace = true
+lt-types.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+rand.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# Crate-specific: the search parser and the sim generator live only here.
+chumsky = "0.13"
+fake = { version = "5.1.0", default-features = false, optional = true }
+
+[build-dependencies]
+serde.workspace = true
+# Crate-specific: only lt-storage's build script generates search/sort code.
+graphql-parser = "0.4"
+prettyplease = "0.2"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", default-features = false, features = ["full", "parsing"] }
+toml = "1"
+
+[features]
+# Deterministic simulation testing. See docs/design/dst.md.
+sim = ["dep:fake"]
+# Expose test-only helpers (in-memory DB, sample data) to dependent crates.
+test-util = []
+
+[lints]
+workspace = true
