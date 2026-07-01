@@ -49,9 +49,6 @@ pub struct Completer {
     pub candidates: Vec<String>,
     /// Index of the currently highlighted candidate (cycles on Tab).
     pub selected: usize,
-    /// True when candidate list is being populated asynchronously (Phase 2).
-    #[allow(dead_code)]
-    pub candidates_pending: bool,
 }
 
 impl Completer {
@@ -62,7 +59,6 @@ impl Completer {
             context: CompletionContext::Gap,
             candidates: Vec::new(),
             selected: 0,
-            candidates_pending: false,
         }
     }
 
@@ -115,7 +111,7 @@ impl Completer {
                     self.context = CompletionContext::Word;
                 }
             }
-            Some(Token::Word { .. } | Token::Unknown { .. }) => {
+            Some(Token::Word { .. }) => {
                 self.candidates = Vec::new();
                 self.context = CompletionContext::Word;
             }
@@ -336,20 +332,19 @@ impl Default for Completer {
 /// Extract the (start, end) byte positions of a token's outer span.
 fn span_bounds(token: &Token) -> (usize, usize) {
     match token {
-        Token::Stem { span, .. }
-        | Token::PartialStem { span, .. }
-        | Token::Word { span, .. }
-        | Token::Unknown { span, .. } => (span.start, span.end),
+        Token::Stem { span, .. } | Token::PartialStem { span, .. } | Token::Word { span, .. } => {
+            (span.start, span.end)
+        }
     }
 }
 
 /// Return the cursor position to land on when Tab-jumping to a token.
 /// For Stem and `PartialStem` tokens, position after the colon (at the value
-/// portion). For Word and Unknown, position at the start of the token.
+/// portion). For Word, position at the start of the token.
 fn cursor_position_for_token(token: &Token) -> usize {
     match token {
         Token::Stem { key_span, .. } | Token::PartialStem { key_span, .. } => key_span.end + 1,
-        Token::Word { span, .. } | Token::Unknown { span, .. } => span.start,
+        Token::Word { span, .. } => span.start,
     }
 }
 
@@ -358,7 +353,7 @@ fn cursor_position_for_token(token: &Token) -> usize {
 /// that the value is "selected" and typing replaces it immediately.
 /// `PartialStem` tokens (empty or invalid value) return None -- there is
 /// nothing to select.
-/// Word and Unknown tokens also return None.
+/// Word tokens also return None.
 fn selection_end_for_token(token: &Token) -> Option<usize> {
     match token {
         Token::Stem { span, val_span, .. } => {
@@ -402,7 +397,6 @@ mod tests {
         assert_eq!(c.context, CompletionContext::Gap);
         assert!(c.candidates.is_empty());
         assert_eq!(c.selected, 0);
-        assert!(!c.candidates_pending);
     }
 
     #[test]

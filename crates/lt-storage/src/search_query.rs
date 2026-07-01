@@ -106,9 +106,6 @@ pub enum Token {
     },
     /// A bare word (goes to FTS).
     Word { span: Span, text: String },
-    /// Anything that could not be classified (e.g. empty string, stray colon).
-    #[allow(dead_code)]
-    Unknown { span: Span, raw: String },
 }
 
 /// A fully-parsed query AST, always constructible from any input string.
@@ -181,21 +178,6 @@ pub struct ParsedQuery {
 }
 
 impl ParsedQuery {
-    /// Return `true` when no filter constraints are set and no FTS terms exist.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.sort.is_none()
-            && self.assignee.is_none()
-            && self.priority.is_none()
-            && self.state.is_none()
-            && self.team.is_none()
-            && self.label.is_none()
-            && self.project.is_none()
-            && self.cycle.is_none()
-            && self.creator.is_none()
-            && self.fts_terms.is_empty()
-    }
-
     /// Return `true` when any filter constraint (beyond sort) is active.
     pub fn has_filters(&self) -> bool {
         self.assignee.is_some()
@@ -502,7 +484,6 @@ pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec
 ///
 /// If `viewer_name` is Some and the assignee filter is "me", it is replaced
 /// with the actual name so that the SQL LIKE filter works correctly.
-#[allow(dead_code)]
 pub fn resolve_me(q: &mut ParsedQuery, viewer_name: Option<&str>) {
     if q.assignee.as_deref() == Some("me") {
         q.assignee = viewer_name.map(str::to_lowercase);
@@ -549,8 +530,8 @@ pub fn args_to_ast(args: &IssueQuery) -> QueryAst {
 /// TUI header.
 ///
 /// Iterates the AST tokens and formats each recognised stem as `key:value`,
-/// joining with two spaces.  `PartialStem` and `Unknown` tokens are skipped
-/// so partially-typed input is not shown in the header.
+/// joining with two spaces.  `PartialStem` tokens are skipped so
+/// partially-typed input is not shown in the header.
 pub fn render_filter_context(ast: &QueryAst) -> String {
     let mut parts: Vec<String> = Vec::new();
     for token in &ast.tokens {
@@ -573,7 +554,7 @@ pub fn render_filter_context(ast: &QueryAst) -> String {
                 StemKind::Creator { value } => parts.push(format!("creator:{value}")),
             },
             Token::Word { text, .. } => parts.push(text.clone()),
-            _ => {} // PartialStem/Unknown: skip in header display
+            Token::PartialStem { .. } => {} // skip in header display
         }
     }
     parts.join("  ")
@@ -590,7 +571,6 @@ mod tests {
     #[test]
     fn parse_empty_string() {
         let q = parse_query("");
-        assert!(q.is_empty());
         assert!(q.sort.is_none());
         assert!(q.fts_terms.is_empty());
     }
@@ -823,8 +803,7 @@ mod tests {
             let (start, end) = match token {
                 Token::Stem { span, .. }
                 | Token::PartialStem { span, .. }
-                | Token::Word { span, .. }
-                | Token::Unknown { span, .. } => (span.start, span.end),
+                | Token::Word { span, .. } => (span.start, span.end),
             };
             // Bounds check.
             assert!(end <= raw.len(), "end={} > raw.len()={}", end, raw.len());

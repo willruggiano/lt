@@ -11,7 +11,6 @@ pub struct Comment {
     pub author_name: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    #[allow(dead_code)]
     pub synced_at: String,
 }
 

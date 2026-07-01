@@ -2,51 +2,13 @@
 ///
 /// Linear's `OAuth2` implementation does not issue refresh tokens.  The only
 /// way to obtain a new access token is to run the full authorization-code +
-/// PKCE flow again.  This module provides `try_refresh`, which attempts that
-/// flow when the stored token appears to be expired AND the client credentials
-/// (`client_id` + `client_secret`) are available -- either from environment
-/// variables or from the stored config file.
-///
-/// The function is best-effort:
-///   - Returns Ok(false) when refresh is not possible (no credentials, no
-///     expiry information, or the token is still valid).
-///   - Returns Ok(true) when a fresh token was obtained and saved.
-///   - Returns Err(...) only when credentials are present and the OAuth flow
-///     itself failed.
+/// PKCE flow again.  This module provides `load_or_refresh_token`, which
+/// attempts that flow when the stored token appears to be expired AND the
+/// client credentials (`client_id` + `client_secret`) are available -- either
+/// from environment variables or from the stored config file.
 use anyhow::{Result, anyhow};
 use lt_config::AuthToken;
 use tracing::info;
-
-/// Attempt to obtain a fresh access token if the current one has expired.
-///
-/// Returns `true` when a new token was saved, `false` when no refresh was
-/// needed or possible.
-#[allow(dead_code)]
-pub fn try_refresh() -> Result<bool> {
-    // Load the current token.  If there is none, nothing to refresh.
-    let Some(token) = lt_config::load_token()? else {
-        return Ok(false);
-    };
-
-    // Only attempt refresh when the token is known to have expired.
-    if !token.is_expired() {
-        return Ok(false);
-    }
-
-    // Check whether we have the client credentials needed to drive the OAuth
-    // flow.  Without them we cannot open the authorization URL.
-    if !credentials_available()? {
-        info!("auth: token is expired but no client credentials are stored -- cannot auto-refresh");
-        return Ok(false);
-    }
-
-    info!("auth: access token has expired -- starting automatic re-authentication");
-
-    // Delegate to the standard login flow, which stores the new token.
-    super::login::run()?;
-
-    Ok(true)
-}
 
 /// Load the stored token, attempting an automatic re-authentication if the
 /// token is expired and client credentials are available.

@@ -140,11 +140,6 @@ fn gen_from_ast(fields: &[FieldSpec]) -> TokenStream {
                         Token::Word { text, .. } => {
                             fts_words.push(format!("{text}*"));
                         }
-                        Token::Unknown { raw: raw_slice, .. } => {
-                            if !raw_slice.is_empty() {
-                                fts_words.push(format!("{raw_slice}*"));
-                            }
-                        }
                     }
                 }
 
