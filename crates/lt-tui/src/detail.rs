@@ -1,8 +1,6 @@
-use std::sync::Arc;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-
 use lt_storage::db::Database;
 
 use super::{App, CommentSyncEvent, Issue, Mode, Status};

@@ -14,9 +14,8 @@
 ///   - Returns Err(...) only when credentials are present and the OAuth flow
 ///     itself failed.
 use anyhow::{Result, anyhow};
-use tracing::info;
-
 use lt_config::AuthToken;
+use tracing::info;
 
 /// Attempt to obtain a fresh access token if the current one has expired.
 ///

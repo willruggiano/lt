@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
 use anyhow::{Result, anyhow};
+use lt_types::types::PageInfo;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::client::{GraphqlTransport, HttpTransport, query_as};
-use lt_types::types::PageInfo;
 
 const NOTIFICATIONS_QUERY: &str = r"
 query Notifications($first: Int, $after: String) {

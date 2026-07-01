@@ -2,12 +2,11 @@ use std::io::Write;
 
 use anyhow::Result;
 use chrono::Utc;
-use tracing::{error, info};
-
 use lt_storage::db;
 use lt_storage::query::IssueQuery;
 use lt_sync::client::HttpTransport;
 use lt_sync::list::fetch;
+use tracing::{error, info};
 
 use super::IssueArgs;
 use super::display::print_table;

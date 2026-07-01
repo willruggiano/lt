@@ -2,10 +2,10 @@ use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-
-use crate::issues::display::print_table;
 use lt_storage::db;
 use lt_types::types::Issue;
+
+use crate::issues::display::print_table;
 
 #[derive(Args, Clone)]
 pub struct SearchArgs {

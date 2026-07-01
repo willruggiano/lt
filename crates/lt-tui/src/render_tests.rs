@@ -6,10 +6,9 @@
 // profile global is touched. Data comes from the deterministic `sim` generator,
 // so the module is gated on `feature = "sim"`.
 
+use lt_storage::sync_port::Member;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-
-use lt_storage::sync_port::Member;
 
 use super::*;
 

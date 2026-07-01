@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use anyhow::Result;
-
 use lt_storage::text;
 use lt_sync::notifications::Notification;
 

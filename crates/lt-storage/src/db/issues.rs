@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use lt_types::types;
 use rusqlite::{Connection, params};
 
 use crate::query::IssueQuery;
-use lt_types::types;
 
 /// The fragment-typed read model's column list: every field
 /// [`types::Issue`] selects, sourced from the relational base via the joins in

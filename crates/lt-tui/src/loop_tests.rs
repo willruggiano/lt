@@ -8,11 +8,11 @@
 
 use std::collections::VecDeque;
 
+use lt_storage::db::Database;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
-use lt_storage::db::Database;
 
 /// Scripted key source for `run_app`. Yields the queued keys, then errors so
 /// a forgotten quit key terminates the loop instead of hanging.

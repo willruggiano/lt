@@ -6,7 +6,6 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-
 use lt_storage::query::{IssueQuery, SortField};
 
 /// Clap value parser for `--sort`: maps a sort key to its [`SortField`], which

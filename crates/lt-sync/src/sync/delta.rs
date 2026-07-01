@@ -1,10 +1,10 @@
 use anyhow::Result;
+use lt_storage::db;
+use lt_types::types::{Issue, IssuesData};
 use serde_json::json;
 
 use crate::client::{GraphqlTransport, HttpTransport, query_as};
 use crate::list::ISSUES_QUERY;
-use lt_storage::db;
-use lt_types::types::{Issue, IssuesData};
 
 /// Fetch one page of issues updated after `since` (an RFC3339 timestamp).
 fn fetch_page(

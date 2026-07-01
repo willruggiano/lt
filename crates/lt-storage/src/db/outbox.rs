@@ -9,11 +9,10 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{Connection, params};
-use serde_json::json;
-
 use lt_types::inputs::{CommentCreateInput, Field, IssueCreateInput, IssueUpdateInput};
 use lt_types::types;
+use rusqlite::{Connection, params};
+use serde_json::json;
 
 pub const OP_ISSUE_UPDATE: &str = "IssueUpdate";
 pub const OP_ISSUE_CREATE: &str = "IssueCreate";

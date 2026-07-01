@@ -1,5 +1,4 @@
 use anyhow::Result;
-
 use lt_storage::db;
 use lt_storage::query::{IssueQuery, SortField};
 

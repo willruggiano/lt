@@ -6,7 +6,6 @@ pub mod probe;
 
 use anyhow::Result;
 use chrono::Utc;
-
 use lt_storage::db;
 use lt_types::types::Issue;
 

@@ -6,7 +6,6 @@ use std::io::Write;
 use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
-
 use lt_storage::db;
 use lt_storage::sim::generate;
 

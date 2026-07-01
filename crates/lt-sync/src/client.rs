@@ -1,8 +1,7 @@
 use anyhow::{Context, Result, anyhow};
+use lt_types::types::GraphqlResponse;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-
-use lt_types::types::GraphqlResponse;
 
 const GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 

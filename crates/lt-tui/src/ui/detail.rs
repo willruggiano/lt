@@ -1,3 +1,4 @@
+use lt_types::types::IssueDetail;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -6,7 +7,6 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 use super::table::date;
 use crate::{App, Status, markdown};
-use lt_types::types::IssueDetail;
 
 /// Render the issue detail as a floating overlay over the right ~60% of the
 /// content area. The underlying issue list is drawn at full width first, so

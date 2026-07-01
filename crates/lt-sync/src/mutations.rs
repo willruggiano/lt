@@ -1,10 +1,9 @@
 use anyhow::{Result, bail};
+use lt_storage::sync_port::{Member, Team, WorkflowState};
+use lt_types::inputs::IssueCreateInput;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-
-use lt_storage::sync_port::{Member, Team, WorkflowState};
-use lt_types::inputs::IssueCreateInput;
 
 use super::client::{GraphqlTransport, query_as};
 

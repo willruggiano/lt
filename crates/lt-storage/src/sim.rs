@@ -9,11 +9,11 @@ use fake::Fake;
 use fake::faker::company::en::{BsNoun, BsVerb, Buzzword, Industry};
 use fake::faker::lorem::en::{Paragraph, Sentence, Word};
 use fake::faker::name::en::Name;
+use lt_types::types;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 use crate::db;
-use lt_types::types;
 
 /// Linear's fixed priority vocabulary (matches the labels the TUI renders).
 const PRIORITIES: &[&str] = &["No priority", "Urgent", "High", "Normal", "Low"];

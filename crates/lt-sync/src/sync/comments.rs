@@ -6,12 +6,12 @@
 //! into the `issue_comments` table.
 
 use anyhow::Result;
+use lt_storage::db;
+use lt_types::types::PageInfo;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::client::{GraphqlTransport, query_as};
-use lt_storage::db;
-use lt_types::types::PageInfo;
 
 const COMMENTS_QUERY: &str = r"
 query IssueComments($id: String!, $after: String) {

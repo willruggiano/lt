@@ -1,9 +1,8 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use ratatui::widgets::TableState;
-
 use lt_storage::search_query;
+use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
 use super::{ALL_KEYBINDINGS, App, Mode, TextInput};

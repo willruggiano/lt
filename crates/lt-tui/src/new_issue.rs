@@ -1,8 +1,6 @@
-use std::sync::Arc;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-
 use lt_storage::sync_port::{Member, ViewerIdentity};
 
 use super::{App, Mode, PopupItem, TextInput, priority_popup_items};

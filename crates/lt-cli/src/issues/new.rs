@@ -1,14 +1,13 @@
 use std::io::{self, BufRead, Write};
 
 use anyhow::{Result, anyhow};
-use serde::Deserialize;
-use serde_json::json;
-
 use lt_storage::sync_port::{Team, WorkflowState};
 use lt_sync::client::{HttpTransport, query_as};
 use lt_sync::mutations::{create_issue, fetch_teams, fetch_workflow_states};
 use lt_types::inputs::IssueCreateInput;
 use lt_types::types::priority_u8_to_label;
+use serde::Deserialize;
+use serde_json::json;
 
 const VIEWER_QUERY: &str = r"
 query Viewer {

@@ -7,11 +7,11 @@
 //! command does not block the others behind it.
 
 use anyhow::{Result, bail};
+use lt_storage::db::outbox::{self, PendingOp};
 use rusqlite::Connection;
 
 use crate::client::GraphqlTransport;
 use crate::mutations;
-use lt_storage::db::outbox::{self, PendingOp};
 
 /// Replay every pending outbox command, recording (not propagating) per-command
 /// failures so a single bad command never aborts the surrounding sync.
@@ -64,12 +64,12 @@ fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -
 
 #[cfg(test)]
 mod tests {
+    use lt_storage::db::outbox::{self, sample_base_issue as base_issue};
     use rusqlite::Connection;
     use serde_json::json;
 
     use super::*;
     use crate::client::FakeTransport;
-    use lt_storage::db::outbox::{self, sample_base_issue as base_issue};
 
     fn db_with_issue(id: &str) -> Connection {
         let conn = Connection::open_in_memory().unwrap();

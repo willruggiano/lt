@@ -1,3 +1,6 @@
+use lt_storage::query::SortField;
+use lt_storage::text;
+use lt_types::types::Issue;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Clear, Paragraph};
@@ -5,9 +8,6 @@ use ratatui::widgets::{Clear, Paragraph};
 use super::table::sort_col_index;
 use super::util::{TableSpec, render_issue_table};
 use crate::SearchOverlay;
-use lt_storage::query::SortField;
-use lt_storage::text;
-use lt_types::types::Issue;
 
 /// Active sort field and direction.
 pub(super) struct SortOrder<'a> {

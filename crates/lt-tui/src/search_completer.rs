@@ -4,8 +4,9 @@
 //! module is the TUI-side completion that drives a [`crate::text_input::TextInput`]
 //! against that parser's tokens.
 
-use crate::text_input::TextInput;
 use lt_storage::search_query::{QueryAst, StemKey, Token, parse_query_ast};
+
+use crate::text_input::TextInput;
 
 // ---------------------------------------------------------------------------
 // Completer (bd-35l)
@@ -384,12 +385,13 @@ fn stem_key_candidates(prefix: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::text_input::TextInput;
     use lt_storage::query::{IssueQuery, SortField};
     use lt_storage::search_query::{
         SortDir, StemKind, Token, args_to_ast, parse_query_ast, render_filter_context,
     };
+
+    use super::*;
+    use crate::text_input::TextInput;
 
     // Completer tests (bd-35l)
     // -----------------------------------------------------------------------

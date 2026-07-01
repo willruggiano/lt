@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use anyhow::Result;
-
 use lt_storage::text;
 use lt_types::types::Issue;
 
@@ -99,8 +98,9 @@ pub fn print_table(out: &mut dyn Write, issues: &[Issue], note: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use lt_types::types::{Label, LabelConnection, State, Team, User};
+
+    use super::*;
 
     fn cached_to_string(issues: &[Issue], note: &str) -> String {
         let mut buf = Vec::new();

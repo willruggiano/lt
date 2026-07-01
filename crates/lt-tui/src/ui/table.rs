@@ -1,12 +1,12 @@
+use lt_storage::query::SortField;
+use lt_storage::text;
+use lt_types::types::Issue;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
 
 use super::util::{TableSpec, render_issue_table, to_u16};
 use crate::{App, Mode, PopupKind, Status};
-use lt_storage::query::SortField;
-use lt_storage::text;
-use lt_types::types::Issue;
 
 pub(super) fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     let overlay: Option<String> = match &app.status {

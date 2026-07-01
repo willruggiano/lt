@@ -3,10 +3,9 @@
 //! query that hits the network.
 
 use anyhow::{Result, anyhow};
-use serde_json::{Value, json};
-
 use lt_storage::query::{IssueQuery, build_sort, parse_date};
 use lt_types::types::{Issue, IssuesData};
+use serde_json::{Value, json};
 
 use crate::auth::refresh::load_or_refresh_token;
 use crate::client::{GraphqlTransport, HttpTransport, query_as};

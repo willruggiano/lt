@@ -1,8 +1,7 @@
 use anyhow::{Result, anyhow};
 use rusqlite::types::ToSql;
 
-use crate::query::parse_date;
-use crate::query::{IssueQuery, SortField};
+use crate::query::{IssueQuery, SortField, parse_date};
 
 fn parse_priority_label(s: &str) -> Result<String> {
     let label = match s.to_lowercase().as_str() {

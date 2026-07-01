@@ -13,8 +13,7 @@ mod render_tests;
 #[cfg(all(test, feature = "sim"))]
 mod loop_tests;
 
-use std::sync::Arc;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -22,6 +21,12 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
 pub(crate) use detail::{handle_detail_key, poll_detail_comment_events};
+use lt_storage::query::IssueQuery;
+use lt_storage::search_query;
+use lt_storage::sync_port::{LoginEvent, SyncEvent, SyncService};
+#[cfg(all(test, feature = "sim"))]
+pub(crate) use lt_types::types::priority_label_to_u8;
+use lt_types::types::{Issue, IssueDetail};
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use new_issue::{ModalEvent, build_assignee_items};
 pub(crate) use new_issue::{NewIssueField, NewIssueModal, handle_new_issue_key};
@@ -36,13 +41,6 @@ use ratatui::backend::Backend;
 use ratatui::widgets::TableState;
 pub(crate) use sync::{build_sync_status_label, poll_login_events, poll_sync_events};
 pub(crate) use text_input::TextInput;
-
-use lt_storage::query::IssueQuery;
-use lt_storage::search_query;
-use lt_storage::sync_port::{LoginEvent, SyncEvent, SyncService};
-#[cfg(all(test, feature = "sim"))]
-pub(crate) use lt_types::types::priority_label_to_u8;
-use lt_types::types::{Issue, IssueDetail};
 
 /// Wall-clock source. The set of clocks is closed -- the real system clock in
 /// the binary, plus a fixed instant in tests -- so it is an enum rather than a
