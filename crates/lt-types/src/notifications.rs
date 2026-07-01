@@ -3,8 +3,10 @@
 
 use cynic::QueryBuilder;
 
+use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
 use crate::schema;
+use crate::types::{Issue, User};
 
 #[derive(cynic::QueryVariables)]
 pub struct NotificationsVariables {
@@ -36,20 +38,69 @@ pub struct NotificationConnection {
     pub page_info: PageInfo,
 }
 
-#[derive(cynic::QueryFragment)]
-pub struct PageInfo {
-    pub has_next_page: bool,
-    pub end_cursor: Option<String>,
-}
-
-/// One notification node: issue notifications carry their issue; every other
-/// concrete type decodes through the interface-level fallback.
+/// One notification node: issue notifications carry their issue (the shared,
+/// fully-selected [`Issue`] fragment -- this is what fragment reuse across
+/// operations is for); every other concrete type decodes through the
+/// interface-level fallback.
 #[derive(cynic::InlineFragments)]
 #[cynic(graphql_type = "Notification")]
 pub enum Notification {
-    IssueNotification(IssueNotification),
+    // Boxed: `IssueNotification` embeds the full `Issue` fragment, making this
+    // variant far larger than `Other` (clippy::large_enum_variant).
+    IssueNotification(Box<IssueNotification>),
     #[cynic(fallback)]
     Other(BaseNotification),
+}
+
+impl Notification {
+    pub fn id(&self) -> &cynic::Id {
+        match self {
+            Self::IssueNotification(n) => &n.id,
+            Self::Other(n) => &n.id,
+        }
+    }
+
+    pub fn type_(&self) -> &str {
+        match self {
+            Self::IssueNotification(n) => &n.type_,
+            Self::Other(n) => &n.type_,
+        }
+    }
+
+    pub fn read_at(&self) -> Option<&DateTime> {
+        match self {
+            Self::IssueNotification(n) => n.read_at.as_ref(),
+            Self::Other(n) => n.read_at.as_ref(),
+        }
+    }
+
+    pub fn created_at(&self) -> &DateTime {
+        match self {
+            Self::IssueNotification(n) => &n.created_at,
+            Self::Other(n) => &n.created_at,
+        }
+    }
+
+    pub fn updated_at(&self) -> &DateTime {
+        match self {
+            Self::IssueNotification(n) => &n.updated_at,
+            Self::Other(n) => &n.updated_at,
+        }
+    }
+
+    pub fn actor(&self) -> Option<&User> {
+        match self {
+            Self::IssueNotification(n) => n.actor.as_ref(),
+            Self::Other(n) => n.actor.as_ref(),
+        }
+    }
+
+    pub fn issue(&self) -> Option<&Issue> {
+        match self {
+            Self::IssueNotification(n) => Some(&n.issue),
+            Self::Other(_) => None,
+        }
+    }
 }
 
 #[derive(cynic::QueryFragment)]
@@ -60,8 +111,8 @@ pub struct IssueNotification {
     pub read_at: Option<DateTime>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
-    pub actor: Option<NotificationActor>,
-    pub issue: NotificationIssue,
+    pub actor: Option<User>,
+    pub issue: Issue,
 }
 
 /// The interface-level selection shared by every notification type.
@@ -74,20 +125,7 @@ pub struct BaseNotification {
     pub read_at: Option<DateTime>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
-    pub actor: Option<NotificationActor>,
-}
-
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "User")]
-pub struct NotificationActor {
-    pub name: String,
-}
-
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "Issue")]
-pub struct NotificationIssue {
-    pub identifier: String,
-    pub title: String,
+    pub actor: Option<User>,
 }
 
 #[cfg(test)]

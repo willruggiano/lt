@@ -31,7 +31,7 @@ pub fn run(out: &mut dyn Write, args: &InboxArgs) -> Result<()> {
     } else {
         notifications
             .into_iter()
-            .filter(|n| n.read_at.is_none())
+            .filter(|n| n.read_at().is_none())
             .collect()
     };
 

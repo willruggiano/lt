@@ -126,12 +126,15 @@ impl Generator {
 
     /// A `(created_at, updated_at)` pair where `updated_at >= created_at`,
     /// both within ~190 days of the fixed base.
-    fn timestamps(&mut self) -> (String, String) {
+    fn timestamps(&mut self) -> (lt_types::scalars::DateTime, lt_types::scalars::DateTime) {
         let created = self.rng.random_range(0..15_552_000i64); // up to 180 days
         let updated = created + self.rng.random_range(0..864_000i64); // up to +10 days
         let c = self.base + Duration::seconds(created);
         let u = self.base + Duration::seconds(updated);
-        (c.to_rfc3339(), u.to_rfc3339())
+        (
+            lt_types::scalars::DateTime(c),
+            lt_types::scalars::DateTime(u),
+        )
     }
 
     fn name(&mut self) -> String {
@@ -159,7 +162,7 @@ impl Generator {
         chosen
             .into_iter()
             .map(|name| types::Label {
-                id: name.clone(),
+                id: lt_types::Id::new(name.clone()),
                 name,
             })
             .collect()
@@ -211,8 +214,10 @@ impl Generator {
         if !self.rng.random_ratio(3, 20) {
             return None;
         }
-        let candidates: Vec<&types::Issue> =
-            existing.iter().filter(|e| e.team.id == team_key).collect();
+        let candidates: Vec<&types::Issue> = existing
+            .iter()
+            .filter(|e| e.team.id.inner() == team_key)
+            .collect();
         if candidates.is_empty() {
             return None;
         }
@@ -227,7 +232,7 @@ impl Generator {
     /// the relational upsert dedupes a person to one `users` row.
     fn user(name: Option<String>) -> Option<types::User> {
         name.map(|name| types::User {
-            id: name.clone(),
+            id: lt_types::Id::new(name.clone()),
             name,
         })
     }
@@ -250,29 +255,29 @@ impl Generator {
         let priority = types::priority_label_to_u8(&priority_label);
         let state_name = (*self.pick(STATES)).to_string();
         types::Issue {
-            id: format!("sim-{:016x}-{index}", self.seed),
+            id: lt_types::Id::new(format!("sim-{:016x}-{index}", self.seed)),
             identifier,
             title,
-            priority,
+            priority: lt_types::scalars::Priority(priority),
             // The team id is its key; entity ids mirror names so renamed-to-same
             // values collapse to one row in the relational base.
             state: types::WorkflowState {
-                id: state_name.clone(),
+                id: lt_types::Id::new(state_name.clone()),
                 name: state_name,
             },
             assignee,
             team: types::Team {
-                id: team_key,
+                id: lt_types::Id::new(team_key),
                 name: team_name,
             },
             description,
             labels: types::LabelConnection { nodes: labels },
             project: project.map(|name| types::Project {
-                id: name.clone(),
+                id: lt_types::Id::new(name.clone()),
                 name,
             }),
             cycle: cycle.map(|name| types::Cycle {
-                id: name.clone(),
+                id: lt_types::Id::new(name.clone()),
                 name: Some(name),
             }),
             creator,
@@ -290,12 +295,12 @@ impl Generator {
             let (created_at, updated_at) = self.timestamps();
             let body: String = Sentence(8..18).fake_with_rng(&mut self.rng);
             out.push(db::Comment {
-                id: format!("{}-c{c}", issue.id),
-                issue_id: issue.id.clone(),
+                id: format!("{}-c{c}", issue.id.inner()),
+                issue_id: issue.id.inner().to_string(),
                 body,
                 author_name: Some(self.name()),
-                created_at,
-                updated_at,
+                created_at: created_at.0.to_rfc3339(),
+                updated_at: updated_at.0.to_rfc3339(),
                 synced_at: String::new(),
             });
         }
@@ -342,7 +347,7 @@ mod tests {
     #[test]
     fn identifiers_are_unique() {
         let d = generate(99, 200);
-        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.as_str()).collect();
+        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.inner()).collect();
         assert_eq!(ids.len(), d.issues.len());
         let idents: HashSet<&str> = d.issues.iter().map(|i| i.identifier.as_str()).collect();
         assert_eq!(idents.len(), d.issues.len());
@@ -351,13 +356,13 @@ mod tests {
     #[test]
     fn relations_reference_existing_issues() {
         let d = generate(123, 200);
-        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.as_str()).collect();
+        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.inner()).collect();
         for issue in &d.issues {
             if let Some(parent) = &issue.parent {
                 assert!(
-                    ids.contains(parent.id.as_str()),
+                    ids.contains(parent.id.inner()),
                     "dangling parent {}",
-                    parent.id
+                    parent.id.inner()
                 );
                 assert_ne!(issue.id, parent.id, "issue is its own parent");
             }

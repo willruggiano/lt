@@ -5,8 +5,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
-use super::table::date;
 use crate::{App, Status, markdown};
+
+/// A comment's `createdAt` is a plain RFC3339 `String` (`IssueDetail` is not
+/// yet migrated to the `DateTime` scalar); render its `YYYY-MM-DD` date part.
+fn comment_date(s: &str) -> &str {
+    if s.len() >= 10 { &s[..10] } else { s }
+}
 
 /// Render the issue detail as a floating overlay over the right ~60% of the
 /// content area. The underlying issue list is drawn at full width first, so
@@ -156,7 +161,11 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
         for comment in &d.comments.nodes {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("{} on {}", comment.author(), date(&comment.created_at)),
+                format!(
+                    "{} on {}",
+                    comment.author(),
+                    comment_date(&comment.created_at)
+                ),
                 Style::new().add_modifier(Modifier::BOLD),
             )));
             lines.extend(markdown::render(&comment.body));

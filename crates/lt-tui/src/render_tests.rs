@@ -204,14 +204,14 @@ fn optimistic_builders_apply_popup_choice() {
 
     let built = build_optimistic_issue(&issue, &PopupKind::Priority, &item("Urgent", Some("1")));
     assert_eq!(built.priority_label, "Urgent");
-    assert_eq!(built.priority, 1);
+    assert_eq!(built.priority, lt_types::scalars::Priority(1));
     let unassigned = build_optimistic_issue(&issue, &PopupKind::Assignee, &item("x", None));
     assert!(unassigned.assignee.is_none());
 
     app.table_state.select(Some(0));
     apply_optimistic_in_memory(&mut app, &PopupKind::Priority, &item("Urgent", Some("1")));
     assert_eq!(app.issues[0].priority_label, "Urgent");
-    assert_eq!(app.issues[0].priority, 1);
+    assert_eq!(app.issues[0].priority, lt_types::scalars::Priority(1));
     apply_optimistic_in_memory(&mut app, &PopupKind::Assignee, &item("none", None));
     assert!(app.issues[0].assignee.is_none());
 }
@@ -227,11 +227,11 @@ fn assignee_items_put_me_first_and_skip_viewer() {
     let members = || {
         vec![
             User {
-                id: "v".to_string(),
+                id: lt_types::Id::new("v"),
                 name: "Vic".to_string(),
             },
             User {
-                id: "m".to_string(),
+                id: lt_types::Id::new("m"),
                 name: "Mara".to_string(),
             },
         ]

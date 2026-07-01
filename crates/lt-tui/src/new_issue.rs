@@ -120,7 +120,7 @@ impl super::App {
                     .into_iter()
                     .map(|t| PopupItem {
                         label: t.name.clone(),
-                        id: Some(t.id),
+                        id: Some(t.id.into_inner()),
                     })
                     .collect();
                 // Pre-select team from filter.
@@ -175,7 +175,7 @@ impl super::App {
                         .into_iter()
                         .map(|s| PopupItem {
                             label: s.name,
-                            id: Some(s.id),
+                            id: Some(s.id.into_inner()),
                         })
                         .collect();
                     let _ = tx.send(ModalEvent::StatesLoaded(items));
@@ -338,25 +338,25 @@ fn build_create_request(
     };
 
     let priority = priority.unwrap_or(0);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = lt_types::scalars::DateTime(chrono::Utc::now());
     let optimistic = types::Issue {
-        id: lt_runtime::db::outbox::temp_id(),
+        id: lt_types::Id::new(lt_runtime::db::outbox::temp_id()),
         identifier: "NEW".to_string(),
         title,
-        priority,
+        priority: lt_types::scalars::Priority(priority),
         priority_label: types::priority_u8_to_label(priority).to_string(),
         // Fall back to a name-keyed id when the modal lacked one so the
         // relational join still resolves a label.
         state: types::WorkflowState {
-            id: state_id.unwrap_or_else(|| state_name.clone()),
+            id: lt_types::Id::new(state_id.unwrap_or_else(|| state_name.clone())),
             name: state_name,
         },
         assignee: assignee_id.map(|id| types::User {
-            id,
+            id: lt_types::Id::new(id),
             name: assignee.map(|a| a.label.clone()).unwrap_or_default(),
         }),
         team: types::Team {
-            id: team_id,
+            id: lt_types::Id::new(team_id),
             name: team_name,
         },
         description,
@@ -365,7 +365,7 @@ fn build_create_request(
         cycle: None,
         creator: None,
         parent: None,
-        created_at: now.clone(),
+        created_at: now,
         updated_at: now,
     };
 
@@ -388,12 +388,12 @@ pub(crate) fn build_assignee_items(viewer: Option<&Viewer>, members: Vec<User>) 
     });
     for m in members {
         // Skip the viewer entry since it is already at the top.
-        if viewer.is_some_and(|v| v.id == m.id) {
+        if viewer.is_some_and(|v| v.id == m.id.inner()) {
             continue;
         }
         items.push(PopupItem {
             label: m.name,
-            id: Some(m.id),
+            id: Some(m.id.into_inner()),
         });
     }
     items

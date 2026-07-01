@@ -1,4 +1,14 @@
+//! The issue fragment types.
+//!
+//! These are cynic `QueryFragment`s: the SAME types decode the wire response
+//! (via the derive's generated `Deserialize`) and are constructed directly by
+//! `lt-storage` from the local DB's relational joins. There is one `Issue`
+//! type, not a wire projection plus a mirrored domain type.
+
 use serde::Deserialize;
+
+use crate::scalars::{DateTime, Priority};
+use crate::schema;
 
 #[derive(Deserialize)]
 pub struct GraphqlResponse<T> {
@@ -9,14 +19,6 @@ pub struct GraphqlResponse<T> {
 #[derive(Deserialize)]
 pub struct GraphqlError {
     pub message: String,
-}
-
-#[derive(Deserialize)]
-pub struct PageInfo {
-    #[serde(rename = "hasNextPage")]
-    pub has_next_page: bool,
-    #[serde(rename = "endCursor")]
-    pub end_cursor: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -38,9 +40,10 @@ pub struct CommentUser {
     pub name: String,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
+#[cynic(graphql_type = "IssueLabel")]
 pub struct Label {
-    pub id: String,
+    pub id: cynic::Id,
     pub name: String,
 }
 
@@ -88,31 +91,29 @@ pub struct IssueDetailTeam {
     pub name: String,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-pub struct LabelConnection {
-    pub nodes: Vec<Label>,
-}
-
 #[derive(Deserialize, Debug, Clone)]
 pub struct CommentConnection {
     pub nodes: Vec<Comment>,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Issue")]
 pub struct Parent {
-    pub id: String,
+    pub id: cynic::Id,
     pub identifier: String,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "WorkflowState")]
 pub struct WorkflowState {
-    pub id: String,
+    pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "User")]
 pub struct User {
-    pub id: String,
+    pub id: cynic::Id,
     pub name: String,
 }
 
@@ -128,33 +129,42 @@ pub struct Viewer {
     pub org_url_key: String,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Team")]
 pub struct Team {
-    pub id: String,
+    pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Project")]
 pub struct Project {
-    pub id: String,
+    pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Cycle")]
 pub struct Cycle {
-    pub id: String,
+    pub id: cynic::Id,
     // Nullable in Linear's schema -- unnamed cycles identify by number.
     pub name: Option<String>,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
+#[cynic(graphql_type = "IssueLabelConnection")]
+pub struct LabelConnection {
+    pub nodes: Vec<Label>,
+}
+
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Issue")]
 pub struct Issue {
-    pub id: String,
+    pub id: cynic::Id,
     pub identifier: String,
     pub title: String,
-    #[serde(rename = "priorityLabel")]
     pub priority_label: String,
-    pub priority: u8,
+    pub priority: Priority,
     pub state: WorkflowState,
     pub assignee: Option<User>,
     pub team: Team,
@@ -164,23 +174,8 @@ pub struct Issue {
     pub cycle: Option<Cycle>,
     pub creator: Option<User>,
     pub parent: Option<Parent>,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: String,
-}
-
-/// One page of the `issues` list query: the issue nodes plus pagination info.
-#[derive(Deserialize)]
-pub struct IssueConnection {
-    pub nodes: Vec<Issue>,
-    #[serde(rename = "pageInfo")]
-    pub page_info: PageInfo,
-}
-
-#[derive(Deserialize)]
-pub struct IssuesData {
-    pub issues: IssueConnection,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
 }
 
 /// Map a Linear priority label to its numeric level. Lossy: any unrecognised

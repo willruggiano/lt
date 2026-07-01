@@ -26,7 +26,7 @@ impl App {
         let cached_comments: Vec<lt_types::types::Comment> = self
             .db
             .connect()
-            .and_then(|conn| lt_runtime::db::query_comments(&conn, &issue.id))
+            .and_then(|conn| lt_runtime::db::query_comments(&conn, issue.id.inner()))
             .unwrap_or_default()
             .into_iter()
             .map(Into::into)
@@ -43,7 +43,7 @@ impl App {
 
         // Spawn background thread to refresh comments through the sync service,
         // then re-read them from the local DB.
-        let issue_id = issue.id.clone();
+        let issue_id = issue.id.into_inner();
         let service = Arc::clone(&self.service);
         let (tx, rx) = mpsc::channel::<CommentSyncEvent>();
         self.detail_comment_rx = Some(rx);
@@ -137,7 +137,7 @@ impl App {
             return;
         }
         let issue_id = match self.selected_issue() {
-            Some(i) => i.id.clone(),
+            Some(i) => i.id.inner().to_string(),
             None => return,
         };
         self.comment_input = None;
@@ -192,18 +192,10 @@ pub(crate) fn build_cached_detail(
             name: issue.team.name.clone(),
         },
         labels: lt_types::types::LabelConnection {
-            nodes: issue
-                .labels
-                .nodes
-                .iter()
-                .map(|l| lt_types::types::Label {
-                    id: l.id.clone(),
-                    name: l.name.clone(),
-                })
-                .collect(),
+            nodes: issue.labels.nodes.clone(),
         },
-        created_at: issue.created_at.clone(),
-        updated_at: issue.updated_at.clone(),
+        created_at: issue.created_at.0.to_rfc3339(),
+        updated_at: issue.updated_at.0.to_rfc3339(),
         comments: lt_types::types::CommentConnection {
             nodes: cached_comments,
         },
@@ -222,7 +214,7 @@ pub(crate) fn populate_relations(
         return;
     };
     // Look up children.
-    if let Ok(children) = lt_runtime::db::query_children(&conn, &issue.id) {
+    if let Ok(children) = lt_runtime::db::query_children(&conn, issue.id.inner()) {
         detail.children = children
             .into_iter()
             .map(|c| lt_types::types::IssueRef {
@@ -234,7 +226,7 @@ pub(crate) fn populate_relations(
     }
     // Look up parent.
     if let Some(ref parent) = issue.parent
-        && let Ok(Some(row)) = lt_runtime::db::query_parent_ref(&conn, &parent.id)
+        && let Ok(Some(row)) = lt_runtime::db::query_parent_ref(&conn, parent.id.inner())
     {
         detail.parent = Some(row);
     }

@@ -3,8 +3,26 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use lt_types::query::IssueQuery;
+use lt_types::scalars::{DateTime, Priority};
 use lt_types::types;
 use rusqlite::{Connection, params};
+
+/// Parse a stored RFC3339 timestamp column into the wire [`DateTime`] scalar.
+/// Storage always writes `chrono::DateTime::to_rfc3339`, so a parse failure
+/// here means the row is corrupt; surface it as a `rusqlite` error rather than
+/// silently defaulting.
+fn parse_datetime_column(s: &str) -> std::result::Result<DateTime, rusqlite::types::FromSqlError> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| DateTime(dt.with_timezone(&Utc)))
+        .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
+}
+
+/// Render a [`DateTime`] back to the RFC3339 text form stored in SQLite,
+/// preserving millisecond precision so text ordering matches chronological
+/// ordering.
+fn format_datetime(dt: &DateTime) -> String {
+    dt.0.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
 
 /// The fragment-typed read model's column list: every field
 /// [`types::Issue`] selects, sourced from the relational base via the joins in
@@ -38,6 +56,9 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
     let priority_label: String = row.get(3)?;
     let priority = types::priority_label_to_u8(&priority_label);
 
+    let created_at: String = row.get(5)?;
+    let updated_at: String = row.get(6)?;
+
     let assignee_id: Option<String> = row.get(9)?;
     let assignee_name: Option<String> = row.get(10)?;
     let project_id: Option<String> = row.get(13)?;
@@ -50,22 +71,25 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
     let parent_identifier: Option<String> = row.get(20)?;
     let labels: Option<String> = row.get(21)?;
 
+    let state_id: String = row.get(7)?;
+    let team_id: String = row.get(11)?;
+
     Ok(types::Issue {
-        id: row.get(0)?,
+        id: lt_types::Id::new(row.get::<_, String>(0)?),
         identifier: row.get(1)?,
         title: row.get(2)?,
         priority_label,
-        priority,
+        priority: Priority(priority),
         state: types::WorkflowState {
-            id: row.get(7)?,
+            id: lt_types::Id::new(state_id),
             name: row.get(8)?,
         },
         assignee: assignee_id.map(|id| types::User {
-            id,
+            id: lt_types::Id::new(id),
             name: assignee_name.unwrap_or_default(),
         }),
         team: types::Team {
-            id: row.get(11)?,
+            id: lt_types::Id::new(team_id),
             name: row.get(12)?,
         },
         description: row.get(4)?,
@@ -75,29 +99,29 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
                 .split(',')
                 .filter(|s| !s.is_empty())
                 .map(|n| types::Label {
-                    id: String::new(),
+                    id: lt_types::Id::new(String::new()),
                     name: n.to_string(),
                 })
                 .collect(),
         },
         project: project_id.map(|id| types::Project {
-            id,
+            id: lt_types::Id::new(id),
             name: project_name.unwrap_or_default(),
         }),
         cycle: cycle_id.map(|id| types::Cycle {
-            id,
+            id: lt_types::Id::new(id),
             name: cycle_name,
         }),
         creator: creator_id.map(|id| types::User {
-            id,
+            id: lt_types::Id::new(id),
             name: creator_name.unwrap_or_default(),
         }),
         parent: parent_id.map(|id| types::Parent {
-            id,
+            id: lt_types::Id::new(id),
             identifier: parent_identifier.unwrap_or_default(),
         }),
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        created_at: parse_datetime_column(&created_at)?,
+        updated_at: parse_datetime_column(&updated_at)?,
     })
 }
 
@@ -147,24 +171,24 @@ pub(crate) fn upsert_issue_tx(
     issue: &types::Issue,
     synced_at: &str,
 ) -> Result<()> {
-    upsert_named_entity(tx, "teams", &issue.team.id, Some(&issue.team.name))?;
+    upsert_named_entity(tx, "teams", issue.team.id.inner(), Some(&issue.team.name))?;
     upsert_named_entity(
         tx,
         "workflow_states",
-        &issue.state.id,
+        issue.state.id.inner(),
         Some(&issue.state.name),
     )?;
     if let Some(a) = &issue.assignee {
-        upsert_named_entity(tx, "users", &a.id, Some(&a.name))?;
+        upsert_named_entity(tx, "users", a.id.inner(), Some(&a.name))?;
     }
     if let Some(c) = &issue.creator {
-        upsert_named_entity(tx, "users", &c.id, Some(&c.name))?;
+        upsert_named_entity(tx, "users", c.id.inner(), Some(&c.name))?;
     }
     if let Some(p) = &issue.project {
-        upsert_named_entity(tx, "projects", &p.id, Some(&p.name))?;
+        upsert_named_entity(tx, "projects", p.id.inner(), Some(&p.name))?;
     }
     if let Some(c) = &issue.cycle {
-        upsert_named_entity(tx, "cycles", &c.id, c.name.as_deref())?;
+        upsert_named_entity(tx, "cycles", c.id.inner(), c.name.as_deref())?;
     }
 
     tx.execute(
@@ -174,35 +198,35 @@ pub(crate) fn upsert_issue_tx(
              team_id, state_id, assignee_id, creator_id, project_id, cycle_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
-            issue.id,
+            issue.id.inner(),
             issue.identifier,
             issue.title,
             issue.priority_label,
             issue.description,
-            issue.created_at,
-            issue.updated_at,
+            format_datetime(&issue.created_at),
+            format_datetime(&issue.updated_at),
             synced_at,
-            issue.parent.as_ref().map(|p| &p.id),
-            issue.team.id,
-            issue.state.id,
-            issue.assignee.as_ref().map(|u| &u.id),
-            issue.creator.as_ref().map(|u| &u.id),
-            issue.project.as_ref().map(|p| &p.id),
-            issue.cycle.as_ref().map(|c| &c.id),
+            issue.parent.as_ref().map(|p| p.id.inner()),
+            issue.team.id.inner(),
+            issue.state.id.inner(),
+            issue.assignee.as_ref().map(|u| u.id.inner()),
+            issue.creator.as_ref().map(|u| u.id.inner()),
+            issue.project.as_ref().map(|p| p.id.inner()),
+            issue.cycle.as_ref().map(|c| c.id.inner()),
         ],
     )
     .context("failed to upsert issue")?;
 
     tx.execute(
         "DELETE FROM issue_labels WHERE issue_id = ?1",
-        params![issue.id],
+        params![issue.id.inner()],
     )
     .context("failed to clear issue labels")?;
     for label in &issue.labels.nodes {
-        upsert_named_entity(tx, "labels", &label.id, Some(&label.name))?;
+        upsert_named_entity(tx, "labels", label.id.inner(), Some(&label.name))?;
         tx.execute(
             "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
-            params![issue.id, label.id],
+            params![issue.id.inner(), label.id.inner()],
         )
         .context("failed to link issue label")?;
     }
@@ -259,7 +283,7 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
         return Ok(());
     }
     for issue in issues {
-        let Some(rows) = map.get(&issue.id) else {
+        let Some(rows) = map.get(issue.id.inner()) else {
             continue;
         };
         for o in rows {
@@ -267,20 +291,20 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
                 "state" => {
                     if let Some(id) = &o.value {
                         issue.state = types::WorkflowState {
-                            id: id.clone(),
+                            id: lt_types::Id::new(id.clone()),
                             name: o.state_name.clone().unwrap_or_default(),
                         };
                     }
                 }
                 "priority" => {
                     if let Some(p) = o.value.as_deref().and_then(|v| v.parse::<u8>().ok()) {
-                        issue.priority = p;
+                        issue.priority = Priority(p);
                         issue.priority_label = types::priority_u8_to_label(p).to_string();
                     }
                 }
                 "assignee" => {
                     issue.assignee = o.value.as_ref().map(|id| types::User {
-                        id: id.clone(),
+                        id: lt_types::Id::new(id.clone()),
                         name: o.user_name.clone().unwrap_or_default(),
                     });
                 }
@@ -486,25 +510,30 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Parse a fixed RFC3339 literal into the wire [`DateTime`] scalar.
+    fn dt(s: &str) -> DateTime {
+        DateTime(s.parse().unwrap())
+    }
+
     /// A list-shaped issue: state/assignee/team carry ids equal to their names
     /// so the relational upsert produces one entity row per distinct name.
     fn test_issue(id: &str, assignee: Option<&str>, state: &str) -> types::Issue {
         types::Issue {
-            id: id.to_string(),
+            id: lt_types::Id::new(id),
             identifier: format!("ENG-{id}"),
             title: format!("issue {id}"),
             priority_label: "Medium".to_string(),
-            priority: 3,
+            priority: Priority(3),
             state: types::WorkflowState {
-                id: state.to_string(),
+                id: lt_types::Id::new(state),
                 name: state.to_string(),
             },
             assignee: assignee.map(|n| types::User {
-                id: n.to_string(),
+                id: lt_types::Id::new(n),
                 name: n.to_string(),
             }),
             team: types::Team {
-                id: "ENG".to_string(),
+                id: lt_types::Id::new("ENG"),
                 name: "Engineering".to_string(),
             },
             description: None,
@@ -513,8 +542,8 @@ mod tests {
             cycle: None,
             creator: None,
             parent: None,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-02T00:00:00Z".to_string(),
+            created_at: dt("2026-01-01T00:00:00Z"),
+            updated_at: dt("2026-01-02T00:00:00Z"),
         }
     }
 
@@ -537,54 +566,54 @@ mod tests {
     /// the reconstruction and relational-upsert tests.
     fn sample_api_issue() -> types::Issue {
         types::Issue {
-            id: "1".to_string(),
+            id: lt_types::Id::new("1"),
             identifier: "ENG-1".to_string(),
             title: "Wire it up".to_string(),
             priority_label: "High".to_string(),
-            priority: 2,
+            priority: Priority(2),
             state: types::WorkflowState {
-                id: "s1".to_string(),
+                id: lt_types::Id::new("s1"),
                 name: "In Progress".to_string(),
             },
             assignee: Some(types::User {
-                id: "u1".to_string(),
+                id: lt_types::Id::new("u1"),
                 name: "Alice".to_string(),
             }),
             team: types::Team {
-                id: "ENG".to_string(),
+                id: lt_types::Id::new("ENG"),
                 name: "Engineering".to_string(),
             },
             description: Some("body".to_string()),
             labels: types::LabelConnection {
                 nodes: vec![
                     types::Label {
-                        id: "l-bug".to_string(),
+                        id: lt_types::Id::new("l-bug"),
                         name: "bug".to_string(),
                     },
                     types::Label {
-                        id: "l-backend".to_string(),
+                        id: lt_types::Id::new("l-backend"),
                         name: "backend".to_string(),
                     },
                 ],
             },
             project: Some(types::Project {
-                id: "p1".to_string(),
+                id: lt_types::Id::new("p1"),
                 name: "Platform".to_string(),
             }),
             cycle: Some(types::Cycle {
-                id: "c1".to_string(),
+                id: lt_types::Id::new("c1"),
                 name: Some("Cycle 7".to_string()),
             }),
             creator: Some(types::User {
-                id: "u2".to_string(),
+                id: lt_types::Id::new("u2"),
                 name: "Carol".to_string(),
             }),
             parent: Some(types::Parent {
-                id: "9".to_string(),
+                id: lt_types::Id::new("9"),
                 identifier: "ENG-9".to_string(),
             }),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-02T00:00:00Z".to_string(),
+            created_at: dt("2026-01-01T00:00:00Z"),
+            updated_at: dt("2026-01-02T00:00:00Z"),
         }
     }
 
@@ -594,7 +623,7 @@ mod tests {
         // The parent referenced by sample_api_issue must exist for the parent
         // self-join to resolve its identifier.
         let mut parent = sample_api_issue();
-        parent.id = "9".to_string();
+        parent.id = lt_types::Id::new("9");
         parent.identifier = "ENG-9".to_string();
         parent.parent = None;
         upsert_issues(&conn, &[parent, sample_api_issue()]).unwrap();
@@ -609,10 +638,10 @@ mod tests {
             ..Default::default()
         };
         let issues = query_issues(&conn, &args).unwrap();
-        let issue = issues.iter().find(|i| i.id == "1").unwrap();
+        let issue = issues.iter().find(|i| i.id.inner() == "1").unwrap();
 
         assert_eq!(issue.identifier, "ENG-1");
-        assert_eq!(issue.priority, 2);
+        assert_eq!(issue.priority, Priority(2));
         assert_eq!(issue.state.name, "In Progress");
         assert_eq!(
             issue.assignee.as_ref().map(|u| u.name.as_str()),
@@ -664,7 +693,7 @@ mod tests {
         };
         let issues = query_issues(&conn, &args).unwrap();
         assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].id, "3");
+        assert_eq!(issues[0].id.inner(), "3");
     }
 
     #[test]
@@ -744,7 +773,7 @@ mod tests {
             ..Default::default()
         };
         let issues = query_issues(&conn, &args).unwrap();
-        let issue = issues.iter().find(|i| i.id == "1").unwrap();
+        let issue = issues.iter().find(|i| i.id.inner() == "1").unwrap();
         assert_eq!(issue.state.name, "Done");
         assert!(issue.assignee.is_none());
 
@@ -771,7 +800,7 @@ mod tests {
         // A delta pull rewrites the base (state changed server-side).
         let mut updated = sample_api_issue();
         updated.state = types::WorkflowState {
-            id: "s2".to_string(),
+            id: lt_types::Id::new("s2"),
             name: "Canceled".to_string(),
         };
         upsert_issues(&conn, &[updated]).unwrap();

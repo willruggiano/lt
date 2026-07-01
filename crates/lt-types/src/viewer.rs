@@ -24,6 +24,7 @@ pub fn query() -> String {
 pub struct ViewerUser {
     pub id: cynic::Id,
     pub name: String,
+    pub email: String,
     pub organization: ViewerOrganization,
 }
 

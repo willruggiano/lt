@@ -12,6 +12,13 @@ use lt_upstream::client::GraphqlTransport;
 use lt_upstream::{comments, issues};
 use rusqlite::Connection;
 
+/// Render a wire timestamp back to RFC3339 text for storage, preserving
+/// millisecond precision and the `Z` suffix so text ordering matches
+/// chronological ordering against existing rows.
+fn format_datetime(dt: &lt_types::scalars::DateTime) -> String {
+    dt.0.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 /// Replay every pending outbox command, recording (not propagating) per-command
 /// failures so a single bad command never aborts the surrounding sync.
 pub fn drain(conn: &Connection, transport: &dyn GraphqlTransport) -> Result<()> {
@@ -36,7 +43,7 @@ fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -
                 conn,
                 op.seq,
                 &op.entity_id,
-                (&created.id, &created.identifier),
+                (created.id.inner(), &created.identifier),
             )?;
         }
         outbox::OP_COMMENT_CREATE => {
@@ -46,12 +53,12 @@ fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -
                 .to_string();
             let created = comments::replay_create(transport, variables)?;
             let comment = lt_storage::db::Comment {
-                id: created.id,
+                id: created.id.into_inner(),
                 issue_id,
                 body: created.body,
                 author_name: created.user.map(|u| u.name),
-                created_at: created.created_at,
-                updated_at: created.updated_at,
+                created_at: format_datetime(&created.created_at),
+                updated_at: format_datetime(&created.updated_at),
                 synced_at: String::new(),
             };
             outbox::ack_comment_create(conn, op.seq, &op.entity_id, &comment)?;
@@ -110,7 +117,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         lt_storage::db::run_migrations(&conn).unwrap();
         let mut issue = base_issue("temp");
-        issue.id = "local:abc".to_string();
+        issue.id = lt_types::Id::new("local:abc");
         issue.identifier = "NEW".to_string();
         let input = lt_types::inputs::IssueCreateInput {
             title: "New".to_string(),

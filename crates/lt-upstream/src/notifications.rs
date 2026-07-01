@@ -1,70 +1,13 @@
+//! Fetch notifications from the Linear API. The `Notification` fragment type
+//! (and its accessors) live in `lt-types`; this module is just the paginated
+//! fetch.
+
 use anyhow::{Result, anyhow};
 use lt_types::notifications as wire;
+pub use lt_types::notifications::Notification;
 use serde_json::json;
 
 use super::client::{GraphqlTransport, HttpTransport, query_as};
-
-#[derive(Debug, Clone)]
-pub struct Notification {
-    pub id: String,
-    pub type_: String,
-    pub read_at: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub issue: Option<NotificationIssue>,
-    pub actor: Option<NotificationActor>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NotificationIssue {
-    pub identifier: String,
-    pub title: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct NotificationActor {
-    pub name: String,
-}
-
-impl From<wire::NotificationActor> for NotificationActor {
-    fn from(actor: wire::NotificationActor) -> Self {
-        Self { name: actor.name }
-    }
-}
-
-impl From<wire::NotificationIssue> for NotificationIssue {
-    fn from(issue: wire::NotificationIssue) -> Self {
-        Self {
-            identifier: issue.identifier,
-            title: issue.title,
-        }
-    }
-}
-
-impl From<wire::Notification> for Notification {
-    fn from(node: wire::Notification) -> Self {
-        match node {
-            wire::Notification::IssueNotification(n) => Self {
-                id: n.id.into_inner(),
-                type_: n.type_,
-                read_at: n.read_at.map(|d| d.0),
-                created_at: n.created_at.0,
-                updated_at: n.updated_at.0,
-                issue: Some(n.issue.into()),
-                actor: n.actor.map(Into::into),
-            },
-            wire::Notification::Other(n) => Self {
-                id: n.id.into_inner(),
-                type_: n.type_,
-                read_at: n.read_at.map(|d| d.0),
-                created_at: n.created_at.0,
-                updated_at: n.updated_at.0,
-                issue: None,
-                actor: n.actor.map(Into::into),
-            },
-        }
-    }
-}
 
 /// Fetch notifications from the Linear API.
 ///
@@ -100,7 +43,7 @@ pub fn fetch(
         let data: wire::NotificationsQuery = query_as(transport, &wire::query(), variables)?;
 
         let conn = data.notifications;
-        all.extend(conn.nodes.into_iter().map(Notification::from));
+        all.extend(conn.nodes);
 
         // Stop if we have reached the total cap.
         if let Some(max) = max_total
@@ -136,6 +79,7 @@ pub fn fetch_from_config(page_size: usize, max_total: Option<usize>) -> Result<V
 mod tests {
     use super::*;
     use crate::client::FakeTransport;
+    use crate::issues::sample_issue_node;
 
     fn node(id: &str) -> serde_json::Value {
         json!({
@@ -165,7 +109,7 @@ mod tests {
         ]);
         let got = fetch(&transport, 250, None).unwrap();
         assert_eq!(
-            got.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            got.iter().map(|n| n.id().inner()).collect::<Vec<_>>(),
             ["n1", "n2"]
         );
         // The second request carries the first page's end cursor.
@@ -197,8 +141,8 @@ mod tests {
             "readAt": null,
             "createdAt": "2026-01-01T00:00:00Z",
             "updatedAt": "2026-01-01T00:00:00Z",
-            "actor": { "name": "Ada Lovelace" },
-            "issue": { "identifier": "ENG-1", "title": "Wire up the thing" }
+            "actor": { "id": "u1", "name": "Ada Lovelace" },
+            "issue": sample_issue_node("1")
         });
         let transport = FakeTransport::new(vec![json!({ "notifications": {
             "nodes": [node],
@@ -207,9 +151,9 @@ mod tests {
         let got = fetch(&transport, 250, None).unwrap();
         assert_eq!(got.len(), 1);
         let n = &got[0];
-        let issue = n.issue.as_ref().unwrap();
+        let issue = n.issue().unwrap();
         assert_eq!(issue.identifier, "ENG-1");
-        assert_eq!(issue.title, "Wire up the thing");
-        assert_eq!(n.actor.as_ref().unwrap().name, "Ada Lovelace");
+        assert_eq!(issue.title, "t");
+        assert_eq!(n.actor().unwrap().name, "Ada Lovelace");
     }
 }

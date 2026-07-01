@@ -5,9 +5,9 @@
 
 use anyhow::{Result, anyhow};
 use lt_types::inputs::IssueCreateInput;
+use lt_types::issues::CreatedIssue;
 use lt_types::types::{Team, User, Viewer, WorkflowState};
 use lt_upstream::client::HttpTransport;
-use lt_upstream::issues::CreatedIssue;
 pub use lt_upstream::issues::fetch;
 
 /// Build a transport from the stored token, erroring when not logged in.

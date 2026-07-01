@@ -11,6 +11,9 @@ serde.workspace = true
 serde_json.workspace = true
 # Crate-specific: the GraphQL schema and query/input types live only here.
 cynic = { version = "3.13", default-features = false }
+# `serde` feature: the wire scalar types (DateTime) decode straight into
+# chrono via cynic's generated Deserialize.
+chrono = { workspace = true, features = ["serde"] }
 
 [build-dependencies]
 serde.workspace = true

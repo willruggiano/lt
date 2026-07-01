@@ -4,40 +4,14 @@
 
 use anyhow::{Result, anyhow, bail};
 use lt_types::inputs::IssueCreateInput;
+use lt_types::issues as wire;
 use lt_types::query::{IssueQuery, build_sort, parse_date};
-use lt_types::types::{Issue, IssuesData};
-use serde::Deserialize;
+use lt_types::types::Issue;
 use serde_json::{Value, json};
 
 use crate::auth::refresh::load_or_refresh_token;
 use crate::client::{GraphqlTransport, HttpTransport, query_as};
 use crate::graphql::{CreatePayload, post_create};
-
-pub const ISSUES_QUERY: &str = r"
-query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
-  issues(filter: $filter, sort: $sort, first: $first, after: $after) {
-    nodes {
-      id
-      identifier
-      title
-      description
-      priorityLabel
-      priority
-      state { id name }
-      assignee { id name }
-      team { id name }
-      labels { nodes { id name } }
-      project { id name }
-      cycle { id name }
-      creator { id name }
-      parent { id identifier }
-      createdAt
-      updatedAt
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-";
 
 fn parse_priority(s: &str) -> Result<f64> {
     match s.to_lowercase().as_str() {
@@ -156,7 +130,7 @@ pub fn fetch_with(
         "after": after,
     });
 
-    let data: IssuesData = query_as(transport, ISSUES_QUERY, variables)?;
+    let data: wire::IssuesQuery = query_as(transport, &wire::query(), variables)?;
 
     let conn = data.issues;
     Ok((
@@ -170,62 +144,9 @@ pub fn fetch_with(
 // Mutations (create synchronously; replay queued outbox commands)
 // ---------------------------------------------------------------------------
 
-const ISSUE_UPDATE_MUTATION: &str = r"
-mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
-  issueUpdate(id: $id, input: $input) {
-    success
-  }
-}
-";
-
-const ISSUE_CREATE_MUTATION: &str = r"
-mutation IssueCreate($input: IssueCreateInput!) {
-  issueCreate(input: $input) {
-    success
-    issue {
-      id
-      identifier
-      title
-    }
-  }
-}
-";
-
-/// The fields the `issueCreate` response returns: enough to confirm success and
-/// reconcile the optimistic temp row with the server's id/identifier.
-#[derive(Deserialize, Debug, Clone)]
-pub struct CreatedIssue {
-    pub id: String,
-    pub identifier: String,
-    pub title: String,
-}
-
-#[derive(Deserialize)]
-struct SuccessPayload {
-    success: bool,
-}
-
-#[derive(Deserialize)]
-struct IssueUpdateData {
-    #[serde(rename = "issueUpdate")]
-    issue_update: SuccessPayload,
-}
-
-#[derive(Deserialize)]
-struct IssueCreatePayload {
-    success: bool,
-    issue: CreatedIssue,
-}
-
-#[derive(Deserialize)]
-struct IssueCreateData {
-    #[serde(rename = "issueCreate")]
-    issue_create: IssueCreatePayload,
-}
-
-impl CreatePayload for IssueCreateData {
-    type Created = CreatedIssue;
-    fn into_created(self) -> (bool, CreatedIssue) {
+impl CreatePayload for wire::IssueCreateMutation {
+    type Created = wire::CreatedIssue;
+    fn into_created(self) -> (bool, Option<wire::CreatedIssue>) {
         (self.issue_create.success, self.issue_create.issue)
     }
 }
@@ -233,7 +154,7 @@ impl CreatePayload for IssueCreateData {
 /// Replay an `issueUpdate` from its stored variables. The drainer reconciles the
 /// base itself, so only success matters here.
 pub fn replay_update(transport: &dyn GraphqlTransport, variables: serde_json::Value) -> Result<()> {
-    let data: IssueUpdateData = query_as(transport, ISSUE_UPDATE_MUTATION, variables)?;
+    let data: wire::IssueUpdateMutation = query_as(transport, &wire::update_mutation(), variables)?;
     if !data.issue_update.success {
         bail!("issueUpdate returned success=false");
     }
@@ -244,13 +165,21 @@ pub fn replay_update(transport: &dyn GraphqlTransport, variables: serde_json::Va
 pub fn replay_create(
     transport: &dyn GraphqlTransport,
     variables: serde_json::Value,
-) -> Result<CreatedIssue> {
-    post_create::<IssueCreateData>(transport, ISSUE_CREATE_MUTATION, "issueCreate", variables)
+) -> Result<wire::CreatedIssue> {
+    post_create::<wire::IssueCreateMutation>(
+        transport,
+        &wire::create_mutation(),
+        "issueCreate",
+        variables,
+    )
 }
 
 /// Create an issue synchronously (the CLI `lt issues new` path, which is an
 /// inherently online command rather than a queued TUI edit).
-pub fn create(transport: &dyn GraphqlTransport, input: &IssueCreateInput) -> Result<CreatedIssue> {
+pub fn create(
+    transport: &dyn GraphqlTransport,
+    input: &IssueCreateInput,
+) -> Result<wire::CreatedIssue> {
     replay_create(transport, json!({ "input": input }))
 }
 

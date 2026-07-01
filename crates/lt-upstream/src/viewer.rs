@@ -31,6 +31,7 @@ mod tests {
             "viewer": {
                 "id": "u1",
                 "name": "Ada",
+                "email": "ada@acme.test",
                 "organization": { "name": "Acme", "urlKey": "acme" }
             }
         })]);

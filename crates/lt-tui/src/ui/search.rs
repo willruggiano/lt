@@ -1,11 +1,9 @@
 use lt_runtime::query::SortField;
-use lt_runtime::text;
-use lt_types::types::Issue;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Clear, Paragraph};
 
-use super::table::sort_col_index;
+use super::table::{row_cells, sort_col_index};
 use super::util::{TableSpec, render_issue_table};
 use crate::SearchOverlay;
 
@@ -65,26 +63,8 @@ pub(super) fn render_search_overlay(
             issues: &overlay.results,
             sort_col,
             desc: sort.desc,
-            cells: search_row_cells,
+            cells: row_cells,
         },
         &mut overlay.table_state,
     );
-}
-
-fn search_row_cells(issue: &Issue) -> [String; 7] {
-    fn date(s: &str) -> &str {
-        if s.len() >= 10 { &s[..10] } else { s }
-    }
-    [
-        issue.identifier.clone(),
-        text::truncate(&issue.title, 40),
-        issue.state.name.clone(),
-        issue.priority_label.clone(),
-        issue
-            .assignee
-            .as_ref()
-            .map_or_else(|| "-".to_string(), |u| u.name.clone()),
-        issue.team.name.clone(),
-        date(&issue.updated_at).to_string(),
-    ]
 }

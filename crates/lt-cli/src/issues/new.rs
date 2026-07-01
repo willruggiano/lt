@@ -224,7 +224,7 @@ fn pick_assignee(
         }
         // match by name
         if let Some(m) = members.iter().find(|m| m.name.to_lowercase() == lower) {
-            return Ok(Some(m.id.clone()));
+            return Ok(Some(m.id.inner().to_string()));
         }
         return Err(anyhow!("no member matching '{h}'"));
     }
@@ -248,13 +248,13 @@ fn pick_assignee(
 
     let lower = trimmed.to_lowercase();
     if let Some(m) = members.iter().find(|m| m.name.to_lowercase() == lower) {
-        return Ok(Some(m.id.clone()));
+        return Ok(Some(m.id.inner().to_string()));
     }
     if let Ok(n) = trimmed.parse::<usize>()
         && n >= 1
         && n <= members.len()
     {
-        return Ok(Some(members[n - 1].id.clone()));
+        return Ok(Some(members[n - 1].id.inner().to_string()));
     }
 
     writeln!(out, "Invalid selection, defaulting to unassigned.")?;
@@ -295,7 +295,7 @@ fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
         let sname = summary
             .states
             .iter()
-            .find(|s| s.id == sid)
+            .find(|s| s.id.inner() == sid)
             .map_or(sid, |s| s.name.as_str());
         writeln!(out, "  State:       {sname}")?;
     } else {
@@ -308,7 +308,7 @@ fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
             summary
                 .members
                 .iter()
-                .find(|m| m.id == aid)
+                .find(|m| m.id.inner() == aid)
                 .map_or_else(|| aid.to_string(), |m| m.name.clone())
         };
         writeln!(out, "  Assignee:    {aname}")?;
@@ -331,7 +331,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
         return Err(anyhow!("no teams found in your Linear organization"));
     }
     let team = pick_team(out, &teams, args.team.as_deref())?;
-    let team_id = team.id.clone();
+    let team_id = team.id.inner().to_string();
     let team_name = team.name.clone();
 
     // Step 2: Title
@@ -348,7 +348,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let state_id = if states.is_empty() {
         None
     } else {
-        pick_state(out, &states, args.state.as_deref())?.map(|s| s.id.clone())
+        pick_state(out, &states, args.state.as_deref())?.map(|s| s.id.inner().to_string())
     };
 
     // Step 6: Assignee -- fetch team members
@@ -407,21 +407,21 @@ mod tests {
 
     fn team(id: &str, name: &str) -> Team {
         Team {
-            id: id.to_string(),
+            id: lt_types::Id::new(id),
             name: name.to_string(),
         }
     }
 
     fn state(id: &str, name: &str) -> WorkflowState {
         WorkflowState {
-            id: id.to_string(),
+            id: lt_types::Id::new(id),
             name: name.to_string(),
         }
     }
 
     fn member(id: &str, name: &str) -> Member {
         Member {
-            id: id.to_string(),
+            id: lt_types::Id::new(id),
             name: name.to_string(),
         }
     }
@@ -462,7 +462,7 @@ mod tests {
         let teams = [team("t1", "Engineering"), team("t2", "Design")];
         let mut out = Vec::new();
         let got = pick_team(&mut out, &teams, Some("engineering")).unwrap();
-        assert_eq!(got.id, "t1");
+        assert_eq!(got.id.inner(), "t1");
         // The hint path does not print the menu.
         assert!(out.is_empty());
     }
@@ -472,7 +472,7 @@ mod tests {
         let teams = [team("t1", "Engineering"), team("t2", "Design")];
         let mut out = Vec::new();
         let got = pick_team(&mut out, &teams, Some("2")).unwrap();
-        assert_eq!(got.id, "t2");
+        assert_eq!(got.id.inner(), "t2");
     }
 
     #[test]
@@ -492,14 +492,16 @@ mod tests {
             pick_state(&mut out, &states, Some("todo"))
                 .unwrap()
                 .unwrap()
-                .id,
+                .id
+                .inner(),
             "s2"
         );
         assert_eq!(
             pick_state(&mut out, &states, Some("1"))
                 .unwrap()
                 .unwrap()
-                .id,
+                .id
+                .inner(),
             "s1"
         );
         assert!(pick_state(&mut out, &states, Some("nope")).is_err());

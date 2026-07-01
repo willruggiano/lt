@@ -898,16 +898,21 @@ mod run_query_tests {
     use super::*;
     use crate::db;
 
+    /// Parse a fixed RFC3339 literal into the wire `DateTime` scalar.
+    fn dt(s: &str) -> lt_types::scalars::DateTime {
+        lt_types::scalars::DateTime(s.parse().unwrap())
+    }
+
     fn user(name: &str) -> types::User {
         types::User {
-            id: name.to_string(),
+            id: lt_types::Id::new(name),
             name: name.to_string(),
         }
     }
 
     fn state(name: &str) -> types::WorkflowState {
         types::WorkflowState {
-            id: name.to_string(),
+            id: lt_types::Id::new(name),
             name: name.to_string(),
         }
     }
@@ -917,15 +922,15 @@ mod run_query_tests {
     /// reconstructs them.
     fn issue(id: &str, title: &str) -> Issue {
         Issue {
-            id: id.to_string(),
+            id: lt_types::Id::new(id),
             identifier: format!("ENG-{id}"),
             title: title.to_string(),
             priority_label: "Medium".to_string(),
-            priority: 3,
+            priority: lt_types::scalars::Priority(3),
             state: state("Todo"),
             assignee: None,
             team: types::Team {
-                id: "ENG".to_string(),
+                id: lt_types::Id::new("ENG"),
                 name: "Engineering".to_string(),
             },
             description: None,
@@ -934,8 +939,8 @@ mod run_query_tests {
             cycle: None,
             creator: None,
             parent: None,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            created_at: dt("2026-01-01T00:00:00Z"),
+            updated_at: dt("2026-01-01T00:00:00Z"),
         }
     }
 
@@ -946,35 +951,35 @@ mod run_query_tests {
         let mut r1 = issue("1", "fix oauth login");
         r1.priority_label = "Urgent".to_string();
         r1.assignee = Some(user("Alice"));
-        r1.updated_at = "2026-01-05T00:00:00Z".to_string();
+        r1.updated_at = dt("2026-01-05T00:00:00Z");
 
         let mut r2 = issue("2", "render markdown");
         r2.priority_label = "High".to_string();
         r2.state = state("In Progress");
         r2.assignee = Some(user("Bob"));
         r2.team = types::Team {
-            id: "DES".to_string(),
+            id: lt_types::Id::new("DES"),
             name: "Design".to_string(),
         };
-        r2.updated_at = "2026-01-04T00:00:00Z".to_string();
+        r2.updated_at = dt("2026-01-04T00:00:00Z");
         r2.labels = types::LabelConnection {
             nodes: vec![
                 types::Label {
-                    id: "backend".to_string(),
+                    id: lt_types::Id::new("backend"),
                     name: "backend".to_string(),
                 },
                 types::Label {
-                    id: "urgent".to_string(),
+                    id: lt_types::Id::new("urgent"),
                     name: "urgent".to_string(),
                 },
             ],
         };
         r2.project = Some(types::Project {
-            id: "Platform".to_string(),
+            id: lt_types::Id::new("Platform"),
             name: "Platform".to_string(),
         });
         r2.cycle = Some(types::Cycle {
-            id: "Cycle 7".to_string(),
+            id: lt_types::Id::new("Cycle 7"),
             name: Some("Cycle 7".to_string()),
         });
         r2.creator = Some(user("Carol"));
@@ -982,14 +987,14 @@ mod run_query_tests {
         let mut r3 = issue("3", "oauth token refresh");
         r3.priority_label = "Low".to_string();
         r3.state = state("Done");
-        r3.updated_at = "2026-01-03T00:00:00Z".to_string();
+        r3.updated_at = dt("2026-01-03T00:00:00Z");
 
         db::upsert_issues(&conn, &[r1, r2, r3]).unwrap();
         conn
     }
 
     fn ids(issues: &[Issue]) -> Vec<&str> {
-        issues.iter().map(|i| i.id.as_str()).collect()
+        issues.iter().map(|i| i.id.inner()).collect()
     }
 
     #[test]

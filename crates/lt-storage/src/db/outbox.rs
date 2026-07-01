@@ -214,7 +214,7 @@ pub fn enqueue_issue_create(
     insert_pending(
         &tx,
         OP_ISSUE_CREATE,
-        &optimistic.id,
+        optimistic.id.inner(),
         &json!({ "input": input }),
     )?;
     tx.commit().context("failed to commit issue create")?;
@@ -394,18 +394,18 @@ fn delete_command(tx: &Connection, seq: i64) -> Result<()> {
 #[cfg(any(test, feature = "test-util"))]
 pub fn sample_base_issue(id: &str) -> types::Issue {
     types::Issue {
-        id: id.to_string(),
+        id: lt_types::Id::new(id),
         identifier: format!("ENG-{id}"),
         title: format!("issue {id}"),
         priority_label: "Normal".to_string(),
-        priority: 3,
+        priority: lt_types::scalars::Priority(3),
         state: types::WorkflowState {
-            id: "s-todo".to_string(),
+            id: lt_types::Id::new("s-todo"),
             name: "Todo".to_string(),
         },
         assignee: None,
         team: types::Team {
-            id: "ENG".to_string(),
+            id: lt_types::Id::new("ENG"),
             name: "Engineering".to_string(),
         },
         description: None,
@@ -414,8 +414,8 @@ pub fn sample_base_issue(id: &str) -> types::Issue {
         cycle: None,
         creator: None,
         parent: None,
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        updated_at: "2026-01-02T00:00:00Z".to_string(),
+        created_at: lt_types::scalars::DateTime("2026-01-01T00:00:00Z".parse().unwrap_or_default()),
+        updated_at: lt_types::scalars::DateTime("2026-01-02T00:00:00Z".parse().unwrap_or_default()),
     }
 }
 
@@ -486,7 +486,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
         let mut issue = base_issue("temp");
-        issue.id = "local:abc".to_string();
+        issue.id = lt_types::Id::new("local:abc");
         issue.identifier = "NEW".to_string();
         let input = IssueCreateInput {
             title: "New".to_string(),
@@ -518,7 +518,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
         let mut issue = base_issue("temp");
-        issue.id = "local:abc".to_string();
+        issue.id = lt_types::Id::new("local:abc");
         let input = IssueCreateInput {
             title: "New".to_string(),
             team_id: "ENG".to_string(),

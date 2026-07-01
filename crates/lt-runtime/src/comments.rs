@@ -3,17 +3,25 @@
 
 use anyhow::Result;
 use lt_storage::db;
+use lt_types::comments::CommentNode;
 use lt_upstream::client::GraphqlTransport;
-use lt_upstream::comments::{ApiComment, fetch_all};
+use lt_upstream::comments::fetch_all;
 
-fn api_to_db(c: &ApiComment, issue_id: &str) -> db::Comment {
+/// Render a wire timestamp back to RFC3339 text for storage, preserving
+/// millisecond precision and the `Z` suffix so text ordering matches
+/// chronological ordering against existing rows.
+fn format_datetime(dt: &lt_types::scalars::DateTime) -> String {
+    dt.0.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn api_to_db(c: &CommentNode, issue_id: &str) -> db::Comment {
     db::Comment {
-        id: c.id.clone(),
+        id: c.id.inner().to_string(),
         issue_id: issue_id.to_string(),
         body: c.body.clone(),
-        author_name: c.author_name(),
-        created_at: c.created_at.clone(),
-        updated_at: c.updated_at.clone(),
+        author_name: c.user.as_ref().map(|u| u.name.clone()),
+        created_at: format_datetime(&c.created_at),
+        updated_at: format_datetime(&c.updated_at),
         synced_at: String::new(), // filled by upsert_comments
     }
 }
@@ -99,16 +107,17 @@ mod tests {
     }
 
     #[test]
-    fn sync_missing_issue_clears_existing() {
+    fn sync_missing_issue_returns_error() {
+        // `Query.issue` is non-null in the schema; a missing issue surfaces as a
+        // GraphQL error, so `sync` propagates it rather than silently clearing.
         let conn = conn_with_stale();
         let transport = FakeTransport::new(vec![json!({ "issue": null })]);
-        sync(&conn, &transport, "i1").unwrap();
-        assert!(db::query_comments(&conn, "i1").unwrap().is_empty());
+        assert!(sync(&conn, &transport, "i1").is_err());
     }
 
     #[test]
     fn api_to_db_maps_fields_and_author() {
-        let api: ApiComment = serde_json::from_value(json!({
+        let api: CommentNode = serde_json::from_value(json!({
             "id": "c1",
             "body": "looks good",
             "createdAt": "2026-01-01T00:00:00Z",
@@ -121,15 +130,15 @@ mod tests {
         assert_eq!(row.issue_id, "issue-9");
         assert_eq!(row.body, "looks good");
         assert_eq!(row.author_name.as_deref(), Some("Alice"));
-        assert_eq!(row.created_at, "2026-01-01T00:00:00Z");
-        assert_eq!(row.updated_at, "2026-01-02T00:00:00Z");
+        assert_eq!(row.created_at, "2026-01-01T00:00:00.000Z");
+        assert_eq!(row.updated_at, "2026-01-02T00:00:00.000Z");
         // synced_at is stamped later by upsert_comments.
         assert!(row.synced_at.is_empty());
     }
 
     #[test]
     fn api_to_db_handles_missing_author() {
-        let api: ApiComment = serde_json::from_value(json!({
+        let api: CommentNode = serde_json::from_value(json!({
             "id": "c2",
             "body": "system note",
             "createdAt": "2026-01-01T00:00:00Z",

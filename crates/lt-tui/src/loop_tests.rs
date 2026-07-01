@@ -38,19 +38,24 @@ fn key(c: char) -> KeyEvent {
 /// relational upsert reconstructs them.
 fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Issue {
     use lt_types::types;
+    let ts = lt_types::scalars::DateTime(
+        format!("2026-01-{day:02}T00:00:00Z")
+            .parse()
+            .unwrap_or_default(),
+    );
     types::Issue {
-        id: id.to_string(),
+        id: lt_types::Id::new(id),
         identifier: ident.to_string(),
         title: format!("issue {ident}"),
         priority_label: "No priority".to_string(),
-        priority: 0,
+        priority: lt_types::scalars::Priority(0),
         state: types::WorkflowState {
-            id: state.to_string(),
+            id: lt_types::Id::new(state),
             name: state.to_string(),
         },
         assignee: None,
         team: types::Team {
-            id: "ENG".to_string(),
+            id: lt_types::Id::new("ENG"),
             name: "Engineering".to_string(),
         },
         description: None,
@@ -59,8 +64,8 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
         cycle: None,
         creator: None,
         parent: None,
-        created_at: format!("2026-01-{day:02}T00:00:00Z"),
-        updated_at: format!("2026-01-{day:02}T00:00:00Z"),
+        created_at: ts,
+        updated_at: ts,
     }
 }
 
@@ -188,7 +193,7 @@ fn populate_relations_fills_parent_and_children() {
     parent.title = "the parent".to_string();
     let mut child = db_issue("c1", "ENG-10", "Done", 8);
     child.parent = Some(lt_types::types::Parent {
-        id: "p1".to_string(),
+        id: lt_types::Id::new("p1"),
         identifier: "ENG-9".to_string(),
     });
     let app = app_with_db(&[parent, child]).unwrap();
@@ -198,7 +203,7 @@ fn populate_relations_fills_parent_and_children() {
     let mut detail = build_cached_detail(&issue, Vec::new());
 
     // Seed the issue under a parent so query_children finds it.
-    issue.id = "p1".to_string();
+    issue.id = lt_types::Id::new("p1");
     populate_relations(&app.db, &mut detail, &issue);
     assert_eq!(detail.children.len(), 1);
     assert_eq!(detail.children[0].identifier, "ENG-10");
