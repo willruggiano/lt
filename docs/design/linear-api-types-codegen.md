@@ -614,6 +614,21 @@ Resolved in PR 5:
   (a `from_key` value-parser lives in `lt-cli`); `IssueArgs` (clap) lowers into
   `lt-types`'s `IssueQuery`.
 
+Resolved in PR 6:
+
+- **No corpse to delete.** The migration folded the hand-written serde structs
+  in `lt-types/src/types.rs` into the role of shared currency / read-model types
+  rather than orphaning them: the DB reconstructs `types::Issue` from relational
+  joins (`lt-storage/src/db/issues.rs:issue_from_row`), and cynic decodes wire
+  responses into the same structs via serde. An import audit confirms every item
+  is live across the workspace — down to `GraphqlError.message`
+  (`lt-upstream/src/client.rs:63`) and `Comment::author()`
+  (`lt-tui/src/ui/detail.rs:159`). `cargo machete` reports no unused
+  dependencies. The only artifact removed was a stale blanket
+  `#![allow(dead_code)]` at the top of `types.rs`, which suppressed nothing
+  (Rust's `dead_code` lint never fires on `pub` items of a `pub` module in a
+  library crate) and violated the strictness posture ([[contributing.md]]).
+
 Still open (deferred):
 
 - **Labels model** — `labelIds` (full replace) vs `addedLabelIds`/
