@@ -9,11 +9,14 @@
 - Plans must not leave unanswered "research" questions; primary evidence is
   required for all claims
 - Code and documentation are the only acceptable form of primary evidence
-- Don't: present data obtained from the web (via WebSearch, curl, mcp, or
-  otherwise) as primary evidence
-- Do: read a project's public documentation and/or clone and explore its source
-  code
-- Prefer `make check` and `make test` to validate changes -- they are the gate.
-  Run them, not ad-hoc one-off `cargo` invocations. Reach for an individual
-  command only to debug a gate that has already _failed_ (which generally should
-  not be necessary).
+  - Do: read a project's public documentation and/or clone and explore its
+    source code
+  - Don't: present data obtained from the web (via WebSearch, curl, mcp, or
+    otherwise) as primary evidence
+- When creating or editing code, use the `lt-file-editor` subagent and the
+  `lt-code-writer` skill. This agent/skill will ensure that the project's
+  build/lint/test gates are executed correctly. Prefer it for any substantive
+  code change rather than making those changes yourself.
+- Use the `lt-check-runner` subagent and the `lt-check` skill when you need to
+  verify code changes. Prefer it to running `make check` (or any other gate)
+  directly.
