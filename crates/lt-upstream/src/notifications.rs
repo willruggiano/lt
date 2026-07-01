@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{Result, anyhow};
 use lt_types::types::PageInfo;
 use serde::Deserialize;
