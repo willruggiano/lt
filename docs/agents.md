@@ -13,10 +13,14 @@
     source code
   - Don't: present data obtained from the web (via WebSearch, curl, mcp, or
     otherwise) as primary evidence
-- When creating or editing code, use the `lt-file-editor` subagent and the
-  `lt-code-writer` skill. This agent/skill will ensure that the project's
-  build/lint/test gates are executed correctly. Prefer it for any substantive
-  code change rather than making those changes yourself.
-- Use the `lt-check-runner` subagent and the `lt-check` skill when you need to
-  verify code changes. Prefer it to running `make check` (or any other gate)
-  directly.
+- Use subagents and skills to write, review, and test code changes. Prefer these
+  to writing, reviewing, and testing code changes yourself.
+  - Writing code: use the `lt-file-editor` subagent and the `lt-code-writer`
+    skill. This agent/skill will ensure that the project's build/lint/test gates
+    are executed correctly.
+  - Testing code: use the `lt-check-runner` subagent and the `lt-check` skill.
+  - Don't: reuse the same subagent for follow-up work. Subagents should be given
+    a specific, fully defined task. Create _new_ subagents for follow-up work.
+  - Don't: redirect a subagent if direction changes. Either let it fully
+    complete, and then spawn a _new_ subagent to redirect the changes, or
+    immediately kill it and revert its in-progress changes.
