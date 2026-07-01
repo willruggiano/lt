@@ -18,7 +18,7 @@ check: ## Run formatter, linter, supply-chain, and dedup gates
 	cargo clippy --all-targets --all-features -- -D warnings
 	GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null cargo deny check
 	cargo machete
-	cpd .
+	cpd --no-tips --no-colors .
 	cargo dupes check --exclude-tests --min-nodes 25 --max-exact 0 --max-near 0
 
 test: ## Run the test suite (default + all features)
