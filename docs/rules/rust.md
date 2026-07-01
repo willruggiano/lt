@@ -3,6 +3,8 @@ paths:
   - "**/*.rs"
 ---
 
+# Rust conventions
+
 - Configuration is the source of truth (`Cargo.toml`, `clippy.toml`, etc). Do
   not duplicate configuration values into documentation, per
   [[documentation.md]]
