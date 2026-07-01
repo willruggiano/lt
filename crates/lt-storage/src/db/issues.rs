@@ -56,7 +56,7 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
         title: row.get(2)?,
         priority_label,
         priority,
-        state: types::State {
+        state: types::WorkflowState {
             id: row.get(7)?,
             name: row.get(8)?,
         },
@@ -266,7 +266,7 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
             match o.field.as_str() {
                 "state" => {
                     if let Some(id) = &o.value {
-                        issue.state = types::State {
+                        issue.state = types::WorkflowState {
                             id: id.clone(),
                             name: o.state_name.clone().unwrap_or_default(),
                         };
@@ -495,7 +495,7 @@ mod tests {
             title: format!("issue {id}"),
             priority_label: "Medium".to_string(),
             priority: 3,
-            state: types::State {
+            state: types::WorkflowState {
                 id: state.to_string(),
                 name: state.to_string(),
             },
@@ -542,7 +542,7 @@ mod tests {
             title: "Wire it up".to_string(),
             priority_label: "High".to_string(),
             priority: 2,
-            state: types::State {
+            state: types::WorkflowState {
                 id: "s1".to_string(),
                 name: "In Progress".to_string(),
             },
@@ -770,7 +770,7 @@ mod tests {
 
         // A delta pull rewrites the base (state changed server-side).
         let mut updated = sample_api_issue();
-        updated.state = types::State {
+        updated.state = types::WorkflowState {
             id: "s2".to_string(),
             name: "Canceled".to_string(),
         };

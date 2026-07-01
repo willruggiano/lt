@@ -1,7 +1,7 @@
 //! Team-member list reads (the new-issue modal's assignee picker).
 
 use anyhow::Result;
-use lt_types::sync_dto::Member;
+use lt_types::types::User;
 
 use crate::client::GraphqlTransport;
 use crate::graphql::fetch_team_items;
@@ -20,6 +20,6 @@ query TeamMembers($teamId: String!) {
 ";
 
 /// List a team's members.
-pub fn fetch(transport: &dyn GraphqlTransport, team_id: &str) -> Result<Vec<Member>> {
+pub fn fetch(transport: &dyn GraphqlTransport, team_id: &str) -> Result<Vec<User>> {
     fetch_team_items(transport, TEAM_MEMBERS_QUERY, team_id)
 }

@@ -256,7 +256,7 @@ impl Generator {
             priority,
             // The team id is its key; entity ids mirror names so renamed-to-same
             // values collapse to one row in the relational base.
-            state: types::State {
+            state: types::WorkflowState {
                 id: state_name.clone(),
                 name: state_name,
             },

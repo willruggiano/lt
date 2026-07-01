@@ -107,7 +107,7 @@ pub struct Parent {
 }
 
 #[derive(Deserialize, Clone, PartialEq)]
-pub struct State {
+pub struct WorkflowState {
     pub id: String,
     pub name: String,
 }
@@ -116,6 +116,18 @@ pub struct State {
 pub struct User {
     pub id: String,
     pub name: String,
+}
+
+/// The authenticated user's identity: the viewer plus their organization
+/// (workspace) name and url-key. Surfaced in the TUI header, the "Me" assignee
+/// item, and the created-issue URL. Sourced from the viewer query
+/// ([`crate::viewer`]) and persisted (id, name) into `sync_meta` at sync time.
+#[derive(Debug, Clone)]
+pub struct Viewer {
+    pub id: String,
+    pub name: String,
+    pub org_name: String,
+    pub org_url_key: String,
 }
 
 #[derive(Deserialize, Clone, PartialEq)]
@@ -145,7 +157,7 @@ pub struct Issue {
     #[serde(rename = "priorityLabel")]
     pub priority_label: String,
     pub priority: u8,
-    pub state: State,
+    pub state: WorkflowState,
     pub assignee: Option<User>,
     pub team: Team,
     pub description: Option<String>,

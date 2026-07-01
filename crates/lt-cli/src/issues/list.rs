@@ -31,7 +31,7 @@ fn resolve_me(conn: &lt_runtime::db::Connection, query: &mut IssueQuery) -> Resu
 }
 
 pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
-    let mut query = args.to_query();
+    let mut query = IssueQuery::from(args);
 
     // --live: bypass cache entirely. The GraphQL filter resolves `me` itself.
     if args.live {
@@ -54,7 +54,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
             // persists the viewer identity that `resolve_me` reads below.
             info!("Cache empty -- running full sync...");
             drop(conn);
-            lt_runtime::sync_cmd::full::run()?;
+            lt_runtime::sync::full::run()?;
             // Re-open after sync.
             let conn2 = db::open_db(db::db_path()?)?;
             resolve_me(&conn2, &mut query)?;
@@ -81,7 +81,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
                 print_table(out, &issues, &note)?;
 
                 std::thread::spawn(|| {
-                    if let Err(e) = lt_runtime::sync_cmd::delta::run() {
+                    if let Err(e) = lt_runtime::sync::delta::run() {
                         error!("background sync error: {}", e);
                     }
                 });

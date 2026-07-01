@@ -9,12 +9,12 @@ use std::sync::mpsc::Receiver;
 
 use anyhow::Result;
 use lt_types::query::IssueQuery;
-pub use lt_types::sync_dto::{Member, Team, ViewerIdentity, WorkflowState};
+pub use lt_types::types::{Team, User, Viewer, WorkflowState};
 
 /// Outcome of a background sync, delivered to the TUI event loop.
 pub enum SyncEvent {
     /// Sync succeeded; carries a freshly-fetched identity when one was requested.
-    Done(Option<ViewerIdentity>),
+    Done(Option<Viewer>),
     Error(String),
     NotAuthenticated,
 }
@@ -47,7 +47,7 @@ pub trait SyncService: Send + Sync {
     fn spawn_login(&self) -> Receiver<LoginEvent>;
 
     /// Fetch the viewer identity (best-effort; `None` when unauthenticated).
-    fn fetch_viewer(&self) -> Option<ViewerIdentity>;
+    fn fetch_viewer(&self) -> Option<Viewer>;
 
     /// List the teams the viewer can file issues against.
     fn fetch_teams(&self) -> Result<Vec<Team>>;
@@ -56,7 +56,7 @@ pub trait SyncService: Send + Sync {
     fn fetch_workflow_states(&self, team_id: &str) -> Result<Vec<WorkflowState>>;
 
     /// List a team's members.
-    fn fetch_team_members(&self, team_id: &str) -> Result<Vec<Member>>;
+    fn fetch_team_members(&self, team_id: &str) -> Result<Vec<User>>;
 
     /// Sync an issue's comments from the API into the local database.
     fn sync_comments(&self, issue_id: &str) -> Result<()>;

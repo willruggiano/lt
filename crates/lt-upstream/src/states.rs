@@ -1,7 +1,7 @@
 //! Workflow-state list reads (the new-issue modal's state picker).
 
 use anyhow::Result;
-use lt_types::sync_dto::WorkflowState;
+use lt_types::types::WorkflowState;
 
 use crate::client::GraphqlTransport;
 use crate::graphql::fetch_team_items;
@@ -13,7 +13,6 @@ query WorkflowStates($teamId: String!) {
       nodes {
         id
         name
-        type
       }
     }
   }

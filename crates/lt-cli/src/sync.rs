@@ -5,7 +5,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::Subcommand;
-use lt_runtime::sync_cmd as sync;
+use lt_runtime::sync;
 
 #[derive(Subcommand)]
 pub enum SyncCommands {

@@ -399,7 +399,7 @@ pub fn sample_base_issue(id: &str) -> types::Issue {
         title: format!("issue {id}"),
         priority_label: "Normal".to_string(),
         priority: 3,
-        state: types::State {
+        state: types::WorkflowState {
             id: "s-todo".to_string(),
             name: "Todo".to_string(),
         },

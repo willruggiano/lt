@@ -293,7 +293,7 @@ impl SyncService for NoopSyncService {
         let (_tx, rx) = mpsc::channel();
         rx
     }
-    fn fetch_viewer(&self) -> Option<lt_runtime::sync_port::ViewerIdentity> {
+    fn fetch_viewer(&self) -> Option<lt_runtime::sync_port::Viewer> {
         None
     }
     fn fetch_teams(&self) -> Result<Vec<lt_runtime::sync_port::Team>> {
@@ -305,7 +305,7 @@ impl SyncService for NoopSyncService {
     ) -> Result<Vec<lt_runtime::sync_port::WorkflowState>> {
         Ok(Vec::new())
     }
-    fn fetch_team_members(&self, _team_id: &str) -> Result<Vec<lt_runtime::sync_port::Member>> {
+    fn fetch_team_members(&self, _team_id: &str) -> Result<Vec<lt_runtime::sync_port::User>> {
         Ok(Vec::new())
     }
     fn sync_comments(&self, _issue_id: &str) -> Result<()> {

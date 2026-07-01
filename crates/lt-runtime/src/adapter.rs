@@ -12,22 +12,15 @@ use lt_types::query::IssueQuery;
 use lt_upstream as upstream;
 use lt_upstream::client::HttpTransport;
 
-use crate::sync_port::{
-    LoginEvent, Member, SyncEvent, SyncService, Team, ViewerIdentity, WorkflowState,
-};
+use crate::sync_port::{LoginEvent, SyncEvent, SyncService, Team, User, Viewer, WorkflowState};
 
 pub struct LinearSyncService;
 
 impl LinearSyncService {
     /// Best-effort viewer identity from the stored token.
-    fn viewer_identity() -> Option<ViewerIdentity> {
+    fn viewer_identity() -> Option<Viewer> {
         let token = lt_config::load_token().ok().flatten()?;
-        let v = upstream::viewer::fetch(&HttpTransport::new(token.access_token)).ok()?;
-        Some(ViewerIdentity {
-            id: v.id,
-            name: v.name,
-            org_name: v.org_name,
-        })
+        upstream::viewer::fetch(&HttpTransport::new(token.access_token)).ok()
     }
 
     /// A transport with a fresh (auto-refreshed) token for a live read.
@@ -102,7 +95,7 @@ impl SyncService for LinearSyncService {
         rx
     }
 
-    fn fetch_viewer(&self) -> Option<ViewerIdentity> {
+    fn fetch_viewer(&self) -> Option<Viewer> {
         Self::viewer_identity()
     }
 
@@ -114,7 +107,7 @@ impl SyncService for LinearSyncService {
         upstream::states::fetch(&Self::transport()?, team_id)
     }
 
-    fn fetch_team_members(&self, team_id: &str) -> Result<Vec<Member>> {
+    fn fetch_team_members(&self, team_id: &str) -> Result<Vec<User>> {
         upstream::members::fetch(&Self::transport()?, team_id)
     }
 

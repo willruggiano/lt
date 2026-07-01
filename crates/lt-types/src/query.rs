@@ -13,6 +13,14 @@ include!(concat!(env!("OUT_DIR"), "/sort_field.rs"));
 // build_sort(&SortField, desc) -> serde_json::Value -- generated (bd-2w5).
 include!(concat!(env!("OUT_DIR"), "/sort_build.rs"));
 
+impl std::str::FromStr for SortField {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_key(s).ok_or_else(|| format!("invalid sort field: {s}"))
+    }
+}
+
 /// A filter/sort specification for the issues list.
 #[derive(Clone, Debug)]
 pub struct IssueQuery {

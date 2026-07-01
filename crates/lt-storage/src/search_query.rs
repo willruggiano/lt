@@ -926,8 +926,8 @@ mod run_query_tests {
         }
     }
 
-    fn state(name: &str) -> types::State {
-        types::State {
+    fn state(name: &str) -> types::WorkflowState {
+        types::WorkflowState {
             id: name.to_string(),
             name: name.to_string(),
         }

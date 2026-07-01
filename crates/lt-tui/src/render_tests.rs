@@ -6,7 +6,7 @@
 // profile global is touched. Data comes from the deterministic `sim` generator,
 // so the module is gated on `feature = "sim"`.
 
-use lt_runtime::sync_port::Member;
+use lt_runtime::sync_port::User;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -218,18 +218,19 @@ fn optimistic_builders_apply_popup_choice() {
 
 #[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
-    let viewer = lt_runtime::sync_port::ViewerIdentity {
+    let viewer = lt_runtime::sync_port::Viewer {
         id: "v".to_string(),
         name: "Vic".to_string(),
         org_name: "Acme".to_string(),
+        org_url_key: "acme".to_string(),
     };
     let members = || {
         vec![
-            Member {
+            User {
                 id: "v".to_string(),
                 name: "Vic".to_string(),
             },
-            Member {
+            User {
                 id: "m".to_string(),
                 name: "Mara".to_string(),
             },

@@ -16,10 +16,9 @@ pub use adapter::LinearSyncService;
 pub mod auth;
 pub mod issues;
 pub mod notifications;
-pub mod sync_cmd;
 
 // Store read/write facade re-exported so downstream crates name one seam.
 #[cfg(feature = "sim")]
 pub use lt_storage::sim;
 pub use lt_storage::{db, search_query, text};
-pub use lt_types::{query, sync_dto};
+pub use lt_types::query;

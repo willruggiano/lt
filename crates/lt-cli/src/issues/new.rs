@@ -1,10 +1,9 @@
 use std::io::{self, BufRead, Write};
 
 use anyhow::{Result, anyhow};
-use lt_runtime::issues::{NewIssueMember as Member, NewIssueSession, NewIssueViewer as Viewer};
-use lt_runtime::sync_port::{Team, WorkflowState};
+use lt_runtime::issues::NewIssueSession;
 use lt_types::inputs::IssueCreateInput;
-use lt_types::types::priority_u8_to_label;
+use lt_types::types::{Team, User as Member, Viewer, WorkflowState, priority_u8_to_label};
 
 #[derive(Debug, Clone)]
 pub struct NewIssueArgs {
@@ -168,9 +167,6 @@ fn pick_state<'a>(
     states: &'a [WorkflowState],
     hint: Option<&str>,
 ) -> Result<Option<&'a WorkflowState>> {
-    // Default: first unstarted state
-    let default_state = states.iter().find(|s| s.type_ == "unstarted");
-
     if let Some(h) = hint {
         let lower = h.to_lowercase();
         if let Some(s) = states.iter().find(|s| s.name.to_lowercase() == lower) {
@@ -185,25 +181,16 @@ fn pick_state<'a>(
         return Err(anyhow!("no state matching '{h}'"));
     }
 
-    let default_name = default_state.map_or("(first)", |s| s.name.as_str());
-
     writeln!(out, "Workflow states:")?;
     for (i, s) in states.iter().enumerate() {
-        let marker = if Some(s.id.as_str()) == default_state.map(|d| d.id.as_str()) {
-            " *"
-        } else {
-            ""
-        };
-        writeln!(out, "  {}. {}{}", i + 1, s.name, marker)?;
+        writeln!(out, "  {}. {}", i + 1, s.name)?;
     }
 
-    let input = read_line(
-        out,
-        &format!("State (number or name, default: {default_name}): "),
-    )?;
+    // Empty input leaves the state unset, so Linear applies the team default.
+    let input = read_line(out, "State (number or name, Enter to skip): ")?;
 
     if input.trim().is_empty() {
-        return Ok(default_state);
+        return Ok(None);
     }
 
     let lower = input.trim().to_lowercase();
@@ -217,8 +204,8 @@ fn pick_state<'a>(
         return Ok(Some(&states[n - 1]));
     }
 
-    writeln!(out, "Invalid state, using default: {default_name}")?;
-    Ok(default_state)
+    writeln!(out, "Invalid state, skipping (team default applies).")?;
+    Ok(None)
 }
 
 fn pick_assignee(
@@ -235,11 +222,8 @@ fn pick_assignee(
         if lower == "none" || lower == "unassigned" {
             return Ok(None);
         }
-        // match by name or email
-        if let Some(m) = members
-            .iter()
-            .find(|m| m.name.to_lowercase() == lower || m.email.to_lowercase() == lower)
-        {
+        // match by name
+        if let Some(m) = members.iter().find(|m| m.name.to_lowercase() == lower) {
             return Ok(Some(m.id.clone()));
         }
         return Err(anyhow!("no member matching '{h}'"));
@@ -263,10 +247,7 @@ fn pick_assignee(
     }
 
     let lower = trimmed.to_lowercase();
-    if let Some(m) = members
-        .iter()
-        .find(|m| m.name.to_lowercase() == lower || m.email.to_lowercase() == lower)
-    {
+    if let Some(m) = members.iter().find(|m| m.name.to_lowercase() == lower) {
         return Ok(Some(m.id.clone()));
     }
     if let Ok(n) = trimmed.parse::<usize>()
@@ -414,8 +395,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     writeln!(
         out,
         "URL:     https://linear.app/{}/issue/{}",
-        viewer.org_url_key(),
-        issue.identifier
+        viewer.org_url_key, issue.identifier
     )?;
 
     Ok(())
@@ -423,8 +403,6 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use lt_runtime::issues::Organization;
-
     use super::*;
 
     fn team(id: &str, name: &str) -> Team {
@@ -434,19 +412,17 @@ mod tests {
         }
     }
 
-    fn state(id: &str, name: &str, type_: &str) -> WorkflowState {
+    fn state(id: &str, name: &str) -> WorkflowState {
         WorkflowState {
             id: id.to_string(),
             name: name.to_string(),
-            type_: type_.to_string(),
         }
     }
 
-    fn member(id: &str, name: &str, email: &str) -> Member {
+    fn member(id: &str, name: &str) -> Member {
         Member {
             id: id.to_string(),
             name: name.to_string(),
-            email: email.to_string(),
         }
     }
 
@@ -454,10 +430,8 @@ mod tests {
         Viewer {
             id: "viewer-id".to_string(),
             name: "Vic Viewer".to_string(),
-            email: "vic@example.com".to_string(),
-            organization: Organization {
-                url_key: "acme".to_string(),
-            },
+            org_name: "Acme".to_string(),
+            org_url_key: "acme".to_string(),
         }
     }
 
@@ -512,10 +486,7 @@ mod tests {
 
     #[test]
     fn pick_state_hint_matches_name_and_number() {
-        let states = [
-            state("s1", "Backlog", "backlog"),
-            state("s2", "Todo", "unstarted"),
-        ];
+        let states = [state("s1", "Backlog"), state("s2", "Todo")];
         let mut out = Vec::new();
         assert_eq!(
             pick_state(&mut out, &states, Some("todo"))
@@ -536,7 +507,7 @@ mod tests {
 
     #[test]
     fn pick_assignee_hint_resolves_special_and_matches() {
-        let members = [member("m1", "Alice", "alice@example.com")];
+        let members = [member("m1", "Alice")];
         let v = viewer();
         let mut out = Vec::new();
 
@@ -553,7 +524,7 @@ mod tests {
             None
         );
         assert_eq!(
-            pick_assignee(&mut out, &members, &v, Some("ALICE@example.com")).unwrap(),
+            pick_assignee(&mut out, &members, &v, Some("alice")).unwrap(),
             Some("m1".to_string())
         );
         assert!(pick_assignee(&mut out, &members, &v, Some("ghost")).is_err());
@@ -573,8 +544,8 @@ mod tests {
 
     #[test]
     fn print_summary_renders_all_fields() {
-        let states = [state("s1", "Todo", "unstarted")];
-        let members = [member("m1", "Alice", "alice@example.com")];
+        let states = [state("s1", "Todo")];
+        let members = [member("m1", "Alice")];
         let v = viewer();
         let mut out = Vec::new();
         print_summary(
