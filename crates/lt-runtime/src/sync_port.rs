@@ -1,47 +1,15 @@
 //! The seam between the TUI read model and the sync layer's API edge.
 //!
-//! Defined in the lowest crate both `lt-tui` and `lt-cli` share so the TUI can
-//! drive sync/login and live modal reads through a trait object with no
-//! compile-time dependency on `lt-sync` or `cynic`. `lt-cli` provides the
-//! concrete adapter backed by `lt-sync`.
+//! Defined in `lt-runtime` — the crate both `lt-tui` and `lt-cli` share — so the
+//! TUI can drive sync/login and live modal reads through a trait object without
+//! a compile-time dependency on `lt-upstream` or `cynic`. The concrete adapter
+//! ([`crate::LinearSyncService`]) is the only code that touches the API edge.
 
 use std::sync::mpsc::Receiver;
 
 use anyhow::Result;
-
-use crate::query::IssueQuery;
-
-/// The viewer's identity, surfaced in the TUI header and the "Me" assignee item.
-pub struct ViewerIdentity {
-    pub id: String,
-    pub name: String,
-    pub org_name: String,
-}
-
-/// A team the new-issue modal can target. `lt-sync` decodes API responses
-/// directly into this shared type, so the adapter needs no mapping layer.
-#[derive(serde::Deserialize)]
-pub struct Team {
-    pub id: String,
-    pub name: String,
-}
-
-/// A workflow state for the state picker. `type_` (the state category, e.g.
-/// "unstarted") is used by the CLI's new-issue default; the TUI ignores it.
-#[derive(serde::Deserialize)]
-pub struct WorkflowState {
-    pub id: String,
-    pub name: String,
-    #[serde(rename = "type", default)]
-    pub type_: String,
-}
-
-/// A team member for the assignee picker.
-#[derive(serde::Deserialize)]
-pub struct Member {
-    pub id: String,
-    pub name: String,
-}
+use lt_types::query::IssueQuery;
+pub use lt_types::sync_dto::{Member, Team, ViewerIdentity, WorkflowState};
 
 /// Outcome of a background sync, delivered to the TUI event loop.
 pub enum SyncEvent {
@@ -60,9 +28,9 @@ pub enum LoginEvent {
     Error(String),
 }
 
-/// The sync/API operations the TUI drives, abstracted away from `lt-sync`.
+/// The sync/API operations the TUI drives, abstracted away from `lt-upstream`.
 ///
-/// The concrete implementation lives in `lt-cli` and is the only code that
+/// The concrete implementation lives in `lt-runtime` and is the only code that
 /// touches `HttpTransport`/cynic; the TUI holds it behind this trait so an API
 /// call from the render/event path does not compile.
 pub trait SyncService: Send + Sync {

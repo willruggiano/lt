@@ -1,11 +1,11 @@
-//! The `lt sync` command surface. The sync engine lives in `lt-upstream`; this
+//! The `lt sync` command surface. The sync engine lives in `lt-runtime`; this
 //! is only the clap dispatch.
 
 use std::io::Write;
 
 use anyhow::Result;
 use clap::Subcommand;
-use lt_upstream::sync;
+use lt_runtime::sync_cmd as sync;
 
 #[derive(Subcommand)]
 pub enum SyncCommands {

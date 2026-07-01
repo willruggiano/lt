@@ -6,7 +6,7 @@
 // profile global is touched. Data comes from the deterministic `sim` generator,
 // so the module is gated on `feature = "sim"`.
 
-use lt_storage::sync_port::Member;
+use lt_runtime::sync_port::Member;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -14,7 +14,7 @@ use super::*;
 
 /// The seeded `sim` dataset's list issues, which the TUI renders.
 fn sim_issues(seed: u64, size: usize) -> Vec<Issue> {
-    lt_storage::sim::generate(seed, size).issues
+    lt_runtime::sim::generate(seed, size).issues
 }
 
 /// Draw one frame at `w`x`h` and return the rendered buffer as text.
@@ -146,11 +146,11 @@ fn filter_sort_sync_and_replacement() {
     let mut app = app_with_issues(0, 1);
     app.active_filter = search_query::parse_query_ast("sort:title+");
     app.sync_args_from_filter();
-    assert!(matches!(app.args.sort, lt_storage::query::SortField::Title));
+    assert!(matches!(app.args.sort, lt_runtime::query::SortField::Title));
     assert!(!app.args.desc);
 
     // replace_sort_in_filter rewrites the sort token, preserving other stems.
-    app.args.sort = lt_storage::query::SortField::Updated;
+    app.args.sort = lt_runtime::query::SortField::Updated;
     app.args.desc = true;
     app.active_filter = search_query::parse_query_ast("state:todo sort:title+");
     let replaced = app.replace_sort_in_filter();
@@ -184,7 +184,7 @@ fn priority_label_to_u8_maps_levels() {
 
 #[test]
 fn db_comment_to_api_conversion() {
-    let comment = lt_storage::db::Comment {
+    let comment = lt_runtime::db::Comment {
         id: "c1".to_string(),
         issue_id: "i1".to_string(),
         body: "hi".to_string(),
@@ -218,7 +218,7 @@ fn optimistic_builders_apply_popup_choice() {
 
 #[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
-    let viewer = lt_storage::sync_port::ViewerIdentity {
+    let viewer = lt_runtime::sync_port::ViewerIdentity {
         id: "v".to_string(),
         name: "Vic".to_string(),
         org_name: "Acme".to_string(),

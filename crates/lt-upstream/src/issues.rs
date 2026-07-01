@@ -3,8 +3,8 @@
 //! these queries are the issue paths that hit the network.
 
 use anyhow::{Result, anyhow, bail};
-use lt_storage::query::{IssueQuery, build_sort, parse_date};
 use lt_types::inputs::IssueCreateInput;
+use lt_types::query::{IssueQuery, build_sort, parse_date};
 use lt_types::types::{Issue, IssuesData};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -255,9 +255,9 @@ pub fn create(transport: &dyn GraphqlTransport, input: &IssueCreateInput) -> Res
 }
 
 /// A minimal GraphQL issue node matching [`Issue`]'s deserialization, shared by
-/// the fetch tests here and in `sync::delta`.
-#[cfg(test)]
-pub(crate) fn sample_issue_node(id: &str) -> serde_json::Value {
+/// the fetch tests here and the `lt-runtime` delta-sync tests (via `test-util`).
+#[cfg(any(test, feature = "test-util"))]
+pub fn sample_issue_node(id: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id, "identifier": format!("ENG-{id}"), "title": "t",
         "priorityLabel": "High", "priority": 2,

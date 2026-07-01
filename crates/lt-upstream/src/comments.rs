@@ -1,8 +1,8 @@
 //! The comment domain: replay of queued `commentCreate` mutations and the
-//! per-issue comment sync that pulls the API's comment thread into the DB.
+//! per-issue comment fetch that pulls the API's comment thread. Persistence of
+//! the fetched thread into the local DB lives in `lt-runtime`.
 
 use anyhow::Result;
-use lt_storage::db;
 use lt_types::types::PageInfo;
 use serde::Deserialize;
 use serde_json::json;
@@ -81,7 +81,7 @@ pub fn replay_create(
 }
 
 // ---------------------------------------------------------------------------
-// Comment sync (pull an issue's thread into the local DB)
+// Comment fetch (pull an issue's thread from the API)
 // ---------------------------------------------------------------------------
 
 const COMMENTS_QUERY: &str = r"
@@ -106,15 +106,23 @@ struct CommentUser {
     name: String,
 }
 
+/// A single comment as returned by the API, before local persistence.
 #[derive(Deserialize)]
-struct ApiComment {
-    id: String,
-    body: String,
+pub struct ApiComment {
+    pub id: String,
+    pub body: String,
     #[serde(rename = "createdAt")]
-    created_at: String,
+    pub created_at: String,
     #[serde(rename = "updatedAt")]
-    updated_at: String,
+    pub updated_at: String,
     user: Option<CommentUser>,
+}
+
+impl ApiComment {
+    /// The comment author's name, if any.
+    pub fn author_name(&self) -> Option<String> {
+        self.user.as_ref().map(|u| u.name.clone())
+    }
 }
 
 #[derive(Deserialize)]
@@ -134,29 +142,10 @@ struct IssueCommentsData {
     issue: Option<IssueWithComments>,
 }
 
-fn api_to_db(c: &ApiComment, issue_id: &str) -> db::Comment {
-    db::Comment {
-        id: c.id.clone(),
-        issue_id: issue_id.to_string(),
-        body: c.body.clone(),
-        author_name: c.user.as_ref().map(|u| u.name.clone()),
-        created_at: c.created_at.clone(),
-        updated_at: c.updated_at.clone(),
-        synced_at: String::new(), // filled by upsert_comments
-    }
-}
-
-/// Fetch all comments for `issue_id` from the Linear API and upsert them into
-/// the local `issue_comments` table.
-///
-/// All existing comments for the issue are replaced with the freshly fetched
-/// set to keep the DB consistent with Linear.
-pub fn sync(
-    conn: &rusqlite::Connection,
-    transport: &dyn GraphqlTransport,
-    issue_id: &str,
-) -> Result<()> {
-    let mut all_comments: Vec<db::Comment> = Vec::new();
+/// Fetch every comment for `issue_id` from the Linear API, paginating until the
+/// thread is exhausted. Returns an empty vec when the issue is not found.
+pub fn fetch_all(transport: &dyn GraphqlTransport, issue_id: &str) -> Result<Vec<ApiComment>> {
+    let mut all: Vec<ApiComment> = Vec::new();
     let mut cursor: Option<String> = None;
 
     loop {
@@ -172,9 +161,7 @@ pub fn sync(
         };
 
         let conn_data = issue.comments;
-        for c in &conn_data.nodes {
-            all_comments.push(api_to_db(c, issue_id));
-        }
+        all.extend(conn_data.nodes);
 
         if !conn_data.page_info.has_next_page {
             break;
@@ -182,10 +169,7 @@ pub fn sync(
         cursor = conn_data.page_info.end_cursor;
     }
 
-    // Replace the existing comments for this issue with the fresh set.
-    db::delete_comments_for_issue(conn, issue_id)?;
-    db::upsert_comments(conn, &all_comments)?;
-    Ok(())
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -231,39 +215,15 @@ mod tests {
         }}})
     }
 
-    fn test_conn() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        db::run_migrations(&conn).unwrap();
-        conn
-    }
-
     #[test]
-    fn sync_paginates_and_replaces_existing() {
-        let conn = test_conn();
-        // A stale comment that the sync should replace.
-        db::upsert_comments(
-            &conn,
-            &[db::Comment {
-                id: "old".to_string(),
-                issue_id: "i1".to_string(),
-                body: "stale".to_string(),
-                author_name: None,
-                created_at: "2025-01-01T00:00:00Z".to_string(),
-                updated_at: "2025-01-01T00:00:00Z".to_string(),
-                synced_at: String::new(),
-            }],
-        )
-        .unwrap();
-
+    fn fetch_all_paginates() {
         let transport = FakeTransport::new(vec![
             comments_page(&[comment_node("c1", "first")], true, Some("cur")),
             comments_page(&[comment_node("c2", "second")], false, None),
         ]);
-        sync(&conn, &transport, "i1").unwrap();
-
-        let rows = db::query_comments(&conn, "i1").unwrap();
+        let comments = fetch_all(&transport, "i1").unwrap();
         assert_eq!(
-            rows.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            comments.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
             ["c1", "c2"]
         );
         // Second request carries the first page's cursor.
@@ -271,58 +231,22 @@ mod tests {
     }
 
     #[test]
-    fn sync_missing_issue_clears_existing() {
-        let conn = test_conn();
-        db::upsert_comments(
-            &conn,
-            &[db::Comment {
-                id: "old".to_string(),
-                issue_id: "i1".to_string(),
-                body: "stale".to_string(),
-                author_name: None,
-                created_at: "2025-01-01T00:00:00Z".to_string(),
-                updated_at: "2025-01-01T00:00:00Z".to_string(),
-                synced_at: String::new(),
-            }],
-        )
-        .unwrap();
-
+    fn fetch_all_missing_issue_is_empty() {
         let transport = FakeTransport::new(vec![json!({ "issue": null })]);
-        sync(&conn, &transport, "i1").unwrap();
-        assert!(db::query_comments(&conn, "i1").unwrap().is_empty());
+        assert!(fetch_all(&transport, "i1").unwrap().is_empty());
     }
 
     #[test]
-    fn api_to_db_maps_fields_and_author() {
-        let api: ApiComment = serde_json::from_value(json!({
-            "id": "c1",
-            "body": "looks good",
-            "createdAt": "2026-01-01T00:00:00Z",
-            "updatedAt": "2026-01-02T00:00:00Z",
-            "user": { "name": "Alice" }
-        }))
-        .unwrap();
-        let row = api_to_db(&api, "issue-9");
-        assert_eq!(row.id, "c1");
-        assert_eq!(row.issue_id, "issue-9");
-        assert_eq!(row.body, "looks good");
-        assert_eq!(row.author_name.as_deref(), Some("Alice"));
-        assert_eq!(row.created_at, "2026-01-01T00:00:00Z");
-        assert_eq!(row.updated_at, "2026-01-02T00:00:00Z");
-        // synced_at is stamped later by upsert_comments.
-        assert!(row.synced_at.is_empty());
-    }
+    fn api_comment_author_name() {
+        let with_author: ApiComment = serde_json::from_value(comment_node("c1", "b")).unwrap();
+        assert_eq!(with_author.author_name().as_deref(), Some("Alice"));
 
-    #[test]
-    fn api_to_db_handles_missing_author() {
-        let api: ApiComment = serde_json::from_value(json!({
-            "id": "c2",
-            "body": "system note",
-            "createdAt": "2026-01-01T00:00:00Z",
-            "updatedAt": "2026-01-01T00:00:00Z",
+        let no_author: ApiComment = serde_json::from_value(json!({
+            "id": "c2", "body": "note",
+            "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
             "user": null
         }))
         .unwrap();
-        assert!(api_to_db(&api, "issue-9").author_name.is_none());
+        assert!(no_author.author_name().is_none());
     }
 }

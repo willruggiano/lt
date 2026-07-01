@@ -6,10 +6,10 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use lt_storage::query::{IssueQuery, SortField};
+use lt_runtime::query::{IssueQuery, SortField};
 
 /// Clap value parser for `--sort`: maps a sort key to its [`SortField`], which
-/// is intentionally clap-free (it lives in the data layer, `lt-storage`).
+/// is intentionally clap-free (it lives in the data layer, `lt-types`).
 fn parse_sort_field(s: &str) -> Result<SortField, String> {
     SortField::from_key(s).ok_or_else(|| format!("invalid sort field: {s}"))
 }
@@ -74,7 +74,7 @@ pub struct IssueArgs {
 }
 
 impl IssueArgs {
-    /// Lower the clap args into the storage-layer [`IssueQuery`] (drops the
+    /// Lower the clap args into the data-layer [`IssueQuery`] (drops the
     /// CLI-only `--live` flag, which the caller handles separately).
     pub fn to_query(&self) -> IssueQuery {
         IssueQuery {

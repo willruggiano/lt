@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow};
+use lt_types::query::{IssueQuery, SortField, parse_date};
 use rusqlite::types::ToSql;
-
-use crate::query::{IssueQuery, SortField, parse_date};
 
 fn parse_priority_label(s: &str) -> Result<String> {
     let label = match s.to_lowercase().as_str() {
@@ -124,8 +123,9 @@ pub fn build_sql_order(args: &IssueQuery) -> String {
 
 #[cfg(test)]
 mod tests {
+    use lt_types::query::IssueQuery;
+
     use super::*;
-    use crate::query::IssueQuery;
 
     fn default_args() -> IssueQuery {
         IssueQuery::default()

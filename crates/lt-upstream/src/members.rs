@@ -1,7 +1,7 @@
 //! Team-member list reads (the new-issue modal's assignee picker).
 
 use anyhow::Result;
-use lt_storage::sync_port::Member;
+use lt_types::sync_dto::Member;
 
 use crate::client::GraphqlTransport;
 use crate::graphql::fetch_team_items;

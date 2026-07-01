@@ -17,6 +17,10 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use serde::Deserialize;
 
+// Shared with lt-types/build.rs: SortFieldSpec, base_type_name,
+// extract_input_object_fields, to_pascal_case, sort_field_arms.
+include!("../../build/schema_codegen.rs");
+
 // ---------------------------------------------------------------------------
 // Allowlist config types
 // ---------------------------------------------------------------------------
@@ -36,64 +40,6 @@ struct FieldSpec {
     gql_field: String,
     /// Expected base GraphQL type name (schema-validated).
     gql_type: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SortFieldSpec {
-    /// Sort key as typed by the user after "sort:" (e.g. "updated").
-    key: String,
-    /// Field name inside `IssueSortInput` (schema-validated).
-    gql_field: String,
-    /// SQLite column name used in ORDER BY clauses.
-    sql_col: String,
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Recursively unwrap NonNull/List wrappers and return the base named type.
-fn base_type_name<'a>(ty: &'a graphql_parser::schema::Type<'a, String>) -> &'a str {
-    use graphql_parser::schema::Type;
-    match ty {
-        Type::NamedType(name) => name.as_str(),
-        Type::NonNullType(inner) | Type::ListType(inner) => base_type_name(inner),
-    }
-}
-
-/// Parse the GraphQL schema and return a map of `input_type`'s field names to
-/// their base type names.
-fn extract_input_object_fields(schema_src: &str, input_type: &str) -> HashMap<String, String> {
-    let doc: Document<String> = graphql_parser::parse_schema(schema_src)
-        .unwrap_or_else(|e| panic!("Failed to parse GraphQL schema: {e}"));
-
-    for def in &doc.definitions {
-        if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
-            && input.name == input_type
-        {
-            let mut map = HashMap::new();
-            for field in &input.fields {
-                let base = base_type_name(&field.value_type).to_string();
-                map.insert(field.name.clone(), base);
-            }
-            return map;
-        }
-    }
-
-    panic!("{input_type} input type not found in the GraphQL schema");
-}
-
-/// Convert a lowercase key to `PascalCase` for use as an enum variant name.
-fn to_pascal_case(s: &str) -> String {
-    s.split(['_', '-'])
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-            }
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -453,88 +399,6 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
 // Code generation (quote-based) -- sort field
 // ---------------------------------------------------------------------------
 
-/// Generate the `SortField` enum with `label()` and `next()` impls.
-///
-/// Variants are in TOML order.  `label()` returns the user-facing key string.
-/// `next()` cycles through variants in order, wrapping around.
-fn gen_sort_field_enum(sort_fields: &[SortFieldSpec]) -> TokenStream {
-    let variants: Vec<proc_macro2::Ident> = sort_fields
-        .iter()
-        .map(|f| format_ident!("{}", to_pascal_case(&f.key)))
-        .collect();
-
-    let label_arms = sort_fields.iter().map(|f| {
-        let variant = format_ident!("{}", to_pascal_case(&f.key));
-        let key_str = &f.key;
-        quote! {
-            SortField::#variant => #key_str,
-        }
-    });
-
-    let from_key_arms = sort_fields.iter().map(|f| {
-        let variant = format_ident!("{}", to_pascal_case(&f.key));
-        let key_str = &f.key;
-        quote! {
-            #key_str => Some(SortField::#variant),
-        }
-    });
-
-    // next(): each variant maps to the next one in order, last wraps to first.
-    let next_arms = variants.windows(2).map(|w| {
-        let cur = &w[0];
-        let nxt = &w[1];
-        quote! {
-            SortField::#cur => SortField::#nxt,
-        }
-    });
-    // Last variant wraps to first.
-    let last_variant = variants.last().expect("sort_field list must not be empty");
-    let first_variant = variants.first().expect("sort_field list must not be empty");
-    let wrap_arm = quote! {
-        SortField::#last_variant => SortField::#first_variant,
-    };
-
-    quote! {
-        /// A sort field for the issues list.
-        ///
-        /// Generated from `[[sort_field]]` entries in `build/search_filter_fields.toml`
-        /// by build.rs (bd-2w5). Do not edit by hand.
-        ///
-        /// Kept clap-free so the data layer carries no CLI-parsing dependency;
-        /// the `lt-cli` argument parser maps strings via [`SortField::from_key`].
-        #[derive(Clone, Debug, PartialEq)]
-        pub enum SortField {
-            #( #variants, )*
-        }
-
-        impl SortField {
-            /// The user-facing sort key string (as typed after "sort:").
-            pub fn label(&self) -> &'static str {
-                match self {
-                    #( #label_arms )*
-                }
-            }
-
-            /// Parse a sort key string (as typed after "sort:") into a variant.
-            pub fn from_key(key: &str) -> Option<Self> {
-                match key {
-                    #( #from_key_arms )*
-                    _ => None,
-                }
-            }
-
-            /// Cycle to the next sort field, wrapping around at the end.
-            #[must_use]
-            pub fn next(&self) -> Self {
-                match self {
-                    #( #next_arms )*
-                    #wrap_arm
-                }
-            }
-        }
-    }
-}
-
 /// Generate `parse_sort_value(value: &str) -> Option<(SortField, SortDir)>`.
 ///
 /// Strips an optional '+' or '-' suffix, then matches the field name.
@@ -581,24 +445,6 @@ fn gen_parse_sort_value(sort_fields: &[SortFieldSpec]) -> TokenStream {
 /// Generate `sort_col(field: &SortField) -> &'static str`.
 ///
 /// Maps each `SortField` variant to its SQLite column name.
-/// `SortField::<Variant> => <value>,` match arms, one per sort field, where
-/// `value` selects the per-field string literal to map onto.
-fn sort_field_arms(
-    sort_fields: &[SortFieldSpec],
-    value: impl Fn(&SortFieldSpec) -> &str,
-) -> Vec<TokenStream> {
-    sort_fields
-        .iter()
-        .map(|f| {
-            let variant = format_ident!("{}", to_pascal_case(&f.key));
-            let value = value(f);
-            quote! {
-                SortField::#variant => #value,
-            }
-        })
-        .collect()
-}
-
 fn gen_sort_col(sort_fields: &[SortFieldSpec]) -> TokenStream {
     let match_arms = sort_field_arms(sort_fields, |f| &f.sql_col);
 
@@ -611,27 +457,6 @@ fn gen_sort_col(sort_fields: &[SortFieldSpec]) -> TokenStream {
             match field {
                 #( #match_arms )*
             }
-        }
-    }
-}
-
-/// Generate `build_sort(field: &SortField, desc: bool) -> serde_json::Value`.
-///
-/// Produces the JSON payload for the Linear GraphQL `sort` argument.
-fn gen_build_sort(sort_fields: &[SortFieldSpec]) -> TokenStream {
-    let match_arms = sort_field_arms(sort_fields, |f| &f.gql_field);
-
-    quote! {
-        /// Build the Linear GraphQL `sort` argument JSON for the given field and direction.
-        ///
-        /// Generated from `[[sort_field]]` entries in `build/search_filter_fields.toml`
-        /// by build.rs (bd-2w5). Do not edit by hand.
-        pub fn build_sort(field: &SortField, desc: bool) -> serde_json::Value {
-            let order = if desc { "Descending" } else { "Ascending" };
-            let field_key = match field {
-                #( #match_arms )*
-            };
-            serde_json::json!([{ field_key: { "order": order } }])
         }
     }
 }
@@ -655,6 +480,10 @@ fn main() {
             .display()
     );
     println!("cargo:rerun-if-changed=build.rs");
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("../../build/schema_codegen.rs").display()
+    );
 
     // -----------------------------------------------------------------------
     // Load the allowlist
@@ -713,76 +542,9 @@ fn main() {
         validation_errors.join("\n")
     );
 
-    // -----------------------------------------------------------------------
-    // Validate every sort_field entry against IssueSortInput in the schema
-    // -----------------------------------------------------------------------
-    let mut sort_validation_errors: Vec<String> = Vec::new();
-
-    for spec in &config.sort_field {
-        if !issue_sort_input_fields.contains_key(&spec.gql_field) {
-            sort_validation_errors.push(format!(
-                "  sort_field key '{}': field '{}' does not exist in IssueSortInput",
-                spec.key, spec.gql_field
-            ));
-        }
-    }
-
-    assert!(
-        sort_validation_errors.is_empty(),
-        "build.rs: sort_field validation failed against IssueSortInput schema:\n{}\n\
-         Fix [[sort_field]] entries in build/search_filter_fields.toml.",
-        sort_validation_errors.join("\n")
-    );
-
-    // Require at least one sort_field entry so the generated enum is non-empty.
-    assert!(
-        !config.sort_field.is_empty(),
-        "build.rs: [[sort_field]] list in search_filter_fields.toml is empty"
-    );
+    validate_sort_fields(&config.sort_field, &issue_sort_input_fields);
 
     let sort_fields = &config.sort_field;
-
-    // -----------------------------------------------------------------------
-    // Generate sort_field.rs  (included in src/issues/mod.rs)
-    // -----------------------------------------------------------------------
-    let sort_field_enum = gen_sort_field_enum(sort_fields);
-
-    let sort_field_combined: TokenStream = quote! {
-        #sort_field_enum
-    };
-
-    let sort_field_tree = syn::parse2(sort_field_combined)
-        .unwrap_or_else(|e| panic!("build.rs: failed to parse sort_field TokenStream: {e}"));
-    let sort_field_formatted = prettyplease::unparse(&sort_field_tree);
-
-    let sort_field_header = "// sort_field.rs -- generated by build.rs (bd-2w5)\n\
-                             // DO NOT EDIT -- regenerate by running `cargo build`\n\n";
-    let sort_field_src = format!("{sort_field_header}{sort_field_formatted}");
-
-    let sort_field_path = Path::new(&out_dir).join("sort_field.rs");
-    fs::write(&sort_field_path, &sort_field_src)
-        .unwrap_or_else(|e| panic!("Cannot write {}: {e}", sort_field_path.display()));
-
-    // -----------------------------------------------------------------------
-    // Generate sort_build.rs  (included in src/issues/sort.rs)
-    // -----------------------------------------------------------------------
-    let build_sort_fn = gen_build_sort(sort_fields);
-
-    let sort_build_combined: TokenStream = quote! {
-        #build_sort_fn
-    };
-
-    let sort_build_tree = syn::parse2(sort_build_combined)
-        .unwrap_or_else(|e| panic!("build.rs: failed to parse sort_build TokenStream: {e}"));
-    let sort_build_formatted = prettyplease::unparse(&sort_build_tree);
-
-    let sort_build_header = "// sort_build.rs -- generated by build.rs (bd-2w5)\n\
-                             // DO NOT EDIT -- regenerate by running `cargo build`\n\n";
-    let sort_build_src = format!("{sort_build_header}{sort_build_formatted}");
-
-    let sort_build_path = Path::new(&out_dir).join("sort_build.rs");
-    fs::write(&sort_build_path, &sort_build_src)
-        .unwrap_or_else(|e| panic!("Cannot write {}: {e}", sort_build_path.display()));
 
     // -----------------------------------------------------------------------
     // Generate search_stems.rs

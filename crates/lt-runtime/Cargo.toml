@@ -1,0 +1,32 @@
+[package]
+name = "lt-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+lt-config.workspace = true
+lt-types.workspace = true
+lt-storage.workspace = true
+lt-upstream.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Crate-specific: the sync-probe diagnostic issues a raw HTTP request.
+ureq = { version = "3", features = ["json"] }
+
+[dev-dependencies]
+lt-storage = { workspace = true, features = ["test-util"] }
+lt-upstream = { workspace = true, features = ["test-util"] }
+
+[features]
+# Deterministic simulation testing. See docs/design/dst.md.
+sim = ["lt-storage/sim"]
+# Expose test-only helpers (in-memory DB, sample data) to dependent crates.
+test-util = ["lt-storage/test-util"]
+
+[lints]
+workspace = true

@@ -82,14 +82,15 @@ pub fn query_as<T: DeserializeOwned>(
 
 /// Test double for [`GraphqlTransport`]: returns scripted `data` payloads in
 /// order and records the `(query, variables)` of each call. Shared across the
-/// crate's fetcher tests.
-#[cfg(test)]
+/// crate's fetcher tests and the `lt-runtime` sync/comment tests (via the
+/// `test-util` feature).
+#[cfg(any(test, feature = "test-util"))]
 pub struct FakeTransport {
     responses: std::cell::RefCell<std::collections::VecDeque<Result<Value>>>,
     pub calls: std::cell::RefCell<Vec<(String, Value)>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl FakeTransport {
     /// Script a sequence of successful `data` payloads, one per `query` call.
     pub fn new(responses: Vec<Value>) -> Self {
@@ -105,7 +106,7 @@ impl FakeTransport {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl GraphqlTransport for FakeTransport {
     fn query(&self, query: &str, variables: Value) -> Result<Value> {
         self.calls.borrow_mut().push((query.to_string(), variables));

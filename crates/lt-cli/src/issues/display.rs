@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use anyhow::Result;
-use lt_storage::text;
+use lt_runtime::text;
 use lt_types::types::Issue;
 
 const MAX_TITLE: usize = 40;
@@ -188,7 +188,7 @@ mod tests {
     #[cfg(feature = "sim")]
     #[test]
     fn cached_table_snapshot_from_sim() {
-        let dataset = lt_storage::sim::generate(0, 8);
+        let dataset = lt_runtime::sim::generate(0, 8);
         insta::assert_snapshot!(cached_to_string(&dataset.issues, "(cached)"));
     }
 }

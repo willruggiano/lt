@@ -15,6 +15,7 @@ lt-config = { path = "crates/lt-config" }
 lt-types = { path = "crates/lt-types" }
 lt-storage = { path = "crates/lt-storage" }
 lt-upstream = { path = "crates/lt-upstream" }
+lt-runtime = { path = "crates/lt-runtime" }
 lt-tui = { path = "crates/lt-tui" }
 
 # Third-party shared by more than one crate. Single-consumer dependencies are

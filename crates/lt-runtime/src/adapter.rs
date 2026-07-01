@@ -8,12 +8,13 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 use lt_storage::db;
-use lt_storage::query::IssueQuery;
-use lt_storage::sync_port::{
-    LoginEvent, Member, SyncEvent, SyncService, Team, ViewerIdentity, WorkflowState,
-};
+use lt_types::query::IssueQuery;
 use lt_upstream as upstream;
 use lt_upstream::client::HttpTransport;
+
+use crate::sync_port::{
+    LoginEvent, Member, SyncEvent, SyncService, Team, ViewerIdentity, WorkflowState,
+};
 
 pub struct LinearSyncService;
 
@@ -55,9 +56,9 @@ impl SyncService for LinearSyncService {
             }
 
             let result = if full {
-                upstream::sync::full::run()
+                crate::sync::full::run()
             } else {
-                upstream::sync::delta::run()
+                crate::sync::delta::run()
             };
             match result {
                 Ok(()) => {
@@ -119,6 +120,6 @@ impl SyncService for LinearSyncService {
 
     fn sync_comments(&self, issue_id: &str) -> Result<()> {
         let conn = db::open_db(db::db_path()?)?;
-        upstream::comments::sync(&conn, &Self::transport()?, issue_id)
+        crate::comments::sync(&conn, &Self::transport()?, issue_id)
     }
 }

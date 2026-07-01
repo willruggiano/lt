@@ -1,11 +1,11 @@
 //! The `lt auth` command surface. The OAuth/login/token logic lives in
-//! `lt-upstream`; this is only the clap dispatch.
+//! `lt-upstream` behind the runtime; this is only the clap dispatch.
 
 use std::io::Write;
 
 use anyhow::Result;
 use clap::Subcommand;
-use lt_upstream::auth;
+use lt_runtime::auth;
 
 #[derive(Subcommand)]
 pub enum AuthCommands {

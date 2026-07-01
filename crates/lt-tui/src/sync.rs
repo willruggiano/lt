@@ -11,8 +11,8 @@ pub(crate) fn build_sync_status_label(syncing: bool, clock: &Clock) -> String {
         return format_sync_label(true, None, clock);
     }
     let last = (|| -> Option<String> {
-        let conn = lt_storage::db::open_db(lt_storage::db::db_path().ok()?).ok()?;
-        lt_storage::db::get_meta(&conn, "last_synced_at").ok()?
+        let conn = lt_runtime::db::open_db(lt_runtime::db::db_path().ok()?).ok()?;
+        lt_runtime::db::get_meta(&conn, "last_synced_at").ok()?
     })();
     format_sync_label(false, last.as_deref(), clock)
 }

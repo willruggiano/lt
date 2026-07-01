@@ -2,9 +2,8 @@ use std::io::Write;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use lt_storage::db;
-use lt_storage::query::IssueQuery;
-use lt_upstream as upstream;
+use lt_runtime::db;
+use lt_runtime::query::IssueQuery;
 use tracing::{error, info};
 
 use super::IssueArgs;
@@ -17,7 +16,7 @@ const CACHE_TTL_SECS: i64 = 300;
 /// joined assignee name. The viewer identity is persisted into `sync_meta` at
 /// sync time (one viewer per database by definition), so this is a pure local
 /// read with no network round-trip.
-fn resolve_me(conn: &rusqlite::Connection, query: &mut IssueQuery) -> Result<()> {
+fn resolve_me(conn: &lt_runtime::db::Connection, query: &mut IssueQuery) -> Result<()> {
     let is_me = query
         .assignee
         .as_deref()
@@ -36,7 +35,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
 
     // --live: bypass cache entirely. The GraphQL filter resolves `me` itself.
     if args.live {
-        let (issues, has_next_page, _) = upstream::issues::fetch(&query, None)?;
+        let (issues, has_next_page, _) = lt_runtime::issues::fetch(&query, None)?;
         print_table(out, &issues, "")?;
         if has_next_page {
             writeln!(out, "\n+more issues")?;
@@ -55,7 +54,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
             // persists the viewer identity that `resolve_me` reads below.
             info!("Cache empty -- running full sync...");
             drop(conn);
-            upstream::sync::full::run()?;
+            lt_runtime::sync_cmd::full::run()?;
             // Re-open after sync.
             let conn2 = db::open_db(db::db_path()?)?;
             resolve_me(&conn2, &mut query)?;
@@ -82,7 +81,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
                 print_table(out, &issues, &note)?;
 
                 std::thread::spawn(|| {
-                    if let Err(e) = upstream::sync::delta::run() {
+                    if let Err(e) = lt_runtime::sync_cmd::delta::run() {
                         error!("background sync error: {}", e);
                     }
                 });

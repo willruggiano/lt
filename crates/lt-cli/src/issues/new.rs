@@ -1,82 +1,10 @@
 use std::io::{self, BufRead, Write};
 
 use anyhow::{Result, anyhow};
-use lt_storage::sync_port::{Team, WorkflowState};
+use lt_runtime::issues::{NewIssueMember as Member, NewIssueSession, NewIssueViewer as Viewer};
+use lt_runtime::sync_port::{Team, WorkflowState};
 use lt_types::inputs::IssueCreateInput;
 use lt_types::types::priority_u8_to_label;
-use lt_upstream as upstream;
-use lt_upstream::client::{HttpTransport, query_as};
-use serde::Deserialize;
-use serde_json::json;
-
-const VIEWER_QUERY: &str = r"
-query Viewer {
-  viewer {
-    id
-    name
-    email
-    organization {
-      urlKey
-    }
-  }
-}
-";
-
-const TEAM_MEMBERS_QUERY: &str = r"
-query TeamMembers($teamId: String!) {
-  team(id: $teamId) {
-    members {
-      nodes {
-        id
-        name
-        email
-      }
-    }
-  }
-}
-";
-
-#[derive(Deserialize, Debug, Clone)]
-struct Organization {
-    #[serde(rename = "urlKey")]
-    pub url_key: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct Viewer {
-    pub id: String,
-    pub name: String,
-    #[allow(dead_code)]
-    pub email: String,
-    pub organization: Organization,
-}
-
-#[derive(Deserialize)]
-struct ViewerData {
-    viewer: Viewer,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct Member {
-    pub id: String,
-    pub name: String,
-    pub email: String,
-}
-
-#[derive(Deserialize)]
-struct MemberConnection {
-    nodes: Vec<Member>,
-}
-
-#[derive(Deserialize)]
-struct TeamDetail {
-    members: MemberConnection,
-}
-
-#[derive(Deserialize)]
-struct TeamDetailData {
-    team: TeamDetail,
-}
 
 #[derive(Debug, Clone)]
 pub struct NewIssueArgs {
@@ -411,16 +339,13 @@ fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
 }
 
 pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
-    let token = lt_config::load_token()?
-        .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
-    let transport = HttpTransport::new(token.access_token);
-
-    // Fetch viewer (for "me" shortcut)
-    let viewer_data: ViewerData = query_as(&transport, VIEWER_QUERY, json!({}))?;
-    let viewer = viewer_data.viewer;
+    // Open the session: builds the transport and fetches the viewer (for the
+    // "me" shortcut) up front.
+    let session = NewIssueSession::open()?;
+    let viewer = session.viewer.clone();
 
     // Step 1: Team
-    let teams = upstream::teams::fetch(&transport)?;
+    let teams = session.teams()?;
     if teams.is_empty() {
         return Err(anyhow!("no teams found in your Linear organization"));
     }
@@ -438,7 +363,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let priority = prompt_priority(out, args.priority.as_deref())?;
 
     // Step 5: State -- fetch workflow states for the chosen team
-    let states = upstream::states::fetch(&transport, &team_id)?;
+    let states = session.workflow_states(&team_id)?;
     let state_id = if states.is_empty() {
         None
     } else {
@@ -446,9 +371,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     };
 
     // Step 6: Assignee -- fetch team members
-    let members_data: TeamDetailData =
-        query_as(&transport, TEAM_MEMBERS_QUERY, json!({ "teamId": team_id }))?;
-    let members = members_data.team.members.nodes;
+    let members = session.team_members(&team_id)?;
     let assignee_id = pick_assignee(out, &members, &viewer, args.assignee.as_deref())?;
 
     // Confirm summary before creating
@@ -486,12 +409,13 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
         assignee_id,
     };
 
-    let issue = upstream::issues::create(&transport, &input)?;
+    let issue = session.create(&input)?;
     writeln!(out, "Created: {} - {}", issue.identifier, issue.title)?;
     writeln!(
         out,
         "URL:     https://linear.app/{}/issue/{}",
-        viewer.organization.url_key, issue.identifier
+        viewer.org_url_key(),
+        issue.identifier
     )?;
 
     Ok(())
@@ -499,6 +423,8 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use lt_runtime::issues::Organization;
+
     use super::*;
 
     fn team(id: &str, name: &str) -> Team {

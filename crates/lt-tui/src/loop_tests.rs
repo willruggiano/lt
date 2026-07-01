@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 
-use lt_storage::db::Database;
+use lt_runtime::db::Database;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -69,7 +69,7 @@ fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
     let db = Database::memory()?;
     {
         let conn = db.connect()?;
-        lt_storage::db::upsert_issues(&conn, rows)?;
+        lt_runtime::db::upsert_issues(&conn, rows)?;
     }
     let mut app = App::for_test(Vec::new());
     app.db = db;
@@ -285,7 +285,7 @@ fn poll_sync_events_done_refreshes_and_sets_identity() {
     app.sync.syncing = true;
     let (tx, rx) = mpsc::channel();
     tx.send(SyncEvent::Done(Some(
-        lt_storage::sync_port::ViewerIdentity {
+        lt_runtime::sync_port::ViewerIdentity {
             id: "u1".to_string(),
             name: "Ada".to_string(),
             org_name: "Acme".to_string(),

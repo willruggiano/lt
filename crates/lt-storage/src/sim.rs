@@ -380,7 +380,7 @@ mod tests {
         db::upsert_issues(&conn, &d.issues).unwrap();
         db::upsert_comments(&conn, &d.comments).unwrap();
         // sanity: relational base reconstructs the rows.
-        let args = crate::query::IssueQuery {
+        let args = lt_types::query::IssueQuery {
             limit: 250,
             ..Default::default()
         };

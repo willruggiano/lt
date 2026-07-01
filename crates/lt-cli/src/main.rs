@@ -1,4 +1,3 @@
-mod adapter;
 mod auth;
 mod inbox;
 mod issues;
@@ -70,9 +69,9 @@ enum Commands {
     },
 }
 
-/// Launch the TUI with the `lt-upstream`-backed service injected.
-fn run_tui(query: lt_storage::query::IssueQuery) -> Result<()> {
-    tui::run(query, Arc::new(adapter::LinearSyncService))
+/// Launch the TUI with the `lt-runtime`-backed service injected.
+fn run_tui(query: lt_runtime::query::IssueQuery) -> Result<()> {
+    tui::run(query, Arc::new(lt_runtime::LinearSyncService))
 }
 
 fn main() -> Result<()> {
@@ -100,7 +99,7 @@ fn main() -> Result<()> {
     let mut out = output::Output::stdout();
 
     match cli.command {
-        None => run_tui(lt_storage::query::IssueQuery::default())?,
+        None => run_tui(lt_runtime::query::IssueQuery::default())?,
         Some(Commands::Auth { command }) => auth::run(&mut out, &command)?,
         Some(Commands::Inbox { args }) => inbox::run(&mut out, &args)?,
         Some(Commands::Issues { args, subcommand }) => issues::run(&mut out, &args, subcommand)?,

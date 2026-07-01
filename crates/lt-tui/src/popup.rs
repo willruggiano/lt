@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use lt_storage::search_query;
+use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
@@ -173,8 +173,8 @@ impl SearchOverlay {
         } else {
             list_limit
         };
-        match lt_storage::db::db_path()
-            .and_then(lt_storage::db::open_db)
+        match lt_runtime::db::db_path()
+            .and_then(lt_runtime::db::open_db)
             .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
         {
             Ok(issues) => {
@@ -357,10 +357,10 @@ impl super::App {
 /// (a priority/state item with no id) are no-ops; an assignee item with no id
 /// clears the assignee.
 fn enqueue_edit(issue_id: &str, kind: &PopupKind, item: &PopupItem) {
-    use lt_storage::db::outbox::{
+    use lt_runtime::db::outbox::{
         enqueue_assignee_change, enqueue_priority_change, enqueue_state_change,
     };
-    let Ok(conn) = lt_storage::db::db_path().and_then(lt_storage::db::open_db) else {
+    let Ok(conn) = lt_runtime::db::db_path().and_then(lt_runtime::db::open_db) else {
         return;
     };
     let _ = match kind {

@@ -1,10 +1,9 @@
 use anyhow::Result;
 use lt_storage::db;
 use lt_types::types::{Issue, IssuesData};
+use lt_upstream::client::{GraphqlTransport, HttpTransport, query_as};
+use lt_upstream::issues::ISSUES_QUERY;
 use serde_json::json;
-
-use crate::client::{GraphqlTransport, HttpTransport, query_as};
-use crate::issues::ISSUES_QUERY;
 
 /// Fetch one page of issues updated after `since` (an RFC3339 timestamp).
 fn fetch_page(
@@ -51,7 +50,7 @@ pub fn run() -> Result<()> {
         return super::full::run();
     };
 
-    let token = crate::auth::refresh::load_or_refresh_token()?;
+    let token = lt_upstream::auth::refresh::load_or_refresh_token()?;
     let transport = HttpTransport::new(token.access_token);
 
     // Drain queued local mutations first so the base reflects acked edits before
@@ -65,14 +64,16 @@ pub fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use lt_upstream::client::FakeTransport;
+    use lt_upstream::issues::sample_issue_node;
+
     use super::*;
-    use crate::client::FakeTransport;
 
     #[test]
     fn fetch_page_filters_by_since_and_extracts_page_info() {
         let transport = FakeTransport::new(vec![json!({
             "issues": {
-                "nodes": [crate::issues::sample_issue_node("1")],
+                "nodes": [sample_issue_node("1")],
                 "pageInfo": { "hasNextPage": false, "endCursor": null }
             }
         })]);

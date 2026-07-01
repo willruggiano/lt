@@ -1,7 +1,7 @@
 //! Workflow-state list reads (the new-issue modal's state picker).
 
 use anyhow::Result;
-use lt_storage::sync_port::WorkflowState;
+use lt_types::sync_dto::WorkflowState;
 
 use crate::client::GraphqlTransport;
 use crate::graphql::fetch_team_items;

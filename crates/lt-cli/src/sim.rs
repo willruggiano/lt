@@ -1,13 +1,13 @@
 //! The `lt sim` command: seed the local database from the deterministic
-//! generator in `lt-storage` (the generator itself is reused by tests).
+//! generator in `lt-storage` (reached via the runtime seam; reused by tests).
 
 use std::io::Write;
 
 use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
-use lt_storage::db;
-use lt_storage::sim::generate;
+use lt_runtime::db;
+use lt_runtime::sim::generate;
 
 /// Knobs for `lt sim`.
 #[derive(Args)]
