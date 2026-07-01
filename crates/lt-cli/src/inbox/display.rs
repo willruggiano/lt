@@ -1,8 +1,8 @@
 use std::io::Write;
 
 use anyhow::Result;
-use lt_storage::text;
-use lt_upstream::notifications::Notification;
+use lt_runtime::notifications::Notification;
+use lt_runtime::text;
 
 /// Format an ISO-8601 timestamp as a relative age string like '5m ago', '2h ago', '3d ago'.
 /// Falls back to the raw string if parsing fails. `now_secs` is the reference
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn print_table_snapshot() {
-        use lt_upstream::notifications::{
+        use lt_runtime::notifications::{
             Notification, NotificationActor, NotificationIssue, NotificationIssueState,
             NotificationIssueTeam,
         };

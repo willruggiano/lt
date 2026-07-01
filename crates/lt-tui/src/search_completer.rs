@@ -1,10 +1,10 @@
 //! Tab-completion for the search query bar.
 //!
-//! The query *parser* and SQL builder live in `lt_storage::search_query`; this
+//! The query *parser* and SQL builder live in `lt_runtime::search_query`; this
 //! module is the TUI-side completion that drives a [`crate::text_input::TextInput`]
 //! against that parser's tokens.
 
-use lt_storage::search_query::{QueryAst, StemKey, Token, parse_query_ast};
+use lt_runtime::search_query::{QueryAst, StemKey, Token, parse_query_ast};
 
 use crate::text_input::TextInput;
 
@@ -385,8 +385,8 @@ fn stem_key_candidates(prefix: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use lt_storage::query::{IssueQuery, SortField};
-    use lt_storage::search_query::{
+    use lt_runtime::query::{IssueQuery, SortField};
+    use lt_runtime::search_query::{
         SortDir, StemKind, Token, args_to_ast, parse_query_ast, render_filter_context,
     };
 

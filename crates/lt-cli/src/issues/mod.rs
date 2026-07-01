@@ -6,13 +6,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use lt_storage::query::{IssueQuery, SortField};
-
-/// Clap value parser for `--sort`: maps a sort key to its [`SortField`], which
-/// is intentionally clap-free (it lives in the data layer, `lt-storage`).
-fn parse_sort_field(s: &str) -> Result<SortField, String> {
-    SortField::from_key(s).ok_or_else(|| format!("invalid sort field: {s}"))
-}
+use lt_runtime::query::{IssueQuery, SortField};
 
 #[derive(Args, Clone)]
 pub struct IssueArgs {
@@ -53,7 +47,7 @@ pub struct IssueArgs {
     pub updated_before: Option<String>,
 
     /// Sort field
-    #[arg(long, default_value = "updated", value_parser = parse_sort_field)]
+    #[arg(long, default_value = "updated")]
     pub sort: SortField,
 
     /// Sort in descending order (default is ascending)
@@ -73,24 +67,24 @@ pub struct IssueArgs {
     pub live: bool,
 }
 
-impl IssueArgs {
-    /// Lower the clap args into the storage-layer [`IssueQuery`] (drops the
-    /// CLI-only `--live` flag, which the caller handles separately).
-    pub fn to_query(&self) -> IssueQuery {
+/// Lower the clap args into the data-layer [`IssueQuery`] (drops the CLI-only
+/// `--live` flag, which the caller handles separately).
+impl From<&IssueArgs> for IssueQuery {
+    fn from(args: &IssueArgs) -> Self {
         IssueQuery {
-            team: self.team.clone(),
-            assignee: self.assignee.clone(),
-            no_assignee: self.no_assignee,
-            state: self.state.clone(),
-            priority: self.priority.clone(),
-            created_after: self.created_after.clone(),
-            created_before: self.created_before.clone(),
-            updated_after: self.updated_after.clone(),
-            updated_before: self.updated_before.clone(),
-            sort: self.sort.clone(),
-            desc: self.desc,
-            title: self.title.clone(),
-            limit: self.limit,
+            team: args.team.clone(),
+            assignee: args.assignee.clone(),
+            no_assignee: args.no_assignee,
+            state: args.state.clone(),
+            priority: args.priority.clone(),
+            created_after: args.created_after.clone(),
+            created_before: args.created_before.clone(),
+            updated_after: args.updated_after.clone(),
+            updated_before: args.updated_before.clone(),
+            sort: args.sort.clone(),
+            desc: args.desc,
+            title: args.title.clone(),
+            limit: args.limit,
         }
     }
 }

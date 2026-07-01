@@ -1,7 +1,7 @@
 use std::sync::{Arc, mpsc};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use lt_storage::sync_port::{Member, ViewerIdentity};
+use lt_runtime::sync_port::{User, Viewer};
 
 use super::{App, Mode, PopupItem, TextInput, priority_popup_items};
 
@@ -230,10 +230,10 @@ impl super::App {
         // Offline create: write an optimistic temp row and queue the command.
         // The sync drainer posts it and reconciles the temp id with the server.
         let (input, optimistic) = build_create_request(modal, team_id);
-        let result = lt_storage::db::db_path()
-            .and_then(lt_storage::db::open_db)
+        let result = lt_runtime::db::db_path()
+            .and_then(lt_runtime::db::open_db)
             .and_then(|conn| {
-                lt_storage::db::outbox::enqueue_issue_create(&conn, &optimistic, &input)
+                lt_runtime::db::outbox::enqueue_issue_create(&conn, &optimistic, &input)
             });
 
         match result {
@@ -340,14 +340,14 @@ fn build_create_request(
     let priority = priority.unwrap_or(0);
     let now = chrono::Utc::now().to_rfc3339();
     let optimistic = types::Issue {
-        id: lt_storage::db::outbox::temp_id(),
+        id: lt_runtime::db::outbox::temp_id(),
         identifier: "NEW".to_string(),
         title,
         priority,
         priority_label: types::priority_u8_to_label(priority).to_string(),
         // Fall back to a name-keyed id when the modal lacked one so the
         // relational join still resolves a label.
-        state: types::State {
+        state: types::WorkflowState {
             id: state_id.unwrap_or_else(|| state_name.clone()),
             name: state_name,
         },
@@ -374,10 +374,7 @@ fn build_create_request(
 
 /// Build the assignee popup items: "Me (name)" at top if the viewer is known,
 /// then "Unassigned", then the remaining team members (excluding the viewer).
-pub(crate) fn build_assignee_items(
-    viewer: Option<&ViewerIdentity>,
-    members: Vec<Member>,
-) -> Vec<PopupItem> {
+pub(crate) fn build_assignee_items(viewer: Option<&Viewer>, members: Vec<User>) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = Vec::new();
     if let Some(v) = viewer {
         items.push(PopupItem {

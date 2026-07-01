@@ -7,14 +7,13 @@ use anyhow::Result;
 use chrono::Utc;
 use lt_storage::db;
 use lt_types::types::Issue;
-
-use crate::client::GraphqlTransport;
+use lt_upstream::client::GraphqlTransport;
 
 /// Persist the authenticated viewer's identity into `sync_meta` so cached reads
 /// can resolve `me` without a network round-trip. A database tracks exactly one
 /// viewer by definition, so this is an upsert of a stable identity.
 fn persist_viewer(conn: &rusqlite::Connection, transport: &dyn GraphqlTransport) -> Result<()> {
-    let viewer = crate::viewer::fetch(transport)?;
+    let viewer = lt_upstream::viewer::fetch(transport)?;
     db::set_meta(conn, "viewer_id", &viewer.id)?;
     db::set_meta(conn, "viewer_name", &viewer.name)?;
     Ok(())

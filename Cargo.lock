@@ -1426,13 +1426,9 @@ dependencies = [
  "clap",
  "insta",
  "lt-config",
- "lt-storage",
+ "lt-runtime",
  "lt-tui",
  "lt-types",
- "lt-upstream",
- "rusqlite",
- "serde",
- "serde_json",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -1446,6 +1442,21 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lt-runtime"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "lt-config",
+ "lt-storage",
+ "lt-types",
+ "lt-upstream",
+ "rusqlite",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
@@ -1481,22 +1492,28 @@ dependencies = [
  "chrono",
  "crossterm",
  "insta",
- "lt-storage",
+ "lt-runtime",
  "lt-types",
  "open",
  "pulldown-cmark",
  "ratatui",
- "rusqlite",
 ]
 
 [[package]]
 name = "lt-types"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
  "cynic",
  "cynic-codegen",
+ "graphql-parser",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
  "serde",
  "serde_json",
+ "syn 2.0.118",
+ "toml",
 ]
 
 [[package]]
@@ -1505,13 +1522,10 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64",
- "chrono",
  "lt-config",
- "lt-storage",
  "lt-types",
  "open",
  "rand 0.10.1",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",

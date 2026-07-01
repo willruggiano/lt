@@ -586,24 +586,33 @@ Resolved in PR 4:
 Resolved in PR 5:
 
 - **Workspace split shipped** — the crate is now
-  `crates/{lt-config,lt-types,lt-storage,lt-upstream,lt-tui,lt-cli}`. The cynic
-  schema module + `QueryFragment` structs + input objects live in `lt-types`
-  (which owns the sole `cynic` dependency); the relational store, read model,
-  generated search/sort codegen, and the `IssueQuery` filter spec in
-  `lt-storage`; the API edge in `lt-upstream`, organized into domain modules
-  (`auth`, `viewer`, `issues`, `comments`, `teams`, `states`, `members`,
-  `notifications`, `sync`) so call sites read `upstream::teams::fetch()`.
-- **TUI ⊥ API enforced structurally** — `lt-tui` lists neither `lt-upstream` nor
-  `cynic` in its manifest, so an API call from the render/event path does not
-  compile. The TUI drives sync/login and live modal reads through a
-  `SyncService` port (`lt-storage`), with the `lt-upstream`-backed adapter
-  injected by `lt-cli` at `lt_tui::run`. Writes flow through the outbox (PR 4).
+  `crates/{lt-config,lt-types,lt-storage,lt-upstream,lt-runtime,lt-tui,lt-cli}`.
+  The cynic schema module + `QueryFragment` structs + input objects live in
+  `lt-types` (which owns the sole `cynic` dependency), alongside the
+  `IssueQuery` filter spec, the generated `SortField`/`build_sort` sort
+  vocabulary, and the sync-picker DTOs (`sync_dto`); the relational store, read
+  model, and generated search-stem codegen in `lt-storage` (a pure store); the
+  API edge in `lt-upstream` (a pure API client with no store dependency),
+  organized into domain modules (`auth`, `viewer`, `issues`, `comments`,
+  `teams`, `states`, `members`, `notifications`) so call sites read
+  `upstream::teams::fetch()`; and `lt-runtime` composes the two — the sync
+  engine, comment persistence, the `SyncService` port and its
+  `LinearSyncService` adapter, and the CLI command orchestration — re-exporting
+  the store facade so `lt-tui`/`lt-cli` depend on `lt-runtime` alone.
+- **TUI ⊥ API held by the port, not the manifest** — `lt-tui` no longer lists
+  `lt-storage` or `lt-upstream`; it depends only on `lt-runtime` and `lt-types`.
+  Because `lt-runtime` re-exports the store facade, the compile-time proof that
+  an API call cannot originate in the render/event path softens from a manifest
+  invariant to a convention: the `SyncService` port stays the boundary the TUI
+  drives sync/login and live modal reads through, with the `lt-upstream`-backed
+  `LinearSyncService` adapter injected by `lt-cli` at `lt_tui::run`. Writes flow
+  through the outbox (PR 4).
 - **Viewer baked into the DB** — a database tracks one viewer by definition, so
   the sync engine persists the viewer identity into `sync_meta`; cached reads
   resolve `--assignee me` locally with no network round-trip.
 - **`clap` kept out of the data layer** — the generated `SortField` is clap-free
   (a `from_key` value-parser lives in `lt-cli`); `IssueArgs` (clap) lowers into
-  `lt-storage`'s `IssueQuery`.
+  `lt-types`'s `IssueQuery`.
 
 Still open (deferred):
 

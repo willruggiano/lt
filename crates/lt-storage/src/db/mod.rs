@@ -13,7 +13,33 @@ pub use issues::{
     get_meta, query_children, query_issues, query_issues_page, search_issues, search_issues_like,
     set_meta, upsert_issues,
 };
-use rusqlite::{Connection, Params};
+pub use rusqlite::Connection;
+use rusqlite::Params;
+
+/// Look up an issue's identifier/title/state name by id, for the detail pane's
+/// parent reference. Returns `None` when no issue with that id is cached.
+pub fn query_parent_ref(conn: &Connection, id: &str) -> Result<Option<lt_types::types::IssueRef>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.identifier, i.title, s.name
+             FROM issues i
+             JOIN workflow_states s ON s.id = i.state_id
+             WHERE i.id = ?1",
+        )
+        .context("failed to prepare query_parent_ref statement")?;
+
+    let mut rows = stmt.query([id]).context("failed to query parent issue")?;
+
+    if let Some(row) = rows.next().context("failed to read parent issue row")? {
+        Ok(Some(lt_types::types::IssueRef {
+            identifier: row.get(0).context("failed to read parent identifier")?,
+            title: row.get(1).context("failed to read parent title")?,
+            state_name: row.get(2).context("failed to read parent state")?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
 
 /// Run a parameterized write statement, attaching `what` to any error.
 ///
@@ -276,5 +302,24 @@ impl Database {
             #[cfg(any(test, feature = "test-util"))]
             Database::Memory { uri, .. } => open_db(uri),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_parent_ref_resolves_and_misses() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        upsert_issues(&conn, &[outbox::sample_base_issue("9")]).unwrap();
+
+        let found = query_parent_ref(&conn, "9").unwrap().unwrap();
+        assert_eq!(found.identifier, "ENG-9");
+        assert_eq!(found.title, "issue 9");
+        assert_eq!(found.state_name, "Todo");
+
+        assert!(query_parent_ref(&conn, "absent").unwrap().is_none());
     }
 }

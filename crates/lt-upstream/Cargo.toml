@@ -8,13 +8,10 @@ publish = false
 [dependencies]
 lt-config.workspace = true
 lt-types.workspace = true
-lt-storage.workspace = true
 anyhow.workspace = true
 base64.workspace = true
-chrono.workspace = true
 open.workspace = true
 rand.workspace = true
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -23,8 +20,9 @@ sha2 = "0.11"
 ureq = { version = "3", features = ["json"] }
 url = "2"
 
-[dev-dependencies]
-lt-storage = { workspace = true, features = ["test-util"] }
+[features]
+# Expose the fake GraphQL transport to dependent crates' tests (lt-runtime).
+test-util = []
 
 [lints]
 workspace = true

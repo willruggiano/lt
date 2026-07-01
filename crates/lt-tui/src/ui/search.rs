@@ -1,5 +1,5 @@
-use lt_storage::query::SortField;
-use lt_storage::text;
+use lt_runtime::query::SortField;
+use lt_runtime::text;
 use lt_types::types::Issue;
 use ratatui::Frame;
 use ratatui::layout::Rect;

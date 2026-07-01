@@ -21,9 +21,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
 pub(crate) use detail::{handle_detail_key, poll_detail_comment_events};
-use lt_storage::query::IssueQuery;
-use lt_storage::search_query;
-use lt_storage::sync_port::{LoginEvent, SyncEvent, SyncService};
+use lt_runtime::query::IssueQuery;
+use lt_runtime::search_query;
+use lt_runtime::sync_port::{LoginEvent, SyncEvent, SyncService};
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use lt_types::types::priority_label_to_u8;
 use lt_types::types::{Issue, IssueDetail};
@@ -293,19 +293,19 @@ impl SyncService for NoopSyncService {
         let (_tx, rx) = mpsc::channel();
         rx
     }
-    fn fetch_viewer(&self) -> Option<lt_storage::sync_port::ViewerIdentity> {
+    fn fetch_viewer(&self) -> Option<lt_runtime::sync_port::Viewer> {
         None
     }
-    fn fetch_teams(&self) -> Result<Vec<lt_storage::sync_port::Team>> {
+    fn fetch_teams(&self) -> Result<Vec<lt_runtime::sync_port::Team>> {
         Ok(Vec::new())
     }
     fn fetch_workflow_states(
         &self,
         _team_id: &str,
-    ) -> Result<Vec<lt_storage::sync_port::WorkflowState>> {
+    ) -> Result<Vec<lt_runtime::sync_port::WorkflowState>> {
         Ok(Vec::new())
     }
-    fn fetch_team_members(&self, _team_id: &str) -> Result<Vec<lt_storage::sync_port::Member>> {
+    fn fetch_team_members(&self, _team_id: &str) -> Result<Vec<lt_runtime::sync_port::User>> {
         Ok(Vec::new())
     }
     fn sync_comments(&self, _issue_id: &str) -> Result<()> {
@@ -396,7 +396,7 @@ pub struct App {
 
     /// Database handle. Defaults to the per-profile SQLite file; tests install
     /// an in-memory database via `Database::memory`.
-    pub db: lt_storage::db::Database,
+    pub db: lt_runtime::db::Database,
 
     /// Wall-clock source. Defaults to the system clock; tests install a fixed
     /// clock so time-derived labels are deterministic.
@@ -459,7 +459,7 @@ impl App {
             initial_args,
             last_esc_time: None,
             login_rx: None,
-            db: lt_storage::db::Database::File,
+            db: lt_runtime::db::Database::File,
             clock: Clock::System,
             service,
         }
@@ -604,7 +604,7 @@ impl App {
             match self
                 .db
                 .connect()
-                .and_then(|conn| lt_storage::db::query_issues_page(&conn, &self.args, offset))
+                .and_then(|conn| lt_runtime::db::query_issues_page(&conn, &self.args, offset))
             {
                 Ok((issues, has_next_page)) => {
                     self.issues = issues;
@@ -711,9 +711,9 @@ pub fn run(args: IssueQuery, service: Arc<dyn SyncService>) -> Result<()> {
     // Use query_issues_page so we can capture the correct has_next_page flag.
     let (cached_issues, initial_has_next_page, initial_end_cursor) =
         (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
-            let conn = lt_storage::db::open_db(lt_storage::db::db_path()?)?;
+            let conn = lt_runtime::db::open_db(lt_runtime::db::db_path()?)?;
             let limit = i64::from(args.limit.min(250));
-            let (issues, has_next) = lt_storage::db::query_issues_page(&conn, &args, 0)?;
+            let (issues, has_next) = lt_runtime::db::query_issues_page(&conn, &args, 0)?;
             let end_cursor = if has_next {
                 Some(limit.to_string())
             } else {

@@ -1,7 +1,7 @@
 use std::sync::{Arc, mpsc};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use lt_storage::db::Database;
+use lt_runtime::db::Database;
 
 use super::{App, CommentSyncEvent, Issue, Mode, Status};
 
@@ -26,7 +26,7 @@ impl App {
         let cached_comments: Vec<lt_types::types::Comment> = self
             .db
             .connect()
-            .and_then(|conn| lt_storage::db::query_comments(&conn, &issue.id))
+            .and_then(|conn| lt_runtime::db::query_comments(&conn, &issue.id))
             .unwrap_or_default()
             .into_iter()
             .map(Into::into)
@@ -50,9 +50,9 @@ impl App {
 
         std::thread::spawn(move || match service.sync_comments(&issue_id) {
             Ok(()) => {
-                let fresh = lt_storage::db::db_path()
-                    .and_then(lt_storage::db::open_db)
-                    .and_then(|conn| lt_storage::db::query_comments(&conn, &issue_id))
+                let fresh = lt_runtime::db::db_path()
+                    .and_then(lt_runtime::db::open_db)
+                    .and_then(|conn| lt_runtime::db::query_comments(&conn, &issue_id))
                     .unwrap_or_default()
                     .into_iter()
                     .map(Into::into)
@@ -158,10 +158,10 @@ impl App {
             issue_id: issue_id.clone(),
             body: body.clone(),
         };
-        if let Ok(conn) = lt_storage::db::db_path().and_then(lt_storage::db::open_db) {
-            let _ = lt_storage::db::outbox::enqueue_comment_create(
+        if let Ok(conn) = lt_runtime::db::db_path().and_then(lt_runtime::db::open_db) {
+            let _ = lt_runtime::db::outbox::enqueue_comment_create(
                 &conn,
-                &lt_storage::db::outbox::temp_id(),
+                &lt_runtime::db::outbox::temp_id(),
                 self.viewer_name.as_deref(),
                 &input,
             );
@@ -222,7 +222,7 @@ pub(crate) fn populate_relations(
         return;
     };
     // Look up children.
-    if let Ok(children) = lt_storage::db::query_children(&conn, &issue.id) {
+    if let Ok(children) = lt_runtime::db::query_children(&conn, &issue.id) {
         detail.children = children
             .into_iter()
             .map(|c| lt_types::types::IssueRef {
@@ -233,22 +233,10 @@ pub(crate) fn populate_relations(
             .collect();
     }
     // Look up parent.
-    if let Some(ref parent) = issue.parent {
-        let parent_sql = "SELECT i.identifier, i.title, s.name
-                          FROM issues i
-                          JOIN workflow_states s ON s.id = i.state_id
-                          WHERE i.id = ?1";
-        if let Ok(mut stmt) = conn.prepare(parent_sql)
-            && let Ok(row) = stmt.query_row(rusqlite::params![parent.id], |row| {
-                Ok(lt_types::types::IssueRef {
-                    identifier: row.get(0)?,
-                    title: row.get(1)?,
-                    state_name: row.get(2)?,
-                })
-            })
-        {
-            detail.parent = Some(row);
-        }
+    if let Some(ref parent) = issue.parent
+        && let Ok(Some(row)) = lt_runtime::db::query_parent_ref(&conn, &parent.id)
+    {
+        detail.parent = Some(row);
     }
 }
 

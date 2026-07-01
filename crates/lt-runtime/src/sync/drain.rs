@@ -8,10 +8,9 @@
 
 use anyhow::{Result, bail};
 use lt_storage::db::outbox::{self, PendingOp};
+use lt_upstream::client::GraphqlTransport;
+use lt_upstream::{comments, issues};
 use rusqlite::Connection;
-
-use crate::client::GraphqlTransport;
-use crate::{comments, issues};
 
 /// Replay every pending outbox command, recording (not propagating) per-command
 /// failures so a single bad command never aborts the surrounding sync.
@@ -65,11 +64,11 @@ fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -
 #[cfg(test)]
 mod tests {
     use lt_storage::db::outbox::{self, sample_base_issue as base_issue};
+    use lt_upstream::client::FakeTransport;
     use rusqlite::Connection;
     use serde_json::json;
 
     use super::*;
-    use crate::client::FakeTransport;
 
     fn db_with_issue(id: &str) -> Connection {
         let conn = Connection::open_in_memory().unwrap();

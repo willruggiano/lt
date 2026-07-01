@@ -1,16 +1,15 @@
 use anyhow::Result;
 use lt_storage::db;
-use lt_storage::query::{IssueQuery, SortField};
-
-use crate::client::HttpTransport;
-use crate::issues::fetch;
+use lt_types::query::{IssueQuery, SortField};
+use lt_upstream::client::HttpTransport;
+use lt_upstream::issues::fetch;
 
 /// Fetch every page from the Linear API and upsert into SQLite.
 /// Sets `sync_meta` key='`last_synced_at`' to the current UTC timestamp on success.
 pub fn run() -> Result<()> {
     let conn = db::open_db(db::db_path()?)?;
 
-    let token = crate::auth::refresh::load_or_refresh_token()?;
+    let token = lt_upstream::auth::refresh::load_or_refresh_token()?;
     let transport = HttpTransport::new(token.access_token);
 
     // Drain queued local mutations before re-fetching the world.

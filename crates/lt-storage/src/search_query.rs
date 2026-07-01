@@ -33,11 +33,10 @@
 /// `sort:updated-` so the first thing they see is the most recently
 /// updated issues in descending order.
 use anyhow::Result;
+use lt_types::query::{IssueQuery, SortField};
 use lt_types::types::Issue;
 use rusqlite::Connection;
 use tracing::warn;
-
-use crate::query::{IssueQuery, SortField};
 
 // ---------------------------------------------------------------------------
 // Generated parser (bd-1pl): StemKey, StemKind, parse_query_ast_impl,
@@ -927,8 +926,8 @@ mod run_query_tests {
         }
     }
 
-    fn state(name: &str) -> types::State {
-        types::State {
+    fn state(name: &str) -> types::WorkflowState {
+        types::WorkflowState {
             id: name.to_string(),
             name: name.to_string(),
         }

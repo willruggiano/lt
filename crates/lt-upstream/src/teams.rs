@@ -1,7 +1,7 @@
 //! Team list reads (the new-issue modal's team picker).
 
 use anyhow::Result;
-use lt_storage::sync_port::Team;
+use lt_types::types::Team;
 use serde::Deserialize;
 use serde_json::json;
 

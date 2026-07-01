@@ -31,4 +31,6 @@ pub struct ViewerUser {
 #[cynic(graphql_type = "Organization")]
 pub struct ViewerOrganization {
     pub name: String,
+    #[cynic(rename = "urlKey")]
+    pub url_key: String,
 }

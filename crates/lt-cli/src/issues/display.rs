@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use anyhow::Result;
-use lt_storage::text;
+use lt_runtime::text;
 use lt_types::types::Issue;
 
 const MAX_TITLE: usize = 40;
@@ -98,7 +98,7 @@ pub fn print_table(out: &mut dyn Write, issues: &[Issue], note: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use lt_types::types::{Label, LabelConnection, State, Team, User};
+    use lt_types::types::{Label, LabelConnection, Team, User, WorkflowState};
 
     use super::*;
 
@@ -131,7 +131,7 @@ mod tests {
                 title: "Short title".into(),
                 priority_label: "Urgent".into(),
                 priority: 1,
-                state: State {
+                state: WorkflowState {
                     id: String::new(),
                     name: "In Progress".into(),
                 },
@@ -158,7 +158,7 @@ mod tests {
                 title: "A title that is definitely longer than forty characters wide".into(),
                 priority_label: "No priority".into(),
                 priority: 0,
-                state: State {
+                state: WorkflowState {
                     id: String::new(),
                     name: "Backlog".into(),
                 },
@@ -188,7 +188,7 @@ mod tests {
     #[cfg(feature = "sim")]
     #[test]
     fn cached_table_snapshot_from_sim() {
-        let dataset = lt_storage::sim::generate(0, 8);
+        let dataset = lt_runtime::sim::generate(0, 8);
         insta::assert_snapshot!(cached_to_string(&dataset.issues, "(cached)"));
     }
 }

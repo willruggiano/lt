@@ -5,7 +5,7 @@ use clap::Args;
 
 mod display;
 
-use lt_upstream::notifications;
+use lt_runtime::notifications;
 
 #[derive(Args, Clone)]
 pub struct InboxArgs {

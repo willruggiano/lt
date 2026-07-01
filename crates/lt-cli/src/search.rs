@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use lt_storage::db;
+use lt_runtime::db;
 use lt_types::types::Issue;
 
 use crate::issues::display::print_table;
