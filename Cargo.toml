@@ -14,41 +14,21 @@ repository = "https://github.com/willruggiano/lt"
 lt-config = { path = "crates/lt-config" }
 lt-types = { path = "crates/lt-types" }
 lt-storage = { path = "crates/lt-storage" }
-lt-sync = { path = "crates/lt-sync" }
+lt-upstream = { path = "crates/lt-upstream" }
 lt-tui = { path = "crates/lt-tui" }
 
-# Third-party
+# Third-party shared by more than one crate. Single-consumer dependencies are
+# defined in the crate that uses them, not here.
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock"] }
-chumsky = "0.13"
-clap = { version = "4.6", features = ["derive"] }
-crossterm = "0.29"
-cynic = { version = "3.13", default-features = false }
 dirs = "6"
-fake = { version = "5.1.0", default-features = false }
 open = "5"
-pulldown-cmark = { version = "0.13.4", default-features = false }
 rand = "0.10"
-ratatui = "0.30.0"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11"
 tracing = "0.1"
-tracing-appender = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ureq = { version = "3", features = ["json"] }
-url = "2"
-
-# Build dependencies
-cynic-codegen = "3.13"
-graphql-parser = "0.4"
-prettyplease = "0.2"
-proc-macro2 = "1"
-quote = "1"
-syn = { version = "2", default-features = false, features = ["full", "parsing"] }
-toml = "1"
 
 # Dev dependencies
 insta = "1.48.0"

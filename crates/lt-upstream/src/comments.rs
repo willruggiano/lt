@@ -1,9 +1,5 @@
-//! Sync comments for a single issue from the Linear API into the local DB.
-//!
-//! The Linear GraphQL API returns comment IDs alongside bodies when queried
-//! through the issue detail endpoint.  This module re-uses the existing
-//! `fetch_issue_detail` infrastructure to obtain comments and persists them
-//! into the `issue_comments` table.
+//! The comment domain: replay of queued `commentCreate` mutations and the
+//! per-issue comment sync that pulls the API's comment thread into the DB.
 
 use anyhow::Result;
 use lt_storage::db;
@@ -12,6 +8,81 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::client::{GraphqlTransport, query_as};
+use crate::graphql::{CreatePayload, post_create};
+
+// ---------------------------------------------------------------------------
+// Mutation replay (driven by the outbox drainer)
+// ---------------------------------------------------------------------------
+
+const COMMENT_CREATE_MUTATION: &str = r"
+mutation CommentCreate($input: CommentCreateInput!) {
+  commentCreate(input: $input) {
+    success
+    comment {
+      id
+      body
+      createdAt
+      updatedAt
+      user { name }
+    }
+  }
+}
+";
+
+/// The created comment returned by `commentCreate`, used to replace the
+/// optimistic temp row on ack.
+#[derive(Deserialize, Debug, Clone)]
+pub struct CreatedComment {
+    pub id: String,
+    pub body: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    pub user: Option<CommentAuthor>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct CommentAuthor {
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+struct CommentCreatePayload {
+    success: bool,
+    comment: CreatedComment,
+}
+
+#[derive(Deserialize)]
+struct CommentCreateData {
+    #[serde(rename = "commentCreate")]
+    comment_create: CommentCreatePayload,
+}
+
+impl CreatePayload for CommentCreateData {
+    type Created = CreatedComment;
+    fn into_created(self) -> (bool, CreatedComment) {
+        (self.comment_create.success, self.comment_create.comment)
+    }
+}
+
+/// Replay a `commentCreate`, returning the server's comment so the optimistic
+/// temp row can be replaced.
+pub fn replay_create(
+    transport: &dyn GraphqlTransport,
+    variables: serde_json::Value,
+) -> Result<CreatedComment> {
+    post_create::<CommentCreateData>(
+        transport,
+        COMMENT_CREATE_MUTATION,
+        "commentCreate",
+        variables,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Comment sync (pull an issue's thread into the local DB)
+// ---------------------------------------------------------------------------
 
 const COMMENTS_QUERY: &str = r"
 query IssueComments($id: String!, $after: String) {
@@ -80,7 +151,7 @@ fn api_to_db(c: &ApiComment, issue_id: &str) -> db::Comment {
 ///
 /// All existing comments for the issue are replaced with the freshly fetched
 /// set to keep the DB consistent with Linear.
-pub fn sync_comments(
+pub fn sync(
     conn: &rusqlite::Connection,
     transport: &dyn GraphqlTransport,
     issue_id: &str,
@@ -122,6 +193,25 @@ mod tests {
     use super::*;
     use crate::client::FakeTransport;
 
+    #[test]
+    fn replay_create_returns_server_comment() {
+        let transport = FakeTransport::new(vec![json!({
+            "commentCreate": { "success": true, "comment": {
+                "id": "c1", "body": "hi",
+                "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+                "user": { "name": "Ada" }
+            }}
+        })]);
+        let created = replay_create(
+            &transport,
+            json!({ "input": { "issueId": "i1", "body": "hi" } }),
+        )
+        .unwrap();
+        assert_eq!(created.id, "c1");
+        assert_eq!(created.user.unwrap().name, "Ada");
+        assert_eq!(transport.variables(0)["input"]["issueId"], json!("i1"));
+    }
+
     fn comment_node(id: &str, body: &str) -> serde_json::Value {
         json!({
             "id": id, "body": body,
@@ -148,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_comments_paginates_and_replaces_existing() {
+    fn sync_paginates_and_replaces_existing() {
         let conn = test_conn();
         // A stale comment that the sync should replace.
         db::upsert_comments(
@@ -169,7 +259,7 @@ mod tests {
             comments_page(&[comment_node("c1", "first")], true, Some("cur")),
             comments_page(&[comment_node("c2", "second")], false, None),
         ]);
-        sync_comments(&conn, &transport, "i1").unwrap();
+        sync(&conn, &transport, "i1").unwrap();
 
         let rows = db::query_comments(&conn, "i1").unwrap();
         assert_eq!(
@@ -181,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_comments_missing_issue_clears_existing() {
+    fn sync_missing_issue_clears_existing() {
         let conn = test_conn();
         db::upsert_comments(
             &conn,
@@ -198,7 +288,7 @@ mod tests {
         .unwrap();
 
         let transport = FakeTransport::new(vec![json!({ "issue": null })]);
-        sync_comments(&conn, &transport, "i1").unwrap();
+        sync(&conn, &transport, "i1").unwrap();
         assert!(db::query_comments(&conn, "i1").unwrap().is_empty());
     }
 

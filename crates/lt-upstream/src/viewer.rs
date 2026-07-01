@@ -1,8 +1,8 @@
 //! Fetch the authenticated user's identity (viewer) from the Linear API.
 
 use anyhow::Result;
-use cynic::QueryBuilder;
 use lt_types::viewer::ViewerQuery;
+use serde_json::Value;
 
 use super::client::{GraphqlTransport, query_as};
 
@@ -14,11 +14,9 @@ pub struct Viewer {
     pub org_name: String,
 }
 
-pub fn fetch_viewer(transport: &dyn GraphqlTransport) -> Result<Viewer> {
-    let operation = ViewerQuery::build(());
-    let variables = serde_json::to_value(operation.variables)?;
-
-    let data: ViewerQuery = query_as(transport, &operation.query, variables)?;
+pub fn fetch(transport: &dyn GraphqlTransport) -> Result<Viewer> {
+    // The viewer query takes no variables; cynic builds the string in lt-types.
+    let data: ViewerQuery = query_as(transport, &lt_types::viewer::query(), Value::Null)?;
     Ok(Viewer {
         id: data.viewer.id.into_inner(),
         name: data.viewer.name,
@@ -38,7 +36,7 @@ mod tests {
         let transport = FakeTransport::new(vec![json!({
             "viewer": { "id": "u1", "name": "Ada", "organization": { "name": "Acme" } }
         })]);
-        let viewer = fetch_viewer(&transport).unwrap();
+        let viewer = fetch(&transport).unwrap();
         assert_eq!(viewer.id, "u1");
         assert_eq!(viewer.name, "Ada");
         assert_eq!(viewer.org_name, "Acme");

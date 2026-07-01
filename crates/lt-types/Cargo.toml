@@ -6,12 +6,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
-cynic.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Crate-specific: the GraphQL schema and query/input types live only here.
+cynic = { version = "3.13", default-features = false }
 
 [build-dependencies]
-cynic-codegen.workspace = true
+# Crate-specific: only lt-types registers the cynic schema.
+cynic-codegen = "3.13"
 
 [lints]
 workspace = true

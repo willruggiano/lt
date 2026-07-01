@@ -2,10 +2,10 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::{Result, anyhow};
 use lt_storage::sync_port::{Team, WorkflowState};
-use lt_sync::client::{HttpTransport, query_as};
-use lt_sync::mutations::{create_issue, fetch_teams, fetch_workflow_states};
 use lt_types::inputs::IssueCreateInput;
 use lt_types::types::priority_u8_to_label;
+use lt_upstream as upstream;
+use lt_upstream::client::{HttpTransport, query_as};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -420,7 +420,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let viewer = viewer_data.viewer;
 
     // Step 1: Team
-    let teams = fetch_teams(&transport)?;
+    let teams = upstream::teams::fetch(&transport)?;
     if teams.is_empty() {
         return Err(anyhow!("no teams found in your Linear organization"));
     }
@@ -438,7 +438,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     let priority = prompt_priority(out, args.priority.as_deref())?;
 
     // Step 5: State -- fetch workflow states for the chosen team
-    let states = fetch_workflow_states(&transport, &team_id)?;
+    let states = upstream::states::fetch(&transport, &team_id)?;
     let state_id = if states.is_empty() {
         None
     } else {
@@ -486,7 +486,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
         assignee_id,
     };
 
-    let issue = create_issue(&transport, &input)?;
+    let issue = upstream::issues::create(&transport, &input)?;
     writeln!(out, "Created: {} - {}", issue.identifier, issue.title)?;
     writeln!(
         out,

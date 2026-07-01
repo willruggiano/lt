@@ -1,8 +1,8 @@
-//! The concrete [`SyncService`], backed by `lt-sync`.
+//! The concrete [`SyncService`], backed by `lt-upstream`.
 //!
 //! This is the only place in the TUI's runtime that touches
-//! `HttpTransport`/cynic. `lt-cli` injects it into `lt_tui::run`, which lets the
-//! TUI drive sync/login and modal reads without depending on `lt-sync`.
+//! `HttpTransport`/cynic. `lt-cli` injects it into `tui::run`, which lets the
+//! TUI drive sync/login and modal reads without depending on `lt-upstream`.
 
 use std::sync::mpsc;
 
@@ -12,7 +12,8 @@ use lt_storage::query::IssueQuery;
 use lt_storage::sync_port::{
     LoginEvent, Member, SyncEvent, SyncService, Team, ViewerIdentity, WorkflowState,
 };
-use lt_sync::client::HttpTransport;
+use lt_upstream as upstream;
+use lt_upstream::client::HttpTransport;
 
 pub struct LinearSyncService;
 
@@ -20,7 +21,7 @@ impl LinearSyncService {
     /// Best-effort viewer identity from the stored token.
     fn viewer_identity() -> Option<ViewerIdentity> {
         let token = lt_config::load_token().ok().flatten()?;
-        let v = lt_sync::viewer::fetch_viewer(&HttpTransport::new(token.access_token)).ok()?;
+        let v = upstream::viewer::fetch(&HttpTransport::new(token.access_token)).ok()?;
         Some(ViewerIdentity {
             id: v.id,
             name: v.name,
@@ -30,7 +31,7 @@ impl LinearSyncService {
 
     /// A transport with a fresh (auto-refreshed) token for a live read.
     fn transport() -> Result<HttpTransport> {
-        let token = lt_sync::auth::refresh::load_or_refresh_token()?;
+        let token = upstream::auth::refresh::load_or_refresh_token()?;
         Ok(HttpTransport::new(token.access_token))
     }
 }
@@ -54,9 +55,9 @@ impl SyncService for LinearSyncService {
             }
 
             let result = if full {
-                lt_sync::sync::full::run()
+                upstream::sync::full::run()
             } else {
-                lt_sync::sync::delta::run()
+                upstream::sync::delta::run()
             };
             match result {
                 Ok(()) => {
@@ -84,7 +85,7 @@ impl SyncService for LinearSyncService {
 
     fn spawn_login(&self) -> mpsc::Receiver<LoginEvent> {
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || match lt_sync::auth::login_non_interactive() {
+        std::thread::spawn(move || match upstream::auth::login_non_interactive() {
             Ok(()) => {
                 // Fetch viewer identity while the token is fresh.
                 let viewer = Self::viewer_identity();
@@ -105,19 +106,19 @@ impl SyncService for LinearSyncService {
     }
 
     fn fetch_teams(&self) -> Result<Vec<Team>> {
-        lt_sync::mutations::fetch_teams(&Self::transport()?)
+        upstream::teams::fetch(&Self::transport()?)
     }
 
     fn fetch_workflow_states(&self, team_id: &str) -> Result<Vec<WorkflowState>> {
-        lt_sync::mutations::fetch_workflow_states(&Self::transport()?, team_id)
+        upstream::states::fetch(&Self::transport()?, team_id)
     }
 
     fn fetch_team_members(&self, team_id: &str) -> Result<Vec<Member>> {
-        lt_sync::mutations::fetch_team_members(&Self::transport()?, team_id)
+        upstream::members::fetch(&Self::transport()?, team_id)
     }
 
     fn sync_comments(&self, issue_id: &str) -> Result<()> {
         let conn = db::open_db(db::db_path()?)?;
-        lt_sync::sync::comments::sync_comments(&conn, &Self::transport()?, issue_id)
+        upstream::comments::sync(&conn, &Self::transport()?, issue_id)
     }
 }

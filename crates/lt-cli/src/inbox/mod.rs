@@ -5,7 +5,7 @@ use clap::Args;
 
 mod display;
 
-use lt_sync::notifications::fetch_notifications_from_config;
+use lt_upstream::notifications;
 
 #[derive(Args, Clone)]
 pub struct InboxArgs {
@@ -24,7 +24,7 @@ pub fn run(out: &mut dyn Write, args: &InboxArgs) -> Result<()> {
     // When --all is not set we only need unread notifications; fetch with the
     // limit as a page-size hint and filter afterward.
     let max_total = Some(args.limit);
-    let notifications = fetch_notifications_from_config(args.limit, max_total)?;
+    let notifications = notifications::fetch_from_config(args.limit, max_total)?;
 
     let filtered: Vec<_> = if args.all {
         notifications

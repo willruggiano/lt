@@ -1,11 +1,10 @@
 use std::io::Write;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use chrono::Utc;
 use lt_storage::db;
 use lt_storage::query::IssueQuery;
-use lt_sync::client::HttpTransport;
-use lt_sync::list::fetch;
+use lt_upstream as upstream;
 use tracing::{error, info};
 
 use super::IssueArgs;
@@ -14,9 +13,10 @@ use super::display::print_table;
 /// Cache TTL in seconds (5 minutes).
 const CACHE_TTL_SECS: i64 = 300;
 
-/// Resolve `--assignee=me` to the viewer's actual name so the SQL filter can
-/// match the joined assignee name. Uses the identity cached in `sync_meta`
-/// when available, otherwise asks the Linear API and caches it.
+/// Resolve `--assignee=me` to the viewer's name so the SQL filter can match the
+/// joined assignee name. The viewer identity is persisted into `sync_meta` at
+/// sync time (one viewer per database by definition), so this is a pure local
+/// read with no network round-trip.
 fn resolve_me(conn: &rusqlite::Connection, query: &mut IssueQuery) -> Result<()> {
     let is_me = query
         .assignee
@@ -25,14 +25,8 @@ fn resolve_me(conn: &rusqlite::Connection, query: &mut IssueQuery) -> Result<()>
     if !is_me {
         return Ok(());
     }
-    let name = if let Some(n) = db::get_meta(conn, "viewer_name")? {
-        n
-    } else {
-        let token = lt_sync::auth::refresh::load_or_refresh_token()?;
-        let viewer = lt_sync::viewer::fetch_viewer(&HttpTransport::new(token.access_token))?;
-        db::set_meta(conn, "viewer_name", &viewer.name)?;
-        viewer.name
-    };
+    let name = db::get_meta(conn, "viewer_name")?
+        .ok_or_else(|| anyhow!("`--assignee me` needs a synced viewer; run `lt sync` first"))?;
     query.assignee = Some(name);
     Ok(())
 }
@@ -42,7 +36,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
 
     // --live: bypass cache entirely. The GraphQL filter resolves `me` itself.
     if args.live {
-        let (issues, has_next_page, _) = fetch(&query, None)?;
+        let (issues, has_next_page, _) = upstream::issues::fetch(&query, None)?;
         print_table(out, &issues, "")?;
         if has_next_page {
             writeln!(out, "\n+more issues")?;
@@ -51,23 +45,26 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
     }
 
     let conn = db::open_db(db::db_path()?)?;
-    resolve_me(&conn, &mut query)?;
 
     // Check last_synced_at from sync_meta.
     let last_synced_at = db::get_meta(&conn, "last_synced_at")?;
 
     match last_synced_at {
         None => {
-            // Cache is empty (never synced). Run full sync first.
+            // Cache is empty (never synced). Run full sync first -- this also
+            // persists the viewer identity that `resolve_me` reads below.
             info!("Cache empty -- running full sync...");
             drop(conn);
-            lt_sync::sync::full::run()?;
+            upstream::sync::full::run()?;
             // Re-open after sync.
             let conn2 = db::open_db(db::db_path()?)?;
+            resolve_me(&conn2, &mut query)?;
             let issues = db::query_issues(&conn2, &query)?;
             print_table(out, &issues, "(cached)")?;
         }
         Some(ref ts) => {
+            resolve_me(&conn, &mut query)?;
+
             // Parse the timestamp and check age.
             let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(ts).map_or(i64::MAX, |t| {
                 Utc::now().signed_duration_since(t).num_seconds()
@@ -85,7 +82,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
                 print_table(out, &issues, &note)?;
 
                 std::thread::spawn(|| {
-                    if let Err(e) = lt_sync::sync::delta::run() {
+                    if let Err(e) = upstream::sync::delta::run() {
                         error!("background sync error: {}", e);
                     }
                 });

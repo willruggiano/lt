@@ -1427,9 +1427,9 @@ dependencies = [
  "insta",
  "lt-config",
  "lt-storage",
- "lt-sync",
  "lt-tui",
  "lt-types",
+ "lt-upstream",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1474,28 +1474,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lt-sync"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "cynic",
- "lt-config",
- "lt-storage",
- "lt-types",
- "open",
- "rand 0.10.1",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tracing",
- "ureq",
- "url",
-]
-
-[[package]]
 name = "lt-tui"
 version = "0.4.0"
 dependencies = [
@@ -1519,6 +1497,27 @@ dependencies = [
  "cynic-codegen",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lt-upstream"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "lt-config",
+ "lt-storage",
+ "lt-types",
+ "open",
+ "rand 0.10.1",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tracing",
+ "ureq",
+ "url",
 ]
 
 [[package]]

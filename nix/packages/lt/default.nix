@@ -32,9 +32,6 @@
           cargo = config.packages.toolchain;
           rustc = config.packages.toolchain;
         };
-        # The root manifest is a virtual workspace (no `[package]`); shared
-        # metadata lives under `[workspace.package]`. The `lt` binary and its
-        # description come from the `lt-cli` member crate.
         workspaceToml = builtins.fromTOML (builtins.readFile "${inputs.self}/Cargo.toml");
         cliToml = builtins.fromTOML (builtins.readFile "${inputs.self}/crates/lt-cli/Cargo.toml");
       in

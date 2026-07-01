@@ -19,17 +19,18 @@ path = "src/main.rs"
 lt-config.workspace = true
 lt-types.workspace = true
 lt-storage.workspace = true
-lt-sync.workspace = true
+lt-upstream.workspace = true
 lt-tui.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
-clap.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tracing-appender.workspace = true
-tracing-subscriber.workspace = true
+# Crate-specific: only the binary parses args and configures logging.
+clap = { version = "4.6", features = ["derive"] }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 insta.workspace = true

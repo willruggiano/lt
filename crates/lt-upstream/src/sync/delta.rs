@@ -4,7 +4,7 @@ use lt_types::types::{Issue, IssuesData};
 use serde_json::json;
 
 use crate::client::{GraphqlTransport, HttpTransport, query_as};
-use crate::list::ISSUES_QUERY;
+use crate::issues::ISSUES_QUERY;
 
 /// Fetch one page of issues updated after `since` (an RFC3339 timestamp).
 fn fetch_page(
@@ -57,6 +57,8 @@ pub fn run() -> Result<()> {
     // Drain queued local mutations first so the base reflects acked edits before
     // the delta fetch overwrites it.
     super::drain::drain(&conn, &transport)?;
+    // Persist the viewer so cached reads can resolve `me` offline.
+    super::persist_viewer(&conn, &transport)?;
 
     super::sync_pages(&conn, |after| fetch_page(&transport, &since, after))
 }
@@ -70,7 +72,7 @@ mod tests {
     fn fetch_page_filters_by_since_and_extracts_page_info() {
         let transport = FakeTransport::new(vec![json!({
             "issues": {
-                "nodes": [crate::list::sample_issue_node("1")],
+                "nodes": [crate::issues::sample_issue_node("1")],
                 "pageInfo": { "hasNextPage": false, "endCursor": null }
             }
         })]);

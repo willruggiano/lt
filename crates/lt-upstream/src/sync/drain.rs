@@ -11,7 +11,7 @@ use lt_storage::db::outbox::{self, PendingOp};
 use rusqlite::Connection;
 
 use crate::client::GraphqlTransport;
-use crate::mutations;
+use crate::{comments, issues};
 
 /// Replay every pending outbox command, recording (not propagating) per-command
 /// failures so a single bad command never aborts the surrounding sync.
@@ -28,11 +28,11 @@ fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -
     let variables = serde_json::from_str(&op.variables)?;
     match op.op_type.as_str() {
         outbox::OP_ISSUE_UPDATE => {
-            mutations::post_issue_update(transport, variables)?;
+            issues::replay_update(transport, variables)?;
             outbox::ack_issue_update(conn, op.seq, &op.entity_id)?;
         }
         outbox::OP_ISSUE_CREATE => {
-            let created = mutations::post_issue_create(transport, variables)?;
+            let created = issues::replay_create(transport, variables)?;
             outbox::ack_issue_create(
                 conn,
                 op.seq,
@@ -45,7 +45,7 @@ fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            let created = mutations::post_comment_create(transport, variables)?;
+            let created = comments::replay_create(transport, variables)?;
             let comment = lt_storage::db::Comment {
                 id: created.id,
                 issue_id,

@@ -1,10 +1,11 @@
-//! The `lt sync` command surface. The sync engine lives in `lt-sync`; this is
-//! only the clap dispatch.
+//! The `lt sync` command surface. The sync engine lives in `lt-upstream`; this
+//! is only the clap dispatch.
 
 use std::io::Write;
 
 use anyhow::Result;
 use clap::Subcommand;
+use lt_upstream::sync;
 
 #[derive(Subcommand)]
 pub enum SyncCommands {
@@ -23,15 +24,15 @@ pub enum SyncCommands {
 pub fn run(out: &mut dyn Write, cmd: SyncCommands) -> Result<()> {
     match cmd {
         SyncCommands::Delta => {
-            lt_sync::sync::delta::run()?;
+            sync::delta::run()?;
             writeln!(out, "Sync complete.")?;
             Ok(())
         }
         SyncCommands::Full => {
-            lt_sync::sync::full::run()?;
+            sync::full::run()?;
             writeln!(out, "Sync complete.")?;
             Ok(())
         }
-        SyncCommands::Probe { token } => lt_sync::sync::probe::run(out, token),
+        SyncCommands::Probe { token } => sync::probe::run(out, token),
     }
 }

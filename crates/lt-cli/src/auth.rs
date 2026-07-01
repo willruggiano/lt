@@ -1,10 +1,11 @@
 //! The `lt auth` command surface. The OAuth/login/token logic lives in
-//! `lt-sync`; this is only the clap dispatch.
+//! `lt-upstream`; this is only the clap dispatch.
 
 use std::io::Write;
 
 use anyhow::Result;
 use clap::Subcommand;
+use lt_upstream::auth;
 
 #[derive(Subcommand)]
 pub enum AuthCommands {
@@ -18,8 +19,8 @@ pub enum AuthCommands {
 
 pub fn run(out: &mut dyn Write, cmd: &AuthCommands) -> Result<()> {
     match cmd {
-        AuthCommands::Login => lt_sync::auth::run_login(),
-        AuthCommands::Status => lt_sync::auth::run_status(out),
-        AuthCommands::Logout => lt_sync::auth::run_logout(out),
+        AuthCommands::Login => auth::login(),
+        AuthCommands::Status => auth::status(out),
+        AuthCommands::Logout => auth::logout(out),
     }
 }

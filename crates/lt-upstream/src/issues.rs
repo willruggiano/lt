@@ -1,14 +1,17 @@
-//! The live (`--live`) issue-list fetch: the Linear API path behind the CLI's
-//! cache. The cached read model lives in `lt-storage`; this is the only issue
-//! query that hits the network.
+//! The issue domain: the live (`--live`) list fetch behind the CLI's cache and
+//! the create/replay mutations. The cached read model lives in `lt-storage`;
+//! these queries are the issue paths that hit the network.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use lt_storage::query::{IssueQuery, build_sort, parse_date};
+use lt_types::inputs::IssueCreateInput;
 use lt_types::types::{Issue, IssuesData};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::auth::refresh::load_or_refresh_token;
 use crate::client::{GraphqlTransport, HttpTransport, query_as};
+use crate::graphql::{CreatePayload, post_create};
 
 pub const ISSUES_QUERY: &str = r"
 query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
@@ -163,6 +166,94 @@ pub fn fetch_with(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Mutations (create synchronously; replay queued outbox commands)
+// ---------------------------------------------------------------------------
+
+const ISSUE_UPDATE_MUTATION: &str = r"
+mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) {
+    success
+  }
+}
+";
+
+const ISSUE_CREATE_MUTATION: &str = r"
+mutation IssueCreate($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue {
+      id
+      identifier
+      title
+    }
+  }
+}
+";
+
+/// The fields the `issueCreate` response returns: enough to confirm success and
+/// reconcile the optimistic temp row with the server's id/identifier.
+#[derive(Deserialize, Debug, Clone)]
+pub struct CreatedIssue {
+    pub id: String,
+    pub identifier: String,
+    pub title: String,
+}
+
+#[derive(Deserialize)]
+struct SuccessPayload {
+    success: bool,
+}
+
+#[derive(Deserialize)]
+struct IssueUpdateData {
+    #[serde(rename = "issueUpdate")]
+    issue_update: SuccessPayload,
+}
+
+#[derive(Deserialize)]
+struct IssueCreatePayload {
+    success: bool,
+    issue: CreatedIssue,
+}
+
+#[derive(Deserialize)]
+struct IssueCreateData {
+    #[serde(rename = "issueCreate")]
+    issue_create: IssueCreatePayload,
+}
+
+impl CreatePayload for IssueCreateData {
+    type Created = CreatedIssue;
+    fn into_created(self) -> (bool, CreatedIssue) {
+        (self.issue_create.success, self.issue_create.issue)
+    }
+}
+
+/// Replay an `issueUpdate` from its stored variables. The drainer reconciles the
+/// base itself, so only success matters here.
+pub fn replay_update(transport: &dyn GraphqlTransport, variables: serde_json::Value) -> Result<()> {
+    let data: IssueUpdateData = query_as(transport, ISSUE_UPDATE_MUTATION, variables)?;
+    if !data.issue_update.success {
+        bail!("issueUpdate returned success=false");
+    }
+    Ok(())
+}
+
+/// Replay an `issueCreate`, returning the server's id/identifier.
+pub fn replay_create(
+    transport: &dyn GraphqlTransport,
+    variables: serde_json::Value,
+) -> Result<CreatedIssue> {
+    post_create::<IssueCreateData>(transport, ISSUE_CREATE_MUTATION, "issueCreate", variables)
+}
+
+/// Create an issue synchronously (the CLI `lt issues new` path, which is an
+/// inherently online command rather than a queued TUI edit).
+pub fn create(transport: &dyn GraphqlTransport, input: &IssueCreateInput) -> Result<CreatedIssue> {
+    replay_create(transport, json!({ "input": input }))
+}
+
 /// A minimal GraphQL issue node matching [`Issue`]'s deserialization, shared by
 /// the fetch tests here and in `sync::delta`.
 #[cfg(test)]
@@ -203,5 +294,50 @@ mod tests {
         let vars = transport.variables(0);
         assert_eq!(vars["first"], serde_json::json!(50));
         assert_eq!(vars["after"], serde_json::json!("0"));
+    }
+
+    #[test]
+    fn create_returns_server_identity() {
+        let transport = FakeTransport::new(vec![serde_json::json!({
+            "issueCreate": { "success": true, "issue": {
+                "id": "i1", "identifier": "ENG-1", "title": "New"
+            }}
+        })]);
+        let created = create(
+            &transport,
+            &IssueCreateInput {
+                title: "New".to_string(),
+                team_id: "t1".to_string(),
+                description: None,
+                state_id: Some("s1".to_string()),
+                priority: None,
+                assignee_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(created.identifier, "ENG-1");
+
+        let input = &transport.variables(0)["input"];
+        assert_eq!(input["title"], serde_json::json!("New"));
+        assert_eq!(input["teamId"], serde_json::json!("t1"));
+        assert_eq!(input["stateId"], serde_json::json!("s1"));
+        assert!(input.get("description").is_none());
+        assert!(input.get("priority").is_none());
+        assert!(input.get("assigneeId").is_none());
+    }
+
+    #[test]
+    fn replay_update_sends_variables_and_checks_success() {
+        let transport = FakeTransport::new(vec![
+            serde_json::json!({ "issueUpdate": { "success": true } }),
+        ]);
+        replay_update(
+            &transport,
+            serde_json::json!({ "id": "i1", "input": { "stateId": "s9" } }),
+        )
+        .unwrap();
+        let vars = transport.variables(0);
+        assert_eq!(vars["id"], serde_json::json!("i1"));
+        assert_eq!(vars["input"]["stateId"], serde_json::json!("s9"));
     }
 }

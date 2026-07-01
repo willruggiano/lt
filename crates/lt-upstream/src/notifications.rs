@@ -82,7 +82,7 @@ struct NotificationsData {
 /// `page_size` is the number of items to request per GraphQL page (capped at 250).
 /// `max_total` is the maximum number of items to return across all pages.
 /// When `max_total` is `None` the function fetches every available page.
-pub fn fetch_notifications(
+pub fn fetch(
     transport: &dyn GraphqlTransport,
     page_size: usize,
     max_total: Option<usize>,
@@ -133,13 +133,10 @@ pub fn fetch_notifications(
     Ok(all)
 }
 
-pub fn fetch_notifications_from_config(
-    page_size: usize,
-    max_total: Option<usize>,
-) -> Result<Vec<Notification>> {
+pub fn fetch_from_config(page_size: usize, max_total: Option<usize>) -> Result<Vec<Notification>> {
     let token = lt_config::load_token()?
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
-    fetch_notifications(
+    fetch(
         &HttpTransport::new(token.access_token),
         page_size,
         max_total,
@@ -177,7 +174,7 @@ mod tests {
             page(&["n1"], true, Some("c1")),
             page(&["n2"], false, None),
         ]);
-        let got = fetch_notifications(&transport, 250, None).unwrap();
+        let got = fetch(&transport, 250, None).unwrap();
         assert_eq!(
             got.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
             ["n1", "n2"]
@@ -189,7 +186,7 @@ mod tests {
     #[test]
     fn max_total_truncates_and_stops_early() {
         let transport = FakeTransport::new(vec![page(&["n1", "n2", "n3"], true, Some("c1"))]);
-        let got = fetch_notifications(&transport, 250, Some(2)).unwrap();
+        let got = fetch(&transport, 250, Some(2)).unwrap();
         assert_eq!(got.len(), 2);
         // The cap is reached on the first page, so no second request is made.
         assert_eq!(transport.calls.borrow().len(), 1);
@@ -198,7 +195,7 @@ mod tests {
     #[test]
     fn page_size_is_capped_at_250() {
         let transport = FakeTransport::new(vec![page(&["n1"], false, None)]);
-        fetch_notifications(&transport, 1000, None).unwrap();
+        fetch(&transport, 1000, None).unwrap();
         assert_eq!(transport.variables(0)["first"], json!(250));
     }
 }

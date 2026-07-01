@@ -1,4 +1,3 @@
-pub mod comments;
 pub mod delta;
 pub mod drain;
 pub mod full;
@@ -8,6 +7,18 @@ use anyhow::Result;
 use chrono::Utc;
 use lt_storage::db;
 use lt_types::types::Issue;
+
+use crate::client::GraphqlTransport;
+
+/// Persist the authenticated viewer's identity into `sync_meta` so cached reads
+/// can resolve `me` without a network round-trip. A database tracks exactly one
+/// viewer by definition, so this is an upsert of a stable identity.
+fn persist_viewer(conn: &rusqlite::Connection, transport: &dyn GraphqlTransport) -> Result<()> {
+    let viewer = crate::viewer::fetch(transport)?;
+    db::set_meta(conn, "viewer_id", &viewer.id)?;
+    db::set_meta(conn, "viewer_name", &viewer.name)?;
+    Ok(())
+}
 
 /// Paginate through issue pages via `fetch_page`, upserting each page into the
 /// local DB, then record the current UTC time as `last_synced_at`.
