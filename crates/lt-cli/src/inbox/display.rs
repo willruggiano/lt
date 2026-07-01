@@ -171,22 +171,12 @@ mod tests {
 
     #[test]
     fn print_table_snapshot() {
-        use lt_runtime::notifications::{
-            Notification, NotificationActor, NotificationIssue, NotificationIssueState,
-            NotificationIssueTeam,
-        };
+        use lt_runtime::notifications::{Notification, NotificationActor, NotificationIssue};
 
         fn issue(identifier: &str, title: &str) -> NotificationIssue {
             NotificationIssue {
                 identifier: identifier.into(),
                 title: title.into(),
-                state: NotificationIssueState {
-                    name: "Todo".into(),
-                },
-                priority: None,
-                team: NotificationIssueTeam {
-                    name: "Engineering".into(),
-                },
             }
         }
         fn actor(name: &str) -> NotificationActor {

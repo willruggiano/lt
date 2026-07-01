@@ -1,78 +1,69 @@
 use anyhow::{Result, anyhow};
-use lt_types::types::PageInfo;
-use serde::Deserialize;
+use lt_types::notifications as wire;
 use serde_json::json;
 
 use super::client::{GraphqlTransport, HttpTransport, query_as};
 
-const NOTIFICATIONS_QUERY: &str = r"
-query Notifications($first: Int, $after: String) {
-  notifications(first: $first, after: $after) {
-    nodes {
-      id
-      type
-      readAt
-      createdAt
-      updatedAt
-      ... on IssueNotification {
-        issue { identifier title state { name } priority team { name } }
-        actor { name }
-      }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-";
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct NotificationIssueState {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct NotificationIssueTeam {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct NotificationIssue {
-    pub identifier: String,
-    pub title: String,
-    pub state: NotificationIssueState,
-    pub priority: Option<i64>,
-    pub team: NotificationIssueTeam,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct NotificationActor {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Notification {
     pub id: String,
-    #[serde(rename = "type")]
     pub type_: String,
-    #[serde(rename = "readAt")]
     pub read_at: Option<String>,
-    #[serde(rename = "createdAt")]
     pub created_at: String,
-    #[serde(rename = "updatedAt")]
     pub updated_at: String,
     pub issue: Option<NotificationIssue>,
     pub actor: Option<NotificationActor>,
 }
 
-#[derive(Deserialize)]
-struct NotificationConnection {
-    nodes: Vec<Notification>,
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
+#[derive(Debug, Clone)]
+pub struct NotificationIssue {
+    pub identifier: String,
+    pub title: String,
 }
 
-#[derive(Deserialize)]
-struct NotificationsData {
-    notifications: NotificationConnection,
+#[derive(Debug, Clone)]
+pub struct NotificationActor {
+    pub name: String,
+}
+
+impl From<wire::NotificationActor> for NotificationActor {
+    fn from(actor: wire::NotificationActor) -> Self {
+        Self { name: actor.name }
+    }
+}
+
+impl From<wire::NotificationIssue> for NotificationIssue {
+    fn from(issue: wire::NotificationIssue) -> Self {
+        Self {
+            identifier: issue.identifier,
+            title: issue.title,
+        }
+    }
+}
+
+impl From<wire::Notification> for Notification {
+    fn from(node: wire::Notification) -> Self {
+        match node {
+            wire::Notification::IssueNotification(n) => Self {
+                id: n.id.into_inner(),
+                type_: n.type_,
+                read_at: n.read_at.map(|d| d.0),
+                created_at: n.created_at.0,
+                updated_at: n.updated_at.0,
+                issue: Some(n.issue.into()),
+                actor: n.actor.map(Into::into),
+            },
+            wire::Notification::Other(n) => Self {
+                id: n.id.into_inner(),
+                type_: n.type_,
+                read_at: n.read_at.map(|d| d.0),
+                created_at: n.created_at.0,
+                updated_at: n.updated_at.0,
+                issue: None,
+                actor: n.actor.map(Into::into),
+            },
+        }
+    }
 }
 
 /// Fetch notifications from the Linear API.
@@ -106,10 +97,10 @@ pub fn fetch(
             "after": cursor,
         });
 
-        let data: NotificationsData = query_as(transport, NOTIFICATIONS_QUERY, variables)?;
+        let data: wire::NotificationsQuery = query_as(transport, &wire::query(), variables)?;
 
         let conn = data.notifications;
-        all.extend(conn.nodes);
+        all.extend(conn.nodes.into_iter().map(Notification::from));
 
         // Stop if we have reached the total cap.
         if let Some(max) = max_total
@@ -148,12 +139,12 @@ mod tests {
 
     fn node(id: &str) -> serde_json::Value {
         json!({
+            "__typename": "ProjectNotification",
             "id": id,
             "type": "issueAssignedToYou",
             "readAt": null,
             "createdAt": "2026-01-01T00:00:00Z",
             "updatedAt": "2026-01-01T00:00:00Z",
-            "issue": null,
             "actor": null
         })
     }
@@ -195,5 +186,30 @@ mod tests {
         let transport = FakeTransport::new(vec![page(&["n1"], false, None)]);
         fetch(&transport, 1000, None).unwrap();
         assert_eq!(transport.variables(0)["first"], json!(250));
+    }
+
+    #[test]
+    fn issue_notification_maps_issue_and_actor() {
+        let node = json!({
+            "__typename": "IssueNotification",
+            "id": "n1",
+            "type": "issueAssignedToYou",
+            "readAt": null,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "actor": { "name": "Ada Lovelace" },
+            "issue": { "identifier": "ENG-1", "title": "Wire up the thing" }
+        });
+        let transport = FakeTransport::new(vec![json!({ "notifications": {
+            "nodes": [node],
+            "pageInfo": { "hasNextPage": false, "endCursor": null }
+        }})]);
+        let got = fetch(&transport, 250, None).unwrap();
+        assert_eq!(got.len(), 1);
+        let n = &got[0];
+        let issue = n.issue.as_ref().unwrap();
+        assert_eq!(issue.identifier, "ENG-1");
+        assert_eq!(issue.title, "Wire up the thing");
+        assert_eq!(n.actor.as_ref().unwrap().name, "Ada Lovelace");
     }
 }

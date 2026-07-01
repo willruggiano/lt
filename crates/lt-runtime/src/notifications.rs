@@ -3,6 +3,5 @@
 //! inbox without naming `lt-upstream`.
 
 pub use lt_upstream::notifications::{
-    Notification, NotificationActor, NotificationIssue, NotificationIssueState,
-    NotificationIssueTeam, fetch_from_config,
+    Notification, NotificationActor, NotificationIssue, fetch_from_config,
 };
