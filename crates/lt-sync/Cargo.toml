@@ -1,0 +1,30 @@
+[package]
+name = "lt-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+lt-config.workspace = true
+lt-types.workspace = true
+lt-storage.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+cynic.workspace = true
+open.workspace = true
+rand.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+lt-storage = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

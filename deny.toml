@@ -23,6 +23,9 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal workspace crates are `path` deps without a version (i.e. `*`); allow
+# that wildcard form for them while still denying wildcards on registry crates.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

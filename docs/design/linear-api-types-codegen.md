@@ -583,6 +583,23 @@ Resolved in PR 4:
   (the one UI "clear", via the unassign popup). The other nullable FK fields are
   not yet editable, so the live-API confirmation is deferred until they are.
 
+Resolved in PR 5:
+
+- **Workspace split shipped** — the crate is now
+  `crates/{lt-config,lt-types,lt-storage,lt-sync,lt-tui,lt-cli}`. The cynic
+  schema module + `QueryFragment` structs + input objects live in `lt-types`;
+  the relational store, read model, generated search/sort codegen, and the
+  `IssueQuery` filter spec in `lt-storage`; the API edge (client, mutations,
+  viewer, notifications, sync, auth, live list fetch) in `lt-sync`.
+- **TUI ⊥ API enforced structurally** — `lt-tui` lists neither `lt-sync` nor
+  `cynic` in its manifest, so an API call from the render/event path does not
+  compile. The TUI drives sync/login and live modal reads through a
+  `SyncService` port (`lt-storage`), with the `lt-sync`-backed adapter injected
+  by `lt-cli` at `lt_tui::run`. Writes already flow through the outbox (PR 4).
+- **`clap` kept out of the data layer** — the generated `SortField` is clap-free
+  (a `from_key` value-parser lives in `lt-cli`); `IssueArgs` (clap) lowers into
+  `lt-storage`'s `IssueQuery`.
+
 Still open (deferred):
 
 - **Labels model** — `labelIds` (full replace) vs `addedLabelIds`/
