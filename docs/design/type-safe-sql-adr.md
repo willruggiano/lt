@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (ENG-33, design only).
+Accepted (ENG-33; design only, implementation pending).
 
 ## Context
 
@@ -177,6 +177,7 @@ against the real, fully-migrated schema, using SQLite itself as the checker.
                                         ^
                                         |
               db/sql.rs statement registry
+              (Sql newtype: sole source of statement text)
               - fixed statements: named consts
               - fragments: filter clauses, sort columns,
                 ISSUE_COLUMNS / ISSUE_JOINS probe templates
@@ -198,6 +199,30 @@ Composition validity follows from fragment validity: both builders only conjoin
 clauses with `AND` inside a fixed `SELECT` template, and `ORDER BY` columns come
 from the probed enum. There is no free-form splicing of user input into SQL text
 (values are always bound parameters).
+
+#### Enforcement: the `Sql` newtype
+
+Statement text is a type, not a `&str`, per [[posture.md]] ("use the type system
+to encode invariants"):
+
+```rust
+// db/sql.rs -- the only module that can construct these.
+pub(crate) struct Sql(&'static str);
+pub(crate) struct ComposedSql(String);
+```
+
+- Fixed statements are `Sql` consts declared through a small `macro_rules!` that
+  emits both the const and its registry entry, so declaration and registration
+  are the same line -- an unregistered statement cannot exist.
+- The `db` module's execution helpers (generalizing the existing `execute()`
+  wrapper, `mod.rs:34`) accept `Sql` / `ComposedSql`, never `&str`.
+- The two dynamic builders produce `ComposedSql` via constructors in `db/sql.rs`
+  that accept only registered fragment consts and the sort-column enum. Composed
+  text is therefore AND-joins of validated pieces inside registered templates,
+  by construction.
+- Tests are exempt by design: they keep raw `Connection` access to assert
+  directly on rows (per [[testing.md]]), so no workspace-wide lint ban on
+  `rusqlite` methods is added.
 
 #### Validator
 
@@ -259,21 +284,22 @@ hook.
    the FTS5 search path), and rust-query (early-stage, no FTS5).
 2. **Add a registered-statement schema-adherence check to the test gate**:
    statement/fragment registry in `lt-storage`, validated by preparing against
-   the migrated in-memory schema (P1, P2-const, P3).
-3. **Replace index-based row mapping with aliased, named column access.**
-4. **Adopt `rusqlite_migration`** with the current idempotent DDL as migration
+   the migrated in-memory schema (P1, P2-const, P3). Gate-time, not `build.rs`.
+3. **Enforce the registry with the `Sql` / `ComposedSql` newtypes**: statement
+   text is constructible only inside `db/sql.rs`; execution helpers take the
+   newtypes, never `&str`.
+4. **Replace index-based row mapping with aliased, named column access.**
+5. **Adopt `rusqlite_migration`** with the current idempotent DDL as migration
    1; delete the `pragma_table_info` probe helpers.
+6. **Move the `lt-cli` `COUNT(*)` diagnostics** (`lt-cli/src/search.rs:33-42`)
+   behind `lt-storage` functions, bringing them into the registry.
 
 ## Residual gaps
 
 - Call-site bind arity and value types remain runtime-checked (fail-fast).
 - User-supplied FTS5 `MATCH` syntax errors are inherently runtime; already
   handled as query errors (`search_query.rs:465-474`).
-- Nothing _forces_ new SQL through the registry. Convention and review cover it
-  initially; a `Sql(&'static str)` newtype constructible only inside the
-  registry module -- with `execute`/`prepare` wrappers taking `Sql` -- would
-  encode the invariant in the type system per [[posture.md]]. Open decision
-  point for iteration.
-- The two `COUNT(*)` diagnostics in `lt-cli/src/search.rs:33-42` either move
-  behind a `lt-storage` function (bringing them into the registry) or stay as
-  accepted stragglers. Recommendation: move them.
+- The newtype enforcement is API-shape, not hermetic: `Connection` stays exposed
+  (tests assert on raw rows), so non-test code _could_ still call `rusqlite`
+  methods directly with a string literal. The newtype makes that a visible
+  anomaly in review rather than an impossibility.
