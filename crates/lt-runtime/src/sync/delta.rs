@@ -1,8 +1,8 @@
 use anyhow::Result;
 use lt_storage::db;
-use lt_types::issues::{IssueFilterValue, IssueSortValue, IssuesQuery, IssuesVariables};
-use lt_types::pagination::Page;
-use lt_types::types::Issue;
+use lt_types::issues::{
+    IssueConnection, IssueFilterValue, IssueSortValue, IssuesQuery, IssuesVariables,
+};
 use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
 use serde_json::json;
 
@@ -11,7 +11,7 @@ fn fetch_page(
     transport: &dyn GraphqlTransport,
     since: &str,
     after: Option<&str>,
-) -> Result<Page<Issue>> {
+) -> Result<IssueConnection> {
     // Request all states including completed/archived so delta picks up
     // changes to previously-completed issues.
     let filter = json!({
@@ -74,7 +74,7 @@ mod tests {
         })]);
         let page = fetch_page(&transport, "2026-01-01T00:00:00Z", None).unwrap();
         assert_eq!(page.nodes.len(), 1);
-        assert!(!page.info.has_next_page);
+        assert!(!page.page_info.has_next_page);
 
         let vars = transport.variables(0);
         assert_eq!(

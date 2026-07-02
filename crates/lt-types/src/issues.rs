@@ -15,7 +15,7 @@ use cynic::{MutationBuilder, QueryBuilder};
 
 use crate::graphql::{GraphqlOperation, ensure_success, extract_on_success};
 use crate::inputs::{IssueCreateInput, IssueUpdateInput};
-use crate::pagination::{Page, PageInfo};
+use crate::pagination::PageInfo;
 use crate::schema;
 use crate::types::Issue;
 
@@ -54,7 +54,7 @@ pub struct IssuesQuery {
 
 impl GraphqlOperation for IssuesQuery {
     type Variables = IssuesVariables;
-    type Output = Page<Issue>;
+    type Output = IssueConnection;
     const NAME: &'static str = "issues";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
@@ -62,10 +62,7 @@ impl GraphqlOperation for IssuesQuery {
     }
 
     fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(Page {
-            nodes: self.issues.nodes,
-            info: self.issues.page_info,
-        })
+        Ok(self.issues)
     }
 }
 
@@ -230,8 +227,8 @@ mod tests {
             .extract()
             .unwrap();
         assert_eq!(page.nodes.len(), 1);
-        assert!(page.info.has_next_page);
-        assert_eq!(page.info.end_cursor.as_deref(), Some("50"));
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("50"));
     }
 
     #[test]

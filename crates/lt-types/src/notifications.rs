@@ -4,7 +4,7 @@
 use cynic::QueryBuilder;
 
 use crate::graphql::GraphqlOperation;
-use crate::pagination::{Page, PageInfo};
+use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
 use crate::schema;
 use crate::types::{Issue, User};
@@ -24,7 +24,7 @@ pub struct NotificationsQuery {
 
 impl GraphqlOperation for NotificationsQuery {
     type Variables = NotificationsVariables;
-    type Output = Page<Notification>;
+    type Output = NotificationConnection;
     const NAME: &'static str = "notifications";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
@@ -32,10 +32,7 @@ impl GraphqlOperation for NotificationsQuery {
     }
 
     fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(Page {
-            nodes: self.notifications.nodes,
-            info: self.notifications.page_info,
-        })
+        Ok(self.notifications)
     }
 }
 
@@ -194,7 +191,7 @@ mod tests {
             .extract()
             .unwrap();
         assert_eq!(page.nodes.len(), 1);
-        assert!(page.info.has_next_page);
-        assert_eq!(page.info.end_cursor.as_deref(), Some("c1"));
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("c1"));
     }
 }

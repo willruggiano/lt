@@ -38,7 +38,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
     if args.live {
         let page = lt_runtime::issues::fetch(&query, None)?;
         print_table(out, &page.nodes, "")?;
-        if page.info.has_next_page {
+        if page.page_info.has_next_page {
             writeln!(out, "\n+more issues")?;
         }
         return Ok(());

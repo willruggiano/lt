@@ -14,7 +14,6 @@ open.workspace = true
 rand.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-# Crate-specific: the OAuth/PKCE flow and HTTP transport live only here.
 sha2 = "0.11"
 ureq = { version = "3", features = ["json"] }
 url = "2"
@@ -23,8 +22,6 @@ url = "2"
 lt-types = { workspace = true, features = ["test-util"] }
 
 [features]
-# Expose the fake GraphQL transport and re-exported fixtures to dependent
-# crates' tests (lt-runtime).
 test-util = ["lt-types/test-util"]
 
 [lints]

@@ -27,10 +27,10 @@ pub fn fetch_all(transport: &dyn GraphqlTransport, issue_id: &str) -> Result<Vec
 
         all.extend(page.nodes);
 
-        if !page.info.has_next_page {
+        if !page.page_info.has_next_page {
             break;
         }
-        cursor = page.info.end_cursor;
+        cursor = page.page_info.end_cursor;
         if cursor.is_none() {
             break;
         }

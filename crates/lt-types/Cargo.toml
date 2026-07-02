@@ -26,8 +26,6 @@ syn = { version = "2", default-features = false, features = ["full", "parsing"] 
 toml = "1"
 
 [features]
-# Expose test-only fixtures (sample GraphQL response nodes) to dependent
-# crates' tests (lt-upstream, lt-runtime).
 test-util = []
 
 [lints]

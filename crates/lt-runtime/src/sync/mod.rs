@@ -7,8 +7,7 @@ pub mod service;
 use anyhow::Result;
 use chrono::Utc;
 use lt_storage::db;
-use lt_types::pagination::Page;
-use lt_types::types::Issue;
+use lt_types::issues::IssueConnection;
 use lt_types::viewer::ViewerQuery;
 use lt_upstream::client::{GraphqlTransport, execute};
 
@@ -27,7 +26,7 @@ fn persist_viewer(conn: &rusqlite::Connection, transport: &dyn GraphqlTransport)
 /// `fetch_page` is called with the current cursor and returns the next page.
 fn sync_pages<F>(conn: &rusqlite::Connection, mut fetch_page: F) -> Result<()>
 where
-    F: FnMut(Option<&str>) -> Result<Page<Issue>>,
+    F: FnMut(Option<&str>) -> Result<IssueConnection>,
 {
     let mut cursor: Option<String> = None;
     loop {
@@ -38,10 +37,10 @@ where
             db::upsert_issues(conn, &page.nodes)?;
         }
 
-        if !page.info.has_next_page {
+        if !page.page_info.has_next_page {
             break;
         }
-        cursor = page.info.end_cursor;
+        cursor = page.page_info.end_cursor;
     }
 
     let now = Utc::now().to_rfc3339();

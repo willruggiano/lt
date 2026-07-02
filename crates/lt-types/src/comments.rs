@@ -8,7 +8,7 @@ use cynic::{MutationBuilder, QueryBuilder};
 
 use crate::graphql::{GraphqlOperation, extract_on_success};
 use crate::inputs::CommentCreateInput;
-use crate::pagination::{Page, PageInfo};
+use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
 use crate::schema;
 use crate::types::User;
@@ -28,7 +28,7 @@ pub struct CommentsQuery {
 
 impl GraphqlOperation for CommentsQuery {
     type Variables = CommentsVariables;
-    type Output = Page<Comment>;
+    type Output = CommentConnection;
     const NAME: &'static str = "comments";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
@@ -36,10 +36,7 @@ impl GraphqlOperation for CommentsQuery {
     }
 
     fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(Page {
-            nodes: self.issue.comments.nodes,
-            info: self.issue.comments.page_info,
-        })
+        Ok(self.issue.comments)
     }
 }
 
@@ -164,8 +161,8 @@ mod tests {
             .extract()
             .unwrap();
         assert_eq!(page.nodes.len(), 1);
-        assert!(page.info.has_next_page);
-        assert_eq!(page.info.end_cursor.as_deref(), Some("cur"));
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("cur"));
     }
 
     #[test]

@@ -50,10 +50,10 @@ pub fn fetch(
             break;
         }
 
-        if !page.info.has_next_page {
+        if !page.page_info.has_next_page {
             break;
         }
-        cursor = page.info.end_cursor;
+        cursor = page.page_info.end_cursor;
         if cursor.is_none() {
             break;
         }

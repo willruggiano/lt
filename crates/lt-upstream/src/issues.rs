@@ -5,11 +5,11 @@
 //! only the shared issue node fixture their tests reuse.
 
 use anyhow::Result;
-use lt_types::issues::{IssueFilterValue, IssueSortValue, IssuesQuery, IssuesVariables};
-use lt_types::pagination::Page;
+use lt_types::issues::{
+    IssueConnection, IssueFilterValue, IssueSortValue, IssuesQuery, IssuesVariables,
+};
 use lt_types::query::{IssueQuery, build_sort, parse_date};
 use lt_types::scalars::Priority;
-use lt_types::types::Issue;
 use serde_json::{Value, json};
 
 use crate::auth::refresh::load_or_refresh_token;
@@ -96,7 +96,7 @@ pub fn build_filter(args: &IssueQuery) -> Result<Option<Value>> {
 }
 
 /// Fetch one page of issues, loading (and refreshing) the token first.
-pub fn fetch(args: &IssueQuery, after: Option<&str>) -> Result<Page<Issue>> {
+pub fn fetch(args: &IssueQuery, after: Option<&str>) -> Result<IssueConnection> {
     let token = load_or_refresh_token()?;
     fetch_with(&HttpTransport::new(token.access_token), args, after)
 }
@@ -107,7 +107,7 @@ pub fn fetch_with(
     transport: &dyn GraphqlTransport,
     args: &IssueQuery,
     after: Option<&str>,
-) -> Result<Page<Issue>> {
+) -> Result<IssueConnection> {
     let limit = args.limit.min(250);
     let filter = build_filter(args)?;
     let sort = build_sort(&args.sort, args.desc);
@@ -151,8 +151,8 @@ mod tests {
         let page = fetch_with(&transport, &args, Some("0")).unwrap();
         assert_eq!(page.nodes.len(), 1);
         assert_eq!(page.nodes[0].identifier, "ENG-1");
-        assert!(page.info.has_next_page);
-        assert_eq!(page.info.end_cursor.as_deref(), Some("50"));
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("50"));
 
         let vars = transport.variables(0);
         assert_eq!(vars["first"], serde_json::json!(50));
