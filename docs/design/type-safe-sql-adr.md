@@ -256,17 +256,20 @@ versioned migrations tracked in SQLite's `user_version` pragma, defined as a
 slice of `M::up(...)` entries, with a built-in `MIGRATIONS.validate()` test
 hook.
 
-- **Migration 1 is today's idempotent DDL verbatim** (base schema, relational
-  schema, column add/drop probes). Because the current logic is already
-  idempotent, any existing database -- whatever shape it reached under the
-  probing scheme -- lands on version 1 correctly. Every later change is a plain
-  versioned migration; the probe helpers are deleted.
-- **Drop-and-recreate is not an option**, tempting as the "resyncable cache"
-  property makes it (`mod.rs:252`): `outbox` and `pending_overlay` hold
-  un-synced local intent (`outbox.rs:1-8`) that must survive schema changes.
+- **Migration 1 is the clean final schema** -- one plain `M::up` batch, no
+  probes, no compatibility hook. Pre-v1, databases created under the old probing
+  scheme are a manual hard cutover: delete the file and re-sync (review decision
+  on the implementation PR). Un-synced `outbox` / `pending_overlay` rows die
+  with the file; accepted pre-v1.
+- **Opening an incompatible database fails with an actionable error**: a
+  connection at `user_version = 0` that already contains tables predates
+  versioned migrations, and `open_db` reports the path and tells the user to
+  delete it and re-run `lt sync`, instead of surfacing a bare "table already
+  exists".
 - The migration list becomes the single schema source shared by runtime
   `open_db()` and the validator, preserving the current property that tests
-  exercise the exact production schema.
+  exercise the exact production schema. Migration runs only inside `open_db`;
+  tests reach the migrated schema through `Database::memory()`.
 
 #### Property coverage
 
@@ -289,8 +292,10 @@ hook.
    text is constructible only inside `db/sql.rs`; execution helpers take the
    newtypes, never `&str`.
 4. **Replace index-based row mapping with aliased, named column access.**
-5. **Adopt `rusqlite_migration`** with the current idempotent DDL as migration
-   1; delete the `pragma_table_info` probe helpers.
+5. **Adopt `rusqlite_migration`** with the clean final schema as migration 1;
+   delete the `pragma_table_info` probe helpers. No pre-v1 compatibility bridge:
+   an old-scheme database is deleted manually, and opening one fails with an
+   error saying so.
 6. **Move the `lt-cli` `COUNT(*)` diagnostics** (`lt-cli/src/search.rs:33-42`)
    behind `lt-storage` functions, bringing them into the registry.
 
