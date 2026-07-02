@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "lt-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "lt-config"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1447,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "lt-runtime"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "lt-storage"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "lt-tui"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "lt-types"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "lt-upstream"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "base64",

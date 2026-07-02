@@ -3,36 +3,30 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 license = "MIT"
 homepage = "https://github.com/willruggiano/lt"
 repository = "https://github.com/willruggiano/lt"
 
 [workspace.dependencies]
-# Internal crates
-lt-config = { path = "crates/lt-config" }
-lt-types = { path = "crates/lt-types" }
-lt-storage = { path = "crates/lt-storage" }
-lt-upstream = { path = "crates/lt-upstream" }
-lt-runtime = { path = "crates/lt-runtime" }
-lt-tui = { path = "crates/lt-tui" }
-
-# Third-party shared by more than one crate. Single-consumer dependencies are
-# defined in the crate that uses them, not here.
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock"] }
 dirs = "6"
+insta = "1.48.0"
+lt-config = { path = "crates/lt-config" }
+lt-runtime = { path = "crates/lt-runtime" }
+lt-storage = { path = "crates/lt-storage" }
+lt-tui = { path = "crates/lt-tui" }
+lt-types = { path = "crates/lt-types" }
+lt-upstream = { path = "crates/lt-upstream" }
 open = "5"
 rand = "0.10"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-
-# Dev dependencies
-insta = "1.48.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -50,9 +50,9 @@ pub struct IssueArgs {
     #[arg(long, default_value = "updated")]
     pub sort: SortField,
 
-    /// Sort in descending order (default is ascending)
+    /// Sort in ascending order (default is descending)
     #[arg(long)]
-    pub desc: bool,
+    pub asc: bool,
 
     /// Filter by title (case-insensitive substring)
     #[arg(long)]
@@ -82,7 +82,7 @@ impl From<&IssueArgs> for IssueQuery {
             updated_after: args.updated_after.clone(),
             updated_before: args.updated_before.clone(),
             sort: args.sort.clone(),
-            desc: args.desc,
+            desc: args.asc == false,
             title: args.title.clone(),
             limit: args.limit,
         }
