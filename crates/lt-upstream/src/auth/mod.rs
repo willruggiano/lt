@@ -1,8 +1,4 @@
 //! The auth domain: OAuth2 login/status/logout plus token refresh.
-//!
-//! The command entrypoints are re-exported straight from their submodules —
-//! `upstream::auth::login()`, `::viewer_from_config()`, `::logout()` — rather
-//! than wrapped.
 
 mod login;
 mod logout;

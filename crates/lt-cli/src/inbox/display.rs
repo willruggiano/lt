@@ -30,39 +30,40 @@ pub fn now_unix_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// The widest value `it` yields, no narrower than `min`.
+fn col_width(it: impl Iterator<Item = usize>, min: usize) -> usize {
+    it.fold(min, usize::max)
+}
+
 pub fn print_table(
     out: &mut dyn Write,
     notifications: &[Notification],
     now_secs: u64,
 ) -> Result<()> {
     // Column widths
-    let type_w = notifications
-        .iter()
-        .map(|n| n.type_().len())
-        .max()
-        .unwrap_or(4)
-        .max(4);
+    let type_w = col_width(notifications.iter().map(|n| n.type_().len()), 4);
 
-    let issue_w = notifications
-        .iter()
-        .map(|n| n.issue().map_or(0, |i| i.identifier.len()))
-        .max()
-        .unwrap_or(5)
-        .max(5);
+    let issue_w = col_width(
+        notifications
+            .iter()
+            .map(|n| n.issue().map_or(0, |i| i.identifier.len())),
+        5,
+    );
 
-    let title_w = notifications
-        .iter()
-        .map(|n| n.issue().map_or(0, |i| i.title.len()))
-        .max()
-        .unwrap_or(5)
-        .clamp(5, 60);
+    let title_w = col_width(
+        notifications
+            .iter()
+            .map(|n| n.issue().map_or(0, |i| i.title.len())),
+        5,
+    )
+    .min(60);
 
-    let actor_w = notifications
-        .iter()
-        .map(|n| n.actor().map_or(1, |a| a.name.len()))
-        .max()
-        .unwrap_or(5)
-        .max(5);
+    let actor_w = col_width(
+        notifications
+            .iter()
+            .map(|n| n.actor().map_or(1, |a| a.name.len())),
+        5,
+    );
 
     // Header
     writeln!(
@@ -138,7 +139,7 @@ mod tests {
 
         fn actor(name: &str) -> User {
             User {
-                id: lt_types::Id::new("a"),
+                id: "a".into(),
                 name: name.into(),
             }
         }
@@ -154,7 +155,7 @@ mod tests {
 
         fn issue_notification(f: IssueNotificationFixture) -> Notification {
             Notification::IssueNotification(Box::new(IssueNotification {
-                id: lt_types::Id::new(format!("n-{}", f.type_)),
+                id: format!("n-{}", f.type_).into(),
                 type_: f.type_.into(),
                 read_at: None,
                 created_at: f.created_at.parse().unwrap(),
@@ -166,7 +167,7 @@ mod tests {
 
         fn base_notification(type_: &str, created_at: &str) -> Notification {
             Notification::Other(BaseNotification {
-                id: lt_types::Id::new(format!("n-{type_}")),
+                id: format!("n-{type_}").into(),
                 type_: type_.into(),
                 read_at: None,
                 created_at: created_at.parse().unwrap(),

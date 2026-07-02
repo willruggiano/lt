@@ -107,12 +107,12 @@ mod tests {
 
     fn comment(id: &str, issue_id: &str, created_at: &str) -> Comment {
         Comment {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             body: format!("body {id}"),
             created_at: created_at.parse().unwrap(),
             updated_at: created_at.parse().unwrap(),
             user: Some(User {
-                id: lt_types::Id::new("u-alice"),
+                id: "u-alice".into(),
                 name: "Alice".to_string(),
             }),
             issue_id: Some(issue_id.to_string()),

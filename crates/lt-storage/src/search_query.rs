@@ -900,14 +900,14 @@ mod run_query_tests {
 
     fn user(name: &str) -> types::User {
         types::User {
-            id: lt_types::Id::new(name),
+            id: name.into(),
             name: name.to_string(),
         }
     }
 
     fn state(name: &str) -> types::WorkflowState {
         types::WorkflowState {
-            id: lt_types::Id::new(name),
+            id: name.into(),
             name: name.to_string(),
         }
     }
@@ -917,7 +917,7 @@ mod run_query_tests {
     /// reconstructs them.
     fn issue(id: &str, title: &str) -> Issue {
         Issue {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             identifier: format!("ENG-{id}"),
             title: title.to_string(),
             priority_label: "Medium".to_string(),
@@ -925,7 +925,7 @@ mod run_query_tests {
             state: state("Todo"),
             assignee: None,
             team: types::Team {
-                id: lt_types::Id::new("ENG"),
+                id: "ENG".into(),
                 name: "Engineering".to_string(),
             },
             description: None,
@@ -953,28 +953,28 @@ mod run_query_tests {
         r2.state = state("In Progress");
         r2.assignee = Some(user("Bob"));
         r2.team = types::Team {
-            id: lt_types::Id::new("DES"),
+            id: "DES".into(),
             name: "Design".to_string(),
         };
         r2.updated_at = "2026-01-04T00:00:00Z".parse().unwrap();
         r2.labels = types::IssueLabelConnection {
             nodes: vec![
                 types::IssueLabel {
-                    id: lt_types::Id::new("backend"),
+                    id: "backend".into(),
                     name: "backend".to_string(),
                 },
                 types::IssueLabel {
-                    id: lt_types::Id::new("urgent"),
+                    id: "urgent".into(),
                     name: "urgent".to_string(),
                 },
             ],
         };
         r2.project = Some(types::Project {
-            id: lt_types::Id::new("Platform"),
+            id: "Platform".into(),
             name: "Platform".to_string(),
         });
         r2.cycle = Some(types::Cycle {
-            id: lt_types::Id::new("Cycle 7"),
+            id: "Cycle 7".into(),
             name: Some("Cycle 7".to_string()),
         });
         r2.creator = Some(user("Carol"));

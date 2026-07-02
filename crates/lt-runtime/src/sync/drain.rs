@@ -139,7 +139,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         lt_storage::db::run_migrations(&conn).unwrap();
         let mut issue = base_issue("temp");
-        issue.id = lt_types::Id::new("local:abc");
+        issue.id = "local:abc".into();
         issue.identifier = "NEW".to_string();
         let input = lt_types::inputs::IssueCreateInput {
             title: "New".to_string(),

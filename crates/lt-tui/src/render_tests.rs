@@ -204,7 +204,7 @@ fn optimistic_builders_apply_popup_choice() {
 #[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
     let viewer = lt_types::viewer::User {
-        id: lt_types::Id::new("v"),
+        id: "v".into(),
         name: "Vic".to_string(),
         organization: lt_types::viewer::Organization {
             name: "Acme".to_string(),
@@ -214,11 +214,11 @@ fn assignee_items_put_me_first_and_skip_viewer() {
     let members = || {
         vec![
             User {
-                id: lt_types::Id::new("v"),
+                id: "v".into(),
                 name: "Vic".to_string(),
             },
             User {
-                id: lt_types::Id::new("m"),
+                id: "m".into(),
                 name: "Mara".to_string(),
             },
         ]

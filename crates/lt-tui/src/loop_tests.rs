@@ -44,18 +44,18 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
             .unwrap_or_default(),
     );
     types::Issue {
-        id: lt_types::Id::new(id),
+        id: id.into(),
         identifier: ident.to_string(),
         title: format!("issue {ident}"),
         priority_label: "No priority".to_string(),
         priority: lt_types::scalars::Priority(0),
         state: types::WorkflowState {
-            id: lt_types::Id::new(state),
+            id: state.into(),
             name: state.to_string(),
         },
         assignee: None,
         team: types::Team {
-            id: lt_types::Id::new("ENG"),
+            id: "ENG".into(),
             name: "Engineering".to_string(),
         },
         description: None,
@@ -193,7 +193,7 @@ fn populate_relations_fills_parent_and_children() {
     parent.title = "the parent".to_string();
     let mut child = db_issue("c1", "ENG-10", "Done", 8);
     child.parent = Some(lt_types::types::Parent {
-        id: lt_types::Id::new("p1"),
+        id: "p1".into(),
         identifier: "ENG-9".to_string(),
     });
     let app = app_with_db(&[parent, child]).unwrap();
@@ -203,7 +203,7 @@ fn populate_relations_fills_parent_and_children() {
     let mut detail = build_cached_detail(&issue, Vec::new());
 
     // Seed the issue under a parent so query_children finds it.
-    issue.id = lt_types::Id::new("p1");
+    issue.id = "p1".into();
     populate_relations(&app.db, &mut detail, &issue);
     assert_eq!(detail.children.len(), 1);
     assert_eq!(detail.children[0].identifier, "ENG-10");
@@ -290,7 +290,7 @@ fn poll_sync_events_done_refreshes_and_sets_identity() {
     app.sync.syncing = true;
     let (tx, rx) = mpsc::channel();
     tx.send(SyncEvent::Done(Some(lt_types::viewer::User {
-        id: lt_types::Id::new("u1"),
+        id: "u1".into(),
         name: "Ada".to_string(),
         organization: lt_types::viewer::Organization {
             name: "Acme".to_string(),
@@ -313,7 +313,7 @@ fn poll_detail_comment_events_done_updates_detail() {
     app.detail = Some(build_cached_detail(&issue, Vec::new()));
     let (tx, rx) = mpsc::channel();
     tx.send(CommentSyncEvent::Done(vec![lt_types::comments::Comment {
-        id: lt_types::Id::new("c1"),
+        id: "c1".into(),
         body: "fresh".to_string(),
         created_at: "2026-01-06T00:00:00Z".parse().unwrap(),
         updated_at: "2026-01-06T00:00:00Z".parse().unwrap(),

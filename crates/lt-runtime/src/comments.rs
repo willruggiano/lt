@@ -57,7 +57,7 @@ mod tests {
         db::upsert_comments(
             &conn,
             &[lt_types::comments::Comment {
-                id: lt_types::Id::new("old"),
+                id: "old".into(),
                 body: "stale".to_string(),
                 created_at: "2025-01-01T00:00:00Z".parse().unwrap(),
                 updated_at: "2025-01-01T00:00:00Z".parse().unwrap(),

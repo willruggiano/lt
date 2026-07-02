@@ -512,21 +512,21 @@ mod tests {
     /// so the relational upsert produces one entity row per distinct name.
     fn test_issue(id: &str, assignee: Option<&str>, state: &str) -> types::Issue {
         types::Issue {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             identifier: format!("ENG-{id}"),
             title: format!("issue {id}"),
             priority_label: "Medium".to_string(),
             priority: Priority(3),
             state: types::WorkflowState {
-                id: lt_types::Id::new(state),
+                id: state.into(),
                 name: state.to_string(),
             },
             assignee: assignee.map(|n| types::User {
-                id: lt_types::Id::new(n),
+                id: n.into(),
                 name: n.to_string(),
             }),
             team: types::Team {
-                id: lt_types::Id::new("ENG"),
+                id: "ENG".into(),
                 name: "Engineering".to_string(),
             },
             description: None,
@@ -559,50 +559,50 @@ mod tests {
     /// the reconstruction and relational-upsert tests.
     fn sample_api_issue() -> types::Issue {
         types::Issue {
-            id: lt_types::Id::new("1"),
+            id: "1".into(),
             identifier: "ENG-1".to_string(),
             title: "Wire it up".to_string(),
             priority_label: "High".to_string(),
             priority: Priority(2),
             state: types::WorkflowState {
-                id: lt_types::Id::new("s1"),
+                id: "s1".into(),
                 name: "In Progress".to_string(),
             },
             assignee: Some(types::User {
-                id: lt_types::Id::new("u1"),
+                id: "u1".into(),
                 name: "Alice".to_string(),
             }),
             team: types::Team {
-                id: lt_types::Id::new("ENG"),
+                id: "ENG".into(),
                 name: "Engineering".to_string(),
             },
             description: Some("body".to_string()),
             labels: types::IssueLabelConnection {
                 nodes: vec![
                     types::IssueLabel {
-                        id: lt_types::Id::new("l-bug"),
+                        id: "l-bug".into(),
                         name: "bug".to_string(),
                     },
                     types::IssueLabel {
-                        id: lt_types::Id::new("l-backend"),
+                        id: "l-backend".into(),
                         name: "backend".to_string(),
                     },
                 ],
             },
             project: Some(types::Project {
-                id: lt_types::Id::new("p1"),
+                id: "p1".into(),
                 name: "Platform".to_string(),
             }),
             cycle: Some(types::Cycle {
-                id: lt_types::Id::new("c1"),
+                id: "c1".into(),
                 name: Some("Cycle 7".to_string()),
             }),
             creator: Some(types::User {
-                id: lt_types::Id::new("u2"),
+                id: "u2".into(),
                 name: "Carol".to_string(),
             }),
             parent: Some(types::Parent {
-                id: lt_types::Id::new("9"),
+                id: "9".into(),
                 identifier: "ENG-9".to_string(),
             }),
             created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
@@ -616,7 +616,7 @@ mod tests {
         // The parent referenced by sample_api_issue must exist for the parent
         // self-join to resolve its identifier.
         let mut parent = sample_api_issue();
-        parent.id = lt_types::Id::new("9");
+        parent.id = "9".into();
         parent.identifier = "ENG-9".to_string();
         parent.parent = None;
         upsert_issues(&conn, &[parent, sample_api_issue()]).unwrap();
@@ -793,7 +793,7 @@ mod tests {
         // A delta pull rewrites the base (state changed server-side).
         let mut updated = sample_api_issue();
         updated.state = types::WorkflowState {
-            id: lt_types::Id::new("s2"),
+            id: "s2".into(),
             name: "Canceled".to_string(),
         };
         upsert_issues(&conn, &[updated]).unwrap();

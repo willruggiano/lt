@@ -521,7 +521,7 @@ mod tests {
         let seq = pending(&conn)[0].seq;
         let mut server_issue = base_issue("1");
         server_issue.state = types::WorkflowState {
-            id: lt_types::Id::new("s-merged"),
+            id: "s-merged".into(),
             name: "Merged".to_string(),
         };
         ack_issue_update(&conn, seq, "1", Some(&server_issue)).unwrap();
@@ -540,7 +540,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
         let mut issue = base_issue("temp");
-        issue.id = lt_types::Id::new("local:abc");
+        issue.id = "local:abc".into();
         issue.identifier = "NEW".to_string();
         let input = IssueCreateInput {
             title: "New".to_string(),
@@ -572,7 +572,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
         let mut issue = base_issue("temp");
-        issue.id = lt_types::Id::new("local:abc");
+        issue.id = "local:abc".into();
         let input = IssueCreateInput {
             title: "New".to_string(),
             team_id: "ENG".to_string(),
@@ -633,12 +633,12 @@ mod tests {
         let seq = pending(&conn)[0].seq;
 
         let comment = lt_types::comments::Comment {
-            id: lt_types::Id::new("c-real"),
+            id: "c-real".into(),
             body: "hi".to_string(),
             created_at: "2026-01-03T00:00:00Z".parse().unwrap(),
             updated_at: "2026-01-03T00:00:00Z".parse().unwrap(),
             user: Some(types::User {
-                id: lt_types::Id::new("u-ada"),
+                id: "u-ada".into(),
                 name: "Ada".to_string(),
             }),
             issue_id: Some("1".to_string()),

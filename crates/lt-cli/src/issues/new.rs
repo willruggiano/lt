@@ -408,28 +408,28 @@ mod tests {
 
     fn team(id: &str, name: &str) -> Team {
         Team {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             name: name.to_string(),
         }
     }
 
     fn state(id: &str, name: &str) -> WorkflowState {
         WorkflowState {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             name: name.to_string(),
         }
     }
 
     fn member(id: &str, name: &str) -> Member {
         Member {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             name: name.to_string(),
         }
     }
 
     fn viewer() -> Viewer {
         Viewer {
-            id: lt_types::Id::new("viewer-id"),
+            id: "viewer-id".into(),
             name: "Vic Viewer".to_string(),
             organization: lt_types::viewer::Organization {
                 name: "Acme".to_string(),

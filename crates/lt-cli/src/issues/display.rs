@@ -110,21 +110,21 @@ pub(crate) mod tests {
     /// `Notification::issue`.
     pub(crate) fn sample_issue(id: &str, identifier: &str, title: &str) -> Issue {
         Issue {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             identifier: identifier.into(),
             title: title.into(),
             priority_label: "Urgent".into(),
             priority: lt_types::scalars::Priority(1),
             state: WorkflowState {
-                id: lt_types::Id::new(""),
+                id: "".into(),
                 name: "In Progress".into(),
             },
             assignee: Some(User {
-                id: lt_types::Id::new(""),
+                id: "".into(),
                 name: "Ada Lovelace".into(),
             }),
             team: Team {
-                id: lt_types::Id::new("ENG"),
+                id: "ENG".into(),
                 name: "Engineering".into(),
             },
             description: None,
@@ -171,7 +171,7 @@ pub(crate) mod tests {
         second.assignee = None;
         second.labels = IssueLabelConnection {
             nodes: vec![IssueLabel {
-                id: lt_types::Id::new("l1"),
+                id: "l1".into(),
                 name: "bug".into(),
             }],
         };

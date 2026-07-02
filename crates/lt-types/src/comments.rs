@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn author_falls_back_to_unknown() {
         let comment = Comment {
-            id: cynic::Id::new("c1"),
+            id: "c1".into(),
             body: "hi".to_string(),
             created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
             updated_at: "2026-01-01T00:00:00Z".parse().unwrap(),
