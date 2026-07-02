@@ -40,12 +40,6 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(lt_dir.join("lt.db"))
 }
 
-/// Migration 1: the complete schema in its final shape. We are pre-1.0 and
-/// carry no legacy-compatibility migration (docs/design/type-safe-sql-adr.md,
-/// "Migrations") -- a database from before this crate adopted
-/// `rusqlite_migration` is rejected by [`guard_against_legacy_database`]
-/// rather than patched up in place. Every future schema change is a plain
-/// versioned `M::up` entry appended after this one.
 const MIGRATION_1: &str = "\
     CREATE TABLE issues (
         id               TEXT PRIMARY KEY,
@@ -139,17 +133,7 @@ fn migrations() -> Migrations<'static> {
     Migrations::new(vec![M::up(MIGRATION_1)])
 }
 
-/// Refuse to migrate a database that predates versioned migrations. We are
-/// pre-1.0 and carry no compatibility shim for it (un-synced `outbox` /
-/// `pending_overlay` rows would be lost either way, since they cannot be
-/// reasoned about against an unknown prior schema): the fix is to delete the
-/// stale file and let `lt sync` rebuild the cache, not to migrate it in
-/// place.
-///
-/// A fresh database and a legacy one are both at `PRAGMA user_version = 0`,
-/// so version alone cannot tell them apart; a fresh database also has no
-/// tables yet, so "`user_version` is 0 and `sqlite_master` is non-empty" is
-/// the signal. `path` is folded into the error message.
+/// Refuse a pre-versioning database (`user_version` 0 but tables exist): delete it and re-sync.
 fn guard_against_legacy_database(conn: &Connection, path: &Path) -> Result<()> {
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
