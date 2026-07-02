@@ -4,8 +4,8 @@ use lt_types::comments::Comment;
 use lt_types::types::User;
 use rusqlite::{Connection, params};
 
-use crate::db::issues::EntityTable;
-use crate::db::{parse_datetime_column, sql};
+use crate::db::parse_datetime_column;
+use crate::db::sql::{self, EntityTable};
 
 /// Insert or replace a slice of comments: upsert each comment's author into
 /// the `users` table (relational storage, no more flattened `author_name`),
@@ -109,9 +109,8 @@ mod tests {
     }
 
     fn test_db() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&mut conn).unwrap();
-        conn
+        let db = crate::db::Database::memory().unwrap();
+        db.connect().unwrap()
     }
 
     #[test]

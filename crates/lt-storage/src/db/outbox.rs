@@ -14,8 +14,7 @@ use lt_types::types;
 use rusqlite::{Connection, params};
 use serde_json::json;
 
-use crate::db::issues::EntityTable;
-use crate::db::sql;
+use crate::db::sql::{self, EntityTable};
 
 pub const OP_ISSUE_UPDATE: &str = "IssueUpdate";
 pub const OP_ISSUE_CREATE: &str = "IssueCreate";
@@ -467,8 +466,8 @@ mod tests {
     use super::{sample_base_issue as base_issue, *};
 
     fn db_with_issue(id: &str) -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&mut conn).unwrap();
+        let db = crate::db::Database::memory().unwrap();
+        let conn = db.connect().unwrap();
         crate::db::upsert_issues(&conn, &[base_issue(id)]).unwrap();
         conn
     }
@@ -548,8 +547,8 @@ mod tests {
 
     #[test]
     fn enqueue_create_inserts_temp_row_and_command() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&mut conn).unwrap();
+        let db = crate::db::Database::memory().unwrap();
+        let conn = db.connect().unwrap();
         let mut issue = base_issue("temp");
         issue.id = "local:abc".into();
         issue.identifier = "NEW".to_string();
@@ -580,8 +579,8 @@ mod tests {
 
     #[test]
     fn ack_create_rewrites_temp_id_to_server_id() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&mut conn).unwrap();
+        let db = crate::db::Database::memory().unwrap();
+        let conn = db.connect().unwrap();
         let mut issue = base_issue("temp");
         issue.id = "local:abc".into();
         let input = IssueCreateInput {

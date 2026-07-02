@@ -6,10 +6,9 @@ use lt_types::query::IssueQuery;
 use lt_types::scalars::Priority;
 use lt_types::types;
 use rusqlite::{Connection, params};
-pub(crate) use sql::EntityTable;
 
 use crate::db::parse_datetime_column;
-use crate::db::sql::{self, Sql};
+use crate::db::sql::{self, EntityTable, Sql};
 
 /// Reconstruct a [`types::Issue`] from a row selected by
 /// [`sql::QUERY_ISSUE_BY_ID`] (or any other statement or composed query built
@@ -528,8 +527,8 @@ mod tests {
     }
 
     fn test_db() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&mut conn).unwrap();
+        let db = crate::db::Database::memory().unwrap();
+        let conn = db.connect().unwrap();
         upsert_issues(
             &conn,
             &[
@@ -598,8 +597,8 @@ mod tests {
     }
 
     fn graph_db() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&mut conn).unwrap();
+        let db = crate::db::Database::memory().unwrap();
+        let conn = db.connect().unwrap();
         // The parent referenced by sample_api_issue must exist for the parent
         // self-join to resolve its identifier.
         let mut parent = sample_api_issue();

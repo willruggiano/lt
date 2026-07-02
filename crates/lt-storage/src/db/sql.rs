@@ -218,6 +218,12 @@ statements! {
     COUNT_FTS_ROWS, 0,
         "SELECT COUNT(*) FROM issues_fts";
 
+    /// Count every table in the database, including SQLite's own bookkeeping
+    /// tables. Used only to detect a pre-versioned database: `sqlite_master`
+    /// always exists, so this prepares against any connection.
+    COUNT_TABLES, 0,
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'";
+
     /// Upsert one `(id, name)` row into `teams`.
     UPSERT_TEAM, 2, entity_upsert_sql!("teams");
     /// Upsert one `(id, name)` row into `users`.
@@ -582,9 +588,8 @@ mod tests {
     use super::*;
 
     fn migrated_conn() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&mut conn).unwrap();
-        conn
+        let db = crate::db::Database::memory().unwrap();
+        db.connect().unwrap()
     }
 
     /// The fixed-statement slice of the gate's schema-adherence validator
