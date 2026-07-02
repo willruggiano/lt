@@ -1,7 +1,7 @@
 //! Workflow-state list reads (the new-issue modal's state picker).
 
 use anyhow::Result;
-use lt_types::states as wire;
+use lt_types::states::{WorkflowStatesQuery, query};
 use lt_types::types::WorkflowState;
 
 use crate::client::GraphqlTransport;
@@ -9,7 +9,7 @@ use crate::graphql::fetch_team_scoped;
 
 /// List a team's workflow states.
 pub fn fetch(transport: &dyn GraphqlTransport, team_id: &str) -> Result<Vec<WorkflowState>> {
-    fetch_team_scoped::<wire::WorkflowStatesQuery>(transport, &wire::query(), team_id)
+    fetch_team_scoped::<WorkflowStatesQuery>(transport, &query(), team_id)
 }
 
 #[cfg(test)]

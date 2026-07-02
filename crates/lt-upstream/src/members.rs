@@ -1,7 +1,7 @@
 //! Team-member list reads (the new-issue modal's assignee picker).
 
 use anyhow::Result;
-use lt_types::members as wire;
+use lt_types::members::{TeamMembersQuery, query};
 use lt_types::types::User;
 
 use crate::client::GraphqlTransport;
@@ -9,7 +9,7 @@ use crate::graphql::fetch_team_scoped;
 
 /// List a team's members.
 pub fn fetch(transport: &dyn GraphqlTransport, team_id: &str) -> Result<Vec<User>> {
-    fetch_team_scoped::<wire::TeamMembersQuery>(transport, &wire::query(), team_id)
+    fetch_team_scoped::<TeamMembersQuery>(transport, &query(), team_id)
 }
 
 #[cfg(test)]

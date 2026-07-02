@@ -15,7 +15,8 @@ pub use login::run as login;
 /// credentials are missing. Safe to call from a background thread (the TUI
 /// re-auth path, bd-vhp).
 pub use login::run_non_interactive as login_non_interactive;
-/// Log out and remove local credentials (`lt auth logout`).
+/// Remove the stored auth token (the `lt auth logout` data path); printing
+/// lives in `lt-cli`.
 pub use logout::run as logout;
 /// Fetch the currently authenticated identity (the `lt auth status` data
 /// path); printing lives in `lt-cli`.

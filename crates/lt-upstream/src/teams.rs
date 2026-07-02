@@ -1,7 +1,7 @@
 //! Team list reads (the new-issue modal's team picker).
 
 use anyhow::Result;
-use lt_types::teams as wire;
+use lt_types::teams::{TeamsQuery, query};
 use lt_types::types::Team;
 use serde_json::Value;
 
@@ -9,7 +9,7 @@ use crate::client::{GraphqlTransport, query_as};
 
 /// List the teams the viewer can file issues against.
 pub fn fetch(transport: &dyn GraphqlTransport) -> Result<Vec<Team>> {
-    let data: wire::TeamsQuery = query_as(transport, &wire::query(), Value::Null)?;
+    let data: TeamsQuery = query_as(transport, &query(), Value::Null)?;
     Ok(data.teams.nodes)
 }
 

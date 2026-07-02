@@ -21,7 +21,7 @@ pub fn run(out: &mut dyn Write, cmd: &AuthCommands) -> Result<()> {
     match cmd {
         AuthCommands::Login => auth::login(),
         AuthCommands::Status => print_status(out),
-        AuthCommands::Logout => auth::logout(out),
+        AuthCommands::Logout => print_logout(out),
     }
 }
 
@@ -35,5 +35,16 @@ fn print_status(out: &mut dyn Write) -> Result<()> {
         "organization: {} ({})",
         viewer.organization.name, viewer.organization.url_key
     )?;
+    Ok(())
+}
+
+/// Print the result of removing local credentials (the `lt auth logout`
+/// output).
+fn print_logout(out: &mut dyn Write) -> Result<()> {
+    if auth::logout()? {
+        writeln!(out, "Logged out.")?;
+    } else {
+        writeln!(out, "Not logged in.")?;
+    }
     Ok(())
 }

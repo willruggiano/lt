@@ -4,7 +4,8 @@
 
 /// Interactive `OAuth2` login (the `lt auth login` path).
 pub use lt_upstream::auth::login;
-/// Log out and remove local credentials (`lt auth logout`).
+/// Remove the stored auth token (the `lt auth logout` data path); printing
+/// lives in `lt-cli`.
 pub use lt_upstream::auth::logout;
 /// Fetch the currently authenticated identity (the `lt auth status` data
 /// path); printing lives in `lt-cli`.

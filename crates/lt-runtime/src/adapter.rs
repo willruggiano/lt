@@ -11,8 +11,13 @@ use lt_storage::db;
 use lt_types::query::IssueQuery;
 use lt_types::types::{Team, User, WorkflowState};
 use lt_types::viewer;
-use lt_upstream as upstream;
+use lt_upstream::auth::login_non_interactive;
+use lt_upstream::auth::refresh::load_or_refresh_token;
 use lt_upstream::client::HttpTransport;
+use lt_upstream::members::fetch as fetch_members_upstream;
+use lt_upstream::states::fetch as fetch_states_upstream;
+use lt_upstream::teams::fetch as fetch_teams_upstream;
+use lt_upstream::viewer::fetch as fetch_viewer_upstream;
 
 use crate::sync::service::{LoginEvent, SyncEvent, SyncService};
 
@@ -22,12 +27,12 @@ impl LinearSyncService {
     /// Best-effort viewer identity from the stored token.
     fn viewer_identity() -> Option<viewer::User> {
         let token = lt_config::load_token().ok().flatten()?;
-        upstream::viewer::fetch(&HttpTransport::new(token.access_token)).ok()
+        fetch_viewer_upstream(&HttpTransport::new(token.access_token)).ok()
     }
 
     /// A transport with a fresh (auto-refreshed) token for a live read.
     fn transport() -> Result<HttpTransport> {
-        let token = upstream::auth::refresh::load_or_refresh_token()?;
+        let token = load_or_refresh_token()?;
         Ok(HttpTransport::new(token.access_token))
     }
 }
@@ -81,7 +86,7 @@ impl SyncService for LinearSyncService {
 
     fn spawn_login(&self) -> mpsc::Receiver<LoginEvent> {
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || match upstream::auth::login_non_interactive() {
+        std::thread::spawn(move || match login_non_interactive() {
             Ok(()) => {
                 // Fetch viewer identity while the token is fresh.
                 let viewer = Self::viewer_identity();
@@ -102,15 +107,15 @@ impl SyncService for LinearSyncService {
     }
 
     fn fetch_teams(&self) -> Result<Vec<Team>> {
-        upstream::teams::fetch(&Self::transport()?)
+        fetch_teams_upstream(&Self::transport()?)
     }
 
     fn fetch_workflow_states(&self, team_id: &str) -> Result<Vec<WorkflowState>> {
-        upstream::states::fetch(&Self::transport()?, team_id)
+        fetch_states_upstream(&Self::transport()?, team_id)
     }
 
     fn fetch_team_members(&self, team_id: &str) -> Result<Vec<User>> {
-        upstream::members::fetch(&Self::transport()?, team_id)
+        fetch_members_upstream(&Self::transport()?, team_id)
     }
 
     fn sync_comments(&self, issue_id: &str) -> Result<()> {

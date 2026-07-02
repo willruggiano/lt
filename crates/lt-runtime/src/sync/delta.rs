@@ -1,6 +1,6 @@
 use anyhow::Result;
 use lt_storage::db;
-use lt_types::issues as wire;
+use lt_types::issues::{IssuesQuery, query};
 use lt_types::types::Issue;
 use lt_upstream::client::{GraphqlTransport, HttpTransport, query_as};
 use serde_json::json;
@@ -26,7 +26,7 @@ fn fetch_page(
         "after": after,
     });
 
-    let data: wire::IssuesQuery = query_as(transport, &wire::query(), variables)?;
+    let data: IssuesQuery = query_as(transport, &query(), variables)?;
     let conn = data.issues;
     Ok((
         conn.nodes,
