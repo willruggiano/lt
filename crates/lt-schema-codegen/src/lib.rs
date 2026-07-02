@@ -1,6 +1,5 @@
 //! Shared helpers for the GraphQL-schema-driven sort/search codegen, used as a
 //! build dependency by `lt-types/build.rs` and `lt-storage/build.rs`.
-//! Previously `include!`d from `build/schema_codegen.rs`.
 
 // Build scripts report failure by panicking, which is idiomatic and cannot
 // propagate a `Result`; this crate exists only to be called from build
