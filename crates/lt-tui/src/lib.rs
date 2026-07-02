@@ -24,7 +24,7 @@ pub(crate) use detail::{build_cached_detail, populate_relations};
 pub(crate) use detail::{handle_detail_key, poll_detail_comment_events};
 use lt_runtime::query::IssueQuery;
 use lt_runtime::search_query;
-use lt_runtime::sync_port::{LoginEvent, SyncEvent, SyncService};
+use lt_runtime::sync::service::{LoginEvent, SyncEvent, SyncService};
 use lt_types::types::Issue;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use lt_types::types::priority_label_to_u8;

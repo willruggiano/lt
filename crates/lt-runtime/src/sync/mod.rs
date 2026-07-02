@@ -2,6 +2,7 @@ pub mod delta;
 pub mod drain;
 pub mod full;
 pub mod probe;
+pub mod service;
 
 use anyhow::Result;
 use chrono::Utc;

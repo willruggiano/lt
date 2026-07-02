@@ -14,7 +14,7 @@ use lt_types::viewer;
 use lt_upstream as upstream;
 use lt_upstream::client::HttpTransport;
 
-use crate::sync_port::{LoginEvent, SyncEvent, SyncService};
+use crate::sync::service::{LoginEvent, SyncEvent, SyncService};
 
 pub struct LinearSyncService;
 
