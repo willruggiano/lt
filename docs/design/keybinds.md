@@ -42,7 +42,7 @@ unchanged.
 ## Linear web client inventory
 
 Sourced from Linear's official documentation only. There is no single shortcuts
-page — the authoritative complete list is the in-app `?` overlay; the docs
+page — the authoritative complete list is the in-app shortcuts panel; the docs
 document shortcuts per feature. Each table cites its pages.
 
 Status column: **bound** (mapped in this design), **reserved** (key left unbound
@@ -78,16 +78,22 @@ Sources: [inbox](https://linear.app/docs/inbox),
 Sources: [select-issues](https://linear.app/docs/select-issues),
 [search](https://linear.app/docs/search).
 
-| Keys               | Action            | Status                        |
-| ------------------ | ----------------- | ----------------------------- |
-| `j` / `k`, arrows  | Move highlight    | bound                         |
-| `enter`            | Open issue        | bound (`space` kept as alias) |
-| `/`                | Search            | bound                         |
-| `?`                | Shortcut help     | bound                         |
-| `esc`              | Context-dependent | bound                         |
-| `cmd/ctrl+k`       | Command menu      | out of scope (non-goal)       |
-| `cmd/ctrl+f`       | Find in view      | reserved                      |
-| `cmd/ctrl+[` / `]` | History back/fwd  | out of scope (browser)        |
+| Keys               | Action             | Status                        |
+| ------------------ | ------------------ | ----------------------------- |
+| `j` / `k`, arrows  | Move highlight     | bound                         |
+| `enter`            | Open issue         | bound (`space` kept as alias) |
+| `/`                | Search             | bound                         |
+| `?`                | Open help panel    | reserved (no help panel)      |
+| `ctrl+/`           | Keyboard shortcuts | bound                         |
+| `V`                | Display options    | reserved                      |
+| `esc`              | Context-dependent  | bound                         |
+| `cmd/ctrl+k`       | Command menu       | out of scope (non-goal)       |
+| `cmd/ctrl+f`       | Find in view       | reserved                      |
+| `cmd/ctrl+[` / `]` | History back/fwd   | out of scope (browser)        |
+
+The `ctrl+/` (keyboard shortcuts) and `V` (display options — Linear's home for
+ordering) rows are not documented on the cited pages; they come from the app
+itself.
 
 ### Issue actions (focused or selected issue)
 
@@ -99,23 +105,23 @@ Sources: [assigning-issues](https://linear.app/docs/assigning-issues),
 [creating-issues](https://linear.app/docs/creating-issues),
 [select-issues](https://linear.app/docs/select-issues).
 
-| Keys             | Action               | Status                             |
-| ---------------- | -------------------- | ---------------------------------- |
-| `s`              | Change status        | bound (already matches)            |
-| `a`              | Assign               | bound (already matches)            |
-| `p`              | Set priority         | bound (already matches)            |
-| `c`              | Create issue         | bound (replaces `n`)               |
-| `i`              | Assign to me         | reserved (cheap follow-up)         |
-| `l`              | Edit labels          | reserved                           |
-| `P`              | Set project          | reserved                           |
-| `D`              | Set due date         | reserved                           |
-| `E`              | Set estimate         | reserved                           |
-| `S`              | Subscribe            | reserved — `S` is cycle-sort today |
-| `h`              | Snooze               | reserved                           |
-| `x`              | Select (multi)       | out of scope (non-goal)            |
-| `v`              | Create full-screen   | out of scope (no equivalent)       |
-| `alt+c`          | Create from template | reserved                           |
-| `cmd/ctrl+enter` | Submit form          | bound                              |
+| Keys             | Action               | Status                       |
+| ---------------- | -------------------- | ---------------------------- |
+| `s`              | Change status        | bound (already matches)      |
+| `a`              | Assign               | bound (already matches)      |
+| `p`              | Set priority         | bound (already matches)      |
+| `c`              | Create issue         | bound (replaces `n`)         |
+| `i`              | Assign to me         | reserved (cheap follow-up)   |
+| `l`              | Edit labels          | reserved                     |
+| `P`              | Set project          | reserved                     |
+| `D`              | Set due date         | reserved                     |
+| `E`              | Set estimate         | reserved                     |
+| `S`              | Subscribe            | reserved                     |
+| `h`              | Snooze               | reserved                     |
+| `x`              | Select (multi)       | out of scope (non-goal)      |
+| `v`              | Create full-screen   | out of scope (no equivalent) |
+| `alt+c`          | Create from template | reserved                     |
+| `cmd/ctrl+enter` | Submit form          | bound                        |
 
 ### Inbox, triage, boards
 
@@ -225,7 +231,7 @@ tables + no-timer pending prefix + help generated from the tables**.
 crates/lt-tui/src/keymap/
   mod.rs      KeyContext, Binding, Resolved, resolve(), static binding
               tables, help_rows(), invariant + snapshot tests
-  key.rs      Key: from_event normalization, Display, FromStr, const ctors
+  key.rs      Key: From<KeyEvent> normalization, Display, FromStr, const ctors
   action.rs   Action enum + label()
 ```
 
@@ -238,7 +244,7 @@ of the six handlers. No new dependencies.
 crossterm KeyEvent (EventSource::next_key, Press-filtered)
         |
         v
-  Key::from_event          normalize: strip kitty state bits;
+  Key::from(KeyEvent)      normalize: strip kitty state bits;
         |                  BackTab -> tab+shift; ctrl+char lowercased;
         v                  SHIFT folded into char case ('G', not shift+g)
   dispatch_key(app, key)
@@ -267,8 +273,11 @@ crossterm KeyEvent (EventSource::next_key, Press-filtered)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Key { pub code: KeyCode, pub mods: KeyModifiers }
 
+impl From<KeyEvent> for Key {
+    fn from(ev: KeyEvent) -> Self;            // sole entry from crossterm
+}
+
 impl Key {
-    pub fn from_event(ev: KeyEvent) -> Self;  // sole entry from crossterm
     pub const fn char(c: char) -> Self;       // table-building ctors
     pub const fn ctrl(c: char) -> Self;
     pub const fn plain(code: KeyCode) -> Self;
@@ -302,8 +311,7 @@ pub enum Action {
     Quit, Back, OpenHelp, OpenSearch, OpenDetail, CreateIssue,
     Refresh, Login, OpenInBrowser,
     // issue fields
-    SetStatus, SetPriority, SetAssignee, CycleSort, ToggleSortDirection,
-    Comment,
+    SetStatus, SetPriority, SetAssignee, ToggleSortDirection, Comment,
     // forms
     Submit, Confirm, NextField, PrevField, PickMe,
     // search overlay
@@ -339,7 +347,7 @@ Two layers, resolved context-first:
 
 - The context's own table.
 - `GLOBAL` — **navigation vocabulary only** (`j`/`k`/arrows, `g g`, `G`,
-  `ctrl+d`/`ctrl+u`, page keys). Action keys (`q`, `c`, `?`, `/`) are
+  `ctrl+d`/`ctrl+u`, page keys). Action keys (`q`, `c`, `ctrl+/`, `/`) are
   per-context. This eliminates shadowing surprises (a global `q` would quit the
   app from inside a popup) at the cost of repeating `esc → Back` in each table.
 
@@ -387,7 +395,7 @@ The router at lib.rs:844-851 becomes:
 
 ```rust
 if let Some(ev) = events.next_key(Duration::from_millis(100))? {
-    dispatch_key(app, Key::from_event(ev));
+    dispatch_key(app, Key::from(ev));
 }
 ```
 
@@ -414,14 +422,15 @@ boundary.
 
 ### Conflict resolutions
 
-| Conflict                                  | Resolution                                                                                                                              |
-| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `lt` `g` = top vs Linear `g` chord prefix | `g g` = top (vim), `G` = bottom unchanged. `g` becomes a prefix; `g i`/`g m`/`g t` slot in when those features exist.                   |
-| `lt` `o` = browser vs Linear `o` prefix   | Open-in-browser moves to `ctrl+o`. `o` is left unbound (reserved) — an empty prefix would be dead weight; chords register per feature.  |
-| `lt` `n` = new issue vs Linear `c`        | `c` = create issue in List; `n` unbound. `c` in Detail stays comment (context tables shadow nothing — create is List-scoped).           |
-| `lt` `space` = open vs Linear `enter`     | `enter` opens detail; `space` kept as alias. Revisit if multi-select ever wants `space`.                                                |
-| `lt` `S` = cycle sort vs Linear `S`       | `S` keeps cycle-sort until subscribe exists (sort is also expressible via `/` `sort:` stems, so the fallback exists).                   |
-| Non-conflicts after normalization         | `d` (sort dir) vs `D` (due date), `L` (login) vs `l` (labels), pagination `ctrl+n`/`ctrl+p` vs completion `ctrl+n`/`ctrl+p` (layering). |
+| Conflict                                  | Resolution                                                                                                                                 |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `lt` `g` = top vs Linear `g` chord prefix | `g g` = top (vim), `G` = bottom unchanged. `g` becomes a prefix; `g i`/`g m`/`g t` slot in when those features exist.                      |
+| `lt` `o` = browser vs Linear `o` prefix   | Open-in-browser moves to `ctrl+o`. `o` is left unbound (reserved) — an empty prefix would be dead weight; chords register per feature.     |
+| `lt` `n` = new issue vs Linear `c`        | `c` = create issue in List; `n` unbound. `c` in Detail stays comment (context tables shadow nothing — create is List-scoped).              |
+| `lt` `space` = open vs Linear `enter`     | `enter` opens detail; `space` kept as alias. Revisit if multi-select ever wants `space`.                                                   |
+| `lt` `S` = cycle sort vs Linear `S`       | Cycle-sort functionality is removed (sort remains expressible via `/` `sort:` stems). `S` reserved for subscribe, `V` for display options. |
+| `lt` `?` = keybind help vs Linear `?`     | Linear's `?` opens the help panel, which `lt` lacks; the keybinds panel mirrors Linear's `ctrl+/`. `?` reserved for a future help panel.   |
+| Non-conflicts after normalization         | `d` (sort dir) vs `D` (due date), `L` (login) vs `l` (labels), pagination `ctrl+n`/`ctrl+p` vs completion `ctrl+n`/`ctrl+p` (layering).    |
 
 ### GLOBAL (skipped by text contexts)
 
@@ -437,16 +446,23 @@ boundary.
 
 ### List
 
-| Binding           | Action            | Binding  | Action              |
-| ----------------- | ----------------- | -------- | ------------------- |
-| `enter` / `space` | OpenDetail        | `r`      | Refresh             |
-| `esc`             | Back (double-esc) | `S`      | CycleSort           |
-| `/`               | OpenSearch        | `d`      | ToggleSortDirection |
-| `?`               | OpenHelp          | `ctrl+o` | OpenInBrowser       |
-| `c`               | CreateIssue       | `ctrl+n` | NextPage            |
-| `s`               | SetStatus         | `ctrl+p` | PrevPage            |
-| `p`               | SetPriority       | `L`      | Login               |
-| `a`               | SetAssignee       | `q`      | Quit                |
+| Binding             | Action            | Binding  | Action              |
+| ------------------- | ----------------- | -------- | ------------------- |
+| `enter` / `space`   | OpenDetail        | `ctrl+r` | Refresh             |
+| `esc`               | Back (double-esc) | `d`      | ToggleSortDirection |
+| `/`                 | OpenSearch        | `ctrl+o` | OpenInBrowser       |
+| `ctrl+/` / `ctrl+7` | OpenHelp          | `ctrl+n` | NextPage            |
+| `c`                 | CreateIssue       | `ctrl+p` | PrevPage            |
+| `s`                 | SetStatus         | `L`      | Login               |
+| `p`                 | SetPriority       | `q`      | Quit                |
+| `a`                 | SetAssignee       |          |                     |
+
+`ctrl+7` is the legacy alias for `ctrl+/`: without the kitty protocol, terminals
+send Ctrl+/ as 0x1F, which crossterm decodes as ctrl+`'7'` (crossterm 0.29,
+`src/event/sys/unix/parse.rs:110-113`); kitty-enhanced terminals deliver a true
+`ctrl+/`. Both are bound, like the submit chords. Cycle-sort (`S` today) is
+removed outright — `S` is reserved for subscribe — and its functionality remains
+reachable via `/` `sort:` stems.
 
 ### Detail
 
@@ -493,21 +509,23 @@ limitation, carried forward deliberately.)
 
 ```rust
 pub struct HelpRow {
-    pub keys: String,          // "j / down", "g g", "ctrl+enter / alt+enter"
-    pub label: &'static str,   // Action::label()
-    pub context: &'static str, // "global", "list", "detail", ...
+    pub bindings: Vec<Binding>, // e.g. [j, down] or [g g]
+    pub label: &'static str,    // Action::label()
+    pub context: &'static str,  // "global", "list", "detail", ...
 }
 
 /// Iterate GLOBAL then each context table in declaration order; group
-/// consecutive rows by (context, action); join binding Displays with " / ".
+/// consecutive rows by (context, action).
 pub fn help_rows() -> Vec<HelpRow>;
 ```
 
-`HelpPopup` (popup.rs:61-94) stores `rows: Vec<HelpRow>` built once;
-`update_filter` matches against keys, label, and context. `ui/help.rs` reads the
-rows and gains a context column. Help can no longer drift because it _is_ the
-keymap; the existing inaccuracies (the "Esc/q" title, the context-less `c`
-entry) disappear as a class.
+`HelpPopup` (popup.rs:61-94) stores `rows: Vec<HelpRow>` built once; the
+renderer joins the bindings' `Display` forms with `" / "` ("j / down",
+"ctrl+enter / alt+enter"), and `update_filter` matches against that rendered
+form, the label, and the context. `ui/help.rs` reads the rows and gains a
+context column. Help can no longer drift because it _is_ the keymap; the
+existing inaccuracies (the "Esc/q" title, the context-less `c` entry) disappear
+as a class.
 
 ## Kitty keyboard protocol and the submit chord
 
@@ -518,9 +536,10 @@ unconditionally (new_issue.rs:417, detail.rs:290) and `keyboard_enhanced` only
 selects the hint string. The keymap replicates this exactly: both `ctrl+enter`
 and `alt+enter` are statically bound to `Submit` — no runtime capability
 switching. Without kitty, `ctrl+enter` arrives as plain `enter` (newline in
-multiline fields, today's behavior) and `alt+enter` is the escape hatch.
-`Key::from_event` strips kitty's extra state bits so enhanced and legacy
-terminals produce identical `Key` values for every table entry.
+multiline fields, today's behavior) and `alt+enter` is the escape hatch. The
+same both-bound pattern covers `ctrl+/`/`ctrl+7` for the shortcuts panel. The
+`From<KeyEvent>` conversion strips kitty's extra state bits so enhanced and
+legacy terminals produce identical `Key` values for every table entry.
 
 ## Testing strategy
 
@@ -528,7 +547,7 @@ Inline `#[cfg(test)]` modules per [[testing.md]].
 
 1. **Round-trip agreement** (key.rs): for representative `KeyEvent`s —
    `Char('G')+SHIFT`, `BackTab`, `Char('D')+CTRL+SHIFT`, kitty state bits —
-   assert `from_event(ev).to_string().parse() == from_event(ev)`; `FromStr`
+   assert `Key::from(ev).to_string().parse() == Key::from(ev)`; `FromStr`
    leniency (`"shift+p"` == `"P"`); `Binding` round-trip (`"g g"`).
 2. **Resolution units** (mod.rs): chord hit (`g`,`g` → MoveTop); chord miss
    falls through (`g`,`j` → MoveDown); text context ignores GLOBAL (`c` in
@@ -556,7 +575,11 @@ Each phase lands gate-green (`make check` / `make test`).
    `dispatch_key`; convert `handle_normal_key`/`handle_detail_key`/
    `handle_popup_key` to `apply_*` (the comment-input gate temporarily keeps
    forwarding to the old comment handler). Binding changes land here: `g g`/`G`,
-   `enter`+`space`, `c` create, `ctrl+o` browser. Pending indicator in the
+   `enter`+`space`, `c` create, `ctrl+o` browser, `ctrl+r` refresh,
+   `ctrl+/`+`ctrl+7` help. Cycle-sort is removed outright (`App::cycle_sort`,
+   its `S` binding, and its help entry). The dead `App.input_mode`/`input_buf`
+   filter state (lib.rs:323-325) and the unreachable footer branch
+   (ui/mod.rs:94-95) are deleted (approved in review). Pending indicator in the
    status row. Patch `ALL_KEYBINDINGS` strings minimally so help doesn't lie in
    the interim. Extend loop tests.
 2. **Text contexts.** `key_context` grows the comment-input and `NewIssueField`
@@ -580,10 +603,7 @@ Each phase lands gate-green (`make check` / `make test`).
   (popup.rs:341,346), as does `new_issue_submit` (new_issue.rs:243). Fine today
   (popups only open from List), but phase-4 "s/p/a from Detail" needs a
   return-mode field first. Not solved here; do not bind Detail `s` without it.
-- **Dead legacy filter state.** `App.input_mode`/`input_buf` (lib.rs:323-325)
-  are never set; `ui/mod.rs:94-95` renders an unreachable branch. `key_context`
-  ignores it; removal is separate, user-approved work per
-  [[posture.md#3. Surgical Changes]].
-- **Muscle-memory breaks.** `g` → `g g`, `o` → `ctrl+o`, `n` → `c` are
-  deliberate breaking changes, acceptable in 0.1.x per [[posture.md]]; the help
-  overlay and footer hints are updated in the same phases.
+- **Muscle-memory breaks.** `g` → `g g`, `o` → `ctrl+o`, `n` → `c`, `r` →
+  `ctrl+r`, `?` → `ctrl+/`, and the removal of `S` cycle-sort are deliberate
+  breaking changes, acceptable in 0.1.x per [[posture.md]]; the help overlay and
+  footer hints are updated in the same phases.
