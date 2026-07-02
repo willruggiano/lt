@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use lt_types::query::{IssueQuery, SortField, parse_date};
-use rusqlite::types::ToSql;
+
+use crate::db::sql::{self, BindParams, Frag, SortCol};
 
 fn parse_priority_label(s: &str) -> Result<String> {
     let label = match s.to_lowercase().as_str() {
@@ -18,19 +19,21 @@ fn parse_priority_label(s: &str) -> Result<String> {
     Ok(label.to_string())
 }
 
-/// Build a SQL WHERE clause and bind parameters from `IssueQuery` filter fields.
+/// Select the registered `WHERE`-clause fragments and bind parameters that
+/// apply to `IssueQuery`'s filter fields.
 ///
 /// Returns a tuple of:
-///   - a WHERE clause string (empty string if no filters)
-///   - a Vec of boxed `ToSql` values matching the placeholders in the clause
+///   - the selected fragments, in the order they must be `AND`-joined
+///   - a Vec of boxed `ToSql` values matching the placeholders in those fragments
 ///
-/// The caller is responsible for prepending "WHERE " if the clause is non-empty.
-pub fn build_sql_filter(args: &IssueQuery) -> Result<(String, Vec<Box<dyn ToSql>>)> {
-    let mut clauses: Vec<String> = Vec::new();
-    let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+/// The caller composes the final statement via
+/// [`crate::db::sql::select_issues`] / [`crate::db::sql::select_issues_page`].
+pub(crate) fn build_sql_filter(args: &IssueQuery) -> Result<(Vec<Frag>, BindParams)> {
+    let mut conditions: Vec<Frag> = Vec::new();
+    let mut params: BindParams = Vec::new();
 
     if let Some(team) = &args.team {
-        clauses.push("(t.name LIKE ? OR i.team_id = ?)".to_string());
+        conditions.push(sql::FRAG_TEAM_OR_ID);
         let pattern = format!("%{team}%");
         params.push(Box::new(pattern));
         params.push(Box::new(team.clone()));
@@ -40,85 +43,77 @@ pub fn build_sql_filter(args: &IssueQuery) -> Result<(String, Vec<Box<dyn ToSql>
         if assignee.eq_ignore_ascii_case("me") {
             // "me" is resolved at the call site by the caller who has auth context;
             // we emit a placeholder that the caller must fill with the viewer name.
-            clauses.push("ua.name = ?".to_string());
+            conditions.push(sql::FRAG_ASSIGNEE_EQ);
             params.push(Box::new(assignee.clone()));
         } else {
-            clauses.push("ua.name LIKE ?".to_string());
+            conditions.push(sql::FRAG_ASSIGNEE_LIKE);
             let pattern = format!("%{assignee}%");
             params.push(Box::new(pattern));
         }
     } else if args.no_assignee {
-        clauses.push("i.assignee_id IS NULL".to_string());
+        conditions.push(sql::FRAG_NO_ASSIGNEE);
     }
 
     if let Some(state) = &args.state {
-        clauses.push("s.name LIKE ?".to_string());
+        conditions.push(sql::FRAG_STATE_LIKE);
         let pattern = format!("%{state}%");
         params.push(Box::new(pattern));
     }
 
     if let Some(priority_str) = &args.priority {
         let label = parse_priority_label(priority_str)?;
-        clauses.push("i.priority_label = ?".to_string());
+        conditions.push(sql::FRAG_PRIORITY_EQ);
         params.push(Box::new(label));
     }
 
     if let Some(title) = &args.title {
-        clauses.push("i.title LIKE ?".to_string());
+        conditions.push(sql::FRAG_TITLE_LIKE);
         let pattern = format!("%{title}%");
         params.push(Box::new(pattern));
     }
 
     if let Some(date) = &args.created_after {
         let ts = parse_date(date, "created-after")?;
-        clauses.push("i.created_at >= ?".to_string());
+        conditions.push(sql::FRAG_CREATED_AFTER);
         params.push(Box::new(ts));
     }
 
     if let Some(date) = &args.created_before {
         let ts = parse_date(date, "created-before")?;
-        clauses.push("i.created_at < ?".to_string());
+        conditions.push(sql::FRAG_CREATED_BEFORE);
         params.push(Box::new(ts));
     }
 
     if let Some(date) = &args.updated_after {
         let ts = parse_date(date, "updated-after")?;
-        clauses.push("i.updated_at >= ?".to_string());
+        conditions.push(sql::FRAG_UPDATED_AFTER);
         params.push(Box::new(ts));
     }
 
     if let Some(date) = &args.updated_before {
         let ts = parse_date(date, "updated-before")?;
-        clauses.push("i.updated_at < ?".to_string());
+        conditions.push(sql::FRAG_UPDATED_BEFORE);
         params.push(Box::new(ts));
     }
 
-    let sql = clauses.join(" AND ");
-    Ok((sql, params))
+    Ok((conditions, params))
 }
 
-/// The aliased ORDER BY column for a sort field, matching the read model's
-/// join aliases (`i` issues, `s` state, `t` team, `ua` assignee).
-pub fn sort_column(sort: &SortField) -> &'static str {
+/// The registered `ORDER BY` column for a sort field, matching the read
+/// model's join aliases (`i` issues, `s` state, `t` team, `ua` assignee).
+/// Exhaustive over [`SortField`], so a new sort field fails compilation here
+/// until mapped -- shared by `search_query.rs`, which uses the same
+/// generated `SortField` type.
+pub(crate) fn sort_column(sort: &SortField) -> SortCol {
     match sort {
-        SortField::Created => "i.created_at",
-        SortField::Updated => "i.updated_at",
-        SortField::Priority => "i.priority_label",
-        SortField::Title => "i.title",
-        SortField::Assignee => "ua.name",
-        SortField::State => "s.name",
-        SortField::Team => "t.name",
+        SortField::Created => sql::SORT_CREATED_AT,
+        SortField::Updated => sql::SORT_UPDATED_AT,
+        SortField::Priority => sql::SORT_PRIORITY_LABEL,
+        SortField::Title => sql::SORT_TITLE,
+        SortField::Assignee => sql::SORT_ASSIGNEE_NAME,
+        SortField::State => sql::SORT_STATE_NAME,
+        SortField::Team => sql::SORT_TEAM_NAME,
     }
-}
-
-/// Build a SQL ORDER BY clause from `IssueQuery` sort fields.
-///
-/// Returns a string like "`i.updated_at` DESC" or "`i.title` ASC".
-/// The caller is responsible for prepending "ORDER BY ".
-pub fn build_sql_order(args: &IssueQuery) -> String {
-    let col = sort_column(&args.sort);
-    let dir = if args.desc { "DESC" } else { "ASC" };
-    format!("{col} {dir}")
 }
 
 #[cfg(test)]
@@ -134,8 +129,8 @@ mod tests {
     #[test]
     fn test_no_filters_returns_empty_clause() {
         let args = default_args();
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert!(conditions.is_empty());
         assert_eq!(params.len(), 0);
     }
 
@@ -143,8 +138,8 @@ mod tests {
     fn test_team_filter() {
         let mut args = default_args();
         args.team = Some("backend".to_string());
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "(t.name LIKE ? OR i.team_id = ?)");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert_eq!(conditions, vec![sql::FRAG_TEAM_OR_ID]);
         assert_eq!(params.len(), 2);
     }
 
@@ -152,8 +147,8 @@ mod tests {
     fn test_no_assignee_filter() {
         let mut args = default_args();
         args.no_assignee = true;
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "i.assignee_id IS NULL");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert_eq!(conditions, vec![sql::FRAG_NO_ASSIGNEE]);
         assert_eq!(params.len(), 0);
     }
 
@@ -161,8 +156,8 @@ mod tests {
     fn test_assignee_filter() {
         let mut args = default_args();
         args.assignee = Some("alice".to_string());
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "ua.name LIKE ?");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert_eq!(conditions, vec![sql::FRAG_ASSIGNEE_LIKE]);
         assert_eq!(params.len(), 1);
     }
 
@@ -170,8 +165,8 @@ mod tests {
     fn test_state_filter() {
         let mut args = default_args();
         args.state = Some("in progress".to_string());
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "s.name LIKE ?");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert_eq!(conditions, vec![sql::FRAG_STATE_LIKE]);
         assert_eq!(params.len(), 1);
     }
 
@@ -179,8 +174,8 @@ mod tests {
     fn test_priority_filter_by_label() {
         let mut args = default_args();
         args.priority = Some("high".to_string());
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "i.priority_label = ?");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert_eq!(conditions, vec![sql::FRAG_PRIORITY_EQ]);
         assert_eq!(params.len(), 1);
     }
 
@@ -188,8 +183,8 @@ mod tests {
     fn test_priority_filter_by_number() {
         let mut args = default_args();
         args.priority = Some("2".to_string());
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "i.priority_label = ?");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert_eq!(conditions, vec![sql::FRAG_PRIORITY_EQ]);
         assert_eq!(params.len(), 1);
     }
 
@@ -197,8 +192,8 @@ mod tests {
     fn test_title_filter() {
         let mut args = default_args();
         args.title = Some("crash".to_string());
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "i.title LIKE ?");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert_eq!(conditions, vec![sql::FRAG_TITLE_LIKE]);
         assert_eq!(params.len(), 1);
     }
 
@@ -206,8 +201,8 @@ mod tests {
     fn test_date_filter_created_after() {
         let mut args = default_args();
         args.created_after = Some("2025-01-01".to_string());
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "i.created_at >= ?");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert_eq!(conditions, vec![sql::FRAG_CREATED_AFTER]);
         assert_eq!(params.len(), 1);
     }
 
@@ -224,17 +219,17 @@ mod tests {
         let mut args = default_args();
         args.state = Some("todo".to_string());
         args.title = Some("bug".to_string());
-        let (sql, params) = build_sql_filter(&args).unwrap();
-        assert_eq!(sql, "s.name LIKE ? AND i.title LIKE ?");
+        let (conditions, params) = build_sql_filter(&args).unwrap();
+        assert_eq!(conditions, vec![sql::FRAG_STATE_LIKE, sql::FRAG_TITLE_LIKE]);
         assert_eq!(params.len(), 2);
     }
 
     #[test]
     fn test_order_default() {
         let args = default_args();
-        let order = build_sql_order(&args);
         // default: sort=Updated, desc=true
-        assert_eq!(order, "i.updated_at DESC");
+        assert_eq!(sort_column(&args.sort), sql::SORT_UPDATED_AT);
+        assert!(args.desc);
     }
 
     #[test]
@@ -242,8 +237,8 @@ mod tests {
         let mut args = default_args();
         args.sort = SortField::Title;
         args.desc = false;
-        let order = build_sql_order(&args);
-        assert_eq!(order, "i.title ASC");
+        assert_eq!(sort_column(&args.sort), sql::SORT_TITLE);
+        assert!(!args.desc);
     }
 
     #[test]
@@ -251,8 +246,8 @@ mod tests {
         let mut args = default_args();
         args.sort = SortField::Priority;
         args.desc = false;
-        let order = build_sql_order(&args);
-        assert_eq!(order, "i.priority_label ASC");
+        assert_eq!(sort_column(&args.sort), sql::SORT_PRIORITY_LABEL);
+        assert!(!args.desc);
     }
 
     #[test]
@@ -260,7 +255,7 @@ mod tests {
         let mut args = default_args();
         args.sort = SortField::Assignee;
         args.desc = true;
-        let order = build_sql_order(&args);
-        assert_eq!(order, "ua.name DESC");
+        assert_eq!(sort_column(&args.sort), sql::SORT_ASSIGNEE_NAME);
+        assert!(args.desc);
     }
 }

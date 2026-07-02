@@ -18,7 +18,7 @@ use quote::{format_ident, quote};
 use serde::Deserialize;
 
 // Shared with lt-storage/build.rs: SortFieldSpec, base_type_name,
-// extract_input_object_fields, to_pascal_case, sort_field_arms.
+// extract_input_object_fields, validate_sort_fields, to_pascal_case.
 include!("../../build/schema_codegen.rs");
 
 // ---------------------------------------------------------------------------
@@ -115,6 +115,30 @@ fn gen_sort_field_enum(sort_fields: &[SortFieldSpec]) -> TokenStream {
             }
         }
     }
+}
+
+/// `SortField::<Variant> => <value>,` match arms, one per sort field, where
+/// `value` selects the per-field string literal to map onto.
+///
+/// Only `lt-types/build.rs` calls this (for `gen_build_sort`'s `gql_field`
+/// arms): `lt-storage/build.rs` used to call it too (for a generated
+/// `sort_col()`), but that mapping is now hand-written in
+/// `lt-storage/src/db/filters.rs::sort_column` (type-safe-sql-adr.md), so
+/// this stays local rather than in the shared `schema_codegen.rs`.
+fn sort_field_arms(
+    sort_fields: &[SortFieldSpec],
+    value: impl Fn(&SortFieldSpec) -> &str,
+) -> Vec<TokenStream> {
+    sort_fields
+        .iter()
+        .map(|f| {
+            let variant = format_ident!("{}", to_pascal_case(&f.key));
+            let value = value(f);
+            quote! {
+                SortField::#variant => #value,
+            }
+        })
+        .collect()
 }
 
 /// Generate `build_sort(field: &SortField, desc: bool) -> serde_json::Value`.

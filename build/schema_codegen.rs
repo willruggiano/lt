@@ -1,8 +1,9 @@
 // Shared build-script helpers for the GraphQL-schema-driven sort/search codegen,
 // `include!`d by both `lt-types/build.rs` (SortField/build_sort) and
-// `lt-storage/build.rs` (search stems). Kept in one file so the two build
-// scripts do not carry duplicate copies of the schema-parsing and PascalCase
-// helpers.
+// `lt-storage/build.rs` (search stems): SortFieldSpec, base_type_name,
+// extract_input_object_fields, validate_sort_fields, to_pascal_case. Kept in
+// one file so the two build scripts do not carry duplicate copies of the
+// schema-parsing and PascalCase helpers.
 //
 // The including build script provides the `use` items these depend on
 // (`HashMap`, `graphql_parser` types, `serde::Deserialize`, `proc_macro2`,
@@ -14,9 +15,10 @@ struct SortFieldSpec {
     key: String,
     /// Field name inside `IssueSortInput` (schema-validated).
     gql_field: String,
-    /// SQLite column name used in ORDER BY clauses. Read by `lt-storage`'s
-    /// `sort_col` generator; `lt-types` only needs `key`/`gql_field`, so the
-    /// field reads as dead there.
+    /// SQLite column name used in ORDER BY clauses. Not read by either build
+    /// script: `lt-storage/src/db/filters.rs::sort_column` maps sort fields
+    /// to registered `SortCol` consts by hand (type-safe-sql-adr.md), and
+    /// this field is kept only so the TOML documents that mapping for humans.
     #[allow(dead_code)]
     sql_col: String,
 }
@@ -90,24 +92,6 @@ fn to_pascal_case(s: &str) -> String {
             match chars.next() {
                 None => String::new(),
                 Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-            }
-        })
-        .collect()
-}
-
-/// `SortField::<Variant> => <value>,` match arms, one per sort field, where
-/// `value` selects the per-field string literal to map onto.
-fn sort_field_arms(
-    sort_fields: &[SortFieldSpec],
-    value: impl Fn(&SortFieldSpec) -> &str,
-) -> Vec<TokenStream> {
-    sort_fields
-        .iter()
-        .map(|f| {
-            let variant = format_ident!("{}", to_pascal_case(&f.key));
-            let value = value(f);
-            quote! {
-                SortField::#variant => #value,
             }
         })
         .collect()

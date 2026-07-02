@@ -1,17 +1,19 @@
 //! The sole source of SQL statement text in this crate.
 //!
-//! `Sql` wraps a private `&'static str`, so a statement can only come into
-//! existence through the [`statements!`] macro in this module: declaration
-//! and registration into the `STATEMENTS` table (used by the gate's
-//! validator) happen on the same macro invocation, so an unregistered
-//! statement cannot exist. Production code executes SQL only through
-//! [`prepare`] / [`execute`], which take `Sql`, never `&str`.
+//! `Sql` wraps a private `&'static str`, so a fixed statement can only come
+//! into existence through the [`statements!`] macro in this module:
+//! declaration and registration into the `STATEMENTS` table (used by the
+//! gate's validator) happen on the same macro invocation, so an unregistered
+//! statement cannot exist. Production code executes fixed statements only
+//! through [`prepare`] / [`execute`], which take `Sql`, never `&str`.
 //!
-//! `query_issues`/`query_issues_page` (dynamic `WHERE`/`ORDER BY`
-//! composition) and `search_query.rs`'s structured-search builder are not
-//! converted yet -- they still compose plain `String` SQL from
-//! [`ISSUE_COLUMNS`]/[`ISSUE_JOINS`]. That is phase 3 of the ADR (typed
-//! `ComposedSql` composition).
+//! The two dynamic builders (`filters.rs::build_sql_filter`,
+//! `search_query.rs::build_conditions`) select a runtime slice of registered
+//! [`Frag`] conditions and a registered [`SortCol`]; the only way to turn
+//! those into SQL text is [`select_issues`] / [`select_issues_page`], which
+//! produce a private [`ComposedSql`] executed only through
+//! [`prepare_composed`]. There is no free-form SQL text splicing anywhere in
+//! `lt-storage`'s production code.
 //!
 //! See docs/design/type-safe-sql-adr.md ("Statement registry", "Enforcement:
 //! the `Sql` newtype", decisions 2-3).
@@ -306,17 +308,215 @@ statements! {
         "DELETE FROM issue_comments WHERE issue_id = ?1 AND id NOT LIKE 'local:%'";
 }
 
-/// `ISSUE_COLUMNS`/`ISSUE_JOINS` as plain `&str`, for `query_issues` /
-/// `query_issues_page` (`db/issues.rs`) and the structured-search builder
-/// (`search_query.rs`), which still compose their `SELECT` dynamically.
-///
-/// phase 3 (type-safe-sql-adr.md) replaces this with typed `ComposedSql`
-/// composition; until then this is the one place still exposing raw column
-/// text outside the registry.
-pub(crate) const ISSUE_COLUMNS: &str = issue_columns!();
-pub(crate) const ISSUE_JOINS: &str = issue_joins!();
+// ---------------------------------------------------------------------------
+// Dynamic composition: registered fragments + typed composers
+// ---------------------------------------------------------------------------
+//
+// `filters.rs::build_sql_filter` and `search_query.rs::build_conditions`
+// still choose *which* WHERE clauses apply to a query at runtime -- that
+// selection is inherently dynamic. What used to be free-form clause text is
+// now a closed set of registered `Frag`s; composition itself (assembling
+// `SELECT`/`FROM`/`JOIN`/`WHERE`/`ORDER BY`/`LIMIT` around them) happens only
+// through `select_issues`/`select_issues_page` below. See
+// docs/design/type-safe-sql-adr.md ("Statement registry", decision 2).
 
-/// The 22 names [`ISSUE_COLUMNS`] aliases to, in order -- the shape
+/// A registered `WHERE`-clause fragment, referencing the read-model join
+/// aliases (`i` issues, `s` state, `t` team, `ua` assignee, `uc` creator,
+/// `p` project, `c` cycle). The field is private: constructible only inside
+/// this module (via [`fragments!`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Frag(&'static str);
+
+/// Bind parameters for a dynamic builder's selected [`Frag`]s, in the same
+/// order. A type alias so `filters.rs::build_sql_filter` and
+/// `search_query.rs::build_conditions`'s return types clear
+/// `clippy::type_complexity`.
+pub(crate) type BindParams = Vec<Box<dyn rusqlite::types::ToSql>>;
+
+/// Declares one or more registered fragments: a `pub(crate) const NAME: Frag`
+/// per entry, plus (test-only) a `FRAGMENTS` table of `(name, fragment,
+/// declared bind-param count)` the gate's validator iterates.
+macro_rules! fragments {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident, $params:expr, $sql:expr;
+    )*) => {
+        $(
+            $(#[$meta])*
+            pub(crate) const $name: Frag = Frag($sql);
+        )*
+
+        /// Every registered fragment, for the `sql_validation` gate: name,
+        /// fragment, and its declared bind-parameter count.
+        #[cfg(test)]
+        pub(crate) const FRAGMENTS: &[(&str, Frag, usize)] = &[
+            $((stringify!($name), $name, $params),)*
+        ];
+    };
+}
+
+fragments! {
+    // -- filters.rs::build_sql_filter --
+    /// `--team`: match the team name or its exact key.
+    FRAG_TEAM_OR_ID, 2, "(t.name LIKE ? OR i.team_id = ?)";
+    /// `--assignee=me` (or case-insensitive): exact match against the
+    /// caller-resolved viewer name.
+    FRAG_ASSIGNEE_EQ, 1, "ua.name = ?";
+    /// `--assignee`: substring match.
+    FRAG_ASSIGNEE_LIKE, 1, "ua.name LIKE ?";
+    /// `--no-assignee`.
+    FRAG_NO_ASSIGNEE, 0, "i.assignee_id IS NULL";
+    /// `--state`: substring match.
+    FRAG_STATE_LIKE, 1, "s.name LIKE ?";
+    /// `--priority`: exact match against the normalised label. Shared by
+    /// `filters.rs` and `search_query.rs`'s `priority:` stem.
+    FRAG_PRIORITY_EQ, 1, "i.priority_label = ?";
+    /// `--title`: substring match.
+    FRAG_TITLE_LIKE, 1, "i.title LIKE ?";
+    /// `--created-after`.
+    FRAG_CREATED_AFTER, 1, "i.created_at >= ?";
+    /// `--created-before`.
+    FRAG_CREATED_BEFORE, 1, "i.created_at < ?";
+    /// `--updated-after`.
+    FRAG_UPDATED_AFTER, 1, "i.updated_at >= ?";
+    /// `--updated-before`.
+    FRAG_UPDATED_BEFORE, 1, "i.updated_at < ?";
+
+    // -- search_query.rs::build_conditions --
+    /// `assignee:me` in the TUI search bar: matched without caller
+    /// resolution (an unresolved "me" therefore matches nothing).
+    FRAG_ASSIGNEE_ME, 0, "LOWER(ua.name) = 'me'";
+    /// `assignee:<name>`: case-insensitive substring match.
+    FRAG_ASSIGNEE_LOWER_LIKE, 1, "LOWER(COALESCE(ua.name,'')) LIKE ?";
+    /// `state:<name>`: case-insensitive substring match.
+    FRAG_STATE_LOWER_LIKE, 1, "LOWER(s.name) LIKE ?";
+    /// `team:<name>`: case-insensitive match against the team name or key.
+    FRAG_TEAM_LOWER_OR_ID, 2,
+        "(LOWER(t.name) LIKE ? OR LOWER(COALESCE(i.team_id,'')) LIKE ?)";
+    /// `label:<name>`: any linked label whose name matches.
+    FRAG_LABEL_EXISTS, 1,
+        "EXISTS (SELECT 1 FROM issue_labels il JOIN labels lb ON lb.id = il.label_id \
+         WHERE il.issue_id = i.id AND LOWER(lb.name) LIKE ?)";
+    /// `project:<name>`: case-insensitive substring match.
+    FRAG_PROJECT_LOWER_LIKE, 1, "LOWER(COALESCE(p.name,'')) LIKE ?";
+    /// `cycle:<name>`: case-insensitive substring match.
+    FRAG_CYCLE_LOWER_LIKE, 1, "LOWER(COALESCE(c.name,'')) LIKE ?";
+    /// `creator:<name>`: case-insensitive substring match.
+    FRAG_CREATOR_LOWER_LIKE, 1, "LOWER(COALESCE(uc.name,'')) LIKE ?";
+}
+
+/// A registered `ORDER BY` column, aliased to the read model's joins. The
+/// field is private: constructible only inside this module (via
+/// [`sort_cols!`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SortCol(&'static str);
+
+/// Declares one or more registered sort columns: a `pub(crate) const NAME:
+/// SortCol` per entry, plus (test-only) a `SORT_COLS` table the gate's
+/// validator iterates.
+macro_rules! sort_cols {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident, $sql:expr;
+    )*) => {
+        $(
+            $(#[$meta])*
+            pub(crate) const $name: SortCol = SortCol($sql);
+        )*
+
+        /// Every registered sort column, for the `sql_validation` gate.
+        #[cfg(test)]
+        pub(crate) const SORT_COLS: &[(&str, SortCol)] = &[
+            $((stringify!($name), $name),)*
+        ];
+    };
+}
+
+sort_cols! {
+    /// `sort:created` / `--sort created`.
+    SORT_CREATED_AT, "i.created_at";
+    /// `sort:updated` / `--sort updated` (the default).
+    SORT_UPDATED_AT, "i.updated_at";
+    /// `sort:priority` / `--sort priority`.
+    SORT_PRIORITY_LABEL, "i.priority_label";
+    /// `sort:title` / `--sort title`.
+    SORT_TITLE, "i.title";
+    /// `sort:assignee` / `--sort assignee`.
+    SORT_ASSIGNEE_NAME, "ua.name";
+    /// `sort:state` / `--sort state`.
+    SORT_STATE_NAME, "s.name";
+    /// `sort:team` / `--sort team`.
+    SORT_TEAM_NAME, "t.name";
+}
+
+/// A composed `SELECT` built from registered pieces: the fixed
+/// `ISSUE_COLUMNS`/`ISSUE_JOINS` fragments, a runtime-selected slice of
+/// [`Frag`] conditions, and a [`SortCol`]. Constructible only via
+/// [`select_issues`] / [`select_issues_page`] in this module.
+pub(crate) struct ComposedSql(String);
+
+/// Build the issue-shaped `SELECT` behind `query_issues` (`db/issues.rs`) and
+/// the TUI structured search (`search_query.rs::run_query`).
+///
+/// `conditions` are AND-joined after `WHERE`. When `fts` is set, the query
+/// joins `issues_fts` and `issues_fts MATCH ?` is the first `WHERE` clause
+/// (so its bind param precedes `conditions`' binds), with `conditions`
+/// AND-joined after it. `LIMIT` is always a single trailing bound param the
+/// caller supplies last.
+pub(crate) fn select_issues(
+    fts: bool,
+    conditions: &[Frag],
+    order: SortCol,
+    desc: bool,
+) -> ComposedSql {
+    let dir = if desc { "DESC" } else { "ASC" };
+    let fts_join = if fts {
+        " JOIN issues_fts ON issues_fts.rowid = i.rowid"
+    } else {
+        ""
+    };
+
+    let mut clauses: Vec<&str> = Vec::with_capacity(conditions.len() + 1);
+    if fts {
+        clauses.push("issues_fts MATCH ?");
+    }
+    clauses.extend(conditions.iter().map(|f| f.0));
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+
+    ComposedSql(format!(
+        "SELECT {cols} FROM issues i{fts_join} {joins}{where_sql} ORDER BY {order} {dir} LIMIT ?",
+        cols = issue_columns!(),
+        joins = issue_joins!(),
+        order = order.0,
+    ))
+}
+
+/// Build the offset-paginated `SELECT` behind `query_issues_page`
+/// (`db/issues.rs`): no `WHERE`, `LIMIT ?1 OFFSET ?2`.
+pub(crate) fn select_issues_page(order: SortCol, desc: bool) -> ComposedSql {
+    let dir = if desc { "DESC" } else { "ASC" };
+    ComposedSql(format!(
+        "SELECT {cols} FROM issues i {joins} ORDER BY {order} {dir} LIMIT ?1 OFFSET ?2",
+        cols = issue_columns!(),
+        joins = issue_joins!(),
+        order = order.0,
+    ))
+}
+
+/// Prepare a composed statement. The only way production code turns a
+/// [`ComposedSql`] into an executable [`Statement`].
+pub(crate) fn prepare_composed<'c>(
+    conn: &'c Connection,
+    sql: &ComposedSql,
+) -> rusqlite::Result<Statement<'c>> {
+    conn.prepare(&sql.0)
+}
+
+/// The 22 names `ISSUE_COLUMNS` aliases to, in order -- the shape
 /// [`crate::db::issues::issue_from_row`] reads by name. Validator-only.
 #[cfg(test)]
 pub(crate) const ISSUE_COLUMN_NAMES: &[&str] = &[
@@ -387,11 +587,11 @@ mod tests {
         conn
     }
 
-    /// The first slice of the gate's schema-adherence validator
+    /// The fixed-statement slice of the gate's schema-adherence validator
     /// (docs/design/type-safe-sql-adr.md, "Validator"): every registered
     /// statement must prepare against the real, migrated schema (P1), and
     /// its declared bind-parameter count must match what SQLite reports
-    /// (P2, const side). Fragment/composer probes are phase 3.
+    /// (P2, const side).
     #[test]
     fn every_registered_statement_prepares_and_matches_its_declared_param_count() {
         let conn = migrated_conn();
@@ -419,5 +619,59 @@ mod tests {
         let conn = migrated_conn();
         let stmt = conn.prepare(QUERY_COMMENTS.0).unwrap();
         assert_eq!(stmt.column_names().as_slice(), COMMENT_COLUMN_NAMES);
+    }
+
+    /// The fragment slice of the validator: every registered `Frag` must
+    /// prepare inside [`select_issues`]'s template (P1), and the composed
+    /// statement's parameter count must equal the fragment's declared count
+    /// plus one (the trailing `LIMIT` bind).
+    #[test]
+    fn every_fragment_prepares_inside_select_issues() {
+        let conn = migrated_conn();
+        for (name, frag, declared_params) in FRAGMENTS {
+            let composed = select_issues(false, std::slice::from_ref(frag), SORT_UPDATED_AT, true);
+            let stmt = conn
+                .prepare(&composed.0)
+                .unwrap_or_else(|e| panic!("failed to prepare fragment {name}: {e}"));
+            assert_eq!(
+                stmt.parameter_count(),
+                *declared_params + 1,
+                "{name}: declared param count + 1 (LIMIT) does not match the composed statement"
+            );
+        }
+    }
+
+    /// The FTS template: `select_issues(true, &[], ...)` must prepare with
+    /// exactly the `MATCH` and `LIMIT` binds (no conditions).
+    #[test]
+    fn fts_template_prepares_with_match_and_limit_params() {
+        let conn = migrated_conn();
+        let composed = select_issues(true, &[], SORT_UPDATED_AT, true);
+        let stmt = conn.prepare(&composed.0).unwrap();
+        assert_eq!(stmt.parameter_count(), 2);
+    }
+
+    /// Every registered sort column must prepare through both composers.
+    #[test]
+    fn every_sort_col_prepares_through_both_composers() {
+        let conn = migrated_conn();
+        for (name, col) in SORT_COLS {
+            let list = select_issues(false, &[], *col, true);
+            conn.prepare(&list.0)
+                .unwrap_or_else(|e| panic!("failed to prepare {name} via select_issues: {e}"));
+
+            let page = select_issues_page(*col, false);
+            conn.prepare(&page.0)
+                .unwrap_or_else(|e| panic!("failed to prepare {name} via select_issues_page: {e}"));
+        }
+    }
+
+    /// `select_issues_page` has no conditions: only `LIMIT` and `OFFSET`.
+    #[test]
+    fn select_issues_page_has_limit_and_offset_params() {
+        let conn = migrated_conn();
+        let composed = select_issues_page(SORT_UPDATED_AT, true);
+        let stmt = conn.prepare(&composed.0).unwrap();
+        assert_eq!(stmt.parameter_count(), 2);
     }
 }

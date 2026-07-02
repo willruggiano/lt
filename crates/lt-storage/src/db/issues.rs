@@ -12,8 +12,9 @@ use crate::db::parse_datetime_column;
 use crate::db::sql::{self, Sql};
 
 /// Reconstruct a [`types::Issue`] from a row selected by
-/// [`sql::QUERY_ISSUE_BY_ID`] (or any other statement built from
-/// [`sql::ISSUE_COLUMNS`]), reading each field by its column alias.
+/// [`sql::QUERY_ISSUE_BY_ID`] (or any other statement or composed query built
+/// from the same issue-columns/joins template), reading each field by its
+/// column alias.
 pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Issue> {
     let priority_label: String = row.get("priority_label")?;
     let priority = types::priority_label_to_u8(&priority_label);
@@ -280,31 +281,13 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
 /// An `--assignee=me` filter must be resolved to the viewer's name by the
 /// caller before calling this (see `issues::list::resolve_me`).
 pub fn query_issues(conn: &Connection, args: &IssueQuery) -> Result<Vec<types::Issue>> {
-    let (where_clause, mut bind) = crate::db::filters::build_sql_filter(args)?;
-    let order = crate::db::filters::build_sql_order(args);
-    let where_sql = if where_clause.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {where_clause} ")
-    };
+    let (conditions, mut bind) = crate::db::filters::build_sql_filter(args)?;
+    let order = crate::db::filters::sort_column(&args.sort);
     let limit = i64::from(args.limit.min(250));
     bind.push(Box::new(limit));
 
-    // phase 3 (type-safe-sql-adr.md) replaces this with typed `ComposedSql`
-    // composition; the WHERE/ORDER BY clauses are built at runtime from
-    // `IssueQuery`, so this statement cannot be a registered `Sql` const yet.
-    let columns = sql::ISSUE_COLUMNS;
-    let joins = sql::ISSUE_JOINS;
-    let query_sql = format!(
-        "SELECT {columns}
-         FROM issues i
-         {joins}
-         {where_sql}ORDER BY {order}
-         LIMIT ?"
-    );
-
-    let mut stmt = conn
-        .prepare(&query_sql)
+    let composed = sql::select_issues(false, &conditions, order, args.desc);
+    let mut stmt = sql::prepare_composed(conn, &composed)
         .context("failed to prepare query_issues statement")?;
 
     let rows = stmt
@@ -331,27 +314,14 @@ pub fn query_issues_page(
     args: &IssueQuery,
     offset: i64,
 ) -> Result<(Vec<types::Issue>, bool)> {
-    let order_col = crate::db::filters::sort_column(&args.sort);
-    let direction = if args.desc { "DESC" } else { "ASC" };
+    let order = crate::db::filters::sort_column(&args.sort);
     // Fetch one extra row to detect whether there is a next page.
     let cap = args.limit.min(250);
     let fetch_limit = i64::from(cap) + 1;
 
-    // phase 3 (type-safe-sql-adr.md) replaces this with typed `ComposedSql`
-    // composition; see the matching comment in `query_issues`.
-    let columns = sql::ISSUE_COLUMNS;
-    let joins = sql::ISSUE_JOINS;
-    let query_sql = format!(
-        "SELECT {columns}
-         FROM issues i
-         {joins}
-         ORDER BY {order_col} {direction}
-         LIMIT ?1 OFFSET ?2"
-    );
-
-    let mut stmt = conn
-        .prepare(&query_sql)
-        .context("failed to prepare query statement")?;
+    let composed = sql::select_issues_page(order, args.desc);
+    let mut stmt =
+        sql::prepare_composed(conn, &composed).context("failed to prepare query statement")?;
 
     let rows = stmt
         .query_map(params![fetch_limit, offset], issue_from_row)

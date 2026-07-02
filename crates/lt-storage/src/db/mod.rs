@@ -2,7 +2,7 @@ pub mod comments;
 pub mod filters;
 pub mod issues;
 pub mod outbox;
-mod sql;
+pub(crate) mod sql;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,9 +18,6 @@ pub use issues::{
 pub use rusqlite::Connection;
 use rusqlite::Transaction;
 use rusqlite_migration::{HookResult, M, Migrations};
-// `search_query.rs`'s dynamic composition is not converted until phase 3
-// (type-safe-sql-adr.md); it still needs the raw column/join text.
-pub(crate) use sql::{ISSUE_COLUMNS, ISSUE_JOINS};
 
 /// Parse a stored RFC3339 timestamp column into the wire [`DateTime`](lt_types::scalars::DateTime)
 /// scalar via its `FromStr` impl. Storage always writes

@@ -18,7 +18,7 @@ use quote::{format_ident, quote};
 use serde::Deserialize;
 
 // Shared with lt-types/build.rs: SortFieldSpec, base_type_name,
-// extract_input_object_fields, to_pascal_case, sort_field_arms.
+// extract_input_object_fields, validate_sort_fields, to_pascal_case.
 include!("../../build/schema_codegen.rs");
 
 // ---------------------------------------------------------------------------
@@ -437,25 +437,6 @@ fn gen_parse_sort_value(sort_fields: &[SortFieldSpec]) -> TokenStream {
     }
 }
 
-/// Generate `sort_col(field: &SortField) -> &'static str`.
-///
-/// Maps each `SortField` variant to its SQLite column name.
-fn gen_sort_col(sort_fields: &[SortFieldSpec]) -> TokenStream {
-    let match_arms = sort_field_arms(sort_fields, |f| &f.sql_col);
-
-    quote! {
-        /// Map a sort field to the corresponding SQLite column name.
-        ///
-        /// Generated from `[[sort_field]]` entries in `build/search_filter_fields.toml`
-        /// by build.rs (bd-2w5). Do not edit by hand.
-        fn sort_col(field: &SortField) -> &'static str {
-            match field {
-                #( #match_arms )*
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -549,17 +530,15 @@ fn main() {
     let stem_key_enum = gen_stem_key_enum(fields);
     let stem_kind_enum = gen_stem_kind_enum(fields);
     let parse_sort_value_fn = gen_parse_sort_value(sort_fields);
-    let sort_col_fn = gen_sort_col(sort_fields);
     let parser_fn = gen_parser_fn(fields);
     let from_ast_impl = gen_from_ast(fields);
 
     // Combine all fragments into a single TokenStream.
-    // parse_sort_value and sort_col must come before parser_fn which calls them.
+    // parse_sort_value must come before parser_fn, which calls it.
     let combined: TokenStream = quote! {
         #stem_key_enum
         #stem_kind_enum
         #parse_sort_value_fn
-        #sort_col_fn
         #parser_fn
         #from_ast_impl
     };
