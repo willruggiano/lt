@@ -12,13 +12,6 @@ use lt_upstream::client::GraphqlTransport;
 use lt_upstream::{comments, issues};
 use rusqlite::Connection;
 
-/// Render a wire timestamp back to RFC3339 text for storage, preserving
-/// millisecond precision and the `Z` suffix so text ordering matches
-/// chronological ordering against existing rows.
-fn format_datetime(dt: &lt_types::scalars::DateTime) -> String {
-    dt.0.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
 /// Replay every pending outbox command, recording (not propagating) per-command
 /// failures so a single bad command never aborts the surrounding sync.
 pub fn drain(conn: &Connection, transport: &dyn GraphqlTransport) -> Result<()> {
@@ -34,34 +27,36 @@ fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -
     let variables = serde_json::from_str(&op.variables)?;
     match op.op_type.as_str() {
         outbox::OP_ISSUE_UPDATE => {
-            issues::replay_update(transport, variables)?;
-            outbox::ack_issue_update(conn, op.seq, &op.entity_id)?;
+            // The server issue is nullable in the schema even on success;
+            // when present it becomes the new base truth, otherwise the ack
+            // falls back to applying the overlay's per-field intent.
+            let server_issue = issues::replay_update(transport, variables)?;
+            outbox::ack_issue_update(conn, op.seq, &op.entity_id, server_issue.as_ref())?;
         }
         outbox::OP_ISSUE_CREATE => {
-            let created = issues::replay_create(transport, variables)?;
-            outbox::ack_issue_create(
-                conn,
-                op.seq,
-                &op.entity_id,
-                (created.id.inner(), &created.identifier),
-            )?;
+            // Upsert the server's full issue into the base, replacing the
+            // temp row -- server truth, not a hand-stitched id/identifier
+            // rewrite.
+            let issue = issues::replay_create(transport, variables)?;
+            outbox::ack_issue_create(conn, op.seq, &op.entity_id, &issue)?;
         }
         outbox::OP_COMMENT_CREATE => {
             let issue_id = variables["input"]["issueId"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            let created = comments::replay_create(transport, variables)?;
-            let comment = lt_storage::db::Comment {
-                id: created.id.into_inner(),
-                issue_id,
-                body: created.body,
-                author_name: created.user.map(|u| u.name),
-                created_at: format_datetime(&created.created_at),
-                updated_at: format_datetime(&created.updated_at),
-                synced_at: String::new(),
-            };
-            outbox::ack_comment_create(conn, op.seq, &op.entity_id, &comment)?;
+            // The server-returned comment is used as-is: it already carries
+            // the shared `comments::Comment` shape the base row is built from.
+            let comment = comments::replay_create(transport, variables)?;
+            outbox::ack_comment_create(
+                conn,
+                op.seq,
+                &outbox::CommentAck {
+                    temp_id: &op.entity_id,
+                    issue_id: &issue_id,
+                    comment: &comment,
+                },
+            )?;
         }
         other => bail!("unknown outbox op_type: {other}"),
     }
@@ -98,7 +93,11 @@ mod tests {
         let conn = db_with_issue("1");
         outbox::enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
 
-        let transport = FakeTransport::new(vec![json!({ "issueUpdate": { "success": true } })]);
+        // No server issue in the response: falls back to the overlay
+        // reconciliation.
+        let transport = FakeTransport::new(vec![
+            json!({ "issueUpdate": { "success": true, "issue": null } }),
+        ]);
         drain(&conn, &transport).unwrap();
 
         let state: String = conn
@@ -110,6 +109,29 @@ mod tests {
         assert_eq!(pending_count(&conn), 0);
         // The replayed command carried the coalesced variables.
         assert_eq!(transport.variables(0)["input"]["stateId"], json!("s-done"));
+    }
+
+    #[test]
+    fn drains_issue_update_prefers_server_issue_when_present() {
+        let conn = db_with_issue("1");
+        outbox::enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
+
+        // The server returns full truth, including a state the overlay never
+        // recorded (e.g. a workflow automation moved it further).
+        let mut server_issue = lt_upstream::issues::sample_issue_node("1");
+        server_issue["state"] = json!({ "id": "s-merged", "name": "Merged" });
+        let transport = FakeTransport::new(vec![
+            json!({ "issueUpdate": { "success": true, "issue": server_issue } }),
+        ]);
+        drain(&conn, &transport).unwrap();
+
+        let state: String = conn
+            .query_row("SELECT state_id FROM issues WHERE id = '1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "s-merged");
+        assert_eq!(pending_count(&conn), 0);
     }
 
     #[test]
@@ -129,11 +151,12 @@ mod tests {
         };
         outbox::enqueue_issue_create(&conn, &issue, &input).unwrap();
 
-        let transport = FakeTransport::new(vec![json!({
-            "issueCreate": { "success": true, "issue": {
-                "id": "real-1", "identifier": "ENG-42", "title": "New"
-            }}
-        })]);
+        let mut server_issue = lt_upstream::issues::sample_issue_node("1");
+        server_issue["id"] = json!("real-1");
+        server_issue["identifier"] = json!("ENG-42");
+        let transport = FakeTransport::new(vec![
+            json!({ "issueCreate": { "success": true, "issue": server_issue } }),
+        ]);
         drain(&conn, &transport).unwrap();
 
         let ident: String = conn
@@ -144,6 +167,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ident, "ENG-42");
+        // The temp row is gone, not just renamed in place.
+        let temp: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM issues WHERE id = 'local:abc'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(temp, 0);
         assert_eq!(pending_count(&conn), 0);
     }
 
@@ -154,13 +186,13 @@ mod tests {
             issue_id: "1".to_string(),
             body: "hi".to_string(),
         };
-        outbox::enqueue_comment_create(&conn, "local:c", Some("Ada"), &input).unwrap();
+        outbox::enqueue_comment_create(&conn, "local:c", &input).unwrap();
 
         let transport = FakeTransport::new(vec![json!({
             "commentCreate": { "success": true, "comment": {
                 "id": "c-real", "body": "hi",
                 "createdAt": "2026-01-03T00:00:00Z", "updatedAt": "2026-01-03T00:00:00Z",
-                "user": { "name": "Ada" }
+                "user": { "id": "u1", "name": "Ada" }
             }}
         })]);
         drain(&conn, &transport).unwrap();
@@ -168,7 +200,7 @@ mod tests {
         let ids: Vec<String> = lt_storage::db::query_comments(&conn, "1")
             .unwrap()
             .into_iter()
-            .map(|c| c.id)
+            .map(|c| c.id.into_inner())
             .collect();
         assert_eq!(ids, ["c-real"]);
         assert_eq!(pending_count(&conn), 0);

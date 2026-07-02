@@ -3,26 +3,11 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use lt_types::query::IssueQuery;
-use lt_types::scalars::{DateTime, Priority};
+use lt_types::scalars::Priority;
 use lt_types::types;
 use rusqlite::{Connection, params};
 
-/// Parse a stored RFC3339 timestamp column into the wire [`DateTime`] scalar.
-/// Storage always writes `chrono::DateTime::to_rfc3339`, so a parse failure
-/// here means the row is corrupt; surface it as a `rusqlite` error rather than
-/// silently defaulting.
-fn parse_datetime_column(s: &str) -> std::result::Result<DateTime, rusqlite::types::FromSqlError> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .map(|dt| DateTime(dt.with_timezone(&Utc)))
-        .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
-}
-
-/// Render a [`DateTime`] back to the RFC3339 text form stored in SQLite,
-/// preserving millisecond precision so text ordering matches chronological
-/// ordering.
-fn format_datetime(dt: &DateTime) -> String {
-    dt.0.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
+use crate::db::parse_datetime_column;
 
 /// The fragment-typed read model's column list: every field
 /// [`types::Issue`] selects, sourced from the relational base via the joins in
@@ -203,8 +188,8 @@ pub(crate) fn upsert_issue_tx(
             issue.title,
             issue.priority_label,
             issue.description,
-            format_datetime(&issue.created_at),
-            format_datetime(&issue.updated_at),
+            issue.created_at.to_rfc3339_millis(),
+            issue.updated_at.to_rfc3339_millis(),
             synced_at,
             issue.parent.as_ref().map(|p| p.id.inner()),
             issue.team.id.inner(),
@@ -496,6 +481,19 @@ pub fn query_children(conn: &Connection, parent_id: &str) -> Result<Vec<types::I
     query_issues_one(conn, &sql, parent_id, "query_children")
 }
 
+/// Look up a single issue by id, for the detail pane's parent reference.
+/// Returns `None` when no issue with that id is cached.
+pub fn query_issue_by_id(conn: &Connection, id: &str) -> Result<Option<types::Issue>> {
+    let sql = format!(
+        "SELECT {ISSUE_COLUMNS}
+         FROM issues i
+         {ISSUE_JOINS}
+         WHERE i.id = ?1"
+    );
+    let mut issues = query_issues_one(conn, &sql, id, "query_issue_by_id")?;
+    Ok(issues.pop())
+}
+
 /// Insert or replace a key/value pair in the `sync_meta` table.
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     crate::db::execute(
@@ -509,11 +507,6 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Parse a fixed RFC3339 literal into the wire [`DateTime`] scalar.
-    fn dt(s: &str) -> DateTime {
-        DateTime(s.parse().unwrap())
-    }
 
     /// A list-shaped issue: state/assignee/team carry ids equal to their names
     /// so the relational upsert produces one entity row per distinct name.
@@ -542,8 +535,8 @@ mod tests {
             cycle: None,
             creator: None,
             parent: None,
-            created_at: dt("2026-01-01T00:00:00Z"),
-            updated_at: dt("2026-01-02T00:00:00Z"),
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-01-02T00:00:00Z".parse().unwrap(),
         }
     }
 
@@ -612,8 +605,8 @@ mod tests {
                 id: lt_types::Id::new("9"),
                 identifier: "ENG-9".to_string(),
             }),
-            created_at: dt("2026-01-01T00:00:00Z"),
-            updated_at: dt("2026-01-02T00:00:00Z"),
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-01-02T00:00:00Z".parse().unwrap(),
         }
     }
 

@@ -183,21 +183,6 @@ fn priority_label_to_u8_maps_levels() {
 }
 
 #[test]
-fn db_comment_to_api_conversion() {
-    let comment = lt_runtime::db::Comment {
-        id: "c1".to_string(),
-        issue_id: "i1".to_string(),
-        body: "hi".to_string(),
-        author_name: Some("Alice".to_string()),
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        updated_at: "2026-01-01T00:00:00Z".to_string(),
-        synced_at: String::new(),
-    };
-    let api = lt_types::types::Comment::from(comment);
-    assert_eq!(api.author(), "Alice");
-}
-
-#[test]
 fn optimistic_builders_apply_popup_choice() {
     let mut app = app_with_issues(0, 1);
     let issue = app.issues[0].clone();
@@ -218,11 +203,13 @@ fn optimistic_builders_apply_popup_choice() {
 
 #[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
-    let viewer = lt_runtime::sync_port::Viewer {
-        id: "v".to_string(),
+    let viewer = lt_types::viewer::User {
+        id: lt_types::Id::new("v"),
         name: "Vic".to_string(),
-        org_name: "Acme".to_string(),
-        org_url_key: "acme".to_string(),
+        organization: lt_types::viewer::Organization {
+            name: "Acme".to_string(),
+            url_key: "acme".to_string(),
+        },
     };
     let members = || {
         vec![

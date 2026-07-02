@@ -14,7 +14,7 @@ pub fn run(out: &mut dyn Write) -> Result<()> {
     let data: ViewerQuery = query_as(&transport, &lt_types::viewer::query(), Value::Null)?;
     let viewer = data.viewer;
 
-    writeln!(out, "user:         {} <{}>", viewer.name, viewer.email)?;
+    writeln!(out, "user:         {}", viewer.name)?;
     writeln!(out, "id:           {}", viewer.id.inner())?;
     writeln!(
         out,

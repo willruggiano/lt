@@ -3,7 +3,8 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Result, anyhow};
 use lt_runtime::issues::NewIssueSession;
 use lt_types::inputs::IssueCreateInput;
-use lt_types::types::{Team, User as Member, Viewer, WorkflowState, priority_u8_to_label};
+use lt_types::types::{Team, User as Member, WorkflowState, priority_u8_to_label};
+use lt_types::viewer::User as Viewer;
 
 #[derive(Debug, Clone)]
 pub struct NewIssueArgs {
@@ -217,7 +218,7 @@ fn pick_assignee(
     if let Some(h) = hint {
         let lower = h.to_lowercase();
         if lower == "me" {
-            return Ok(Some(viewer.id.clone()));
+            return Ok(Some(viewer.id.inner().to_string()));
         }
         if lower == "none" || lower == "unassigned" {
             return Ok(None);
@@ -243,7 +244,7 @@ fn pick_assignee(
         return Ok(None);
     }
     if trimmed.to_lowercase() == "me" {
-        return Ok(Some(viewer.id.clone()));
+        return Ok(Some(viewer.id.inner().to_string()));
     }
 
     let lower = trimmed.to_lowercase();
@@ -302,7 +303,7 @@ fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
         writeln!(out, "  State:       (default)")?;
     }
     if let Some(aid) = summary.assignee_id {
-        let aname = if aid == summary.viewer.id {
+        let aname = if aid == summary.viewer.id.inner() {
             summary.viewer.name.clone()
         } else {
             summary
@@ -395,7 +396,7 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     writeln!(
         out,
         "URL:     https://linear.app/{}/issue/{}",
-        viewer.org_url_key, issue.identifier
+        viewer.organization.url_key, issue.identifier
     )?;
 
     Ok(())
@@ -428,10 +429,12 @@ mod tests {
 
     fn viewer() -> Viewer {
         Viewer {
-            id: "viewer-id".to_string(),
+            id: lt_types::Id::new("viewer-id"),
             name: "Vic Viewer".to_string(),
-            org_name: "Acme".to_string(),
-            org_url_key: "acme".to_string(),
+            organization: lt_types::viewer::Organization {
+                name: "Acme".to_string(),
+                url_key: "acme".to_string(),
+            },
         }
     }
 

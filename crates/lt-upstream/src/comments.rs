@@ -14,8 +14,8 @@ use crate::graphql::{CreatePayload, post_create};
 // ---------------------------------------------------------------------------
 
 impl CreatePayload for wire::CommentCreateMutation {
-    type Created = wire::CreatedCommentNode;
-    fn into_created(self) -> (bool, Option<wire::CreatedCommentNode>) {
+    type Created = wire::Comment;
+    fn into_created(self) -> (bool, Option<wire::Comment>) {
         (
             self.comment_create.success,
             Some(self.comment_create.comment),
@@ -28,7 +28,7 @@ impl CreatePayload for wire::CommentCreateMutation {
 pub fn replay_create(
     transport: &dyn GraphqlTransport,
     variables: serde_json::Value,
-) -> Result<wire::CreatedCommentNode> {
+) -> Result<wire::Comment> {
     post_create::<wire::CommentCreateMutation>(
         transport,
         &wire::create_mutation(),
@@ -43,11 +43,8 @@ pub fn replay_create(
 
 /// Fetch every comment for `issue_id` from the Linear API, paginating until the
 /// thread is exhausted.
-pub fn fetch_all(
-    transport: &dyn GraphqlTransport,
-    issue_id: &str,
-) -> Result<Vec<wire::CommentNode>> {
-    let mut all: Vec<wire::CommentNode> = Vec::new();
+pub fn fetch_all(transport: &dyn GraphqlTransport, issue_id: &str) -> Result<Vec<wire::Comment>> {
+    let mut all: Vec<wire::Comment> = Vec::new();
     let mut cursor: Option<String> = None;
 
     loop {
@@ -84,7 +81,7 @@ mod tests {
             "commentCreate": { "success": true, "comment": {
                 "id": "c1", "body": "hi",
                 "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
-                "user": { "name": "Ada" }
+                "user": { "id": "u1", "name": "Ada" }
             }}
         })]);
         let created = replay_create(
@@ -101,7 +98,7 @@ mod tests {
         json!({
             "id": id, "body": body,
             "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
-            "user": { "name": "Alice" }
+            "user": { "id": "u1", "name": "Alice" }
         })
     }
 

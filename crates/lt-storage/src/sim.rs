@@ -13,8 +13,6 @@ use lt_types::types;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
-use crate::db;
-
 /// Linear's fixed priority vocabulary (matches the labels the TUI renders).
 const PRIORITIES: &[&str] = &["No priority", "Urgent", "High", "Normal", "Low"];
 
@@ -32,10 +30,12 @@ const STATES: &[&str] = &[
 const BASE_SECS: i64 = 1_767_225_600;
 
 /// A generated, deterministic dataset ready to upsert into the local DB.
+/// Comments carry their issue id alongside since [`lt_types::comments::Comment`]
+/// itself does not (that's the caller's key, not the GraphQL type's field).
 #[derive(PartialEq)]
 pub struct Dataset {
     pub issues: Vec<types::Issue>,
-    pub comments: Vec<db::Comment>,
+    pub comments: Vec<(String, lt_types::comments::Comment)>,
 }
 
 /// Uppercase the first character of `s`.
@@ -288,21 +288,26 @@ impl Generator {
         }
     }
 
-    fn comments_for(&mut self, issue: &types::Issue) -> Vec<db::Comment> {
+    fn comments_for(&mut self, issue: &types::Issue) -> Vec<(String, lt_types::comments::Comment)> {
         let n = self.rng.random_range(0..4usize);
         let mut out = Vec::with_capacity(n);
         for c in 0..n {
             let (created_at, updated_at) = self.timestamps();
             let body: String = Sentence(8..18).fake_with_rng(&mut self.rng);
-            out.push(db::Comment {
-                id: format!("{}-c{c}", issue.id.inner()),
-                issue_id: issue.id.inner().to_string(),
-                body,
-                author_name: Some(self.name()),
-                created_at: created_at.0.to_rfc3339(),
-                updated_at: updated_at.0.to_rfc3339(),
-                synced_at: String::new(),
-            });
+            let author = self.name();
+            out.push((
+                issue.id.inner().to_string(),
+                lt_types::comments::Comment {
+                    id: lt_types::Id::new(format!("{}-c{c}", issue.id.inner())),
+                    body,
+                    created_at,
+                    updated_at,
+                    user: Some(types::User {
+                        id: lt_types::Id::new(author.clone()),
+                        name: author,
+                    }),
+                },
+            ));
         }
         out
     }
@@ -327,6 +332,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::db;
 
     #[test]
     fn same_seed_is_deterministic() {
@@ -367,12 +373,11 @@ mod tests {
                 assert_ne!(issue.id, parent.id, "issue is its own parent");
             }
         }
-        for comment in &d.comments {
+        for (issue_id, comment) in &d.comments {
             assert!(
-                ids.contains(comment.issue_id.as_str()),
-                "comment {} references missing issue {}",
-                comment.id,
-                comment.issue_id
+                ids.contains(issue_id.as_str()),
+                "comment {} references missing issue {issue_id}",
+                comment.id.inner(),
             );
         }
     }
@@ -383,7 +388,9 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
         db::upsert_issues(&conn, &d.issues).unwrap();
-        db::upsert_comments(&conn, &d.comments).unwrap();
+        for (issue_id, comment) in &d.comments {
+            db::upsert_comments(&conn, issue_id, std::slice::from_ref(comment)).unwrap();
+        }
         // sanity: relational base reconstructs the rows.
         let args = lt_types::query::IssueQuery {
             limit: 250,

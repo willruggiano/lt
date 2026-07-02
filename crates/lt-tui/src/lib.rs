@@ -18,15 +18,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+pub use detail::IssueDetailView;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
 pub(crate) use detail::{handle_detail_key, poll_detail_comment_events};
 use lt_runtime::query::IssueQuery;
 use lt_runtime::search_query;
 use lt_runtime::sync_port::{LoginEvent, SyncEvent, SyncService};
+use lt_types::types::Issue;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use lt_types::types::priority_label_to_u8;
-use lt_types::types::{Issue, IssueDetail};
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use new_issue::{ModalEvent, build_assignee_items};
 pub(crate) use new_issue::{NewIssueField, NewIssueModal, handle_new_issue_key};
@@ -104,7 +105,7 @@ pub enum Status {
 /// Events sent from the background comment-sync thread to the TUI event loop.
 pub enum CommentSyncEvent {
     /// Comments refreshed successfully from the Linear API.
-    Done(Vec<lt_types::types::Comment>),
+    Done(Vec<lt_types::comments::Comment>),
     /// Comment sync error (non-fatal; cached data remains shown).
     Error(String),
 }
@@ -293,7 +294,7 @@ impl SyncService for NoopSyncService {
         let (_tx, rx) = mpsc::channel();
         rx
     }
-    fn fetch_viewer(&self) -> Option<lt_runtime::sync_port::Viewer> {
+    fn fetch_viewer(&self) -> Option<lt_types::viewer::User> {
         None
     }
     fn fetch_teams(&self) -> Result<Vec<lt_runtime::sync_port::Team>> {
@@ -331,7 +332,7 @@ pub struct App {
 
     // -- detail pane -------------------------------------------------
     /// Loaded detail for the currently-open issue.
-    pub detail: Option<IssueDetail>,
+    pub detail: Option<IssueDetailView>,
     /// Vertical scroll offset inside the detail pane (in lines).
     pub detail_scroll: u16,
 
@@ -768,7 +769,7 @@ pub fn run(args: IssueQuery, service: Arc<dyn SyncService>) -> Result<()> {
 
     if let Some(viewer) = viewer {
         app.viewer_name = Some(viewer.name);
-        app.org_name = Some(viewer.org_name);
+        app.org_name = Some(viewer.organization.name);
     }
 
     let mut terminal = ratatui::init();

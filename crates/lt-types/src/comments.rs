@@ -1,6 +1,8 @@
 //! The per-issue comment thread query and the `commentCreate` mutation,
 //! modelled as cynic `QueryFragment`s. These are the shared "currency" types;
-//! the fetch/replay lives in `lt-upstream`.
+//! the fetch/replay lives in `lt-upstream`, and `lt-storage` reconstructs the
+//! same [`Comment`] from its relational joins -- there is one `Comment` type,
+//! not a wire projection plus a mirrored domain type.
 
 use cynic::{MutationBuilder, QueryBuilder};
 
@@ -8,6 +10,7 @@ use crate::inputs::CommentCreateInput;
 use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
 use crate::schema;
+use crate::types::User;
 
 #[derive(cynic::QueryVariables)]
 pub struct CommentsVariables {
@@ -41,24 +44,27 @@ pub struct IssueWithComments {
 
 #[derive(cynic::QueryFragment)]
 pub struct CommentConnection {
-    pub nodes: Vec<CommentNode>,
+    pub nodes: Vec<Comment>,
     pub page_info: PageInfo,
 }
 
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "User")]
-pub struct CommentUserRef {
-    pub name: String,
-}
-
-#[derive(cynic::QueryFragment)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "Comment")]
-pub struct CommentNode {
+pub struct Comment {
     pub id: cynic::Id,
     pub body: String,
     pub created_at: DateTime,
     pub updated_at: DateTime,
-    pub user: Option<CommentUserRef>,
+    pub user: Option<User>,
+}
+
+impl Comment {
+    /// The comment's author display name, or "unknown" for a comment with no
+    /// associated user.
+    #[must_use]
+    pub fn author(&self) -> &str {
+        self.user.as_ref().map_or("unknown", |u| u.name.as_str())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -74,24 +80,14 @@ pub struct CommentCreateVariables {
 #[cynic(graphql_type = "Mutation", variables = "CommentCreateVariables")]
 pub struct CommentCreateMutation {
     #[arguments(input: $input)]
-    pub comment_create: CommentCreatePayload,
+    pub comment_create: CommentPayload,
 }
 
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "CommentPayload")]
-pub struct CommentCreatePayload {
+pub struct CommentPayload {
     pub success: bool,
-    pub comment: CreatedCommentNode,
-}
-
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "Comment")]
-pub struct CreatedCommentNode {
-    pub id: cynic::Id,
-    pub body: String,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
-    pub user: Option<CommentUserRef>,
+    pub comment: Comment,
 }
 
 /// The built `commentCreate` mutation string.
@@ -108,7 +104,7 @@ pub fn create_mutation() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_mutation, query};
+    use super::{Comment, create_mutation, query};
 
     #[test]
     fn query_declares_expected_variables() {
@@ -122,5 +118,17 @@ mod tests {
         let built = create_mutation();
         assert!(built.contains("commentCreate"));
         assert!(built.contains("$input: CommentCreateInput!"));
+    }
+
+    #[test]
+    fn author_falls_back_to_unknown() {
+        let comment = Comment {
+            id: cynic::Id::new("c1"),
+            body: "hi".to_string(),
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            user: None,
+        };
+        assert_eq!(comment.author(), "unknown");
     }
 }

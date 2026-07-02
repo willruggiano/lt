@@ -1,50 +1,40 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
+use lt_types::comments::Comment;
+use lt_types::types::User;
 use rusqlite::{Connection, params};
 
-/// A row in the `issue_comments` table.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Comment {
-    pub id: String,
-    pub issue_id: String,
-    pub body: String,
-    pub author_name: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub synced_at: String,
-}
+use crate::db::parse_datetime_column;
 
-impl From<Comment> for lt_types::types::Comment {
-    fn from(c: Comment) -> Self {
-        Self {
-            body: c.body,
-            created_at: c.created_at,
-            user: c
-                .author_name
-                .map(|name| lt_types::types::CommentUser { name }),
-        }
-    }
-}
-
-/// Insert or replace a slice of comments, setting `synced_at` to now (UTC).
-pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
+/// Insert or replace a slice of comments for `issue_id`: upsert each comment's
+/// author into the `users` table (relational storage, no more flattened
+/// `author_name`), then the comment row, stamping `synced_at` to now (UTC).
+pub fn upsert_comments(conn: &Connection, issue_id: &str, comments: &[Comment]) -> Result<()> {
     let synced_at = Utc::now().to_rfc3339();
     let mut stmt = conn
         .prepare(
             "INSERT OR REPLACE INTO issue_comments
-             (id, issue_id, body, author_name, created_at, updated_at, synced_at)
+             (id, issue_id, body, user_id, created_at, updated_at, synced_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .context("failed to prepare upsert_comments statement")?;
 
     for c in comments {
+        if let Some(user) = &c.user {
+            crate::db::issues::upsert_named_entity(
+                conn,
+                "users",
+                user.id.inner(),
+                Some(&user.name),
+            )?;
+        }
         stmt.execute(params![
-            c.id,
-            c.issue_id,
+            c.id.inner(),
+            issue_id,
             c.body,
-            c.author_name,
-            c.created_at,
-            c.updated_at,
+            c.user.as_ref().map(|u| u.id.inner()),
+            c.created_at.to_rfc3339_millis(),
+            c.updated_at.to_rfc3339_millis(),
             synced_at,
         ])
         .context("failed to upsert comment")?;
@@ -52,27 +42,35 @@ pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
     Ok(())
 }
 
-/// Return all comments for a given `issue_id`, ordered by `created_at` ascending.
+/// Return all comments for a given `issue_id`, ordered by `created_at`
+/// ascending, reconstructing each comment's author via a `LEFT JOIN` against
+/// `users`.
 pub fn query_comments(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, issue_id, body, author_name, created_at, updated_at, synced_at
-             FROM issue_comments
-             WHERE issue_id = ?1
-             ORDER BY created_at ASC",
+            "SELECT ic.id, ic.body, ic.created_at, ic.updated_at, ic.user_id, u.name
+             FROM issue_comments ic
+             LEFT JOIN users u ON u.id = ic.user_id
+             WHERE ic.issue_id = ?1
+             ORDER BY ic.created_at ASC",
         )
         .context("failed to prepare query_comments statement")?;
 
     let rows = stmt
         .query_map(params![issue_id], |row| {
+            let created_at: String = row.get(2)?;
+            let updated_at: String = row.get(3)?;
+            let user_id: Option<String> = row.get(4)?;
+            let user_name: Option<String> = row.get(5)?;
             Ok(Comment {
-                id: row.get(0)?,
-                issue_id: row.get(1)?,
-                body: row.get(2)?,
-                author_name: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
-                synced_at: row.get(6)?,
+                id: lt_types::Id::new(row.get::<_, String>(0)?),
+                body: row.get(1)?,
+                created_at: parse_datetime_column(&created_at)?,
+                updated_at: parse_datetime_column(&updated_at)?,
+                user: user_id.map(|id| User {
+                    id: lt_types::Id::new(id),
+                    name: user_name.unwrap_or_default(),
+                }),
             })
         })
         .context("failed to execute query_comments")?;
@@ -100,16 +98,16 @@ pub fn delete_comments_for_issue(conn: &Connection, issue_id: &str) -> Result<()
 mod tests {
     use super::*;
 
-    fn comment(id: &str, issue_id: &str, created_at: &str) -> Comment {
+    fn comment(id: &str, created_at: &str) -> Comment {
         Comment {
-            id: id.to_string(),
-            issue_id: issue_id.to_string(),
+            id: lt_types::Id::new(id),
             body: format!("body {id}"),
-            author_name: Some("Alice".to_string()),
-            created_at: created_at.to_string(),
-            updated_at: created_at.to_string(),
-            // Overwritten by upsert_comments; value here is irrelevant.
-            synced_at: String::new(),
+            created_at: created_at.parse().unwrap(),
+            updated_at: created_at.parse().unwrap(),
+            user: Some(User {
+                id: lt_types::Id::new("u-alice"),
+                name: "Alice".to_string(),
+            }),
         }
     }
 
@@ -124,23 +122,22 @@ mod tests {
         let conn = test_db();
         upsert_comments(
             &conn,
+            "i1",
             &[
-                comment("c2", "i1", "2026-01-02T00:00:00Z"),
-                comment("c1", "i1", "2026-01-01T00:00:00Z"),
-                comment("c3", "i2", "2026-01-03T00:00:00Z"),
+                comment("c2", "2026-01-02T00:00:00Z"),
+                comment("c1", "2026-01-01T00:00:00Z"),
             ],
         )
         .unwrap();
+        upsert_comments(&conn, "i2", &[comment("c3", "2026-01-03T00:00:00Z")]).unwrap();
 
         let got = query_comments(&conn, "i1").unwrap();
         assert_eq!(
-            got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            got.iter().map(|c| c.id.inner()).collect::<Vec<_>>(),
             ["c1", "c2"]
         );
         assert_eq!(got[0].body, "body c1");
-        assert_eq!(got[0].author_name.as_deref(), Some("Alice"));
-        // synced_at is stamped on insert, not carried from the input.
-        assert!(!got[0].synced_at.is_empty());
+        assert_eq!(got[0].author(), "Alice");
     }
 
     #[test]
@@ -152,11 +149,11 @@ mod tests {
     #[test]
     fn upsert_replaces_existing_by_id() {
         let conn = test_db();
-        upsert_comments(&conn, &[comment("c1", "i1", "2026-01-01T00:00:00Z")]).unwrap();
+        upsert_comments(&conn, "i1", &[comment("c1", "2026-01-01T00:00:00Z")]).unwrap();
 
-        let mut updated = comment("c1", "i1", "2026-01-01T00:00:00Z");
+        let mut updated = comment("c1", "2026-01-01T00:00:00Z");
         updated.body = "edited".to_string();
-        upsert_comments(&conn, &[updated]).unwrap();
+        upsert_comments(&conn, "i1", &[updated]).unwrap();
 
         let got = query_comments(&conn, "i1").unwrap();
         assert_eq!(got.len(), 1);
@@ -164,16 +161,21 @@ mod tests {
     }
 
     #[test]
+    fn upsert_with_no_author_leaves_user_none() {
+        let conn = test_db();
+        let mut c = comment("c1", "2026-01-01T00:00:00Z");
+        c.user = None;
+        upsert_comments(&conn, "i1", &[c]).unwrap();
+
+        let got = query_comments(&conn, "i1").unwrap();
+        assert_eq!(got[0].author(), "unknown");
+    }
+
+    #[test]
     fn delete_removes_only_target_issue() {
         let conn = test_db();
-        upsert_comments(
-            &conn,
-            &[
-                comment("c1", "i1", "2026-01-01T00:00:00Z"),
-                comment("c2", "i2", "2026-01-02T00:00:00Z"),
-            ],
-        )
-        .unwrap();
+        upsert_comments(&conn, "i1", &[comment("c1", "2026-01-01T00:00:00Z")]).unwrap();
+        upsert_comments(&conn, "i2", &[comment("c2", "2026-01-02T00:00:00Z")]).unwrap();
 
         delete_comments_for_issue(&conn, "i1").unwrap();
 

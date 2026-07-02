@@ -83,13 +83,7 @@ pub struct IssueUpdateVariables {
 #[cynic(graphql_type = "Mutation", variables = "IssueUpdateVariables")]
 pub struct IssueUpdateMutation {
     #[arguments(id: $id, input: $input)]
-    pub issue_update: IssueUpdatePayload,
-}
-
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "IssuePayload")]
-pub struct IssueUpdatePayload {
-    pub success: bool,
+    pub issue_update: IssuePayload,
 }
 
 /// The built `issueUpdate` mutation string.
@@ -111,24 +105,19 @@ pub struct IssueCreateVariables {
 #[cynic(graphql_type = "Mutation", variables = "IssueCreateVariables")]
 pub struct IssueCreateMutation {
     #[arguments(input: $input)]
-    pub issue_create: IssueCreatePayload,
+    pub issue_create: IssuePayload,
 }
 
+/// The `IssueUpdate`/`IssueCreate` response envelope, shared by both mutations:
+/// a success flag plus the full server-truth issue (nullable in the schema
+/// even on success). Both mutations select the whole [`Issue`] fragment so the
+/// drainer can reconcile the base from server truth rather than hand-stitching
+/// fields.
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "IssuePayload")]
-pub struct IssueCreatePayload {
+pub struct IssuePayload {
     pub success: bool,
-    pub issue: Option<CreatedIssue>,
-}
-
-/// The trimmed selection `issueCreate` returns: enough to confirm success and
-/// reconcile the optimistic temp row with the server's id/identifier.
-#[derive(cynic::QueryFragment, Debug, Clone)]
-#[cynic(graphql_type = "Issue")]
-pub struct CreatedIssue {
-    pub id: cynic::Id,
-    pub identifier: String,
-    pub title: String,
+    pub issue: Option<Issue>,
 }
 
 /// The built `issueCreate` mutation string.

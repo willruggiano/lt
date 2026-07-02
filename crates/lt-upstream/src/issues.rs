@@ -145,27 +145,31 @@ pub fn fetch_with(
 // ---------------------------------------------------------------------------
 
 impl CreatePayload for wire::IssueCreateMutation {
-    type Created = wire::CreatedIssue;
-    fn into_created(self) -> (bool, Option<wire::CreatedIssue>) {
+    type Created = Issue;
+    fn into_created(self) -> (bool, Option<Issue>) {
         (self.issue_create.success, self.issue_create.issue)
     }
 }
 
-/// Replay an `issueUpdate` from its stored variables. The drainer reconciles the
-/// base itself, so only success matters here.
-pub fn replay_update(transport: &dyn GraphqlTransport, variables: serde_json::Value) -> Result<()> {
+/// Replay an `issueUpdate` from its stored variables, returning the
+/// server-returned issue (nullable in the schema even on success) so the
+/// drainer can reconcile the base from server truth when present.
+pub fn replay_update(
+    transport: &dyn GraphqlTransport,
+    variables: serde_json::Value,
+) -> Result<Option<Issue>> {
     let data: wire::IssueUpdateMutation = query_as(transport, &wire::update_mutation(), variables)?;
     if !data.issue_update.success {
         bail!("issueUpdate returned success=false");
     }
-    Ok(())
+    Ok(data.issue_update.issue)
 }
 
-/// Replay an `issueCreate`, returning the server's id/identifier.
+/// Replay an `issueCreate`, returning the server's full issue.
 pub fn replay_create(
     transport: &dyn GraphqlTransport,
     variables: serde_json::Value,
-) -> Result<wire::CreatedIssue> {
+) -> Result<Issue> {
     post_create::<wire::IssueCreateMutation>(
         transport,
         &wire::create_mutation(),
@@ -176,10 +180,7 @@ pub fn replay_create(
 
 /// Create an issue synchronously (the CLI `lt issues new` path, which is an
 /// inherently online command rather than a queued TUI edit).
-pub fn create(
-    transport: &dyn GraphqlTransport,
-    input: &IssueCreateInput,
-) -> Result<wire::CreatedIssue> {
+pub fn create(transport: &dyn GraphqlTransport, input: &IssueCreateInput) -> Result<Issue> {
     replay_create(transport, json!({ "input": input }))
 }
 
@@ -228,9 +229,7 @@ mod tests {
     #[test]
     fn create_returns_server_identity() {
         let transport = FakeTransport::new(vec![serde_json::json!({
-            "issueCreate": { "success": true, "issue": {
-                "id": "i1", "identifier": "ENG-1", "title": "New"
-            }}
+            "issueCreate": { "success": true, "issue": sample_issue_node("1") }
         })]);
         let created = create(
             &transport,
@@ -256,17 +255,31 @@ mod tests {
     }
 
     #[test]
-    fn replay_update_sends_variables_and_checks_success() {
-        let transport = FakeTransport::new(vec![
-            serde_json::json!({ "issueUpdate": { "success": true } }),
-        ]);
-        replay_update(
+    fn replay_update_sends_variables_and_returns_server_issue() {
+        let transport = FakeTransport::new(vec![serde_json::json!({
+            "issueUpdate": { "success": true, "issue": sample_issue_node("1") }
+        })]);
+        let issue = replay_update(
             &transport,
             serde_json::json!({ "id": "i1", "input": { "stateId": "s9" } }),
         )
         .unwrap();
+        assert_eq!(issue.unwrap().identifier, "ENG-1");
         let vars = transport.variables(0);
         assert_eq!(vars["id"], serde_json::json!("i1"));
         assert_eq!(vars["input"]["stateId"], serde_json::json!("s9"));
+    }
+
+    #[test]
+    fn replay_update_tolerates_absent_issue() {
+        let transport = FakeTransport::new(vec![serde_json::json!({
+            "issueUpdate": { "success": true, "issue": null }
+        })]);
+        let issue = replay_update(
+            &transport,
+            serde_json::json!({ "id": "i1", "input": { "stateId": "s9" } }),
+        )
+        .unwrap();
+        assert!(issue.is_none());
     }
 }

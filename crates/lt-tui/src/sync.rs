@@ -100,7 +100,7 @@ pub(crate) fn poll_sync_events(app: &mut App) {
                 // (authentication happened outside the L-key login flow).
                 if let Some(v) = viewer {
                     app.viewer_name = Some(v.name);
-                    app.org_name = Some(v.org_name);
+                    app.org_name = Some(v.organization.name);
                     app.session.not_authenticated = false;
                 }
                 // Sync finished: refresh the issue list from SQLite so that

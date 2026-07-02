@@ -5,8 +5,8 @@
 
 use anyhow::{Result, anyhow};
 use lt_types::inputs::IssueCreateInput;
-use lt_types::issues::CreatedIssue;
-use lt_types::types::{Team, User, Viewer, WorkflowState};
+use lt_types::types::{Issue, Team, User, WorkflowState};
+use lt_types::viewer;
 use lt_upstream::client::HttpTransport;
 pub use lt_upstream::issues::fetch;
 
@@ -20,7 +20,7 @@ fn transport_from_config() -> Result<HttpTransport> {
 /// A ready-to-drive new-issue session: a transport plus the viewer identity.
 pub struct NewIssueSession {
     transport: HttpTransport,
-    pub viewer: Viewer,
+    pub viewer: viewer::User,
 }
 
 impl NewIssueSession {
@@ -47,7 +47,7 @@ impl NewIssueSession {
     }
 
     /// Create an issue synchronously.
-    pub fn create(&self, input: &IssueCreateInput) -> Result<CreatedIssue> {
+    pub fn create(&self, input: &IssueCreateInput) -> Result<Issue> {
         lt_upstream::issues::create(&self.transport, input)
     }
 }

@@ -289,11 +289,13 @@ fn poll_sync_events_done_refreshes_and_sets_identity() {
     let mut app = app_with_db(&rows).unwrap();
     app.sync.syncing = true;
     let (tx, rx) = mpsc::channel();
-    tx.send(SyncEvent::Done(Some(lt_runtime::sync_port::Viewer {
-        id: "u1".to_string(),
+    tx.send(SyncEvent::Done(Some(lt_types::viewer::User {
+        id: lt_types::Id::new("u1"),
         name: "Ada".to_string(),
-        org_name: "Acme".to_string(),
-        org_url_key: "acme".to_string(),
+        organization: lt_types::viewer::Organization {
+            name: "Acme".to_string(),
+            url_key: "acme".to_string(),
+        },
     })))
     .unwrap();
     app.sync.sync_rx = Some(rx);
@@ -310,15 +312,17 @@ fn poll_detail_comment_events_done_updates_detail() {
     let mut app = app_with_db(&[]).unwrap();
     app.detail = Some(build_cached_detail(&issue, Vec::new()));
     let (tx, rx) = mpsc::channel();
-    tx.send(CommentSyncEvent::Done(vec![lt_types::types::Comment {
+    tx.send(CommentSyncEvent::Done(vec![lt_types::comments::Comment {
+        id: lt_types::Id::new("c1"),
         body: "fresh".to_string(),
-        created_at: "2026-01-06T00:00:00Z".to_string(),
+        created_at: "2026-01-06T00:00:00Z".parse().unwrap(),
+        updated_at: "2026-01-06T00:00:00Z".parse().unwrap(),
         user: None,
     }]))
     .unwrap();
     app.detail_comment_rx = Some(rx);
     poll_detail_comment_events(&mut app);
-    assert_eq!(app.detail.unwrap().comments.nodes.len(), 1);
+    assert_eq!(app.detail.unwrap().comments.len(), 1);
     assert!(app.detail_comment_rx.is_none());
 }
 

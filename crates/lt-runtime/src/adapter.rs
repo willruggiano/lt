@@ -9,16 +9,17 @@ use std::sync::mpsc;
 use anyhow::Result;
 use lt_storage::db;
 use lt_types::query::IssueQuery;
+use lt_types::viewer;
 use lt_upstream as upstream;
 use lt_upstream::client::HttpTransport;
 
-use crate::sync_port::{LoginEvent, SyncEvent, SyncService, Team, User, Viewer, WorkflowState};
+use crate::sync_port::{LoginEvent, SyncEvent, SyncService, Team, User, WorkflowState};
 
 pub struct LinearSyncService;
 
 impl LinearSyncService {
     /// Best-effort viewer identity from the stored token.
-    fn viewer_identity() -> Option<Viewer> {
+    fn viewer_identity() -> Option<viewer::User> {
         let token = lt_config::load_token().ok().flatten()?;
         upstream::viewer::fetch(&HttpTransport::new(token.access_token)).ok()
     }
@@ -85,7 +86,7 @@ impl SyncService for LinearSyncService {
                 let viewer = Self::viewer_identity();
                 let _ = tx.send(LoginEvent::Success {
                     viewer_name: viewer.as_ref().map(|v| v.name.clone()),
-                    org_name: viewer.as_ref().map(|v| v.org_name.clone()),
+                    org_name: viewer.as_ref().map(|v| v.organization.name.clone()),
                 });
             }
             Err(e) => {
@@ -95,7 +96,7 @@ impl SyncService for LinearSyncService {
         rx
     }
 
-    fn fetch_viewer(&self) -> Option<Viewer> {
+    fn fetch_viewer(&self) -> Option<viewer::User> {
         Self::viewer_identity()
     }
 

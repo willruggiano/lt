@@ -8,7 +8,7 @@ use crate::schema;
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query")]
 pub struct ViewerQuery {
-    pub viewer: ViewerUser,
+    pub viewer: User,
 }
 
 /// The built viewer query string. Kept here so cynic stays confined to
@@ -19,18 +19,21 @@ pub fn query() -> String {
     ViewerQuery::build(()).query
 }
 
-#[derive(cynic::QueryFragment)]
+/// The authenticated user's identity, as selected by the viewer query. A
+/// distinct selection from [`crate::types::User`] (adds `organization`, drops
+/// nothing an assignee/creator would need) is why this fragment exists
+/// alongside it, disambiguated by module path.
+#[derive(cynic::QueryFragment, Debug, Clone)]
 #[cynic(graphql_type = "User")]
-pub struct ViewerUser {
+pub struct User {
     pub id: cynic::Id,
     pub name: String,
-    pub email: String,
-    pub organization: ViewerOrganization,
+    pub organization: Organization,
 }
 
-#[derive(cynic::QueryFragment)]
+#[derive(cynic::QueryFragment, Debug, Clone)]
 #[cynic(graphql_type = "Organization")]
-pub struct ViewerOrganization {
+pub struct Organization {
     pub name: String,
     #[cynic(rename = "urlKey")]
     pub url_key: String,

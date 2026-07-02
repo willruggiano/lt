@@ -21,79 +21,11 @@ pub struct GraphqlError {
     pub message: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct Comment {
-    pub body: String,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    pub user: Option<CommentUser>,
-}
-
-impl Comment {
-    pub fn author(&self) -> &str {
-        self.user.as_ref().map_or("unknown", |u| u.name.as_str())
-    }
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct CommentUser {
-    pub name: String,
-}
-
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "IssueLabel")]
 pub struct Label {
     pub id: cynic::Id,
     pub name: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct IssueRef {
-    pub identifier: String,
-    pub title: String,
-    pub state_name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueDetail {
-    pub identifier: String,
-    pub title: String,
-    pub description: Option<String>,
-    #[serde(rename = "priorityLabel")]
-    pub priority_label: String,
-    pub state: IssueDetailState,
-    pub assignee: Option<IssueDetailUser>,
-    pub team: IssueDetailTeam,
-    pub labels: LabelConnection,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: String,
-    pub comments: CommentConnection,
-    #[serde(skip)]
-    pub parent: Option<IssueRef>,
-    #[serde(skip)]
-    pub children: Vec<IssueRef>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueDetailState {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueDetailUser {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueDetailTeam {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct CommentConnection {
-    pub nodes: Vec<Comment>,
 }
 
 #[derive(cynic::QueryFragment, Clone, PartialEq)]
@@ -110,23 +42,11 @@ pub struct WorkflowState {
     pub name: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "User")]
 pub struct User {
     pub id: cynic::Id,
     pub name: String,
-}
-
-/// The authenticated user's identity: the viewer plus their organization
-/// (workspace) name and url-key. Surfaced in the TUI header, the "Me" assignee
-/// item, and the created-issue URL. Sourced from the viewer query
-/// ([`crate::viewer`]) and persisted (id, name) into `sync_meta` at sync time.
-#[derive(Debug, Clone)]
-pub struct Viewer {
-    pub id: String,
-    pub name: String,
-    pub org_name: String,
-    pub org_url_key: String,
 }
 
 #[derive(cynic::QueryFragment, Clone, PartialEq)]

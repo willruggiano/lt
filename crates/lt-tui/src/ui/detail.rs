@@ -1,16 +1,16 @@
-use lt_types::types::IssueDetail;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
+use crate::detail::IssueDetailView;
 use crate::{App, Status, markdown};
 
-/// A comment's `createdAt` is a plain RFC3339 `String` (`IssueDetail` is not
-/// yet migrated to the `DateTime` scalar); render its `YYYY-MM-DD` date part.
-fn comment_date(s: &str) -> &str {
-    if s.len() >= 10 { &s[..10] } else { s }
+/// A comment's `created_at` is the `DateTime` scalar end-to-end; render its
+/// `YYYY-MM-DD` date part.
+fn comment_date(dt: &lt_types::scalars::DateTime) -> String {
+    dt.0.format("%Y-%m-%d").to_string()
 }
 
 /// Render the issue detail as a floating overlay over the right ~60% of the
@@ -77,26 +77,27 @@ fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
+fn build_detail_lines(d: &IssueDetailView) -> Vec<Line<'static>> {
+    let issue = &d.issue;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Header line: IDENTIFIER - Title
     lines.push(Line::from(vec![
         Span::styled(
-            d.identifier.clone(),
+            issue.identifier.clone(),
             Style::new().add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(" - {}", d.title)),
+        Span::raw(format!(" - {}", issue.title)),
     ]));
 
     // Meta line: state, priority, assignee, team
-    let assignee = d
+    let assignee = issue
         .assignee
         .as_ref()
         .map_or_else(|| "unassigned".to_string(), |u| u.name.clone());
     lines.push(Line::from(format!(
         "[{}]  {}  {}  {}",
-        d.state.name, d.priority_label, assignee, d.team.name
+        issue.state.name, issue.priority_label, assignee, issue.team.name
     )));
 
     // Parent issue reference
@@ -108,8 +109,8 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
     }
 
     // Labels, shown directly below the meta line and above Sub-issues.
-    if !d.labels.nodes.is_empty() {
-        let names = d
+    if !issue.labels.nodes.is_empty() {
+        let names = issue
             .labels
             .nodes
             .iter()
@@ -132,7 +133,7 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
         for child in &d.children {
             lines.push(Line::from(format!(
                 "  [{}] {} - {}",
-                child.state_name, child.identifier, child.title
+                child.state.name, child.identifier, child.title
             )));
         }
     }
@@ -140,7 +141,7 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
     // Description
-    if let Some(desc) = &d.description
+    if let Some(desc) = &issue.description
         && !desc.is_empty()
     {
         lines.push(Line::from(Span::styled(
@@ -153,12 +154,12 @@ fn build_detail_lines(d: &IssueDetail) -> Vec<Line<'static>> {
     }
 
     // Comments
-    if !d.comments.nodes.is_empty() {
+    if !d.comments.is_empty() {
         lines.push(Line::from(Span::styled(
             "Comments",
             Style::new().add_modifier(Modifier::UNDERLINED),
         )));
-        for comment in &d.comments.nodes {
+        for comment in &d.comments {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 format!(
