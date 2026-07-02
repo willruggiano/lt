@@ -13,8 +13,6 @@ use lt_types::types;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
-use crate::db;
-
 /// Linear's fixed priority vocabulary (matches the labels the TUI renders).
 const PRIORITIES: &[&str] = &["No priority", "Urgent", "High", "Normal", "Low"];
 
@@ -35,7 +33,7 @@ const BASE_SECS: i64 = 1_767_225_600;
 #[derive(PartialEq)]
 pub struct Dataset {
     pub issues: Vec<types::Issue>,
-    pub comments: Vec<db::Comment>,
+    pub comments: Vec<lt_types::comments::Comment>,
 }
 
 /// Uppercase the first character of `s`.
@@ -126,12 +124,15 @@ impl Generator {
 
     /// A `(created_at, updated_at)` pair where `updated_at >= created_at`,
     /// both within ~190 days of the fixed base.
-    fn timestamps(&mut self) -> (String, String) {
+    fn timestamps(&mut self) -> (lt_types::scalars::DateTime, lt_types::scalars::DateTime) {
         let created = self.rng.random_range(0..15_552_000i64); // up to 180 days
         let updated = created + self.rng.random_range(0..864_000i64); // up to +10 days
         let c = self.base + Duration::seconds(created);
         let u = self.base + Duration::seconds(updated);
-        (c.to_rfc3339(), u.to_rfc3339())
+        (
+            lt_types::scalars::DateTime(c),
+            lt_types::scalars::DateTime(u),
+        )
     }
 
     fn name(&mut self) -> String {
@@ -147,7 +148,7 @@ impl Generator {
 
     /// A set of 0-3 distinct word labels. The label id mirrors the name so the
     /// relational upsert dedupes a shared label to one row.
-    fn labels(&mut self) -> Vec<types::Label> {
+    fn labels(&mut self) -> Vec<types::IssueLabel> {
         let n = self.rng.random_range(0..4usize);
         let mut chosen: Vec<String> = Vec::with_capacity(n);
         for _ in 0..n {
@@ -158,8 +159,8 @@ impl Generator {
         }
         chosen
             .into_iter()
-            .map(|name| types::Label {
-                id: name.clone(),
+            .map(|name| types::IssueLabel {
+                id: name.clone().into(),
                 name,
             })
             .collect()
@@ -211,8 +212,10 @@ impl Generator {
         if !self.rng.random_ratio(3, 20) {
             return None;
         }
-        let candidates: Vec<&types::Issue> =
-            existing.iter().filter(|e| e.team.id == team_key).collect();
+        let candidates: Vec<&types::Issue> = existing
+            .iter()
+            .filter(|e| e.team.id.inner() == team_key)
+            .collect();
         if candidates.is_empty() {
             return None;
         }
@@ -227,7 +230,7 @@ impl Generator {
     /// the relational upsert dedupes a person to one `users` row.
     fn user(name: Option<String>) -> Option<types::User> {
         name.map(|name| types::User {
-            id: name.clone(),
+            id: name.clone().into(),
             name,
         })
     }
@@ -250,29 +253,29 @@ impl Generator {
         let priority = types::priority_label_to_u8(&priority_label);
         let state_name = (*self.pick(STATES)).to_string();
         types::Issue {
-            id: format!("sim-{:016x}-{index}", self.seed),
+            id: format!("sim-{:016x}-{index}", self.seed).into(),
             identifier,
             title,
-            priority,
+            priority: lt_types::scalars::Priority(priority),
             // The team id is its key; entity ids mirror names so renamed-to-same
             // values collapse to one row in the relational base.
             state: types::WorkflowState {
-                id: state_name.clone(),
+                id: state_name.clone().into(),
                 name: state_name,
             },
             assignee,
             team: types::Team {
-                id: team_key,
+                id: team_key.into(),
                 name: team_name,
             },
             description,
-            labels: types::LabelConnection { nodes: labels },
+            labels: types::IssueLabelConnection { nodes: labels },
             project: project.map(|name| types::Project {
-                id: name.clone(),
+                id: name.clone().into(),
                 name,
             }),
             cycle: cycle.map(|name| types::Cycle {
-                id: name.clone(),
+                id: name.clone().into(),
                 name: Some(name),
             }),
             creator,
@@ -283,20 +286,23 @@ impl Generator {
         }
     }
 
-    fn comments_for(&mut self, issue: &types::Issue) -> Vec<db::Comment> {
+    fn comments_for(&mut self, issue: &types::Issue) -> Vec<lt_types::comments::Comment> {
         let n = self.rng.random_range(0..4usize);
         let mut out = Vec::with_capacity(n);
         for c in 0..n {
             let (created_at, updated_at) = self.timestamps();
             let body: String = Sentence(8..18).fake_with_rng(&mut self.rng);
-            out.push(db::Comment {
-                id: format!("{}-c{c}", issue.id),
-                issue_id: issue.id.clone(),
+            let author = self.name();
+            out.push(lt_types::comments::Comment {
+                id: format!("{}-c{c}", issue.id.inner()).into(),
                 body,
-                author_name: Some(self.name()),
                 created_at,
                 updated_at,
-                synced_at: String::new(),
+                user: Some(types::User {
+                    id: author.clone().into(),
+                    name: author,
+                }),
+                issue_id: Some(issue.id.inner().to_string()),
             });
         }
         out
@@ -322,6 +328,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::db;
 
     #[test]
     fn same_seed_is_deterministic() {
@@ -342,7 +349,7 @@ mod tests {
     #[test]
     fn identifiers_are_unique() {
         let d = generate(99, 200);
-        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.as_str()).collect();
+        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.inner()).collect();
         assert_eq!(ids.len(), d.issues.len());
         let idents: HashSet<&str> = d.issues.iter().map(|i| i.identifier.as_str()).collect();
         assert_eq!(idents.len(), d.issues.len());
@@ -351,23 +358,23 @@ mod tests {
     #[test]
     fn relations_reference_existing_issues() {
         let d = generate(123, 200);
-        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.as_str()).collect();
+        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.inner()).collect();
         for issue in &d.issues {
             if let Some(parent) = &issue.parent {
                 assert!(
-                    ids.contains(parent.id.as_str()),
+                    ids.contains(parent.id.inner()),
                     "dangling parent {}",
-                    parent.id
+                    parent.id.inner()
                 );
                 assert_ne!(issue.id, parent.id, "issue is its own parent");
             }
         }
         for comment in &d.comments {
+            let issue_id = comment.issue_id.as_deref().unwrap();
             assert!(
-                ids.contains(comment.issue_id.as_str()),
-                "comment {} references missing issue {}",
-                comment.id,
-                comment.issue_id
+                ids.contains(issue_id),
+                "comment {} references missing issue {issue_id}",
+                comment.id.inner(),
             );
         }
     }

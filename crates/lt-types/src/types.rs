@@ -1,4 +1,9 @@
+//! The shared entity fragment types and the GraphQL response envelope.
+
 use serde::Deserialize;
+
+use crate::scalars::{DateTime, Priority};
+use crate::schema;
 
 #[derive(Deserialize)]
 pub struct GraphqlResponse<T> {
@@ -11,176 +16,81 @@ pub struct GraphqlError {
     pub message: String,
 }
 
-#[derive(Deserialize)]
-pub struct PageInfo {
-    #[serde(rename = "hasNextPage")]
-    pub has_next_page: bool,
-    #[serde(rename = "endCursor")]
-    pub end_cursor: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct Comment {
-    pub body: String,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    pub user: Option<CommentUser>,
-}
-
-impl Comment {
-    pub fn author(&self) -> &str {
-        self.user.as_ref().map_or("unknown", |u| u.name.as_str())
-    }
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct CommentUser {
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
+#[cynic(graphql_type = "IssueLabel")]
+pub struct IssueLabel {
+    pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-pub struct Label {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct IssueRef {
-    pub identifier: String,
-    pub title: String,
-    pub state_name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueDetail {
-    pub identifier: String,
-    pub title: String,
-    pub description: Option<String>,
-    #[serde(rename = "priorityLabel")]
-    pub priority_label: String,
-    pub state: IssueDetailState,
-    pub assignee: Option<IssueDetailUser>,
-    pub team: IssueDetailTeam,
-    pub labels: LabelConnection,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: String,
-    pub comments: CommentConnection,
-    #[serde(skip)]
-    pub parent: Option<IssueRef>,
-    #[serde(skip)]
-    pub children: Vec<IssueRef>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueDetailState {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueDetailUser {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IssueDetailTeam {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-pub struct LabelConnection {
-    pub nodes: Vec<Label>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct CommentConnection {
-    pub nodes: Vec<Comment>,
-}
-
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Issue")]
 pub struct Parent {
-    pub id: String,
+    pub id: cynic::Id,
     pub identifier: String,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "WorkflowState")]
 pub struct WorkflowState {
-    pub id: String,
+    pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
+#[cynic(graphql_type = "User")]
 pub struct User {
-    pub id: String,
+    pub id: cynic::Id,
     pub name: String,
 }
 
-/// The authenticated user's identity: the viewer plus their organization
-/// (workspace) name and url-key. Surfaced in the TUI header, the "Me" assignee
-/// item, and the created-issue URL. Sourced from the viewer query
-/// ([`crate::viewer`]) and persisted (id, name) into `sync_meta` at sync time.
-#[derive(Debug, Clone)]
-pub struct Viewer {
-    pub id: String,
-    pub name: String,
-    pub org_name: String,
-    pub org_url_key: String,
-}
-
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Team")]
 pub struct Team {
-    pub id: String,
+    pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Project")]
 pub struct Project {
-    pub id: String,
+    pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Cycle")]
 pub struct Cycle {
-    pub id: String,
+    pub id: cynic::Id,
     // Nullable in Linear's schema -- unnamed cycles identify by number.
     pub name: Option<String>,
 }
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
+#[cynic(graphql_type = "IssueLabelConnection")]
+pub struct IssueLabelConnection {
+    pub nodes: Vec<IssueLabel>,
+}
+
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "Issue")]
 pub struct Issue {
-    pub id: String,
+    pub id: cynic::Id,
     pub identifier: String,
     pub title: String,
-    #[serde(rename = "priorityLabel")]
     pub priority_label: String,
-    pub priority: u8,
+    pub priority: Priority,
     pub state: WorkflowState,
     pub assignee: Option<User>,
     pub team: Team,
     pub description: Option<String>,
-    pub labels: LabelConnection,
+    pub labels: IssueLabelConnection,
     pub project: Option<Project>,
     pub cycle: Option<Cycle>,
     pub creator: Option<User>,
     pub parent: Option<Parent>,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: String,
-}
-
-/// One page of the `issues` list query: the issue nodes plus pagination info.
-#[derive(Deserialize)]
-pub struct IssueConnection {
-    pub nodes: Vec<Issue>,
-    #[serde(rename = "pageInfo")]
-    pub page_info: PageInfo,
-}
-
-#[derive(Deserialize)]
-pub struct IssuesData {
-    pub issues: IssueConnection,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
 }
 
 /// Map a Linear priority label to its numeric level. Lossy: any unrecognised

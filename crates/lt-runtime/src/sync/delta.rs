@@ -1,8 +1,8 @@
 use anyhow::Result;
 use lt_storage::db;
-use lt_types::types::{Issue, IssuesData};
+use lt_types::issues::{IssuesQuery, query};
+use lt_types::types::Issue;
 use lt_upstream::client::{GraphqlTransport, HttpTransport, query_as};
-use lt_upstream::issues::ISSUES_QUERY;
 use serde_json::json;
 
 /// Fetch one page of issues updated after `since` (an RFC3339 timestamp).
@@ -26,7 +26,7 @@ fn fetch_page(
         "after": after,
     });
 
-    let data: IssuesData = query_as(transport, ISSUES_QUERY, variables)?;
+    let data: IssuesQuery = query_as(transport, &query(), variables)?;
     let conn = data.issues;
     Ok((
         conn.nodes,

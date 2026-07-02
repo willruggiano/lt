@@ -214,7 +214,7 @@ pub fn enqueue_issue_create(
     insert_pending(
         &tx,
         OP_ISSUE_CREATE,
-        &optimistic.id,
+        optimistic.id.inner(),
         &json!({ "input": input }),
     )?;
     tx.commit().context("failed to commit issue create")?;
@@ -222,28 +222,25 @@ pub fn enqueue_issue_create(
 }
 
 /// Enqueue a comment create: insert an optimistic comment row under the client
-/// `temp_id` and queue the `commentCreate` command. The issue and body come from
-/// `input`.
+/// `temp_id` and queue the `commentCreate` command. The issue and body come
+/// from `input`; the author is the persisted viewer identity (`sync_meta`), if
+/// one has been recorded yet.
 pub fn enqueue_comment_create(
     conn: &Connection,
     temp_id: &str,
-    author_name: Option<&str>,
     input: &CommentCreateInput,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    let now = Utc::now().to_rfc3339();
-    crate::db::upsert_comments(
-        &tx,
-        &[crate::db::Comment {
-            id: temp_id.to_string(),
-            issue_id: input.issue_id.clone(),
-            body: input.body.clone(),
-            author_name: author_name.map(str::to_string),
-            created_at: now.clone(),
-            updated_at: now,
-            synced_at: String::new(),
-        }],
-    )?;
+    let now = lt_types::scalars::DateTime(Utc::now());
+    let comment = lt_types::comments::Comment {
+        id: temp_id.into(),
+        body: input.body.clone(),
+        created_at: now,
+        updated_at: now,
+        user: crate::db::synced_viewer(&tx)?,
+        issue_id: Some(input.issue_id.clone()),
+    };
+    crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
     // entity_id is the temp comment id so the ack can find and replace the row.
     insert_pending(&tx, OP_COMMENT_CREATE, temp_id, &json!({ "input": input }))?;
     tx.commit().context("failed to commit comment create")?;
@@ -292,35 +289,47 @@ pub fn pending_operations(conn: &Connection) -> Result<Vec<PendingOp>> {
 }
 
 /// Apply a confirmed issue update to the base and retire its overlay + command,
-/// atomically. The overlay values become the new base truth, so the read model
-/// never flickers back to the pre-edit value.
-pub fn ack_issue_update(conn: &Connection, seq: i64, issue_id: &str) -> Result<()> {
+/// atomically. When the server returned the updated issue (nullable in the
+/// schema even on success), its fields become the new base truth via a full
+/// upsert; otherwise falls back to applying the overlay's per-field intent, as
+/// before. Either way the read model never flickers back to the pre-edit value.
+pub fn ack_issue_update(
+    conn: &Connection,
+    seq: i64,
+    issue_id: &str,
+    server_issue: Option<&types::Issue>,
+) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    for (field, value) in overlay_rows(&tx, issue_id)? {
-        match field.as_str() {
-            "state" => {
-                tx.execute(
-                    "UPDATE issues SET state_id = ?1 WHERE id = ?2",
-                    params![value, issue_id],
-                )?;
+    if let Some(issue) = server_issue {
+        let synced_at = Utc::now().to_rfc3339();
+        crate::db::issues::upsert_issue_tx(&tx, issue, &synced_at)?;
+    } else {
+        for (field, value) in overlay_rows(&tx, issue_id)? {
+            match field.as_str() {
+                "state" => {
+                    tx.execute(
+                        "UPDATE issues SET state_id = ?1 WHERE id = ?2",
+                        params![value, issue_id],
+                    )?;
+                }
+                "assignee" => {
+                    tx.execute(
+                        "UPDATE issues SET assignee_id = ?1 WHERE id = ?2",
+                        params![value, issue_id],
+                    )?;
+                }
+                "priority" => {
+                    let label = value
+                        .as_deref()
+                        .and_then(|v| v.parse::<u8>().ok())
+                        .map_or("No priority", types::priority_u8_to_label);
+                    tx.execute(
+                        "UPDATE issues SET priority_label = ?1 WHERE id = ?2",
+                        params![label, issue_id],
+                    )?;
+                }
+                _ => {}
             }
-            "assignee" => {
-                tx.execute(
-                    "UPDATE issues SET assignee_id = ?1 WHERE id = ?2",
-                    params![value, issue_id],
-                )?;
-            }
-            "priority" => {
-                let label = value
-                    .as_deref()
-                    .and_then(|v| v.parse::<u8>().ok())
-                    .map_or("No priority", types::priority_u8_to_label);
-                tx.execute(
-                    "UPDATE issues SET priority_label = ?1 WHERE id = ?2",
-                    params![label, issue_id],
-                )?;
-            }
-            _ => {}
         }
     }
     tx.execute(
@@ -332,42 +341,54 @@ pub fn ack_issue_update(conn: &Connection, seq: i64, issue_id: &str) -> Result<(
     Ok(())
 }
 
-/// Rewrite the optimistic temp issue row with the server-assigned id and
-/// identifier, then retire the command. `server` is the `(id, identifier)` pair
-/// from the `issueCreate` response.
+/// Replace the optimistic temp issue with the server's full issue (server
+/// truth, not a hand-stitched id/identifier rewrite) and retire the command.
 pub fn ack_issue_create(
     conn: &Connection,
     seq: i64,
     temp_id: &str,
-    server: (&str, &str),
+    issue: &types::Issue,
 ) -> Result<()> {
-    let (real_id, identifier) = server;
     let tx = conn.unchecked_transaction()?;
+    let synced_at = Utc::now().to_rfc3339();
+    crate::db::issues::upsert_issue_tx(&tx, issue, &synced_at)?;
     tx.execute(
-        "UPDATE issue_labels SET issue_id = ?1 WHERE issue_id = ?2",
-        params![real_id, temp_id],
+        "DELETE FROM issue_labels WHERE issue_id = ?1",
+        params![temp_id],
     )?;
-    tx.execute(
-        "UPDATE issues SET id = ?1, identifier = ?2 WHERE id = ?3",
-        params![real_id, identifier, temp_id],
-    )?;
+    tx.execute("DELETE FROM issues WHERE id = ?1", params![temp_id])?;
     delete_command(&tx, seq)?;
     tx.commit().context("failed to commit issue-create ack")?;
     Ok(())
 }
 
+/// The server's acknowledgement of a queued `commentCreate`: the client temp
+/// id to replace, the issue it belongs to, and the server's comment (used
+/// as-is, from the `commentCreate` response).
+pub struct CommentAck<'a> {
+    pub temp_id: &'a str,
+    pub issue_id: &'a str,
+    pub comment: &'a lt_types::comments::Comment,
+}
+
 /// Replace the optimistic temp comment with the server copy and retire the
 /// command, atomically -- so the comment never blinks out between ack and the
 /// next per-issue comment sync.
-pub fn ack_comment_create(
-    conn: &Connection,
-    seq: i64,
-    temp_id: &str,
-    comment: &crate::db::Comment,
-) -> Result<()> {
+pub fn ack_comment_create(conn: &Connection, seq: i64, ack: &CommentAck) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM issue_comments WHERE id = ?1", params![temp_id])?;
-    crate::db::upsert_comments(&tx, std::slice::from_ref(comment))?;
+    tx.execute(
+        "DELETE FROM issue_comments WHERE id = ?1",
+        params![ack.temp_id],
+    )?;
+    // Stamp the issue id from the ack rather than trusting the server's
+    // comment payload for it: the mutation's `issueId` is nullable in the
+    // schema, but the outbox command it replays always carries the issue it
+    // was queued against.
+    let comment = lt_types::comments::Comment {
+        issue_id: Some(ack.issue_id.to_string()),
+        ..ack.comment.clone()
+    };
+    crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
     delete_command(&tx, seq)?;
     tx.commit().context("failed to commit comment-create ack")?;
     Ok(())
@@ -394,28 +415,28 @@ fn delete_command(tx: &Connection, seq: i64) -> Result<()> {
 #[cfg(any(test, feature = "test-util"))]
 pub fn sample_base_issue(id: &str) -> types::Issue {
     types::Issue {
-        id: id.to_string(),
+        id: id.into(),
         identifier: format!("ENG-{id}"),
         title: format!("issue {id}"),
         priority_label: "Normal".to_string(),
-        priority: 3,
+        priority: lt_types::scalars::Priority(3),
         state: types::WorkflowState {
-            id: "s-todo".to_string(),
+            id: "s-todo".into(),
             name: "Todo".to_string(),
         },
         assignee: None,
         team: types::Team {
-            id: "ENG".to_string(),
+            id: "ENG".into(),
             name: "Engineering".to_string(),
         },
         description: None,
-        labels: types::LabelConnection { nodes: Vec::new() },
+        labels: types::IssueLabelConnection { nodes: Vec::new() },
         project: None,
         cycle: None,
         creator: None,
         parent: None,
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        updated_at: "2026-01-02T00:00:00Z".to_string(),
+        created_at: "2026-01-01T00:00:00Z".parse().unwrap_or_default(),
+        updated_at: "2026-01-02T00:00:00Z".parse().unwrap_or_default(),
     }
 }
 
@@ -455,13 +476,13 @@ mod tests {
     }
 
     #[test]
-    fn ack_issue_update_applies_overlay_to_base_and_clears() {
+    fn ack_issue_update_applies_overlay_to_base_when_no_server_issue() {
         let conn = db_with_issue("1");
         enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
         enqueue_assignee_change(&conn, "1", None).unwrap();
 
         let seq = pending(&conn)[0].seq;
-        ack_issue_update(&conn, seq, "1").unwrap();
+        ack_issue_update(&conn, seq, "1", None).unwrap();
 
         // Base now carries the acked values; overlay and command are gone.
         let (state_id, assignee): (String, Option<String>) = conn
@@ -482,11 +503,33 @@ mod tests {
     }
 
     #[test]
+    fn ack_issue_update_prefers_server_issue_over_overlay() {
+        let conn = db_with_issue("1");
+        enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
+
+        let seq = pending(&conn)[0].seq;
+        let mut server_issue = base_issue("1");
+        server_issue.state = types::WorkflowState {
+            id: "s-merged".into(),
+            name: "Merged".to_string(),
+        };
+        ack_issue_update(&conn, seq, "1", Some(&server_issue)).unwrap();
+
+        let state_id: String = conn
+            .query_row("SELECT state_id FROM issues WHERE id = '1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state_id, "s-merged");
+        assert!(pending(&conn).is_empty());
+    }
+
+    #[test]
     fn enqueue_create_inserts_temp_row_and_command() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
         let mut issue = base_issue("temp");
-        issue.id = "local:abc".to_string();
+        issue.id = "local:abc".into();
         issue.identifier = "NEW".to_string();
         let input = IssueCreateInput {
             title: "New".to_string(),
@@ -518,7 +561,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
         let mut issue = base_issue("temp");
-        issue.id = "local:abc".to_string();
+        issue.id = "local:abc".into();
         let input = IssueCreateInput {
             title: "New".to_string(),
             team_id: "ENG".to_string(),
@@ -530,7 +573,9 @@ mod tests {
         enqueue_issue_create(&conn, &issue, &input).unwrap();
         let seq = pending(&conn)[0].seq;
 
-        ack_issue_create(&conn, seq, "local:abc", ("real-1", "ENG-42")).unwrap();
+        let mut server_issue = base_issue("real-1");
+        server_issue.identifier = "ENG-42".to_string();
+        ack_issue_create(&conn, seq, "local:abc", &server_issue).unwrap();
 
         let ident: String = conn
             .query_row(
@@ -552,34 +597,54 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_comment_tags_author_from_synced_viewer() {
+        let conn = db_with_issue("1");
+        crate::db::set_synced_viewer(&conn, "u-ada", "Ada").unwrap();
+        let input = CommentCreateInput {
+            issue_id: "1".to_string(),
+            body: "hi".to_string(),
+        };
+        enqueue_comment_create(&conn, "local:c", &input).unwrap();
+
+        let rows = crate::db::query_comments(&conn, "1").unwrap();
+        assert_eq!(rows[0].author(), "Ada");
+    }
+
+    #[test]
     fn ack_comment_replaces_temp_with_server_copy() {
         let conn = db_with_issue("1");
         let input = CommentCreateInput {
             issue_id: "1".to_string(),
             body: "hi".to_string(),
         };
-        enqueue_comment_create(&conn, "local:c", Some("Ada"), &input).unwrap();
+        enqueue_comment_create(&conn, "local:c", &input).unwrap();
         let seq = pending(&conn)[0].seq;
 
+        let comment = lt_types::comments::Comment {
+            id: "c-real".into(),
+            body: "hi".to_string(),
+            created_at: "2026-01-03T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-01-03T00:00:00Z".parse().unwrap(),
+            user: Some(types::User {
+                id: "u-ada".into(),
+                name: "Ada".to_string(),
+            }),
+            issue_id: Some("1".to_string()),
+        };
         ack_comment_create(
             &conn,
             seq,
-            "local:c",
-            &crate::db::Comment {
-                id: "c-real".to_string(),
-                issue_id: "1".to_string(),
-                body: "hi".to_string(),
-                author_name: Some("Ada".to_string()),
-                created_at: "2026-01-03T00:00:00Z".to_string(),
-                updated_at: "2026-01-03T00:00:00Z".to_string(),
-                synced_at: String::new(),
+            &CommentAck {
+                temp_id: "local:c",
+                issue_id: "1",
+                comment: &comment,
             },
         )
         .unwrap();
 
         let ids: Vec<String> = {
             let rows = crate::db::query_comments(&conn, "1").unwrap();
-            rows.into_iter().map(|c| c.id).collect()
+            rows.into_iter().map(|c| c.id.into_inner()).collect()
         };
         assert_eq!(ids, ["c-real"]);
         assert!(pending(&conn).is_empty());

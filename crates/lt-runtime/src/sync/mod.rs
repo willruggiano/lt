@@ -2,6 +2,7 @@ pub mod delta;
 pub mod drain;
 pub mod full;
 pub mod probe;
+pub mod service;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -14,8 +15,7 @@ use lt_upstream::client::GraphqlTransport;
 /// viewer by definition, so this is an upsert of a stable identity.
 fn persist_viewer(conn: &rusqlite::Connection, transport: &dyn GraphqlTransport) -> Result<()> {
     let viewer = lt_upstream::viewer::fetch(transport)?;
-    db::set_meta(conn, "viewer_id", &viewer.id)?;
-    db::set_meta(conn, "viewer_name", &viewer.name)?;
+    db::set_synced_viewer(conn, viewer.id.inner(), &viewer.name)?;
     Ok(())
 }
 

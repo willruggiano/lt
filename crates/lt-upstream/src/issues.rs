@@ -2,55 +2,19 @@
 //! the create/replay mutations. The cached read model lives in `lt-storage`;
 //! these queries are the issue paths that hit the network.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use lt_types::inputs::IssueCreateInput;
+use lt_types::issues::{
+    IssueCreateMutation, IssueUpdateMutation, IssuesQuery, create_mutation, query, update_mutation,
+};
 use lt_types::query::{IssueQuery, build_sort, parse_date};
-use lt_types::types::{Issue, IssuesData};
-use serde::Deserialize;
+use lt_types::scalars::Priority;
+use lt_types::types::Issue;
 use serde_json::{Value, json};
 
 use crate::auth::refresh::load_or_refresh_token;
 use crate::client::{GraphqlTransport, HttpTransport, query_as};
 use crate::graphql::{CreatePayload, post_create};
-
-pub const ISSUES_QUERY: &str = r"
-query Issues($filter: IssueFilter, $sort: [IssueSortInput!], $first: Int, $after: String) {
-  issues(filter: $filter, sort: $sort, first: $first, after: $after) {
-    nodes {
-      id
-      identifier
-      title
-      description
-      priorityLabel
-      priority
-      state { id name }
-      assignee { id name }
-      team { id name }
-      labels { nodes { id name } }
-      project { id name }
-      cycle { id name }
-      creator { id name }
-      parent { id identifier }
-      createdAt
-      updatedAt
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-";
-
-fn parse_priority(s: &str) -> Result<f64> {
-    match s.to_lowercase().as_str() {
-        "none" | "0" => Ok(0.0),
-        "urgent" | "1" => Ok(1.0),
-        "high" | "2" => Ok(2.0),
-        "normal" | "medium" | "3" => Ok(3.0),
-        "low" | "4" => Ok(4.0),
-        _ => Err(anyhow!(
-            "--priority: expected none/urgent/high/normal/medium/low or 0-4, got {s:?}"
-        )),
-    }
-}
 
 /// Build a GraphQL `IssueFilter` from the query spec (the `--live` path).
 pub fn build_filter(args: &IssueQuery) -> Result<Option<Value>> {
@@ -95,9 +59,9 @@ pub fn build_filter(args: &IssueQuery) -> Result<Option<Value>> {
     }
 
     if let Some(priority_str) = &args.priority {
-        let priority_val = parse_priority(priority_str)?;
+        let p: Priority = priority_str.parse()?;
         filters.push(json!({
-            "priority": { "eq": priority_val }
+            "priority": { "eq": f64::from(p.0) }
         }));
     }
 
@@ -156,7 +120,7 @@ pub fn fetch_with(
         "after": after,
     });
 
-    let data: IssuesData = query_as(transport, ISSUES_QUERY, variables)?;
+    let data: IssuesQuery = query_as(transport, &query(), variables)?;
 
     let conn = data.issues;
     Ok((
@@ -170,87 +134,38 @@ pub fn fetch_with(
 // Mutations (create synchronously; replay queued outbox commands)
 // ---------------------------------------------------------------------------
 
-const ISSUE_UPDATE_MUTATION: &str = r"
-mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
-  issueUpdate(id: $id, input: $input) {
-    success
-  }
-}
-";
-
-const ISSUE_CREATE_MUTATION: &str = r"
-mutation IssueCreate($input: IssueCreateInput!) {
-  issueCreate(input: $input) {
-    success
-    issue {
-      id
-      identifier
-      title
-    }
-  }
-}
-";
-
-/// The fields the `issueCreate` response returns: enough to confirm success and
-/// reconcile the optimistic temp row with the server's id/identifier.
-#[derive(Deserialize, Debug, Clone)]
-pub struct CreatedIssue {
-    pub id: String,
-    pub identifier: String,
-    pub title: String,
-}
-
-#[derive(Deserialize)]
-struct SuccessPayload {
-    success: bool,
-}
-
-#[derive(Deserialize)]
-struct IssueUpdateData {
-    #[serde(rename = "issueUpdate")]
-    issue_update: SuccessPayload,
-}
-
-#[derive(Deserialize)]
-struct IssueCreatePayload {
-    success: bool,
-    issue: CreatedIssue,
-}
-
-#[derive(Deserialize)]
-struct IssueCreateData {
-    #[serde(rename = "issueCreate")]
-    issue_create: IssueCreatePayload,
-}
-
-impl CreatePayload for IssueCreateData {
-    type Created = CreatedIssue;
-    fn into_created(self) -> (bool, CreatedIssue) {
+impl CreatePayload for IssueCreateMutation {
+    type Created = Issue;
+    fn into_created(self) -> (bool, Option<Issue>) {
         (self.issue_create.success, self.issue_create.issue)
     }
 }
 
-/// Replay an `issueUpdate` from its stored variables. The drainer reconciles the
-/// base itself, so only success matters here.
-pub fn replay_update(transport: &dyn GraphqlTransport, variables: serde_json::Value) -> Result<()> {
-    let data: IssueUpdateData = query_as(transport, ISSUE_UPDATE_MUTATION, variables)?;
+/// Replay an `issueUpdate` from its stored variables, returning the
+/// server-returned issue (nullable in the schema even on success) so the
+/// drainer can reconcile the base from server truth when present.
+pub fn replay_update(
+    transport: &dyn GraphqlTransport,
+    variables: serde_json::Value,
+) -> Result<Option<Issue>> {
+    let data: IssueUpdateMutation = query_as(transport, &update_mutation(), variables)?;
     if !data.issue_update.success {
         bail!("issueUpdate returned success=false");
     }
-    Ok(())
+    Ok(data.issue_update.issue)
 }
 
-/// Replay an `issueCreate`, returning the server's id/identifier.
+/// Replay an `issueCreate`, returning the server's full issue.
 pub fn replay_create(
     transport: &dyn GraphqlTransport,
     variables: serde_json::Value,
-) -> Result<CreatedIssue> {
-    post_create::<IssueCreateData>(transport, ISSUE_CREATE_MUTATION, "issueCreate", variables)
+) -> Result<Issue> {
+    post_create::<IssueCreateMutation>(transport, &create_mutation(), "issueCreate", variables)
 }
 
 /// Create an issue synchronously (the CLI `lt issues new` path, which is an
 /// inherently online command rather than a queued TUI edit).
-pub fn create(transport: &dyn GraphqlTransport, input: &IssueCreateInput) -> Result<CreatedIssue> {
+pub fn create(transport: &dyn GraphqlTransport, input: &IssueCreateInput) -> Result<Issue> {
     replay_create(transport, json!({ "input": input }))
 }
 
@@ -299,9 +214,7 @@ mod tests {
     #[test]
     fn create_returns_server_identity() {
         let transport = FakeTransport::new(vec![serde_json::json!({
-            "issueCreate": { "success": true, "issue": {
-                "id": "i1", "identifier": "ENG-1", "title": "New"
-            }}
+            "issueCreate": { "success": true, "issue": sample_issue_node("1") }
         })]);
         let created = create(
             &transport,
@@ -327,17 +240,31 @@ mod tests {
     }
 
     #[test]
-    fn replay_update_sends_variables_and_checks_success() {
-        let transport = FakeTransport::new(vec![
-            serde_json::json!({ "issueUpdate": { "success": true } }),
-        ]);
-        replay_update(
+    fn replay_update_sends_variables_and_returns_server_issue() {
+        let transport = FakeTransport::new(vec![serde_json::json!({
+            "issueUpdate": { "success": true, "issue": sample_issue_node("1") }
+        })]);
+        let issue = replay_update(
             &transport,
             serde_json::json!({ "id": "i1", "input": { "stateId": "s9" } }),
         )
         .unwrap();
+        assert_eq!(issue.unwrap().identifier, "ENG-1");
         let vars = transport.variables(0);
         assert_eq!(vars["id"], serde_json::json!("i1"));
         assert_eq!(vars["input"]["stateId"], serde_json::json!("s9"));
+    }
+
+    #[test]
+    fn replay_update_tolerates_absent_issue() {
+        let transport = FakeTransport::new(vec![serde_json::json!({
+            "issueUpdate": { "success": true, "issue": null }
+        })]);
+        let issue = replay_update(
+            &transport,
+            serde_json::json!({ "id": "i1", "input": { "stateId": "s9" } }),
+        )
+        .unwrap();
+        assert!(issue.is_none());
     }
 }

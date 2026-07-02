@@ -60,7 +60,7 @@ pub(super) fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-fn row_cells(issue: &Issue) -> [String; 7] {
+pub(super) fn row_cells(issue: &Issue) -> [String; 7] {
     [
         issue.identifier.clone(),
         text::truncate(&issue.title, 40),
@@ -71,12 +71,8 @@ fn row_cells(issue: &Issue) -> [String; 7] {
             .as_ref()
             .map_or_else(|| "-".to_string(), |u| u.name.clone()),
         issue.team.name.clone(),
-        date(&issue.updated_at).to_string(),
+        issue.updated_at.date(),
     ]
-}
-
-pub(super) fn date(s: &str) -> &str {
-    if s.len() >= 10 { &s[..10] } else { s }
 }
 
 // Returns the column index (0-6) that corresponds to the active sort field, if any.

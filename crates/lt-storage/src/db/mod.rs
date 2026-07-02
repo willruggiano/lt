@@ -7,38 +7,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-pub use comments::{Comment, delete_comments_for_issue, query_comments, upsert_comments};
+pub use comments::{delete_comments_for_issue, query_comments, upsert_comments};
 pub(crate) use issues::{ISSUE_COLUMNS, ISSUE_JOINS, issue_from_row};
 pub use issues::{
-    get_meta, query_children, query_issues, query_issues_page, search_issues, search_issues_like,
-    set_meta, upsert_issues,
+    get_meta, query_children, query_issue_by_id, query_issues, query_issues_page, search_issues,
+    search_issues_like, set_meta, set_synced_viewer, synced_viewer, upsert_issues,
 };
 pub use rusqlite::Connection;
 use rusqlite::Params;
 
-/// Look up an issue's identifier/title/state name by id, for the detail pane's
-/// parent reference. Returns `None` when no issue with that id is cached.
-pub fn query_parent_ref(conn: &Connection, id: &str) -> Result<Option<lt_types::types::IssueRef>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT i.identifier, i.title, s.name
-             FROM issues i
-             JOIN workflow_states s ON s.id = i.state_id
-             WHERE i.id = ?1",
-        )
-        .context("failed to prepare query_parent_ref statement")?;
-
-    let mut rows = stmt.query([id]).context("failed to query parent issue")?;
-
-    if let Some(row) = rows.next().context("failed to read parent issue row")? {
-        Ok(Some(lt_types::types::IssueRef {
-            identifier: row.get(0).context("failed to read parent identifier")?,
-            title: row.get(1).context("failed to read parent title")?,
-            state_name: row.get(2).context("failed to read parent state")?,
-        }))
-    } else {
-        Ok(None)
-    }
+/// Parse a stored RFC3339 timestamp column into the wire [`DateTime`](lt_types::scalars::DateTime)
+/// scalar via its `FromStr` impl. Storage always writes
+/// [`DateTime::to_rfc3339_millis`](lt_types::scalars::DateTime::to_rfc3339_millis),
+/// so a parse failure here means the row is corrupt; surface it as a
+/// `rusqlite` error rather than silently defaulting.
+pub(crate) fn parse_datetime_column(
+    s: &str,
+) -> std::result::Result<lt_types::scalars::DateTime, rusqlite::types::FromSqlError> {
+    s.parse()
+        .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
 }
 
 /// Run a parameterized write statement, attaching `what` to any error.
@@ -60,31 +47,36 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(lt_dir.join("lt.db"))
 }
 
-/// Whether `column` exists on the `issues` table.
-fn issues_has_column(conn: &Connection, column: &str) -> bool {
+/// Whether `column` exists on `table`.
+fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
     conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name=?1",
-        [column],
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+        rusqlite::params![table, column],
         |row| row.get::<_, i64>(0),
     )
     .unwrap_or(0)
         > 0
 }
 
-/// Adds a column to the `issues` table if it does not already exist.
-fn add_column_if_absent(conn: &Connection, column: &str, alter_sql: &str) -> Result<()> {
-    if !issues_has_column(conn, column) {
+/// Adds a column to `table` if it does not already exist.
+fn add_column_if_absent(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    alter_sql: &str,
+) -> Result<()> {
+    if !has_column(conn, table, column) {
         conn.execute_batch(alter_sql)
             .with_context(|| format!("failed to add {column} column"))?;
     }
     Ok(())
 }
 
-/// Drops a denormalized name column left over from the flat `issues` schema.
-/// No-op on a fresh database that never had it.
-fn drop_column_if_present(conn: &Connection, column: &str) -> Result<()> {
-    if issues_has_column(conn, column) {
-        conn.execute_batch(&format!("ALTER TABLE issues DROP COLUMN {column};"))
+/// Drops a denormalized column left over from an earlier schema. No-op on a
+/// fresh database that never had it.
+fn drop_column_if_present(conn: &Connection, table: &str, column: &str) -> Result<()> {
+    if has_column(conn, table, column) {
+        conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))
             .with_context(|| format!("failed to drop {column} column"))?;
     }
     Ok(())
@@ -134,7 +126,7 @@ fn create_base_schema(conn: &Connection) -> Result<()> {
             id          TEXT PRIMARY KEY,
             issue_id    TEXT NOT NULL,
             body        TEXT NOT NULL,
-            author_name TEXT,
+            user_id     TEXT,
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL,
             synced_at   TEXT NOT NULL
@@ -202,11 +194,13 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Intrinsic columns added after the initial schema.
     add_column_if_absent(
         conn,
+        "issues",
         "description",
         "ALTER TABLE issues ADD COLUMN description TEXT;",
     )?;
     add_column_if_absent(
         conn,
+        "issues",
         "parent_id",
         "ALTER TABLE issues ADD COLUMN parent_id TEXT;",
     )?;
@@ -230,7 +224,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ),
         ("cycle_id", "ALTER TABLE issues ADD COLUMN cycle_id TEXT;"),
     ] {
-        add_column_if_absent(conn, col, sql)?;
+        add_column_if_absent(conn, "issues", col, sql)?;
     }
 
     create_relational_schema(conn)?;
@@ -248,8 +242,21 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         "creator_name",
         "parent_identifier",
     ] {
-        drop_column_if_present(conn, col)?;
+        drop_column_if_present(conn, "issues", col)?;
     }
+
+    // `issue_comments` moved from a flattened `author_name` column to the
+    // relational `user_id` FK (the ADR's model): a fresh database never had
+    // `author_name`; an existing one is migrated in place. Existing rows lose
+    // their author (`user_id` NULL) -- the DB is a resyncable cache, and
+    // un-acked `local:` optimistic rows are untouched by this column swap.
+    add_column_if_absent(
+        conn,
+        "issue_comments",
+        "user_id",
+        "ALTER TABLE issue_comments ADD COLUMN user_id TEXT;",
+    )?;
+    drop_column_if_present(conn, "issue_comments", "author_name")?;
 
     Ok(())
 }
@@ -310,16 +317,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_parent_ref_resolves_and_misses() {
+    fn query_issue_by_id_resolves_and_misses() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         upsert_issues(&conn, &[outbox::sample_base_issue("9")]).unwrap();
 
-        let found = query_parent_ref(&conn, "9").unwrap().unwrap();
+        let found = query_issue_by_id(&conn, "9").unwrap().unwrap();
         assert_eq!(found.identifier, "ENG-9");
         assert_eq!(found.title, "issue 9");
-        assert_eq!(found.state_name, "Todo");
+        assert_eq!(found.state.name, "Todo");
 
-        assert!(query_parent_ref(&conn, "absent").unwrap().is_none());
+        assert!(query_issue_by_id(&conn, "absent").unwrap().is_none());
     }
 }

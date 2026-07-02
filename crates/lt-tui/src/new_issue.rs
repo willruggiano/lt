@@ -1,7 +1,8 @@
 use std::sync::{Arc, mpsc};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use lt_runtime::sync_port::{User, Viewer};
+use lt_types::types::User;
+use lt_types::viewer;
 
 use super::{App, Mode, PopupItem, TextInput, priority_popup_items};
 
@@ -120,7 +121,7 @@ impl super::App {
                     .into_iter()
                     .map(|t| PopupItem {
                         label: t.name.clone(),
-                        id: Some(t.id),
+                        id: Some(t.id.into_inner()),
                     })
                     .collect();
                 // Pre-select team from filter.
@@ -175,7 +176,7 @@ impl super::App {
                         .into_iter()
                         .map(|s| PopupItem {
                             label: s.name,
-                            id: Some(s.id),
+                            id: Some(s.id.into_inner()),
                         })
                         .collect();
                     let _ = tx.send(ModalEvent::StatesLoaded(items));
@@ -338,34 +339,34 @@ fn build_create_request(
     };
 
     let priority = priority.unwrap_or(0);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = lt_types::scalars::DateTime(chrono::Utc::now());
     let optimistic = types::Issue {
-        id: lt_runtime::db::outbox::temp_id(),
+        id: lt_runtime::db::outbox::temp_id().into(),
         identifier: "NEW".to_string(),
         title,
-        priority,
+        priority: lt_types::scalars::Priority(priority),
         priority_label: types::priority_u8_to_label(priority).to_string(),
         // Fall back to a name-keyed id when the modal lacked one so the
         // relational join still resolves a label.
         state: types::WorkflowState {
-            id: state_id.unwrap_or_else(|| state_name.clone()),
+            id: state_id.unwrap_or_else(|| state_name.clone()).into(),
             name: state_name,
         },
         assignee: assignee_id.map(|id| types::User {
-            id,
+            id: id.into(),
             name: assignee.map(|a| a.label.clone()).unwrap_or_default(),
         }),
         team: types::Team {
-            id: team_id,
+            id: team_id.into(),
             name: team_name,
         },
         description,
-        labels: types::LabelConnection { nodes: Vec::new() },
+        labels: types::IssueLabelConnection { nodes: Vec::new() },
         project: None,
         cycle: None,
         creator: None,
         parent: None,
-        created_at: now.clone(),
+        created_at: now,
         updated_at: now,
     };
 
@@ -374,12 +375,15 @@ fn build_create_request(
 
 /// Build the assignee popup items: "Me (name)" at top if the viewer is known,
 /// then "Unassigned", then the remaining team members (excluding the viewer).
-pub(crate) fn build_assignee_items(viewer: Option<&Viewer>, members: Vec<User>) -> Vec<PopupItem> {
+pub(crate) fn build_assignee_items(
+    viewer: Option<&viewer::User>,
+    members: Vec<User>,
+) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = Vec::new();
     if let Some(v) = viewer {
         items.push(PopupItem {
             label: format!("Me ({})", v.name),
-            id: Some(v.id.clone()),
+            id: Some(v.id.inner().to_string()),
         });
     }
     items.push(PopupItem {
@@ -388,12 +392,12 @@ pub(crate) fn build_assignee_items(viewer: Option<&Viewer>, members: Vec<User>) 
     });
     for m in members {
         // Skip the viewer entry since it is already at the top.
-        if viewer.is_some_and(|v| v.id == m.id) {
+        if viewer.is_some_and(|v| v.id.inner() == m.id.inner()) {
             continue;
         }
         items.push(PopupItem {
             label: m.name,
-            id: Some(m.id),
+            id: Some(m.id.into_inner()),
         });
     }
     items

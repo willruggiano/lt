@@ -2,8 +2,18 @@ use std::sync::{Arc, mpsc};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use lt_runtime::db::Database;
+use lt_types::types::Issue;
 
-use super::{App, CommentSyncEvent, Issue, Mode, Status};
+use super::{App, CommentSyncEvent, Mode, Status};
+
+/// The detail pane's view-model: the shared `types`/`comments` fragments the
+/// TUI composes for display, not a wire projection or a mirrored domain type.
+pub struct IssueDetailView {
+    pub issue: Issue,
+    pub comments: Vec<lt_types::comments::Comment>,
+    pub parent: Option<Issue>,
+    pub children: Vec<Issue>,
+}
 
 impl App {
     /// Open the detail pane for the currently selected issue.
@@ -22,28 +32,22 @@ impl App {
         self.detail_scroll = 0;
         self.detail_comment_rx = None;
 
-        // Build an IssueDetail immediately from cached data.
-        let cached_comments: Vec<lt_types::types::Comment> = self
+        // Build the detail view instantly from cached data.
+        let cached_comments = self
             .db
             .connect()
-            .and_then(|conn| lt_runtime::db::query_comments(&conn, &issue.id))
-            .unwrap_or_default()
-            .into_iter()
-            .map(Into::into)
-            .collect();
+            .and_then(|conn| lt_runtime::db::query_comments(&conn, issue.id.inner()))
+            .unwrap_or_default();
 
-        self.detail = Some(build_cached_detail(&issue, cached_comments));
-
-        // Populate parent and children from the local DB cache.
-        if let Some(ref mut detail) = self.detail {
-            populate_relations(&self.db, detail, &issue);
-        }
+        let mut detail = build_cached_detail(&issue, cached_comments);
+        populate_relations(&self.db, &mut detail, &issue);
+        self.detail = Some(detail);
 
         self.status = Status::Idle;
 
         // Spawn background thread to refresh comments through the sync service,
         // then re-read them from the local DB.
-        let issue_id = issue.id.clone();
+        let issue_id = issue.id.into_inner();
         let service = Arc::clone(&self.service);
         let (tx, rx) = mpsc::channel::<CommentSyncEvent>();
         self.detail_comment_rx = Some(rx);
@@ -53,10 +57,7 @@ impl App {
                 let fresh = lt_runtime::db::db_path()
                     .and_then(lt_runtime::db::open_db)
                     .and_then(|conn| lt_runtime::db::query_comments(&conn, &issue_id))
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect();
+                    .unwrap_or_default();
                 let _ = tx.send(CommentSyncEvent::Done(fresh));
             }
             Err(e) => {
@@ -137,20 +138,24 @@ impl App {
             return;
         }
         let issue_id = match self.selected_issue() {
-            Some(i) => i.id.clone(),
+            Some(i) => i.id.inner().to_string(),
             None => return,
         };
         self.comment_input = None;
 
         // Optimistic: show the comment immediately in the open detail pane.
         if let Some(ref mut detail) = self.detail {
-            detail.comments.nodes.push(lt_types::types::Comment {
+            let now = lt_types::scalars::DateTime(chrono::Utc::now());
+            detail.comments.push(lt_types::comments::Comment {
+                id: lt_runtime::db::outbox::temp_id().into(),
                 body: body.clone(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                user: self
-                    .viewer_name
-                    .clone()
-                    .map(|name| lt_types::types::CommentUser { name }),
+                created_at: now,
+                updated_at: now,
+                user: self.viewer_name.clone().map(|name| lt_types::types::User {
+                    id: String::new().into(),
+                    name,
+                }),
+                issue_id: Some(issue_id.clone()),
             });
         }
 
@@ -162,79 +167,38 @@ impl App {
             let _ = lt_runtime::db::outbox::enqueue_comment_create(
                 &conn,
                 &lt_runtime::db::outbox::temp_id(),
-                self.viewer_name.as_deref(),
                 &input,
             );
         }
     }
 }
 
-/// Build an `IssueDetail` from a cached list `Issue` plus its cached comments.
+/// Build a detail view from a cached list `Issue` plus its cached comments.
+/// Parent/children are left empty; `populate_relations` fills them in.
 pub(crate) fn build_cached_detail(
     issue: &Issue,
-    cached_comments: Vec<lt_types::types::Comment>,
-) -> lt_types::types::IssueDetail {
-    lt_types::types::IssueDetail {
-        identifier: issue.identifier.clone(),
-        title: issue.title.clone(),
-        description: issue.description.clone(),
-        priority_label: issue.priority_label.clone(),
-        state: lt_types::types::IssueDetailState {
-            name: issue.state.name.clone(),
-        },
-        assignee: issue
-            .assignee
-            .as_ref()
-            .map(|a| lt_types::types::IssueDetailUser {
-                name: a.name.clone(),
-            }),
-        team: lt_types::types::IssueDetailTeam {
-            name: issue.team.name.clone(),
-        },
-        labels: lt_types::types::LabelConnection {
-            nodes: issue
-                .labels
-                .nodes
-                .iter()
-                .map(|l| lt_types::types::Label {
-                    id: l.id.clone(),
-                    name: l.name.clone(),
-                })
-                .collect(),
-        },
-        created_at: issue.created_at.clone(),
-        updated_at: issue.updated_at.clone(),
-        comments: lt_types::types::CommentConnection {
-            nodes: cached_comments,
-        },
+    cached_comments: Vec<lt_types::comments::Comment>,
+) -> IssueDetailView {
+    IssueDetailView {
+        issue: issue.clone(),
+        comments: cached_comments,
         parent: None,
         children: Vec::new(),
     }
 }
 
 /// Populate a detail's parent/children fields from the local DB cache.
-pub(crate) fn populate_relations(
-    db: &Database,
-    detail: &mut lt_types::types::IssueDetail,
-    issue: &Issue,
-) {
+pub(crate) fn populate_relations(db: &Database, detail: &mut IssueDetailView, issue: &Issue) {
     let Ok(conn) = db.connect() else {
         return;
     };
     // Look up children.
-    if let Ok(children) = lt_runtime::db::query_children(&conn, &issue.id) {
-        detail.children = children
-            .into_iter()
-            .map(|c| lt_types::types::IssueRef {
-                identifier: c.identifier,
-                title: c.title,
-                state_name: c.state.name,
-            })
-            .collect();
+    if let Ok(children) = lt_runtime::db::query_children(&conn, issue.id.inner()) {
+        detail.children = children;
     }
     // Look up parent.
     if let Some(ref parent) = issue.parent
-        && let Ok(Some(row)) = lt_runtime::db::query_parent_ref(&conn, &parent.id)
+        && let Ok(Some(row)) = lt_runtime::db::query_issue_by_id(&conn, parent.id.inner())
     {
         detail.parent = Some(row);
     }
@@ -252,7 +216,7 @@ pub(crate) fn poll_detail_comment_events(app: &mut App) {
     let finished = match rx.try_recv() {
         Ok(CommentSyncEvent::Done(comments)) => {
             if let Some(ref mut detail) = app.detail {
-                detail.comments.nodes = comments;
+                detail.comments = comments;
             }
             true
         }
@@ -307,7 +271,7 @@ pub(crate) fn handle_detail_key(app: &mut App, code: KeyCode, modifiers: KeyModi
         KeyCode::PageUp => app.detail_scroll_page_up(),
         KeyCode::Char('o') => {
             if let Some(detail) = &app.detail {
-                let url = format!("https://linear.app/issue/{}", detail.identifier);
+                let url = format!("https://linear.app/issue/{}", detail.issue.identifier);
                 let _ = open::that(url);
             }
         }

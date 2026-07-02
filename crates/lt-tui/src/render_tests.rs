@@ -6,7 +6,7 @@
 // profile global is touched. Data comes from the deterministic `sim` generator,
 // so the module is gated on `feature = "sim"`.
 
-use lt_runtime::sync_port::User;
+use lt_types::types::User;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -183,55 +183,42 @@ fn priority_label_to_u8_maps_levels() {
 }
 
 #[test]
-fn db_comment_to_api_conversion() {
-    let comment = lt_runtime::db::Comment {
-        id: "c1".to_string(),
-        issue_id: "i1".to_string(),
-        body: "hi".to_string(),
-        author_name: Some("Alice".to_string()),
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        updated_at: "2026-01-01T00:00:00Z".to_string(),
-        synced_at: String::new(),
-    };
-    let api = lt_types::types::Comment::from(comment);
-    assert_eq!(api.author(), "Alice");
-}
-
-#[test]
 fn optimistic_builders_apply_popup_choice() {
     let mut app = app_with_issues(0, 1);
     let issue = app.issues[0].clone();
 
     let built = build_optimistic_issue(&issue, &PopupKind::Priority, &item("Urgent", Some("1")));
     assert_eq!(built.priority_label, "Urgent");
-    assert_eq!(built.priority, 1);
+    assert_eq!(built.priority, lt_types::scalars::Priority(1));
     let unassigned = build_optimistic_issue(&issue, &PopupKind::Assignee, &item("x", None));
     assert!(unassigned.assignee.is_none());
 
     app.table_state.select(Some(0));
     apply_optimistic_in_memory(&mut app, &PopupKind::Priority, &item("Urgent", Some("1")));
     assert_eq!(app.issues[0].priority_label, "Urgent");
-    assert_eq!(app.issues[0].priority, 1);
+    assert_eq!(app.issues[0].priority, lt_types::scalars::Priority(1));
     apply_optimistic_in_memory(&mut app, &PopupKind::Assignee, &item("none", None));
     assert!(app.issues[0].assignee.is_none());
 }
 
 #[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
-    let viewer = lt_runtime::sync_port::Viewer {
-        id: "v".to_string(),
+    let viewer = lt_types::viewer::User {
+        id: "v".into(),
         name: "Vic".to_string(),
-        org_name: "Acme".to_string(),
-        org_url_key: "acme".to_string(),
+        organization: lt_types::viewer::Organization {
+            name: "Acme".to_string(),
+            url_key: "acme".to_string(),
+        },
     };
     let members = || {
         vec![
             User {
-                id: "v".to_string(),
+                id: "v".into(),
                 name: "Vic".to_string(),
             },
             User {
-                id: "m".to_string(),
+                id: "m".into(),
                 name: "Mara".to_string(),
             },
         ]

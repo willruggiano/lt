@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use lt_tui as tui;
 
 #[derive(Parser)]
 #[command(name = "lt", about = "Linear TUI for terminal power users", version)]
@@ -71,7 +70,7 @@ enum Commands {
 
 /// Launch the TUI with the `lt-runtime`-backed service injected.
 fn run_tui(query: lt_runtime::query::IssueQuery) -> Result<()> {
-    tui::run(query, Arc::new(lt_runtime::LinearSyncService))
+    lt_tui::run(query, Arc::new(lt_runtime::LinearSyncService))
 }
 
 fn main() -> Result<()> {

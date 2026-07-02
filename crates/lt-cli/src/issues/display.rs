@@ -2,12 +2,14 @@ use std::io::Write;
 
 use anyhow::Result;
 use lt_runtime::text;
+use lt_types::scalars::DateTime;
 use lt_types::types::Issue;
 
 const MAX_TITLE: usize = 40;
 
-fn date(s: &str) -> &str {
-    if s.len() >= 10 { &s[..10] } else { s }
+/// Render a wire timestamp as its `YYYY-MM-DD` date part.
+fn date(dt: &DateTime) -> String {
+    dt.0.format("%Y-%m-%d").to_string()
 }
 
 /// Print one padded row, each cell left-aligned to its column width.
@@ -81,8 +83,8 @@ pub fn print_table(out: &mut dyn Write, issues: &[Issue], note: &str) -> Result<
                     .as_ref()
                     .map_or_else(|| "-".to_string(), |u| u.name.clone()),
                 i.team.name.clone(),
-                date(&i.created_at).to_string(),
-                date(&i.updated_at).to_string(),
+                date(&i.created_at),
+                date(&i.updated_at),
             ]
         })
         .collect();
@@ -97,10 +99,44 @@ pub fn print_table(out: &mut dyn Write, issues: &[Issue], note: &str) -> Result<
 }
 
 #[cfg(test)]
-mod tests {
-    use lt_types::types::{Label, LabelConnection, Team, User, WorkflowState};
+pub(crate) mod tests {
+    use lt_types::types::{IssueLabel, IssueLabelConnection, Team, User, WorkflowState};
 
     use super::*;
+
+    /// A minimal issue fragment for display tests: `id`/`identifier`/`title`
+    /// vary, everything else is a fixed baseline. Shared with the inbox
+    /// display tests, which render the same `Issue` fragment via
+    /// `Notification::issue`.
+    pub(crate) fn sample_issue(id: &str, identifier: &str, title: &str) -> Issue {
+        Issue {
+            id: id.into(),
+            identifier: identifier.into(),
+            title: title.into(),
+            priority_label: "Urgent".into(),
+            priority: lt_types::scalars::Priority(1),
+            state: WorkflowState {
+                id: "".into(),
+                name: "In Progress".into(),
+            },
+            assignee: Some(User {
+                id: "".into(),
+                name: "Ada Lovelace".into(),
+            }),
+            team: Team {
+                id: "ENG".into(),
+                name: "Engineering".into(),
+            },
+            description: None,
+            labels: IssueLabelConnection { nodes: Vec::new() },
+            project: None,
+            cycle: None,
+            creator: None,
+            parent: None,
+            created_at: DateTime("2026-01-02T03:04:05Z".parse().unwrap()),
+            updated_at: DateTime("2026-01-06T07:08:09Z".parse().unwrap()),
+        }
+    }
 
     fn cached_to_string(issues: &[Issue], note: &str) -> String {
         let mut buf = Vec::new();
@@ -124,64 +160,25 @@ mod tests {
     fn live_table_renders_columns() {
         // Two hand-built rows exercise the list::Issue -> row mapping, an
         // unassigned issue ("-"), and the long-title truncation at MAX_TITLE.
-        let issues = vec![
-            Issue {
-                id: "1".into(),
-                identifier: "ENG-1".into(),
-                title: "Short title".into(),
-                priority_label: "Urgent".into(),
-                priority: 1,
-                state: WorkflowState {
-                    id: String::new(),
-                    name: "In Progress".into(),
-                },
-                assignee: Some(User {
-                    id: String::new(),
-                    name: "Ada Lovelace".into(),
-                }),
-                team: Team {
-                    id: "ENG".into(),
-                    name: "Engineering".into(),
-                },
-                description: None,
-                labels: LabelConnection { nodes: Vec::new() },
-                project: None,
-                cycle: None,
-                creator: None,
-                parent: None,
-                created_at: "2026-01-02T03:04:05Z".into(),
-                updated_at: "2026-01-06T07:08:09Z".into(),
-            },
-            Issue {
-                id: "2".into(),
-                identifier: "ENG-2".into(),
-                title: "A title that is definitely longer than forty characters wide".into(),
-                priority_label: "No priority".into(),
-                priority: 0,
-                state: WorkflowState {
-                    id: String::new(),
-                    name: "Backlog".into(),
-                },
-                assignee: None,
-                team: Team {
-                    id: "ENG".into(),
-                    name: "Engineering".into(),
-                },
-                description: None,
-                labels: LabelConnection {
-                    nodes: vec![Label {
-                        id: "l1".into(),
-                        name: "bug".into(),
-                    }],
-                },
-                project: None,
-                cycle: None,
-                creator: None,
-                parent: None,
-                created_at: "2026-01-01T00:00:00Z".into(),
-                updated_at: "2026-01-01T00:00:00Z".into(),
-            },
-        ];
+        let mut second = sample_issue(
+            "2",
+            "ENG-2",
+            "A title that is definitely longer than forty characters wide",
+        );
+        second.priority_label = "No priority".into();
+        second.priority = lt_types::scalars::Priority(0);
+        second.state.name = "Backlog".into();
+        second.assignee = None;
+        second.labels = IssueLabelConnection {
+            nodes: vec![IssueLabel {
+                id: "l1".into(),
+                name: "bug".into(),
+            }],
+        };
+        second.created_at = DateTime("2026-01-01T00:00:00Z".parse().unwrap());
+        second.updated_at = DateTime("2026-01-01T00:00:00Z".parse().unwrap());
+
+        let issues = vec![sample_issue("1", "ENG-1", "Short title"), second];
         insta::assert_snapshot!(live_to_string(&issues));
     }
 

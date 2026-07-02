@@ -31,7 +31,7 @@ pub fn run(out: &mut dyn Write, args: &InboxArgs) -> Result<()> {
     } else {
         notifications
             .into_iter()
-            .filter(|n| n.read_at.is_none())
+            .filter(|n| n.read_at().is_none())
             .collect()
     };
 
@@ -40,6 +40,6 @@ pub fn run(out: &mut dyn Write, args: &InboxArgs) -> Result<()> {
         return Ok(());
     }
 
-    display::print_table(out, &filtered, display::now_unix_secs())?;
+    display::print_table(out, &filtered, chrono::Utc::now())?;
     Ok(())
 }

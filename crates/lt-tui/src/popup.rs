@@ -231,13 +231,13 @@ impl super::App {
             None => return,
         };
         let current_state_name = issue.state.name.clone();
-        match self.service.fetch_workflow_states(&issue.team.id) {
+        match self.service.fetch_workflow_states(issue.team.id.inner()) {
             Ok(states) => {
                 self.popup_items = states
                     .into_iter()
                     .map(|s| PopupItem {
                         label: s.name,
-                        id: Some(s.id),
+                        id: Some(s.id.into_inner()),
                     })
                     .collect();
                 self.popup_selected = self
@@ -260,7 +260,7 @@ impl super::App {
         };
         // Linear priority: 0=No priority, 1=Urgent, 2=High, 3=Normal, 4=Low
         self.popup_items = priority_popup_items();
-        self.popup_selected = priority as usize;
+        self.popup_selected = usize::from(priority.0);
         self.mode = Mode::Popup(PopupKind::Priority);
         self.footer_msg = None;
     }
@@ -274,12 +274,12 @@ impl super::App {
             label: "Unassign".to_string(),
             id: None,
         }];
-        match self.service.fetch_team_members(&issue.team.id) {
+        match self.service.fetch_team_members(issue.team.id.inner()) {
             Ok(members) => {
                 for m in members {
                     items.push(PopupItem {
                         label: m.name,
-                        id: Some(m.id),
+                        id: Some(m.id.into_inner()),
                     });
                 }
             }
@@ -294,7 +294,7 @@ impl super::App {
             .and_then(|a| {
                 items
                     .iter()
-                    .position(|item| item.id.as_deref() == Some(a.id.as_str()))
+                    .position(|item| item.id.as_deref() == Some(a.id.inner()))
             })
             .unwrap_or(0);
         self.popup_items = items;
@@ -332,7 +332,7 @@ impl super::App {
         // 1. Enqueue local intent (overlay + outbox) in one transaction. No
         //    network: the sync drainer replays it. The read model merges the
         //    overlay, so the change renders without a base write.
-        enqueue_edit(&issue.id, &kind, &item);
+        enqueue_edit(issue.id.inner(), &kind, &item);
 
         // 2. Update the in-memory issue list for instant feedback before the
         //    next DB-backed fetch reloads the merged read model.
@@ -387,13 +387,15 @@ fn apply_change(issue: &mut lt_types::types::Issue, kind: &PopupKind, item: &Pop
         PopupKind::State => {
             issue.state.name.clone_from(&item.label);
             if let Some(id) = &item.id {
-                issue.state.id.clone_from(id);
+                issue.state.id = id.clone().into();
             }
         }
         PopupKind::Priority => {
             issue.priority_label.clone_from(&item.label);
             if let Some(pstr) = &item.id {
-                issue.priority = pstr.parse().unwrap_or(issue.priority);
+                issue.priority = pstr
+                    .parse()
+                    .map_or(issue.priority, lt_types::scalars::Priority);
             }
         }
         PopupKind::Assignee => {
@@ -401,7 +403,7 @@ fn apply_change(issue: &mut lt_types::types::Issue, kind: &PopupKind, item: &Pop
                 issue.assignee = None;
             } else {
                 issue.assignee = Some(lt_types::types::User {
-                    id: item.id.clone().unwrap_or_default(),
+                    id: item.id.clone().unwrap_or_default().into(),
                     name: item.label.clone(),
                 });
             }

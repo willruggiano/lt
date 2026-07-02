@@ -1,79 +1,13 @@
+//! Fetch notifications from the Linear API. The `Notification` fragment type
+//! (and its accessors) live in `lt-types`; this module is just the paginated
+//! fetch.
+
 use anyhow::{Result, anyhow};
-use lt_types::types::PageInfo;
-use serde::Deserialize;
+pub use lt_types::notifications::Notification;
+use lt_types::notifications::{NotificationsQuery, query};
 use serde_json::json;
 
 use super::client::{GraphqlTransport, HttpTransport, query_as};
-
-const NOTIFICATIONS_QUERY: &str = r"
-query Notifications($first: Int, $after: String) {
-  notifications(first: $first, after: $after) {
-    nodes {
-      id
-      type
-      readAt
-      createdAt
-      updatedAt
-      ... on IssueNotification {
-        issue { identifier title state { name } priority team { name } }
-        actor { name }
-      }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-";
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct NotificationIssueState {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct NotificationIssueTeam {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct NotificationIssue {
-    pub identifier: String,
-    pub title: String,
-    pub state: NotificationIssueState,
-    pub priority: Option<i64>,
-    pub team: NotificationIssueTeam,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct NotificationActor {
-    pub name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct Notification {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub type_: String,
-    #[serde(rename = "readAt")]
-    pub read_at: Option<String>,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: String,
-    pub issue: Option<NotificationIssue>,
-    pub actor: Option<NotificationActor>,
-}
-
-#[derive(Deserialize)]
-struct NotificationConnection {
-    nodes: Vec<Notification>,
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
-}
-
-#[derive(Deserialize)]
-struct NotificationsData {
-    notifications: NotificationConnection,
-}
 
 /// Fetch notifications from the Linear API.
 ///
@@ -106,7 +40,7 @@ pub fn fetch(
             "after": cursor,
         });
 
-        let data: NotificationsData = query_as(transport, NOTIFICATIONS_QUERY, variables)?;
+        let data: NotificationsQuery = query_as(transport, &query(), variables)?;
 
         let conn = data.notifications;
         all.extend(conn.nodes);
@@ -145,15 +79,16 @@ pub fn fetch_from_config(page_size: usize, max_total: Option<usize>) -> Result<V
 mod tests {
     use super::*;
     use crate::client::FakeTransport;
+    use crate::issues::sample_issue_node;
 
     fn node(id: &str) -> serde_json::Value {
         json!({
+            "__typename": "ProjectNotification",
             "id": id,
-            "type": "issueAssignedToYou",
+            "category": "assignments",
             "readAt": null,
             "createdAt": "2026-01-01T00:00:00Z",
             "updatedAt": "2026-01-01T00:00:00Z",
-            "issue": null,
             "actor": null
         })
     }
@@ -174,7 +109,7 @@ mod tests {
         ]);
         let got = fetch(&transport, 250, None).unwrap();
         assert_eq!(
-            got.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            got.iter().map(|n| n.id().inner()).collect::<Vec<_>>(),
             ["n1", "n2"]
         );
         // The second request carries the first page's end cursor.
@@ -195,5 +130,30 @@ mod tests {
         let transport = FakeTransport::new(vec![page(&["n1"], false, None)]);
         fetch(&transport, 1000, None).unwrap();
         assert_eq!(transport.variables(0)["first"], json!(250));
+    }
+
+    #[test]
+    fn issue_notification_maps_issue_and_actor() {
+        let node = json!({
+            "__typename": "IssueNotification",
+            "id": "n1",
+            "category": "assignments",
+            "readAt": null,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "actor": { "id": "u1", "name": "Ada Lovelace" },
+            "issue": sample_issue_node("1")
+        });
+        let transport = FakeTransport::new(vec![json!({ "notifications": {
+            "nodes": [node],
+            "pageInfo": { "hasNextPage": false, "endCursor": null }
+        }})]);
+        let got = fetch(&transport, 250, None).unwrap();
+        assert_eq!(got.len(), 1);
+        let n = &got[0];
+        let issue = n.issue().unwrap();
+        assert_eq!(issue.identifier, "ENG-1");
+        assert_eq!(issue.title, "t");
+        assert_eq!(n.actor().unwrap().name, "Ada Lovelace");
     }
 }

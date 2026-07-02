@@ -24,8 +24,9 @@ fn resolve_me(conn: &lt_runtime::db::Connection, query: &mut IssueQuery) -> Resu
     if !is_me {
         return Ok(());
     }
-    let name = db::get_meta(conn, "viewer_name")?
-        .ok_or_else(|| anyhow!("`--assignee me` needs a synced viewer; run `lt sync` first"))?;
+    let name = db::synced_viewer(conn)?
+        .ok_or_else(|| anyhow!("`--assignee me` needs a synced viewer; run `lt sync` first"))?
+        .name;
     query.assignee = Some(name);
     Ok(())
 }

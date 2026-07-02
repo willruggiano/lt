@@ -259,6 +259,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1504,6 +1505,7 @@ name = "lt-types"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "cynic",
  "cynic-codegen",
  "graphql-parser",
