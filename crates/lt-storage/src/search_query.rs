@@ -934,7 +934,7 @@ mod run_query_tests {
                 name: "Engineering".to_string(),
             },
             description: None,
-            labels: types::LabelConnection { nodes: Vec::new() },
+            labels: types::IssueLabelConnection { nodes: Vec::new() },
             project: None,
             cycle: None,
             creator: None,
@@ -962,13 +962,13 @@ mod run_query_tests {
             name: "Design".to_string(),
         };
         r2.updated_at = dt("2026-01-04T00:00:00Z");
-        r2.labels = types::LabelConnection {
+        r2.labels = types::IssueLabelConnection {
             nodes: vec![
-                types::Label {
+                types::IssueLabel {
                     id: lt_types::Id::new("backend"),
                     name: "backend".to_string(),
                 },
-                types::Label {
+                types::IssueLabel {
                     id: lt_types::Id::new("urgent"),
                     name: "urgent".to_string(),
                 },

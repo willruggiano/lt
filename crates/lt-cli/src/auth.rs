@@ -20,7 +20,20 @@ pub enum AuthCommands {
 pub fn run(out: &mut dyn Write, cmd: &AuthCommands) -> Result<()> {
     match cmd {
         AuthCommands::Login => auth::login(),
-        AuthCommands::Status => auth::status(out),
+        AuthCommands::Status => print_status(out),
         AuthCommands::Logout => auth::logout(out),
     }
+}
+
+/// Print the currently authenticated identity (the `lt auth status` output).
+fn print_status(out: &mut dyn Write) -> Result<()> {
+    let viewer = auth::viewer_from_config()?;
+    writeln!(out, "user:         {}", viewer.name)?;
+    writeln!(out, "id:           {}", viewer.id.inner())?;
+    writeln!(
+        out,
+        "organization: {} ({})",
+        viewer.organization.name, viewer.organization.url_key
+    )?;
+    Ok(())
 }

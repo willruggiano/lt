@@ -3,8 +3,8 @@
 //! fetch.
 
 use anyhow::{Result, anyhow};
-use lt_types::notifications as wire;
 pub use lt_types::notifications::Notification;
+use lt_types::notifications::{NotificationsQuery, query};
 use serde_json::json;
 
 use super::client::{GraphqlTransport, HttpTransport, query_as};
@@ -40,7 +40,7 @@ pub fn fetch(
             "after": cursor,
         });
 
-        let data: wire::NotificationsQuery = query_as(transport, &wire::query(), variables)?;
+        let data: NotificationsQuery = query_as(transport, &query(), variables)?;
 
         let conn = data.notifications;
         all.extend(conn.nodes);

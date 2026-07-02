@@ -148,7 +148,7 @@ impl Generator {
 
     /// A set of 0-3 distinct word labels. The label id mirrors the name so the
     /// relational upsert dedupes a shared label to one row.
-    fn labels(&mut self) -> Vec<types::Label> {
+    fn labels(&mut self) -> Vec<types::IssueLabel> {
         let n = self.rng.random_range(0..4usize);
         let mut chosen: Vec<String> = Vec::with_capacity(n);
         for _ in 0..n {
@@ -159,8 +159,8 @@ impl Generator {
         }
         chosen
             .into_iter()
-            .map(|name| types::Label {
-                id: lt_types::Id::new(name.clone()),
+            .map(|name| types::IssueLabel {
+                id: name.clone().into(),
                 name,
             })
             .collect()
@@ -230,7 +230,7 @@ impl Generator {
     /// the relational upsert dedupes a person to one `users` row.
     fn user(name: Option<String>) -> Option<types::User> {
         name.map(|name| types::User {
-            id: lt_types::Id::new(name.clone()),
+            id: name.clone().into(),
             name,
         })
     }
@@ -253,29 +253,29 @@ impl Generator {
         let priority = types::priority_label_to_u8(&priority_label);
         let state_name = (*self.pick(STATES)).to_string();
         types::Issue {
-            id: lt_types::Id::new(format!("sim-{:016x}-{index}", self.seed)),
+            id: format!("sim-{:016x}-{index}", self.seed).into(),
             identifier,
             title,
             priority: lt_types::scalars::Priority(priority),
             // The team id is its key; entity ids mirror names so renamed-to-same
             // values collapse to one row in the relational base.
             state: types::WorkflowState {
-                id: lt_types::Id::new(state_name.clone()),
+                id: state_name.clone().into(),
                 name: state_name,
             },
             assignee,
             team: types::Team {
-                id: lt_types::Id::new(team_key),
+                id: team_key.into(),
                 name: team_name,
             },
             description,
-            labels: types::LabelConnection { nodes: labels },
+            labels: types::IssueLabelConnection { nodes: labels },
             project: project.map(|name| types::Project {
-                id: lt_types::Id::new(name.clone()),
+                id: name.clone().into(),
                 name,
             }),
             cycle: cycle.map(|name| types::Cycle {
-                id: lt_types::Id::new(name.clone()),
+                id: name.clone().into(),
                 name: Some(name),
             }),
             creator,
@@ -294,12 +294,12 @@ impl Generator {
             let body: String = Sentence(8..18).fake_with_rng(&mut self.rng);
             let author = self.name();
             out.push(lt_types::comments::Comment {
-                id: lt_types::Id::new(format!("{}-c{c}", issue.id.inner())),
+                id: format!("{}-c{c}", issue.id.inner()).into(),
                 body,
                 created_at,
                 updated_at,
                 user: Some(types::User {
-                    id: lt_types::Id::new(author.clone()),
+                    id: author.clone().into(),
                     name: author,
                 }),
                 issue_id: Some(issue.id.inner().to_string()),

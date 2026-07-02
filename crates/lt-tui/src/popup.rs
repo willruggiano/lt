@@ -387,7 +387,7 @@ fn apply_change(issue: &mut lt_types::types::Issue, kind: &PopupKind, item: &Pop
         PopupKind::State => {
             issue.state.name.clone_from(&item.label);
             if let Some(id) = &item.id {
-                issue.state.id = lt_types::Id::new(id.clone());
+                issue.state.id = id.clone().into();
             }
         }
         PopupKind::Priority => {
@@ -403,7 +403,7 @@ fn apply_change(issue: &mut lt_types::types::Issue, kind: &PopupKind, item: &Pop
                 issue.assignee = None;
             } else {
                 issue.assignee = Some(lt_types::types::User {
-                    id: lt_types::Id::new(item.id.clone().unwrap_or_default()),
+                    id: item.id.clone().unwrap_or_default().into(),
                     name: item.label.clone(),
                 });
             }

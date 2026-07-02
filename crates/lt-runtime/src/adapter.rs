@@ -9,11 +9,12 @@ use std::sync::mpsc;
 use anyhow::Result;
 use lt_storage::db;
 use lt_types::query::IssueQuery;
+use lt_types::types::{Team, User, WorkflowState};
 use lt_types::viewer;
 use lt_upstream as upstream;
 use lt_upstream::client::HttpTransport;
 
-use crate::sync_port::{LoginEvent, SyncEvent, SyncService, Team, User, WorkflowState};
+use crate::sync_port::{LoginEvent, SyncEvent, SyncService};
 
 pub struct LinearSyncService;
 

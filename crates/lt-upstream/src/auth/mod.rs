@@ -1,7 +1,8 @@
 //! The auth domain: OAuth2 login/status/logout plus token refresh.
 //!
 //! The command entrypoints are re-exported straight from their submodules —
-//! `upstream::auth::login()`, `::status()`, `::logout()` — rather than wrapped.
+//! `upstream::auth::login()`, `::viewer_from_config()`, `::logout()` — rather
+//! than wrapped.
 
 mod login;
 mod logout;
@@ -16,5 +17,6 @@ pub use login::run as login;
 pub use login::run_non_interactive as login_non_interactive;
 /// Log out and remove local credentials (`lt auth logout`).
 pub use logout::run as logout;
-/// Show the currently authenticated identity (`lt auth status`).
-pub use status::run as status;
+/// Fetch the currently authenticated identity (the `lt auth status` data
+/// path); printing lives in `lt-cli`.
+pub use status::viewer_from_config;

@@ -9,7 +9,7 @@ use std::sync::mpsc::Receiver;
 
 use anyhow::Result;
 use lt_types::query::IssueQuery;
-pub use lt_types::types::{Team, User, WorkflowState};
+use lt_types::types::{Team, User, WorkflowState};
 use lt_types::viewer;
 
 /// Outcome of a background sync, delivered to the TUI event loop.

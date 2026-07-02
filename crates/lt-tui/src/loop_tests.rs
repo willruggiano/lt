@@ -59,7 +59,7 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
             name: "Engineering".to_string(),
         },
         description: None,
-        labels: types::LabelConnection { nodes: Vec::new() },
+        labels: types::IssueLabelConnection { nodes: Vec::new() },
         project: None,
         cycle: None,
         creator: None,

@@ -227,7 +227,7 @@ fn synced_viewer(conn: &Connection) -> Result<Option<types::User>> {
     let id = crate::db::get_meta(conn, "viewer_id")?;
     let name = crate::db::get_meta(conn, "viewer_name")?;
     Ok(id.zip(name).map(|(id, name)| types::User {
-        id: lt_types::Id::new(id),
+        id: id.into(),
         name,
     }))
 }
@@ -244,7 +244,7 @@ pub fn enqueue_comment_create(
     let tx = conn.unchecked_transaction()?;
     let now = lt_types::scalars::DateTime(Utc::now());
     let comment = lt_types::comments::Comment {
-        id: lt_types::Id::new(temp_id),
+        id: temp_id.into(),
         body: input.body.clone(),
         created_at: now,
         updated_at: now,
@@ -426,22 +426,22 @@ fn delete_command(tx: &Connection, seq: i64) -> Result<()> {
 #[cfg(any(test, feature = "test-util"))]
 pub fn sample_base_issue(id: &str) -> types::Issue {
     types::Issue {
-        id: lt_types::Id::new(id),
+        id: id.into(),
         identifier: format!("ENG-{id}"),
         title: format!("issue {id}"),
         priority_label: "Normal".to_string(),
         priority: lt_types::scalars::Priority(3),
         state: types::WorkflowState {
-            id: lt_types::Id::new("s-todo"),
+            id: "s-todo".into(),
             name: "Todo".to_string(),
         },
         assignee: None,
         team: types::Team {
-            id: lt_types::Id::new("ENG"),
+            id: "ENG".into(),
             name: "Engineering".to_string(),
         },
         description: None,
-        labels: types::LabelConnection { nodes: Vec::new() },
+        labels: types::IssueLabelConnection { nodes: Vec::new() },
         project: None,
         cycle: None,
         creator: None,

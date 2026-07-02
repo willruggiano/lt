@@ -4,7 +4,9 @@
 
 use anyhow::{Result, anyhow, bail};
 use lt_types::inputs::IssueCreateInput;
-use lt_types::issues as wire;
+use lt_types::issues::{
+    IssueCreateMutation, IssueUpdateMutation, IssuesQuery, create_mutation, query, update_mutation,
+};
 use lt_types::query::{IssueQuery, build_sort, parse_date};
 use lt_types::types::Issue;
 use serde_json::{Value, json};
@@ -130,7 +132,7 @@ pub fn fetch_with(
         "after": after,
     });
 
-    let data: wire::IssuesQuery = query_as(transport, &wire::query(), variables)?;
+    let data: IssuesQuery = query_as(transport, &query(), variables)?;
 
     let conn = data.issues;
     Ok((
@@ -144,7 +146,7 @@ pub fn fetch_with(
 // Mutations (create synchronously; replay queued outbox commands)
 // ---------------------------------------------------------------------------
 
-impl CreatePayload for wire::IssueCreateMutation {
+impl CreatePayload for IssueCreateMutation {
     type Created = Issue;
     fn into_created(self) -> (bool, Option<Issue>) {
         (self.issue_create.success, self.issue_create.issue)
@@ -158,7 +160,7 @@ pub fn replay_update(
     transport: &dyn GraphqlTransport,
     variables: serde_json::Value,
 ) -> Result<Option<Issue>> {
-    let data: wire::IssueUpdateMutation = query_as(transport, &wire::update_mutation(), variables)?;
+    let data: IssueUpdateMutation = query_as(transport, &update_mutation(), variables)?;
     if !data.issue_update.success {
         bail!("issueUpdate returned success=false");
     }
@@ -170,12 +172,7 @@ pub fn replay_create(
     transport: &dyn GraphqlTransport,
     variables: serde_json::Value,
 ) -> Result<Issue> {
-    post_create::<wire::IssueCreateMutation>(
-        transport,
-        &wire::create_mutation(),
-        "issueCreate",
-        variables,
-    )
+    post_create::<IssueCreateMutation>(transport, &create_mutation(), "issueCreate", variables)
 }
 
 /// Create an issue synchronously (the CLI `lt issues new` path, which is an

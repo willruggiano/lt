@@ -3,7 +3,7 @@
 //! the fetched thread into the local DB lives in `lt-runtime`.
 
 use anyhow::Result;
-use lt_types::comments as wire;
+use lt_types::comments::{Comment, CommentCreateMutation, CommentsQuery, create_mutation, query};
 use serde_json::json;
 
 use crate::client::{GraphqlTransport, query_as};
@@ -13,9 +13,9 @@ use crate::graphql::{CreatePayload, post_create};
 // Mutation replay (driven by the outbox drainer)
 // ---------------------------------------------------------------------------
 
-impl CreatePayload for wire::CommentCreateMutation {
-    type Created = wire::Comment;
-    fn into_created(self) -> (bool, Option<wire::Comment>) {
+impl CreatePayload for CommentCreateMutation {
+    type Created = Comment;
+    fn into_created(self) -> (bool, Option<Comment>) {
         (
             self.comment_create.success,
             Some(self.comment_create.comment),
@@ -28,13 +28,8 @@ impl CreatePayload for wire::CommentCreateMutation {
 pub fn replay_create(
     transport: &dyn GraphqlTransport,
     variables: serde_json::Value,
-) -> Result<wire::Comment> {
-    post_create::<wire::CommentCreateMutation>(
-        transport,
-        &wire::create_mutation(),
-        "commentCreate",
-        variables,
-    )
+) -> Result<Comment> {
+    post_create::<CommentCreateMutation>(transport, &create_mutation(), "commentCreate", variables)
 }
 
 // ---------------------------------------------------------------------------
@@ -43,8 +38,8 @@ pub fn replay_create(
 
 /// Fetch every comment for `issue_id` from the Linear API, paginating until the
 /// thread is exhausted.
-pub fn fetch_all(transport: &dyn GraphqlTransport, issue_id: &str) -> Result<Vec<wire::Comment>> {
-    let mut all: Vec<wire::Comment> = Vec::new();
+pub fn fetch_all(transport: &dyn GraphqlTransport, issue_id: &str) -> Result<Vec<Comment>> {
+    let mut all: Vec<Comment> = Vec::new();
     let mut cursor: Option<String> = None;
 
     loop {
@@ -53,7 +48,7 @@ pub fn fetch_all(transport: &dyn GraphqlTransport, issue_id: &str) -> Result<Vec
             "after": cursor,
         });
 
-        let data: wire::CommentsQuery = query_as(transport, &wire::query(), variables)?;
+        let data: CommentsQuery = query_as(transport, &query(), variables)?;
 
         let conn = data.issue.comments;
         all.extend(conn.nodes);

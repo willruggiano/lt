@@ -6,5 +6,6 @@
 pub use lt_upstream::auth::login;
 /// Log out and remove local credentials (`lt auth logout`).
 pub use lt_upstream::auth::logout;
-/// Show the currently authenticated identity (`lt auth status`).
-pub use lt_upstream::auth::status;
+/// Fetch the currently authenticated identity (the `lt auth status` data
+/// path); printing lives in `lt-cli`.
+pub use lt_upstream::auth::viewer_from_config;

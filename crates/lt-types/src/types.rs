@@ -23,7 +23,7 @@ pub struct GraphqlError {
 
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "IssueLabel")]
-pub struct Label {
+pub struct IssueLabel {
     pub id: cynic::Id,
     pub name: String,
 }
@@ -73,8 +73,8 @@ pub struct Cycle {
 
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "IssueLabelConnection")]
-pub struct LabelConnection {
-    pub nodes: Vec<Label>,
+pub struct IssueLabelConnection {
+    pub nodes: Vec<IssueLabel>,
 }
 
 #[derive(cynic::QueryFragment, Clone, PartialEq)]
@@ -89,7 +89,7 @@ pub struct Issue {
     pub assignee: Option<User>,
     pub team: Team,
     pub description: Option<String>,
-    pub labels: LabelConnection,
+    pub labels: IssueLabelConnection,
     pub project: Option<Project>,
     pub cycle: Option<Cycle>,
     pub creator: Option<User>,

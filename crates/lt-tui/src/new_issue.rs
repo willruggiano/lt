@@ -1,7 +1,7 @@
 use std::sync::{Arc, mpsc};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use lt_runtime::sync_port::User;
+use lt_types::types::User;
 use lt_types::viewer;
 
 use super::{App, Mode, PopupItem, TextInput, priority_popup_items};
@@ -341,7 +341,7 @@ fn build_create_request(
     let priority = priority.unwrap_or(0);
     let now = lt_types::scalars::DateTime(chrono::Utc::now());
     let optimistic = types::Issue {
-        id: lt_types::Id::new(lt_runtime::db::outbox::temp_id()),
+        id: lt_runtime::db::outbox::temp_id().into(),
         identifier: "NEW".to_string(),
         title,
         priority: lt_types::scalars::Priority(priority),
@@ -349,19 +349,19 @@ fn build_create_request(
         // Fall back to a name-keyed id when the modal lacked one so the
         // relational join still resolves a label.
         state: types::WorkflowState {
-            id: lt_types::Id::new(state_id.unwrap_or_else(|| state_name.clone())),
+            id: state_id.unwrap_or_else(|| state_name.clone()).into(),
             name: state_name,
         },
         assignee: assignee_id.map(|id| types::User {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             name: assignee.map(|a| a.label.clone()).unwrap_or_default(),
         }),
         team: types::Team {
-            id: lt_types::Id::new(team_id),
+            id: team_id.into(),
             name: team_name,
         },
         description,
-        labels: types::LabelConnection { nodes: Vec::new() },
+        labels: types::IssueLabelConnection { nodes: Vec::new() },
         project: None,
         cycle: None,
         creator: None,

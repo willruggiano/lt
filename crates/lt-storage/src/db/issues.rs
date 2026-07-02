@@ -60,49 +60,49 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
     let team_id: String = row.get(11)?;
 
     Ok(types::Issue {
-        id: lt_types::Id::new(row.get::<_, String>(0)?),
+        id: row.get::<_, String>(0)?.into(),
         identifier: row.get(1)?,
         title: row.get(2)?,
         priority_label,
         priority: Priority(priority),
         state: types::WorkflowState {
-            id: lt_types::Id::new(state_id),
+            id: state_id.into(),
             name: row.get(8)?,
         },
         assignee: assignee_id.map(|id| types::User {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             name: assignee_name.unwrap_or_default(),
         }),
         team: types::Team {
-            id: lt_types::Id::new(team_id),
+            id: team_id.into(),
             name: row.get(12)?,
         },
         description: row.get(4)?,
-        labels: types::LabelConnection {
+        labels: types::IssueLabelConnection {
             nodes: labels
                 .unwrap_or_default()
                 .split(',')
                 .filter(|s| !s.is_empty())
-                .map(|n| types::Label {
-                    id: lt_types::Id::new(String::new()),
+                .map(|n| types::IssueLabel {
+                    id: String::new().into(),
                     name: n.to_string(),
                 })
                 .collect(),
         },
         project: project_id.map(|id| types::Project {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             name: project_name.unwrap_or_default(),
         }),
         cycle: cycle_id.map(|id| types::Cycle {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             name: cycle_name,
         }),
         creator: creator_id.map(|id| types::User {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             name: creator_name.unwrap_or_default(),
         }),
         parent: parent_id.map(|id| types::Parent {
-            id: lt_types::Id::new(id),
+            id: id.into(),
             identifier: parent_identifier.unwrap_or_default(),
         }),
         created_at: parse_datetime_column(&created_at)?,
@@ -276,7 +276,7 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
                 "state" => {
                     if let Some(id) = &o.value {
                         issue.state = types::WorkflowState {
-                            id: lt_types::Id::new(id.clone()),
+                            id: id.clone().into(),
                             name: o.state_name.clone().unwrap_or_default(),
                         };
                     }
@@ -289,7 +289,7 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
                 }
                 "assignee" => {
                     issue.assignee = o.value.as_ref().map(|id| types::User {
-                        id: lt_types::Id::new(id.clone()),
+                        id: id.clone().into(),
                         name: o.user_name.clone().unwrap_or_default(),
                     });
                 }
@@ -530,7 +530,7 @@ mod tests {
                 name: "Engineering".to_string(),
             },
             description: None,
-            labels: types::LabelConnection { nodes: Vec::new() },
+            labels: types::IssueLabelConnection { nodes: Vec::new() },
             project: None,
             cycle: None,
             creator: None,
@@ -577,13 +577,13 @@ mod tests {
                 name: "Engineering".to_string(),
             },
             description: Some("body".to_string()),
-            labels: types::LabelConnection {
+            labels: types::IssueLabelConnection {
                 nodes: vec![
-                    types::Label {
+                    types::IssueLabel {
                         id: lt_types::Id::new("l-bug"),
                         name: "bug".to_string(),
                     },
-                    types::Label {
+                    types::IssueLabel {
                         id: lt_types::Id::new("l-backend"),
                         name: "backend".to_string(),
                     },

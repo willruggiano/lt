@@ -100,7 +100,7 @@ pub fn print_table(out: &mut dyn Write, issues: &[Issue], note: &str) -> Result<
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use lt_types::types::{Label, LabelConnection, Team, User, WorkflowState};
+    use lt_types::types::{IssueLabel, IssueLabelConnection, Team, User, WorkflowState};
 
     use super::*;
 
@@ -128,7 +128,7 @@ pub(crate) mod tests {
                 name: "Engineering".into(),
             },
             description: None,
-            labels: LabelConnection { nodes: Vec::new() },
+            labels: IssueLabelConnection { nodes: Vec::new() },
             project: None,
             cycle: None,
             creator: None,
@@ -169,8 +169,8 @@ pub(crate) mod tests {
         second.priority = lt_types::scalars::Priority(0);
         second.state.name = "Backlog".into();
         second.assignee = None;
-        second.labels = LabelConnection {
-            nodes: vec![Label {
+        second.labels = IssueLabelConnection {
+            nodes: vec![IssueLabel {
                 id: lt_types::Id::new("l1"),
                 name: "bug".into(),
             }],

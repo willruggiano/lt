@@ -69,12 +69,12 @@ pub fn query_comments(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>>
             let user_id: Option<String> = row.get(4)?;
             let user_name: Option<String> = row.get(5)?;
             Ok(Comment {
-                id: lt_types::Id::new(row.get::<_, String>(0)?),
+                id: row.get::<_, String>(0)?.into(),
                 body: row.get(1)?,
                 created_at: parse_datetime_column(&created_at)?,
                 updated_at: parse_datetime_column(&updated_at)?,
                 user: user_id.map(|id| User {
-                    id: lt_types::Id::new(id),
+                    id: id.into(),
                     name: user_name.unwrap_or_default(),
                 }),
                 issue_id: Some(issue_id.to_string()),

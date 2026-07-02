@@ -29,6 +29,8 @@ use lt_types::types::Issue;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use lt_types::types::priority_label_to_u8;
 #[cfg(all(test, feature = "sim"))]
+use lt_types::types::{Team, User, WorkflowState};
+#[cfg(all(test, feature = "sim"))]
 pub(crate) use new_issue::{ModalEvent, build_assignee_items};
 pub(crate) use new_issue::{NewIssueField, NewIssueModal, handle_new_issue_key};
 pub(crate) use popup::{
@@ -297,16 +299,13 @@ impl SyncService for NoopSyncService {
     fn fetch_viewer(&self) -> Option<lt_types::viewer::User> {
         None
     }
-    fn fetch_teams(&self) -> Result<Vec<lt_runtime::sync_port::Team>> {
+    fn fetch_teams(&self) -> Result<Vec<Team>> {
         Ok(Vec::new())
     }
-    fn fetch_workflow_states(
-        &self,
-        _team_id: &str,
-    ) -> Result<Vec<lt_runtime::sync_port::WorkflowState>> {
+    fn fetch_workflow_states(&self, _team_id: &str) -> Result<Vec<WorkflowState>> {
         Ok(Vec::new())
     }
-    fn fetch_team_members(&self, _team_id: &str) -> Result<Vec<lt_runtime::sync_port::User>> {
+    fn fetch_team_members(&self, _team_id: &str) -> Result<Vec<User>> {
         Ok(Vec::new())
     }
     fn sync_comments(&self, _issue_id: &str) -> Result<()> {

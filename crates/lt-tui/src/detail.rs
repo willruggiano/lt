@@ -146,12 +146,12 @@ impl App {
         if let Some(ref mut detail) = self.detail {
             let now = lt_types::scalars::DateTime(chrono::Utc::now());
             detail.comments.push(lt_types::comments::Comment {
-                id: lt_types::Id::new(lt_runtime::db::outbox::temp_id()),
+                id: lt_runtime::db::outbox::temp_id().into(),
                 body: body.clone(),
                 created_at: now,
                 updated_at: now,
                 user: self.viewer_name.clone().map(|name| lt_types::types::User {
-                    id: lt_types::Id::new(String::new()),
+                    id: String::new().into(),
                     name,
                 }),
                 issue_id: Some(issue_id.clone()),
