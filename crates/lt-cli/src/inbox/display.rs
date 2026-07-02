@@ -6,11 +6,6 @@ use lt_runtime::notifications::Notification;
 use lt_runtime::text;
 use lt_types::notifications::NotificationCategory;
 
-/// The current wall-clock time.
-pub fn now() -> chrono::DateTime<Utc> {
-    Utc::now()
-}
-
 /// The widest value `it` yields, no narrower than `min`.
 fn col_width(it: impl Iterator<Item = usize>, min: usize) -> usize {
     it.fold(min, usize::max)
