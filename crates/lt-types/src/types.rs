@@ -2,8 +2,7 @@
 //!
 //! These are cynic `QueryFragment`s: the SAME types decode the wire response
 //! (via the derive's generated `Deserialize`) and are constructed directly by
-//! `lt-storage` from the local DB's relational joins. There is one `Issue`
-//! type, not a wire projection plus a mirrored domain type.
+//! `lt-storage` from the local DB's relational joins.
 
 use serde::Deserialize;
 

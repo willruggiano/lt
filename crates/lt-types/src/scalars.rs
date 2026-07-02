@@ -39,3 +39,51 @@ pub struct Priority(pub u8);
 impl cynic::schema::IsScalar<f64> for Priority {
     type SchemaType = f64;
 }
+
+impl std::str::FromStr for Priority {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" | "0" => Ok(Self(0)),
+            "urgent" | "1" => Ok(Self(1)),
+            "high" | "2" => Ok(Self(2)),
+            "normal" | "medium" | "3" => Ok(Self(3)),
+            "low" | "4" => Ok(Self(4)),
+            _ => Err(anyhow::anyhow!(
+                "expected none/urgent/high/normal/medium/low or 0-4, got {s:?}"
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn priority_from_str_accepts_names_and_numbers() {
+        assert_eq!("none".parse::<Priority>().unwrap().0, 0);
+        assert_eq!("0".parse::<Priority>().unwrap().0, 0);
+        assert_eq!("urgent".parse::<Priority>().unwrap().0, 1);
+        assert_eq!("1".parse::<Priority>().unwrap().0, 1);
+        assert_eq!("high".parse::<Priority>().unwrap().0, 2);
+        assert_eq!("2".parse::<Priority>().unwrap().0, 2);
+        assert_eq!("normal".parse::<Priority>().unwrap().0, 3);
+        assert_eq!("medium".parse::<Priority>().unwrap().0, 3);
+        assert_eq!("3".parse::<Priority>().unwrap().0, 3);
+        assert_eq!("low".parse::<Priority>().unwrap().0, 4);
+        assert_eq!("4".parse::<Priority>().unwrap().0, 4);
+        // Case-insensitive.
+        assert_eq!("URGENT".parse::<Priority>().unwrap().0, 1);
+    }
+
+    #[test]
+    fn priority_from_str_rejects_unknown() {
+        let err = "bogus".parse::<Priority>().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "expected none/urgent/high/normal/medium/low or 0-4, got \"bogus\""
+        );
+    }
+}

@@ -2,31 +2,19 @@
 //! the create/replay mutations. The cached read model lives in `lt-storage`;
 //! these queries are the issue paths that hit the network.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use lt_types::inputs::IssueCreateInput;
 use lt_types::issues::{
     IssueCreateMutation, IssueUpdateMutation, IssuesQuery, create_mutation, query, update_mutation,
 };
 use lt_types::query::{IssueQuery, build_sort, parse_date};
+use lt_types::scalars::Priority;
 use lt_types::types::Issue;
 use serde_json::{Value, json};
 
 use crate::auth::refresh::load_or_refresh_token;
 use crate::client::{GraphqlTransport, HttpTransport, query_as};
 use crate::graphql::{CreatePayload, post_create};
-
-fn parse_priority(s: &str) -> Result<f64> {
-    match s.to_lowercase().as_str() {
-        "none" | "0" => Ok(0.0),
-        "urgent" | "1" => Ok(1.0),
-        "high" | "2" => Ok(2.0),
-        "normal" | "medium" | "3" => Ok(3.0),
-        "low" | "4" => Ok(4.0),
-        _ => Err(anyhow!(
-            "--priority: expected none/urgent/high/normal/medium/low or 0-4, got {s:?}"
-        )),
-    }
-}
 
 /// Build a GraphQL `IssueFilter` from the query spec (the `--live` path).
 pub fn build_filter(args: &IssueQuery) -> Result<Option<Value>> {
@@ -71,9 +59,9 @@ pub fn build_filter(args: &IssueQuery) -> Result<Option<Value>> {
     }
 
     if let Some(priority_str) = &args.priority {
-        let priority_val = parse_priority(priority_str)?;
+        let p: Priority = priority_str.parse()?;
         filters.push(json!({
-            "priority": { "eq": priority_val }
+            "priority": { "eq": f64::from(p.0) }
         }));
     }
 

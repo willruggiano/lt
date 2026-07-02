@@ -2,8 +2,9 @@ use std::sync::{Arc, mpsc};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use lt_runtime::db::Database;
+use lt_types::types::Issue;
 
-use super::{App, CommentSyncEvent, Issue, Mode, Status};
+use super::{App, CommentSyncEvent, Mode, Status};
 
 /// The detail pane's view-model: the shared `types`/`comments` fragments the
 /// TUI composes for display, not a wire projection or a mirrored domain type.

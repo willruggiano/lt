@@ -103,18 +103,30 @@ pub fn print_table(
 mod tests {
     use super::*;
 
-    fn dt(s: &str) -> DateTime {
-        DateTime(s.parse().unwrap())
-    }
-
     #[test]
     fn test_relative_age_formatting() {
         // Fixed "now" so the age is deterministic.
         // 2020-01-01T00:00:00Z is 0, 2020-01-02T00:00:00Z is one day later.
-        let now = u64::try_from(dt("2020-01-02T01:00:00Z").0.timestamp()).unwrap();
-        assert_eq!(relative_age(&dt("2020-01-01T00:00:00Z"), now), "1d ago");
-        assert_eq!(relative_age(&dt("2020-01-02T00:00:00Z"), now), "1h ago");
-        assert_eq!(relative_age(&dt("2020-01-02T00:59:30Z"), now), "30s ago");
+        let now = u64::try_from(
+            "2020-01-02T01:00:00Z"
+                .parse::<DateTime>()
+                .unwrap()
+                .0
+                .timestamp(),
+        )
+        .unwrap();
+        assert_eq!(
+            relative_age(&"2020-01-01T00:00:00Z".parse().unwrap(), now),
+            "1d ago"
+        );
+        assert_eq!(
+            relative_age(&"2020-01-02T00:00:00Z".parse().unwrap(), now),
+            "1h ago"
+        );
+        assert_eq!(
+            relative_age(&"2020-01-02T00:59:30Z".parse().unwrap(), now),
+            "30s ago"
+        );
     }
 
     #[test]
@@ -145,8 +157,8 @@ mod tests {
                 id: lt_types::Id::new(format!("n-{}", f.type_)),
                 type_: f.type_.into(),
                 read_at: None,
-                created_at: dt(f.created_at),
-                updated_at: dt(f.created_at),
+                created_at: f.created_at.parse().unwrap(),
+                updated_at: f.created_at.parse().unwrap(),
                 actor: Some(f.actor),
                 issue: f.issue,
             }))
@@ -157,14 +169,21 @@ mod tests {
                 id: lt_types::Id::new(format!("n-{type_}")),
                 type_: type_.into(),
                 read_at: None,
-                created_at: dt(created_at),
-                updated_at: dt(created_at),
+                created_at: created_at.parse().unwrap(),
+                updated_at: created_at.parse().unwrap(),
                 actor: None,
             })
         }
 
         // Fixed "now" so the AGE column is deterministic.
-        let now = u64::try_from(dt("2026-01-10T00:00:00Z").0.timestamp()).unwrap();
+        let now = u64::try_from(
+            "2026-01-10T00:00:00Z"
+                .parse::<DateTime>()
+                .unwrap()
+                .0
+                .timestamp(),
+        )
+        .unwrap();
         let notifications = vec![
             issue_notification(IssueNotificationFixture {
                 type_: "issueAssignedToYou",

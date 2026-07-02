@@ -898,11 +898,6 @@ mod run_query_tests {
     use super::*;
     use crate::db;
 
-    /// Parse a fixed RFC3339 literal into the wire `DateTime` scalar.
-    fn dt(s: &str) -> lt_types::scalars::DateTime {
-        lt_types::scalars::DateTime(s.parse().unwrap())
-    }
-
     fn user(name: &str) -> types::User {
         types::User {
             id: lt_types::Id::new(name),
@@ -939,8 +934,8 @@ mod run_query_tests {
             cycle: None,
             creator: None,
             parent: None,
-            created_at: dt("2026-01-01T00:00:00Z"),
-            updated_at: dt("2026-01-01T00:00:00Z"),
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-01-01T00:00:00Z".parse().unwrap(),
         }
     }
 
@@ -951,7 +946,7 @@ mod run_query_tests {
         let mut r1 = issue("1", "fix oauth login");
         r1.priority_label = "Urgent".to_string();
         r1.assignee = Some(user("Alice"));
-        r1.updated_at = dt("2026-01-05T00:00:00Z");
+        r1.updated_at = "2026-01-05T00:00:00Z".parse().unwrap();
 
         let mut r2 = issue("2", "render markdown");
         r2.priority_label = "High".to_string();
@@ -961,7 +956,7 @@ mod run_query_tests {
             id: lt_types::Id::new("DES"),
             name: "Design".to_string(),
         };
-        r2.updated_at = dt("2026-01-04T00:00:00Z");
+        r2.updated_at = "2026-01-04T00:00:00Z".parse().unwrap();
         r2.labels = types::IssueLabelConnection {
             nodes: vec![
                 types::IssueLabel {
@@ -987,7 +982,7 @@ mod run_query_tests {
         let mut r3 = issue("3", "oauth token refresh");
         r3.priority_label = "Low".to_string();
         r3.state = state("Done");
-        r3.updated_at = dt("2026-01-03T00:00:00Z");
+        r3.updated_at = "2026-01-03T00:00:00Z".parse().unwrap();
 
         db::upsert_issues(&conn, &[r1, r2, r3]).unwrap();
         conn
