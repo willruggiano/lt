@@ -1,14 +1,38 @@
-//! Cross-operation query traits: shared shape rather than shared code, so
-//! `lt-upstream`'s domain modules can decode a `team(id) { <conn> { nodes } }`
-//! query through one generic function regardless of which connection field
-//! the query selects.
+//! The `GraphqlOperation` trait: pairs a cynic-built query string with its
+//! typed variables and the domain-level output extraction, so
+//! `lt-upstream`'s generic `execute` can run and decode any operation through
+//! one code path.
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// A query whose response is `team(id) { <some connection> { nodes } }`.
-/// `into_nodes` extracts the one field that differs between operations
-/// (`states`, `members`, ...).
-pub trait TeamScopedQuery: DeserializeOwned {
-    type Node;
-    fn into_nodes(self) -> Vec<Self::Node>;
+/// One GraphQL operation: its wire variables, the decoded response envelope
+/// (`Self`), and the domain-level output extracted from it.
+pub trait GraphqlOperation: DeserializeOwned + Sized {
+    type Variables: Serialize;
+    type Output;
+    /// Operation name for error context ("issueCreate").
+    const NAME: &'static str;
+    /// Pair the query string with its typed variables via cynic.
+    fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables>;
+    /// Pull the domain output out of the decoded response envelope.
+    fn extract(self) -> anyhow::Result<Self::Output>;
+}
+
+/// Gate a mutation payload on its success flag.
+pub(crate) fn ensure_success(op: &str, success: bool) -> anyhow::Result<()> {
+    if !success {
+        anyhow::bail!("{op} returned success=false");
+    }
+    Ok(())
+}
+
+/// Gate a mutation payload on its success flag, then return `value` as the
+/// extracted output. Shared by every `*Payload { success, <entity> }`
+/// mutation whose entity is already the correct `Output` type (unlike
+/// `issueCreate`, whose entity is optional and needs its own "no entity"
+/// error on success).
+pub(crate) fn extract_on_success<T>(op: &str, success: bool, value: T) -> anyhow::Result<T> {
+    ensure_success(op, success)?;
+    Ok(value)
 }

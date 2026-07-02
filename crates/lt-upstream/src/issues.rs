@@ -1,20 +1,19 @@
-//! The issue domain: the live (`--live`) list fetch behind the CLI's cache and
-//! the create/replay mutations. The cached read model lives in `lt-storage`;
-//! these queries are the issue paths that hit the network.
+//! The issue domain: the live (`--live`) list fetch behind the CLI's cache.
+//! The cached read model lives in `lt-storage`; this query is the issue path
+//! that hits the network. Create/update/replay mutations execute
+//! `lt-types::issues` mutation types directly via `execute`; this module owns
+//! only the shared issue node fixture their tests reuse.
 
-use anyhow::{Result, bail};
-use lt_types::inputs::IssueCreateInput;
+use anyhow::Result;
 use lt_types::issues::{
-    IssueCreateMutation, IssueUpdateMutation, IssuesQuery, create_mutation, query, update_mutation,
+    IssueConnection, IssueFilterValue, IssueSortValue, IssuesQuery, IssuesVariables,
 };
 use lt_types::query::{IssueQuery, build_sort, parse_date};
 use lt_types::scalars::Priority;
-use lt_types::types::Issue;
 use serde_json::{Value, json};
 
 use crate::auth::refresh::load_or_refresh_token;
-use crate::client::{GraphqlTransport, HttpTransport, query_as};
-use crate::graphql::{CreatePayload, post_create};
+use crate::client::{GraphqlTransport, HttpTransport, execute};
 
 /// Build a GraphQL `IssueFilter` from the query spec (the `--live` path).
 pub fn build_filter(args: &IssueQuery) -> Result<Option<Value>> {
@@ -97,7 +96,7 @@ pub fn build_filter(args: &IssueQuery) -> Result<Option<Value>> {
 }
 
 /// Fetch one page of issues, loading (and refreshing) the token first.
-pub fn fetch(args: &IssueQuery, after: Option<&str>) -> Result<(Vec<Issue>, bool, Option<String>)> {
+pub fn fetch(args: &IssueQuery, after: Option<&str>) -> Result<IssueConnection> {
     let token = load_or_refresh_token()?;
     fetch_with(&HttpTransport::new(token.access_token), args, after)
 }
@@ -108,83 +107,32 @@ pub fn fetch_with(
     transport: &dyn GraphqlTransport,
     args: &IssueQuery,
     after: Option<&str>,
-) -> Result<(Vec<Issue>, bool, Option<String>)> {
+) -> Result<IssueConnection> {
     let limit = args.limit.min(250);
     let filter = build_filter(args)?;
     let sort = build_sort(&args.sort, args.desc);
 
-    let variables = json!({
-        "filter": filter,
-        "sort": sort,
-        "first": limit,
-        "after": after,
-    });
+    let variables = IssuesVariables {
+        filter: filter.map(IssueFilterValue),
+        sort: Some(IssueSortValue(sort)),
+        first: Some(i32::try_from(limit).unwrap_or(250)),
+        after: after.map(ToOwned::to_owned),
+    };
 
-    let data: IssuesQuery = query_as(transport, &query(), variables)?;
-
-    let conn = data.issues;
-    Ok((
-        conn.nodes,
-        conn.page_info.has_next_page,
-        conn.page_info.end_cursor,
-    ))
+    execute::<IssuesQuery>(transport, variables)
 }
 
 // ---------------------------------------------------------------------------
-// Mutations (create synchronously; replay queued outbox commands)
+// Shared test fixture (issue node shape reused by the create/update/replay
+// mutation tests)
 // ---------------------------------------------------------------------------
-
-impl CreatePayload for IssueCreateMutation {
-    type Created = Issue;
-    fn into_created(self) -> (bool, Option<Issue>) {
-        (self.issue_create.success, self.issue_create.issue)
-    }
-}
-
-/// Replay an `issueUpdate` from its stored variables, returning the
-/// server-returned issue (nullable in the schema even on success) so the
-/// drainer can reconcile the base from server truth when present.
-pub fn replay_update(
-    transport: &dyn GraphqlTransport,
-    variables: serde_json::Value,
-) -> Result<Option<Issue>> {
-    let data: IssueUpdateMutation = query_as(transport, &update_mutation(), variables)?;
-    if !data.issue_update.success {
-        bail!("issueUpdate returned success=false");
-    }
-    Ok(data.issue_update.issue)
-}
-
-/// Replay an `issueCreate`, returning the server's full issue.
-pub fn replay_create(
-    transport: &dyn GraphqlTransport,
-    variables: serde_json::Value,
-) -> Result<Issue> {
-    post_create::<IssueCreateMutation>(transport, &create_mutation(), "issueCreate", variables)
-}
-
-/// Create an issue synchronously (the CLI `lt issues new` path, which is an
-/// inherently online command rather than a queued TUI edit).
-pub fn create(transport: &dyn GraphqlTransport, input: &IssueCreateInput) -> Result<Issue> {
-    replay_create(transport, json!({ "input": input }))
-}
 
 /// A minimal GraphQL issue node matching [`Issue`]'s deserialization, shared by
 /// the fetch tests here and the `lt-runtime` delta-sync tests (via `test-util`).
+/// Defined once in `lt-types` (the fixture's data owner) and re-exported here
+/// so existing call sites keep this path.
 #[cfg(any(test, feature = "test-util"))]
-pub fn sample_issue_node(id: &str) -> serde_json::Value {
-    serde_json::json!({
-        "id": id, "identifier": format!("ENG-{id}"), "title": "t",
-        "priorityLabel": "High", "priority": 2,
-        "state": { "id": "s", "name": "Todo" },
-        "assignee": null,
-        "team": { "id": "ENG", "name": "Engineering" },
-        "description": null,
-        "labels": { "nodes": [] },
-        "project": null, "cycle": null, "creator": null, "parent": null,
-        "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-02T00:00:00Z"
-    })
-}
+pub use lt_types::issues::sample_issue_node;
 
 #[cfg(test)]
 mod tests {
@@ -200,11 +148,11 @@ mod tests {
             }
         })]);
         let args = IssueQuery::default();
-        let (issues, has_next, end) = fetch_with(&transport, &args, Some("0")).unwrap();
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].identifier, "ENG-1");
-        assert!(has_next);
-        assert_eq!(end.as_deref(), Some("50"));
+        let page = fetch_with(&transport, &args, Some("0")).unwrap();
+        assert_eq!(page.nodes.len(), 1);
+        assert_eq!(page.nodes[0].identifier, "ENG-1");
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("50"));
 
         let vars = transport.variables(0);
         assert_eq!(vars["first"], serde_json::json!(50));
@@ -216,15 +164,17 @@ mod tests {
         let transport = FakeTransport::new(vec![serde_json::json!({
             "issueCreate": { "success": true, "issue": sample_issue_node("1") }
         })]);
-        let created = create(
+        let created = execute::<lt_types::issues::IssueCreateMutation>(
             &transport,
-            &IssueCreateInput {
-                title: "New".to_string(),
-                team_id: "t1".to_string(),
-                description: None,
-                state_id: Some("s1".to_string()),
-                priority: None,
-                assignee_id: None,
+            lt_types::issues::IssueCreateVariables {
+                input: lt_types::inputs::IssueCreateInput {
+                    title: "New".to_string(),
+                    team_id: "t1".to_string(),
+                    description: None,
+                    state_id: Some("s1".to_string()),
+                    priority: None,
+                    assignee_id: None,
+                },
             },
         )
         .unwrap();
@@ -240,13 +190,42 @@ mod tests {
     }
 
     #[test]
-    fn replay_update_sends_variables_and_returns_server_issue() {
+    fn create_rejects_success_false() {
+        let transport = FakeTransport::new(vec![serde_json::json!({
+            "issueCreate": { "success": false, "issue": null }
+        })]);
+        let Err(err) = execute::<lt_types::issues::IssueCreateMutation>(
+            &transport,
+            lt_types::issues::IssueCreateVariables {
+                input: lt_types::inputs::IssueCreateInput {
+                    title: "New".to_string(),
+                    team_id: "t1".to_string(),
+                    description: None,
+                    state_id: None,
+                    priority: None,
+                    assignee_id: None,
+                },
+            },
+        ) else {
+            panic!("expected a success=false error");
+        };
+        assert!(err.to_string().contains("issueCreate"));
+    }
+
+    #[test]
+    fn issue_update_replay_sends_variables_and_returns_server_issue() {
         let transport = FakeTransport::new(vec![serde_json::json!({
             "issueUpdate": { "success": true, "issue": sample_issue_node("1") }
         })]);
-        let issue = replay_update(
+        let issue = execute::<lt_types::issues::IssueUpdateMutation>(
             &transport,
-            serde_json::json!({ "id": "i1", "input": { "stateId": "s9" } }),
+            lt_types::issues::IssueUpdateVariables {
+                id: "i1".to_string(),
+                input: lt_types::inputs::IssueUpdateInput {
+                    state_id: Some("s9".to_string()),
+                    ..Default::default()
+                },
+            },
         )
         .unwrap();
         assert_eq!(issue.unwrap().identifier, "ENG-1");
@@ -256,13 +235,19 @@ mod tests {
     }
 
     #[test]
-    fn replay_update_tolerates_absent_issue() {
+    fn issue_update_replay_tolerates_absent_issue() {
         let transport = FakeTransport::new(vec![serde_json::json!({
             "issueUpdate": { "success": true, "issue": null }
         })]);
-        let issue = replay_update(
+        let issue = execute::<lt_types::issues::IssueUpdateMutation>(
             &transport,
-            serde_json::json!({ "id": "i1", "input": { "stateId": "s9" } }),
+            lt_types::issues::IssueUpdateVariables {
+                id: "i1".to_string(),
+                input: lt_types::inputs::IssueUpdateInput {
+                    state_id: Some("s9".to_string()),
+                    ..Default::default()
+                },
+            },
         )
         .unwrap();
         assert!(issue.is_none());

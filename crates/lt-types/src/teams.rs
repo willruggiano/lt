@@ -3,6 +3,7 @@
 
 use cynic::QueryBuilder;
 
+use crate::graphql::GraphqlOperation;
 use crate::schema;
 use crate::types::Team;
 
@@ -12,10 +13,18 @@ pub struct TeamsQuery {
     pub teams: TeamConnection,
 }
 
-/// The built teams query string.
-#[must_use]
-pub fn query() -> String {
-    TeamsQuery::build(()).query
+impl GraphqlOperation for TeamsQuery {
+    type Variables = ();
+    type Output = Vec<Team>;
+    const NAME: &'static str = "teams";
+
+    fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
+        Self::build(variables)
+    }
+
+    fn extract(self) -> anyhow::Result<Self::Output> {
+        Ok(self.teams.nodes)
+    }
 }
 
 #[derive(cynic::QueryFragment)]
@@ -25,12 +34,27 @@ pub struct TeamConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::query;
+    use super::*;
 
     #[test]
     fn query_selects_team_nodes() {
-        let built = query();
+        let built = TeamsQuery::operation(()).query;
         assert!(built.contains("teams"));
         assert!(built.contains("nodes"));
+    }
+
+    #[test]
+    fn extract_returns_team_nodes() {
+        let data = serde_json::json!({
+            "teams": { "nodes": [{ "id": "t1", "name": "Eng" }, { "id": "t2", "name": "Design" }] }
+        });
+        let teams = serde_json::from_value::<TeamsQuery>(data)
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(
+            teams.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["Eng", "Design"]
+        );
     }
 }

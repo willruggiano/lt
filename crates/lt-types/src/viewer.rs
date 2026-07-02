@@ -3,6 +3,7 @@
 
 use cynic::QueryBuilder;
 
+use crate::graphql::GraphqlOperation;
 use crate::schema;
 
 #[derive(cynic::QueryFragment)]
@@ -11,12 +12,18 @@ pub struct ViewerQuery {
     pub viewer: User,
 }
 
-/// The built viewer query string. Kept here so cynic stays confined to
-/// `lt-types`: the sync layer sends this string and deserializes the response
-/// back into [`ViewerQuery`] via serde, without depending on cynic itself.
-#[must_use]
-pub fn query() -> String {
-    ViewerQuery::build(()).query
+impl GraphqlOperation for ViewerQuery {
+    type Variables = ();
+    type Output = User;
+    const NAME: &'static str = "viewer";
+
+    fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
+        Self::build(variables)
+    }
+
+    fn extract(self) -> anyhow::Result<Self::Output> {
+        Ok(self.viewer)
+    }
 }
 
 /// The authenticated user's identity, as selected by the viewer query. A
@@ -37,4 +44,28 @@ pub struct Organization {
     pub name: String,
     #[cynic(rename = "urlKey")]
     pub url_key: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_maps_nested_fields() {
+        let data = serde_json::json!({
+            "viewer": {
+                "id": "u1",
+                "name": "Ada",
+                "organization": { "name": "Acme", "urlKey": "acme" }
+            }
+        });
+        let viewer = serde_json::from_value::<ViewerQuery>(data)
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(viewer.id.inner(), "u1");
+        assert_eq!(viewer.name, "Ada");
+        assert_eq!(viewer.organization.name, "Acme");
+        assert_eq!(viewer.organization.url_key, "acme");
+    }
 }

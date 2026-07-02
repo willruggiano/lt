@@ -6,6 +6,7 @@
 
 use cynic::{MutationBuilder, QueryBuilder};
 
+use crate::graphql::{GraphqlOperation, extract_on_success};
 use crate::inputs::CommentCreateInput;
 use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
@@ -25,14 +26,18 @@ pub struct CommentsQuery {
     pub issue: IssueWithComments,
 }
 
-/// The built issue-comments query string.
-#[must_use]
-pub fn query() -> String {
-    CommentsQuery::build(CommentsVariables {
-        id: String::new(),
-        after: None,
-    })
-    .query
+impl GraphqlOperation for CommentsQuery {
+    type Variables = CommentsVariables;
+    type Output = CommentConnection;
+    const NAME: &'static str = "comments";
+
+    fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
+        Self::build(variables)
+    }
+
+    fn extract(self) -> anyhow::Result<Self::Output> {
+        Ok(self.issue.comments)
+    }
 }
 
 #[derive(cynic::QueryFragment)]
@@ -74,7 +79,7 @@ impl Comment {
 // Mutation
 // ---------------------------------------------------------------------------
 
-#[derive(cynic::QueryVariables)]
+#[derive(cynic::QueryVariables, serde::Deserialize)]
 pub struct CommentCreateVariables {
     pub input: CommentCreateInput,
 }
@@ -93,25 +98,35 @@ pub struct CommentPayload {
     pub comment: Comment,
 }
 
-/// The built `commentCreate` mutation string.
-#[must_use]
-pub fn create_mutation() -> String {
-    CommentCreateMutation::build(CommentCreateVariables {
-        input: CommentCreateInput {
-            issue_id: String::new(),
-            body: String::new(),
-        },
-    })
-    .query
+impl GraphqlOperation for CommentCreateMutation {
+    type Variables = CommentCreateVariables;
+    type Output = Comment;
+    const NAME: &'static str = "commentCreate";
+
+    fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
+        Self::build(variables)
+    }
+
+    fn extract(self) -> anyhow::Result<Self::Output> {
+        extract_on_success(
+            Self::NAME,
+            self.comment_create.success,
+            self.comment_create.comment,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Comment, create_mutation, query};
+    use super::*;
 
     #[test]
     fn query_declares_expected_variables() {
-        let built = query();
+        let built = CommentsQuery::operation(CommentsVariables {
+            id: String::new(),
+            after: None,
+        })
+        .query;
         assert!(built.contains("$id: String!"));
         assert!(built.contains("$after: String"));
         assert!(built.contains("issueId"));
@@ -119,9 +134,51 @@ mod tests {
 
     #[test]
     fn create_mutation_declares_expected_variables_and_name() {
-        let built = create_mutation();
+        let built = CommentCreateMutation::operation(CommentCreateVariables {
+            input: CommentCreateInput {
+                issue_id: String::new(),
+                body: String::new(),
+            },
+        })
+        .query;
         assert!(built.contains("commentCreate"));
         assert!(built.contains("$input: CommentCreateInput!"));
+    }
+
+    #[test]
+    fn comments_query_extract_maps_page() {
+        let data = serde_json::json!({ "issue": { "comments": {
+            "nodes": [{
+                "id": "c1", "body": "hi",
+                "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+                "user": { "id": "u1", "name": "Ada" },
+                "issueId": "i1"
+            }],
+            "pageInfo": { "hasNextPage": true, "endCursor": "cur" }
+        }}});
+        let page = serde_json::from_value::<CommentsQuery>(data)
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(page.nodes.len(), 1);
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("cur"));
+    }
+
+    #[test]
+    fn comment_create_extract_rejects_success_false() {
+        let data = serde_json::json!({
+            "commentCreate": { "success": false, "comment": {
+                "id": "c1", "body": "hi",
+                "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+                "user": null, "issueId": "i1"
+            }}
+        });
+        let err = serde_json::from_value::<CommentCreateMutation>(data)
+            .unwrap()
+            .extract()
+            .unwrap_err();
+        assert!(err.to_string().contains("commentCreate"));
     }
 
     #[test]

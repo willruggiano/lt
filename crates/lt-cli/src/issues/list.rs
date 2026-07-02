@@ -36,9 +36,9 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
 
     // --live: bypass cache entirely. The GraphQL filter resolves `me` itself.
     if args.live {
-        let (issues, has_next_page, _) = lt_runtime::issues::fetch(&query, None)?;
-        print_table(out, &issues, "")?;
-        if has_next_page {
+        let page = lt_runtime::issues::fetch(&query, None)?;
+        print_table(out, &page.nodes, "")?;
+        if page.page_info.has_next_page {
             writeln!(out, "\n+more issues")?;
         }
         return Ok(());

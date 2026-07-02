@@ -8,16 +8,16 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 use lt_storage::db;
+use lt_types::members::TeamMembersQuery;
 use lt_types::query::IssueQuery;
+use lt_types::states::{TeamVariables, WorkflowStatesQuery};
+use lt_types::teams::TeamsQuery;
 use lt_types::types::{Team, User, WorkflowState};
 use lt_types::viewer;
+use lt_types::viewer::ViewerQuery;
 use lt_upstream::auth::login_non_interactive;
 use lt_upstream::auth::refresh::load_or_refresh_token;
-use lt_upstream::client::HttpTransport;
-use lt_upstream::members::fetch as fetch_members_upstream;
-use lt_upstream::states::fetch as fetch_states_upstream;
-use lt_upstream::teams::fetch as fetch_teams_upstream;
-use lt_upstream::viewer::fetch as fetch_viewer_upstream;
+use lt_upstream::client::{HttpTransport, execute};
 
 use crate::sync::service::{LoginEvent, SyncEvent, SyncService};
 
@@ -27,7 +27,7 @@ impl LinearSyncService {
     /// Best-effort viewer identity from the stored token.
     fn viewer_identity() -> Option<viewer::User> {
         let token = lt_config::load_token().ok().flatten()?;
-        fetch_viewer_upstream(&HttpTransport::new(token.access_token)).ok()
+        execute::<ViewerQuery>(&HttpTransport::new(token.access_token), ()).ok()
     }
 
     /// A transport with a fresh (auto-refreshed) token for a live read.
@@ -107,15 +107,25 @@ impl SyncService for LinearSyncService {
     }
 
     fn fetch_teams(&self) -> Result<Vec<Team>> {
-        fetch_teams_upstream(&Self::transport()?)
+        execute::<TeamsQuery>(&Self::transport()?, ())
     }
 
     fn fetch_workflow_states(&self, team_id: &str) -> Result<Vec<WorkflowState>> {
-        fetch_states_upstream(&Self::transport()?, team_id)
+        execute::<WorkflowStatesQuery>(
+            &Self::transport()?,
+            TeamVariables {
+                team_id: team_id.to_string(),
+            },
+        )
     }
 
     fn fetch_team_members(&self, team_id: &str) -> Result<Vec<User>> {
-        fetch_members_upstream(&Self::transport()?, team_id)
+        execute::<TeamMembersQuery>(
+            &Self::transport()?,
+            lt_types::members::TeamVariables {
+                team_id: team_id.to_string(),
+            },
+        )
     }
 
     fn sync_comments(&self, issue_id: &str) -> Result<()> {

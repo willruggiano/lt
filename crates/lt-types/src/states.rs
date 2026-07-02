@@ -3,6 +3,7 @@
 
 use cynic::QueryBuilder;
 
+use crate::graphql::GraphqlOperation;
 use crate::schema;
 use crate::types::WorkflowState;
 
@@ -19,13 +20,18 @@ pub struct WorkflowStatesQuery {
     pub team: TeamWithStates,
 }
 
-/// The built workflow-states query string.
-#[must_use]
-pub fn query() -> String {
-    WorkflowStatesQuery::build(TeamVariables {
-        team_id: String::new(),
-    })
-    .query
+impl GraphqlOperation for WorkflowStatesQuery {
+    type Variables = TeamVariables;
+    type Output = Vec<WorkflowState>;
+    const NAME: &'static str = "workflowStates";
+
+    fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
+        Self::build(variables)
+    }
+
+    fn extract(self) -> anyhow::Result<Self::Output> {
+        Ok(self.team.states.nodes)
+    }
 }
 
 #[derive(cynic::QueryFragment)]
@@ -39,21 +45,35 @@ pub struct WorkflowStateConnection {
     pub nodes: Vec<WorkflowState>,
 }
 
-impl crate::graphql::TeamScopedQuery for WorkflowStatesQuery {
-    type Node = WorkflowState;
-    fn into_nodes(self) -> Vec<WorkflowState> {
-        self.team.states.nodes
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::query;
+    use super::*;
 
     #[test]
     fn query_declares_team_id_variable() {
-        let built = query();
+        let built = WorkflowStatesQuery::operation(TeamVariables {
+            team_id: String::new(),
+        })
+        .query;
         assert!(built.contains("$teamId: String!"));
         assert!(built.contains("states"));
+    }
+
+    #[test]
+    fn extract_returns_state_nodes() {
+        let data = serde_json::json!({
+            "team": { "states": { "nodes": [
+                { "id": "s1", "name": "Todo" },
+                { "id": "s2", "name": "Done" }
+            ] } }
+        });
+        let states = serde_json::from_value::<WorkflowStatesQuery>(data)
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(
+            states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["Todo", "Done"]
+        );
     }
 }

@@ -3,6 +3,7 @@
 
 use cynic::QueryBuilder;
 
+use crate::graphql::GraphqlOperation;
 use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
 use crate::schema;
@@ -21,15 +22,18 @@ pub struct NotificationsQuery {
     pub notifications: NotificationConnection,
 }
 
-/// The built notifications query string. Kept here so cynic stays confined to
-/// `lt-types` (same contract as `viewer::query`).
-#[must_use]
-pub fn query() -> String {
-    NotificationsQuery::build(NotificationsVariables {
-        first: None,
-        after: None,
-    })
-    .query
+impl GraphqlOperation for NotificationsQuery {
+    type Variables = NotificationsVariables;
+    type Output = NotificationConnection;
+    const NAME: &'static str = "notifications";
+
+    fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
+        Self::build(variables)
+    }
+
+    fn extract(self) -> anyhow::Result<Self::Output> {
+        Ok(self.notifications)
+    }
 }
 
 #[derive(cynic::QueryFragment)]
@@ -155,12 +159,39 @@ pub enum NotificationCategory {
 
 #[cfg(test)]
 mod tests {
-    use super::query;
+    use super::*;
 
     #[test]
     fn query_selects_issue_notification_inline_fragment() {
-        let built = query();
+        let built = NotificationsQuery::operation(NotificationsVariables {
+            first: None,
+            after: None,
+        })
+        .query;
         assert!(built.contains("__typename"));
         assert!(built.contains("... on IssueNotification"));
+    }
+
+    #[test]
+    fn extract_maps_page() {
+        let data = serde_json::json!({ "notifications": {
+            "nodes": [{
+                "__typename": "ProjectNotification",
+                "id": "n1",
+                "category": "assignments",
+                "readAt": null,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z",
+                "actor": null
+            }],
+            "pageInfo": { "hasNextPage": true, "endCursor": "c1" }
+        }});
+        let page = serde_json::from_value::<NotificationsQuery>(data)
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(page.nodes.len(), 1);
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("c1"));
     }
 }

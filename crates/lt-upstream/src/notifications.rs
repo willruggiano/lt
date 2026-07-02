@@ -4,10 +4,9 @@
 
 use anyhow::{Result, anyhow};
 pub use lt_types::notifications::Notification;
-use lt_types::notifications::{NotificationsQuery, query};
-use serde_json::json;
+use lt_types::notifications::{NotificationsQuery, NotificationsVariables};
 
-use super::client::{GraphqlTransport, HttpTransport, query_as};
+use super::client::{GraphqlTransport, HttpTransport, execute};
 
 /// Fetch notifications from the Linear API.
 ///
@@ -35,15 +34,13 @@ pub fn fetch(
             page_size
         };
 
-        let variables = json!({
-            "first": fetch_count,
-            "after": cursor,
-        });
+        let variables = NotificationsVariables {
+            first: Some(i32::try_from(fetch_count).unwrap_or(250)),
+            after: cursor,
+        };
 
-        let data: NotificationsQuery = query_as(transport, &query(), variables)?;
-
-        let conn = data.notifications;
-        all.extend(conn.nodes);
+        let page = execute::<NotificationsQuery>(transport, variables)?;
+        all.extend(page.nodes);
 
         // Stop if we have reached the total cap.
         if let Some(max) = max_total
@@ -53,10 +50,10 @@ pub fn fetch(
             break;
         }
 
-        if !conn.page_info.has_next_page {
+        if !page.page_info.has_next_page {
             break;
         }
-        cursor = conn.page_info.end_cursor;
+        cursor = page.page_info.end_cursor;
         if cursor.is_none() {
             break;
         }
@@ -77,6 +74,8 @@ pub fn fetch_from_config(page_size: usize, max_total: Option<usize>) -> Result<V
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::client::FakeTransport;
     use crate::issues::sample_issue_node;
