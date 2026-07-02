@@ -38,7 +38,7 @@ doubles as a completion signal via the `Disconnected` arm. The four mechanisms
 all differ slightly, the `Option` wrapping leaks into every consumer, and each
 new background job adds a fifth copy of the pattern.
 
-Two further problems surfaced in review:
+Three further problems surfaced in review:
 
 - The comment and modal events are **update notifications carrying data
   payloads**: workers re-read the database (or the API) and ship rows through
@@ -53,23 +53,30 @@ Two further problems surfaced in review:
   `popup.rs:277`). Team-scoped picker data is not in SQLite at all — the lookup
   tables (`lt-storage/src/db/mod.rs:96-98`) are flat `(id, name)` with no team
   scoping.
+- Event consumption is imprecise: view state lives in per-view `Option` fields
+  on `App` beside a redundant `Mode` tag, so any dispatch of an update must ask
+  every possible view "are you displayed?" — when the view's very existence
+  should answer that.
 
-This ADR replaces all of it with one long-lived `mpsc::channel<AppEvent>` and
-one propagation rule: **writes land in SQLite; a payload-free invalidation names
-the scope that changed; whoever displays that scope re-reads it.** Key input
-joins the same queue, making the loop a single blocking wait.
+This ADR replaces all of it with one long-lived `mpsc::channel<AppEvent>`, one
+propagation rule — **writes land in SQLite; a payload-free invalidation names
+the scope that changed; the views that display that scope re-read it** — and one
+structural change that makes the routing precise: view state moves into a
+**stack of live views**, and events route to what exists. Key input joins the
+same queue, making the loop a single blocking wait.
 
 ```text
   [input thread] ──── Key ───────┐
   [sync worker] ── Lifecycle ────┤  Sender<AppEvent> (cloned)
   [login worker] ── Lifecycle ───┼──────────────┐
   [comment refresh] ─ State(..) ─┤              v
-  [team refresh] ──── State(..) ─┘      App.events_rx ── apply_app_event
-                                                             |
-  optimistic writers (same thread) ── apply_state_event <────┘ (State arm)
-                                        |
-                                        └── broadcast to views; each re-reads
-                                            its scopes from SQLite if displayed
+  [team refresh] ──── State(..) ─┘      App.events_rx ── App::apply
+                                          |         |            |
+                              Key: top of the   State: base    Lifecycle:
+                              view stack        list + every   hooks (job
+                              (else the list)   live view      gates), then
+                                                consumes       State(Issues)
+  optimistic writers (same thread) ──────────────┘
 ```
 
 ### Prior art divergence
@@ -80,7 +87,8 @@ messaging; its cross-thread async results travel on a separate channel drained
 by `update_async`. lt's producers are worker threads plus one input thread, so
 the honest adaptation is the channel half of gitui's split, not the
 `Rc<RefCell<VecDeque>>` half. Same-thread propagation needs no queue at all: it
-is a direct call to the same apply function the drain uses (Decision 2).
+is a direct call to the same routing function the drain uses (Decision 3). The
+view stack, however, is gitu's shape (`Vec<Screen>`), not gitui's.
 
 ## Decision 1: event taxonomy — keys, state invalidations, lifecycle results
 
@@ -101,7 +109,7 @@ pub enum AppEvent {
 }
 
 /// A payload-free invalidation. Variants carry only the scope id a view needs
-/// to decide "is this displayed?" and which query to re-run.
+/// to decide relevance and which query to re-run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StateEvent {
     /// The issues read model changed (optimistic edit/create, or sync upsert).
@@ -123,17 +131,15 @@ pub enum LifecycleEvent {
 ```
 
 - **`StateEvent` granularity is per scope (table + owning id)**, not per table
-  and not per row. A view needs exactly (a) a displayed-scope check and (b) a
-  query to re-run; `Comments { issue_id }` and `Team { team_id }` are the
-  minimal keys for both. `Team` deliberately does not split states from members:
-  one trait call writes both (Decision 3), so one event and one paired re-read
-  is honest.
+  and not per row. A view needs exactly (a) a relevance check and (b) a query to
+  re-run; `Comments { issue_id }` and `Team { team_id }` are the minimal keys
+  for both. `Team` deliberately does not split states from members: one trait
+  call writes both (Decision 4), so one event and one paired re-read is honest.
 - **`Lifecycle` events are not invalidations.** They carry identity, error text,
   and scheduling information. Sync completion does not additionally emit
-  `State(Issues)`: the `Done` arm of the lifecycle apply calls
-  `apply_state_event(app, &StateEvent::Issues)` directly — the unification
-  happens at the function level, without ordering two events that always travel
-  together.
+  `State(Issues)`: the `Done` arm of the lifecycle consumer calls
+  `route_state_event(&StateEvent::Issues)` directly — the unification happens at
+  the function level, without ordering two events that always travel together.
 - `SyncEvent`/`LoginEvent` stay in `lt-runtime/src/sync/service.rs` (the trait's
   vocabulary); `AppEvent`/`StateEvent`/`LifecycleEvent` live in `lib.rs` next to
   `App`.
@@ -144,7 +150,7 @@ Rejected alternatives:
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | Payload-carrying wrapper events        | payloads are what make staleness a problem; a payload-free event can only trigger a re-read of current truth |
 | Events carry rowids / entity diffs     | speculative granularity; every consumer re-reads whole scopes anyway                                         |
-| One `StateEvent::Any`                  | forces every view to re-read everything on every event; loses the displayed-scope filter                     |
+| One `StateEvent::Any`                  | forces every view to re-read everything on every event; loses scope relevance                                |
 | Emit `State(Issues)` from sync workers | duplicates the sync `Done` outcome across two ordered events                                                 |
 
 `App` gains two non-optional fields, created in `App::new`:
@@ -160,113 +166,269 @@ events_rx: mpsc::Receiver<AppEvent>,
 `NewIssueModal.modal_rx`, and the enums `CommentSyncEvent` and `ModalEvent` are
 deleted.
 
-## Decision 2: one propagation path — broadcast `StateEvent`s to views that declare their dependencies
+## Decision 2: the view stack — a view exists iff it is displayed
+
+Today `App` holds a `Mode` tag plus a parallel `Option` field per view
+(`detail`, `new_issue_modal`, `help_popup`, `search_overlay`, the
+`popup_items`/`popup_selected`/`popup_anchor` triple), and the codebase already
+maintains the invariant that each field is populated iff its mode is active —
+set on entry, cleared on exit, every poller gated on the `Option`. `Mode` is a
+redundant tag over that invariant, and it is what forces every consumer of an
+update to ask "am I displayed?".
+
+The invariant becomes structure:
 
 ```rust
 // crates/lt-tui/src/lib.rs
-fn apply_app_event(app: &mut App, event: AppEvent) {
-    match event {
-        AppEvent::Key(key) => handle_key(app, key), // today's Mode router
-        AppEvent::State(ev) => apply_state_event(app, &ev),
-        AppEvent::Lifecycle(ev) => sync::apply_lifecycle_event(app, ev),
-    }
+pub struct App {
+    // Base list: always rendered under everything (ui/mod.rs:58-59), never
+    // popped. issues, table_state, args, pagination, status, active_filter,
+    // the double-esc fields, footer_msg, viewport_height: unchanged.
+
+    /// Views stacked over the base list, bottom to top. Empty = the list has
+    /// focus. The top view receives keys; every view consumes StateEvents.
+    pub views: Vec<View>,
+
+    /// Background-job gates and scheduling (lifecycle consumers).
+    pub hooks: Hooks,
+
+    // identity/session/db/clock/service/events_tx/events_rx: unchanged.
 }
 
-/// Broadcast: every view sees every StateEvent and re-reads the scopes it
-/// depends on from `app.db`. Applies are pure re-reads, hence idempotent;
-/// events carry no data, so stale data cannot be applied by construction.
-/// This list changes only when a view is added.
-fn apply_state_event(app: &mut App, ev: &StateEvent) {
-    App::list_on_state_event(app, ev);  // Issues -> do_fetch(false) in List mode
-    detail::on_state_event(app, ev);    // Comments{id} -> re-read if open on id
-    new_issue::on_state_event(app, ev); // Teams, Team{id} -> re-read pickers
-    popup::on_state_event(app, ev);     // Team{id} -> rebuild popup items
+/// One overlay's complete state. A view exists iff it is displayed; there is
+/// no separate mode flag to keep consistent.
+pub enum View {
+    Detail(DetailView),
+    Popup(PopupView),
+    NewIssue(NewIssueModal), // shape unchanged (new_issue.rs:62)
+    Search(SearchOverlay),   // shape unchanged (popup.rs:101)
+    Help(HelpPopup),         // shape unchanged (popup.rs:61)
+}
+
+/// Detail pane: today's IssueDetailView (detail.rs:11) plus the App fields
+/// that were only valid in Detail mode.
+pub struct DetailView {
+    pub issue: Issue, // owned: severs submit_comment's list-selection read
+    pub comments: Vec<Comment>,
+    pub parent: Option<Issue>,
+    pub children: Vec<Issue>,
+    pub scroll: u16,                   // was App.detail_scroll
+    pub comment_input: Option<String>, // was App.comment_input
+}
+
+/// State/priority/assignee picker: today's App.popup_* fields plus the
+/// target captured at open.
+pub struct PopupView {
+    pub kind: PopupKind,
+    /// Target issue id, captured at open; confirm no longer depends on the
+    /// list selection being unchanged.
+    pub issue_id: String,
+    /// The issue's team — the scope key for Team{T} relevance (state and
+    /// assignee popups; None for the static priority popup).
+    pub team_id: Option<String>,
+    pub items: Vec<PopupItem>,
+    pub selected: usize,
+    /// Written by the renderer when this popup sits directly on the base
+    /// table; None => render_popup centers.
+    pub anchor: Option<Rect>,
+}
+
+/// Background-job gates: today's SyncState (lib.rs:258) plus the login gate
+/// that replaces `login_rx.is_some()` (lib.rs:929).
+pub struct Hooks {
+    pub syncing: bool,
+    pub sync_status_label: String,
+    pub next_sync_at: Option<Instant>,
+    pub login_in_flight: bool,
 }
 ```
 
-**Each view declares its own dependencies.** A view module owns one
-`on_state_event(app, &StateEvent)` whose match arms are its subscription: the
-scopes it consumes, with irrelevant scopes falling through. This is the Relay
-idea — components subscribed to updates to their declared dependencies,
-regardless of where the update came from — translated to an immediate-mode TUI,
-where the component set is static (views are fields on `App`) and re-render is
-free (every frame redraws). Adding a consumer of `Teams`/`Team` touches only
-that view's handler; the central broadcast never changes for it. The two
-consumers of `Team { team_id }` (modal and popup) fall out with no central
-coordination.
+- **A stack, not a slot.** Today's topology is a star — every overlay opens from
+  and returns to List — so `Option<View>` would suffice today. But the second
+  layer is not speculative: the keymap design
+  ([PR #43](https://github.com/willruggiano/lt/pull/43)) names "popup
+  return-mode" as its phase-4 blocker (`popup_confirm`/`popup_cancel` hardcode
+  `Mode::List`, `popup.rs:341,346`, so s/p/a popups cannot open from Detail).
+  `Option<View>` plus a return-view field would recreate exactly the
+  parallel-state smell this decision deletes. The stack also models what the
+  renderer already draws — base always, overlays on top — and pop restores
+  whatever is beneath with its state intact. Cost over a slot: a `for` loop in
+  two places. Depth is ≤1 today, ≤2 after keymap phase 4; open sites, not the
+  container, bound the depth.
+- **The base list stays out of the stack.** It is rendered every frame under
+  everything, never popped, and its state (`issues`, `table_state`,
+  `pagination`, `active_filter`) is read by overlays at open time. Putting it in
+  the stack would make "empty stack" an unreachable panic state. Empty stack =
+  the list has focus.
+- **Entry is push, exit is pop.** `Back`/Esc pops everywhere; the list's Esc
+  keeps the double-esc reset (`lib.rs:862-882`). `popup_confirm` becomes: pop
+  the `PopupView`, `enqueue_edit(&p.issue_id, ...)`, route `StateEvent::Issues`
+  (Decision 3).
+- **Latent smells die structurally**: `popup_items`/`popup_selected` are never
+  cleared on close today (`popup.rs:341-348`) — now the whole `PopupView` drops;
+  the dead `input_mode`/`input_buf` pair (`lib.rs:324-325`, unreachable render
+  branch `ui/mod.rs:94-95`) is deleted; `submit_comment` stops reading the list
+  selection (`detail.rs:140`) because `DetailView` owns its issue.
+- **Popup anchoring**: the base-table renderer computes the anchor from column
+  geometry (`table.rs:43-59`). It writes into the popup only when the popup is
+  the sole stack entry (`[View::Popup(p)]` slice pattern); for a future popup
+  over Detail the anchor stays `None` and `render_popup` already centers.
+- The renderer draws the base list, then the stack bottom-up — replacing the six
+  mode-checked blocks in `render_overlays` (`ui/mod.rs:104-152`).
+  `render_status_row`'s Detail branch and the header's Search branch match on
+  the stack top instead of `Mode`.
 
-Rejected stronger forms:
-
-| Option                                                   | Why rejected                                                                                                                  |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Central scope→consumer match                             | a registry that grows with every new scope-consumer pair; dependency declarations live away from the components that own them |
-| Runtime subscription registry (`Vec<(pattern, fn)>`)     | the subscriber set is static; a registry re-encodes the broadcast list as data and loses compile-time visibility              |
-| Relay-proper: dependencies derived from declared queries | needs queries-as-data plus dependency tracking over SQLite — a reactive framework; speculative at 4 scopes and 5 views        |
-
-Trade-off, disclosed: per-view handlers use catch-all arms, so the compiler does
-not force routing of a new `StateEvent` variant the way a central exhaustive
-match would; the scope-relevance tests below cover that instead.
-
-**Same-thread optimistic writers call `apply_state_event` directly** — a
-function call, not a channel round-trip; same frame, zero latency, one code
-path. This is the review's model: optimistic write → DB → invalidation →
-re-read, with the async completion landing on the same path.
-
-- `submit_comment` (`detail.rs:131-173`) keeps the transactional enqueue
-  (`enqueue_comment_create` already writes the optimistic `local:` row with the
-  persisted viewer as author) and deletes the hand-built in-memory push
-  (`detail.rs:147-160`); it calls `apply_state_event(Comments { issue_id })`,
-  which re-reads `query_comments` and renders the `local:` row.
-- `popup_confirm` (`popup.rs:318-343`) keeps `enqueue_edit`, then calls
-  `apply_state_event(Issues)`; the pending-overlay merge in `query_issues*`
-  renders the edit. `apply_optimistic_in_memory` and `build_optimistic_issue`
-  die — the bespoke second read model goes with them.
-- `new_issue_submit` keeps `do_fetch_and_select(identifier)` — it is a DB
-  re-read plus a selection seek, view logic the writer owns. The invariant is
-  "rendered state comes from a DB re-read", not "every write travels the
-  channel".
-
-**Cross-thread producers send `AppEvent::State(ev)`**; the drain calls the same
-broadcast. Workers shrink to "call the API-to-DB sync, then invalidate":
+## Decision 3: routing — each event kind has exactly one consumer path
 
 ```rust
+// crates/lt-tui/src/lib.rs
 impl App {
-    /// Run `job` on a background thread, then always send `State(ev)`.
-    /// Refresh failures are expected offline: logged, cache kept.
-    fn spawn_state_refresh(
-        &self,
-        ev: StateEvent,
-        job: impl FnOnce(&dyn SyncService) -> Result<()> + Send + 'static,
-    ) {
-        let service = Arc::clone(&self.service);
-        let tx = self.events_tx.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = job(service.as_ref()) {
-                tracing::warn!("background refresh failed: {e:#}");
-            }
-            let _ = tx.send(AppEvent::State(ev));
-        });
+    pub fn apply(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::Key(key) => self.dispatch_key(key),
+            AppEvent::State(ev) => self.route_state_event(&ev),
+            AppEvent::Lifecycle(ev) => self.consume_lifecycle(ev),
+        }
+    }
+
+    /// Keys go to the top view; empty stack means the list has focus. This
+    /// is today's Mode router (lib.rs:844-851) keyed on the stack instead;
+    /// the keymap design's dispatch_key replaces it wholesale when it lands.
+    fn dispatch_key(&mut self, key: KeyEvent) {
+        match self.views.last() {
+            Some(View::Detail(_)) => detail::handle_key(self, key),
+            Some(View::Popup(_)) => popup::handle_key(self, key),
+            Some(View::NewIssue(_)) => new_issue::handle_key(self, key),
+            Some(View::Search(_)) => popup::handle_search_key(self, key),
+            Some(View::Help(_)) => popup::handle_help_key(self, key),
+            None => handle_list_key(self, key),
+        }
+    }
+
+    /// Route a state invalidation: the base list first (its consumer owns
+    /// the don't-clobber-under-overlays policy), then every live view. All
+    /// stacked views are visible, so all of them consume; a closed view no
+    /// longer exists, which is the entire display check.
+    fn route_state_event(&mut self, ev: &StateEvent) {
+        self.list_consume(ev);
+        let db = &self.db;
+        for view in &mut self.views {
+            view.consume(db, ev);
+        }
+    }
+
+    /// The base list's subscription: Issues, only while no overlay is up
+    /// (preserving sync.rs:109's guard — search-confirm and popup opens read
+    /// `self.issues`, so a refresh must not swap it beneath them).
+    fn list_consume(&mut self, ev: &StateEvent) {
+        if matches!(ev, StateEvent::Issues) && self.views.is_empty() {
+            self.do_fetch(false); // offset- and selection-preserving
+        }
+    }
+}
+
+impl View {
+    fn consume(&mut self, db: &Database, ev: &StateEvent) {
+        match self {
+            View::Detail(v) => v.consume(db, ev),
+            View::Popup(v) => v.consume(db, ev),
+            View::NewIssue(v) => v.consume(db, ev),
+            View::Search(_) | View::Help(_) => {} // no DB-backed scopes
+        }
     }
 }
 ```
 
-The invalidation is sent **even on failure**: "the refresh attempt finished;
-re-read whatever is cached." That clears the modal's `loading` flag
-deterministically and is why no error variant exists. Per-fetch error display
-dies deliberately: offline, every targeted refresh fails, and per-fetch error
-text (`ModalEvent::LoadError`, the popup footer messages at `popup.rs:252` and
-`popup.rs:287`) would be constant noise in a local-first app; failures go to
-`tracing`, and the global sync label already covers "not authenticated" / "sync
-error". (`CommentSyncEvent::Error`'s apply was already a silent no-op,
-`detail.rs:223-225`.)
+A representative consumer — the per-view `consume` match arms are the view's
+declared dependencies; irrelevant scopes fall through:
 
-`open_detail`'s worker becomes `sync_comments(&issue_id)` → send
-`State(Comments { issue_id })`. This also fixes a test wart: the worker's
-post-sync re-read today opens the real profile DB via `db_path()`
-(`detail.rs:57-60`) even when tests install an in-memory database; all reads now
-go through `app.db` at apply time.
+```rust
+impl DetailView {
+    fn consume(&mut self, db: &Database, ev: &StateEvent) {
+        match ev {
+            StateEvent::Comments { issue_id } if issue_id == self.issue.id.inner() => {
+                if let Ok(conn) = db.connect()
+                    && let Ok(comments) = lt_runtime::db::query_comments(&conn, issue_id)
+                {
+                    self.comments = comments;
+                }
+            }
+            StateEvent::Issues => {
+                // The displayed issue may be what changed (a popup edit
+                // confirmed above this pane, or a sync upsert).
+                if let Ok(conn) = db.connect()
+                    && let Ok(Some(fresh)) =
+                        lt_runtime::db::query_issue_by_id(&conn, self.issue.id.inner())
+                {
+                    self.issue = fresh;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+```
 
-## Decision 3: team-scoped cache — schema, targeted sync, trait diet
+- **Precision is structural.** A closed view does not exist, so no "am I
+  displayed?" checks survive anywhere; the only remaining checks are
+  id-relevance (`Comments{A}` vs the detail's own issue id, `Team{T}` vs the
+  popup's/modal's team) — data checks, not mode checks. On the list screen a
+  team update is a no-op because there is no consumer for it, not because a
+  consumer said no.
+- **All live layers consume**, not just the top: every stacked view is visible
+  (rendered bottom-up), so a `Comments` event must reach a Detail even with a
+  popup on top of it, and an `Issues` from a popup confirm lets the Detail
+  beneath re-read its displayed issue. Applies are payload-free idempotent
+  re-reads, so multi-layer application cannot double-apply.
+- **The base list's policy lives in its consumer**, not the router: today's
+  sync-completion guard `matches!(app.mode, Mode::List)` (`sync.rs:109`) becomes
+  `views.is_empty()` inside `list_consume`.
+- **Same-thread optimistic writers call `route_state_event` directly** — a
+  function call, not a channel round-trip; same frame, zero latency, one code
+  path with the async completions. `submit_comment` keeps the transactional
+  enqueue (`enqueue_comment_create` already writes the optimistic `local:` row)
+  and deletes the hand-built in-memory push (`detail.rs:147-160`);
+  `popup_confirm` keeps `enqueue_edit` and deletes
+  `apply_optimistic_in_memory`/`build_optimistic_issue` — the bespoke second
+  read model. `new_issue_submit` keeps `do_fetch_and_select` (a DB re-read plus
+  a selection seek — view logic the writer owns).
+- **Lifecycle outcomes are consumed by an `App` method over `self.hooks`.** They
+  write identity, `session.not_authenticated`, `status`, and scheduling —
+  App-wide state — and the sync `Done` arm feeds
+  `route_state_event(&StateEvent::Issues)`. `Hooks` groups today's `SyncState`
+  with the `login_in_flight` gate.
+- **Borrow mechanics, verified against the consume bodies**: `&self.db` (shared)
+  and `for view in &mut self.views` are disjoint field borrows in one function
+  body. It holds because no `consume` body touches App-level state: Detail
+  writes only its own comments/issue, the modal only its picker fields ("Me (…)"
+  resolution uses the persisted `db::synced_viewer`, not a service call), the
+  popup only its items/selection. Nothing in the State path spawns work — spawns
+  happen in key handlers, which take `&mut App`. `&Database` is the entire
+  context a `consume` needs; a ctx struct waits until a second dependency
+  actually appears.
+
+Two deviations from the review sketch, disclosed:
+
+- **Key handlers stay `fn(&mut App, ...)`, routed by the top view's
+  discriminant**, rather than a disjoint `view.consume(key)`: confirms mutate
+  App-wide state (`popup_confirm` writes the DB and refreshes the list;
+  `confirm_search` moves results into `app.issues`), and handlers that consume
+  their view pop it first. The keymap design's `dispatch_key` is `app.keys` when
+  it lands; the routing seam is identical.
+- **`hooks.consume` is honored as a grouping, not a signature**: lifecycle
+  outcomes touch identity and session, so the consumer is an `App` method over
+  the `Hooks` field.
+
+Rejected forms:
+
+| Option                                               | Why rejected                                                                                                     |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Broadcast to every view module (previous draft)      | every possible view is asked "are you displayed?" — the stack answers by existence; closed views cannot be asked |
+| Central scope→consumer match                         | a registry that grows with every scope-consumer pair, away from the components that own the dependency           |
+| Runtime subscription registry (`Vec<(pattern, fn)>`) | the subscriber set is the live stack itself; a registry re-encodes it as data and loses compile-time visibility  |
+| Relay-proper: dependencies derived from queries      | needs queries-as-data plus dependency tracking over SQLite — a reactive framework; speculative at this size      |
+
+## Decision 4: team-scoped cache — schema, targeted sync, trait diet
 
 ### Schema (`MIGRATION_2`)
 
@@ -344,7 +506,7 @@ pub trait SyncService: Send + Sync {
     fn spawn_login(&self, on_done: OnLogin);
     /// Startup header identity. Unchanged.
     fn fetch_viewer(&self) -> Option<viewer::User>;
-    /// API -> DB writers; callers re-read via a StateEvent apply.
+    /// API -> DB writers; callers re-read via a StateEvent.
     fn sync_comments(&self, issue_id: &str) -> Result<()>;
     fn sync_teams(&self) -> Result<()>;
     fn sync_team_data(&self, team_id: &str) -> Result<()>;
@@ -364,7 +526,7 @@ pub trait SyncService: Send + Sync {
   call sites: `new_issue.rs:118,173,193`, `popup.rs:234,277`, plus
   `NoopSyncService`). The modal's `fetch_viewer` call (`new_issue.rs:170`) dies
   too: "Me (…)" resolution uses the persisted `db::synced_viewer`
-  (`lt-storage/src/db/issues.rs:484`) at apply time.
+  (`lt-storage/src/db/issues.rs:484`) at consume time.
 
 Rejected alternatives for the spawn signatures:
 
@@ -383,20 +545,57 @@ by `lt sim` (distinct team/assignee and team/creator pairs from the seeded
 issues), keeping the pickers drivable offline per [[dst.md]].
 `NoopSyncService`'s new sync methods return `Ok(())`.
 
-## Decision 4: cache-first pickers
+## Decision 5: cache-first pickers
+
+Cross-thread producers use one helper; the invalidation is sent **even on
+failure** ("the refresh attempt finished; re-read whatever is cached"), which
+clears the modal's `loading` flag deterministically and is why no error variant
+exists. Per-fetch error display dies deliberately: offline, every targeted
+refresh fails, and per-fetch error text (`ModalEvent::LoadError`, the popup
+footer messages at `popup.rs:252,287`) would be constant noise in a local-first
+app; failures go to `tracing`, and the global sync label already covers "not
+authenticated" / "sync error". (`CommentSyncEvent::Error`'s handling was already
+a silent no-op, `detail.rs:223-225`.)
+
+```rust
+impl App {
+    /// Run `job` on a background thread, then always send `State(ev)`.
+    /// Refresh failures are expected offline: logged, cache kept.
+    fn spawn_state_refresh(
+        &self,
+        ev: StateEvent,
+        job: impl FnOnce(&dyn SyncService) -> Result<()> + Send + 'static,
+    ) {
+        let service = Arc::clone(&self.service);
+        let tx = self.events_tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = job(service.as_ref()) {
+                tracing::warn!("background refresh failed: {e:#}");
+            }
+            let _ = tx.send(AppEvent::State(ev));
+        });
+    }
+}
+```
+
+`open_detail`'s worker becomes `sync_comments(&issue_id)` → send
+`State(Comments { issue_id })`. This also fixes a test wart: the worker's
+post-sync re-read today opens the real profile DB via `db_path()`
+(`detail.rs:57-60`) even when tests install an in-memory database; all reads now
+go through `app.db` at consume time.
 
 **New-issue modal** (`new_issue.rs`):
 
-- `open_new_issue_modal`: build `teams` from `query_teams(app.db)` (instant; the
-  synchronous network fetch dies), preselect from `args.team` as today, read
+- Open: build `teams` from `query_teams(app.db)` (instant; the synchronous
+  network fetch dies), preselect from `args.team` as today, read
   `query_team_states`/`query_team_members` for the preselected team, set
   `loading = true`, then `spawn_state_refresh(Teams, |s| s.sync_teams())` and —
   when a team is selected — `spawn_state_refresh(Team { team_id }, …)`.
 - Leaving the Team field: instant cache read for the newly selected team plus
   one `spawn_state_refresh(Team { .. })`. `PopupItem` construction moves from
-  the worker thread to apply-time DB reads (`build_assignee_items` survives, fed
-  by `synced_viewer` + `query_team_members`).
-- The modal's `on_state_event`: on `Teams`, re-read teams and re-anchor the
+  the worker thread to consume-time DB reads (`build_assignee_items` survives,
+  fed by `synced_viewer` + `query_team_members`).
+- `NewIssueModal::consume`: on `Teams`, re-read teams and re-anchor the
   selection by team id (fallback index 0); on `Team { team_id }` — guarded by
   `selected_team_id() == team_id`, a new helper deduplicating the lookup at
   `new_issue.rs:154-160` and `219-224` — re-read states/members, preserve the
@@ -405,13 +604,12 @@ issues), keeping the pickers drivable offline per [[dst.md]].
 
 **State/assignee popups** (`popup.rs:228-303`) migrate to the same pattern —
 they are the other two `fetch_*` callers and today block the UI thread on the
-network: open reads the cache for `issue.team.id`, records it in a new
-`App.popup_team_id: Option<String>`, and spawns `sync_team_data`; the popup's
-`on_state_event`, when `Team { team_id }` matches `popup_team_id` and
-`Mode::Popup(State | Assignee)` is active, rebuilds `popup_items` and re-anchors
-the selection. The priority popup is static and untouched.
+network: open reads the cache for the target issue's team, captures it as
+`PopupView.team_id`, and spawns `sync_team_data`; `PopupView::consume` on a
+matching `Team { team_id }` rebuilds `items` and re-anchors the selection. The
+priority popup is static (`team_id: None`) and untouched.
 
-## Decision 5: sender lifecycle and worker-panic recovery
+## Decision 6: sender lifecycle and worker-panic recovery
 
 `App` holds `events_tx` forever, so the queue never disconnects and every
 `Disconnected` arm dies. What those arms did today:
@@ -448,12 +646,12 @@ keeps running, instead of a silent label repair. `spawn_state_refresh` workers
 need no guard — the invalidation-on-completion already covers the failure path,
 and a panic between the API call and the send costs only one refresh.
 
-In-flight gates replace receiver presence: the existing `sync.syncing` (plus a
-`!syncing` guard added to the login-success sync spawn, which today replaces
-`sync_rx` unguarded at `sync.rs:68-74`), and a new `login_in_flight: bool`
-replacing `login_rx.is_some()` at the `L` binding (`lib.rs:929`).
+In-flight gates live in `Hooks`: `syncing` (plus a `!syncing` guard added to the
+login-success sync spawn, which today replaces `sync_rx` unguarded at
+`sync.rs:68-74`) and `login_in_flight` replacing `login_rx.is_some()` at the `L`
+binding (`lib.rs:929`).
 
-## Decision 6: keys through the queue — input thread, single-wait loop, `EventPump`
+## Decision 7: keys through the queue — input thread, single-wait loop, `EventPump`
 
 ### Input thread and loop
 
@@ -490,10 +688,10 @@ fn run_app<B: Backend>(
 
         // Block up to 100ms for the first event, then drain without blocking.
         if let Some(event) = pump.next(&app.events_rx, Duration::from_millis(100))? {
-            apply_app_event(app, event);
+            app.apply(event);
         }
         while let Ok(event) = app.events_rx.try_recv() {
-            apply_app_event(app, event);
+            app.apply(event);
         }
     }
 }
@@ -534,50 +732,57 @@ enum EventPump {
 
 `Scripted` supplies the first event each frame — typed `AppEvent`, so tests
 script `Key`, `State`, and `Lifecycle` events interleaved. The unconditional
-`try_recv` drain still runs afterwards, so events that applies push onto the
+`try_recv` drain still runs afterwards, so events that consumers push onto the
 real channel are seen in the same frame. Loop tests run thread-free and
 deterministic.
 
 ## Scope relevance
 
-With payload-free events, stale data cannot be applied — events carry none. The
-only check left is scope relevance: compare the event's scope id against what
-the UI displays. No generation counters; duplicate or late events are idempotent
-re-reads of current truth.
+With payload-free events, stale data cannot be applied — events carry none. With
+the view stack, display checks cannot be forgotten — a closed view does not
+exist. Drops happen in exactly two ways: no consumer exists, or an id-relevance
+guard falls through inside a live consumer. Duplicate or late events are
+idempotent re-reads of current truth.
 
-| #   | Event at apply time                            | UI state                                        | Handling                                                      |
-| --- | ---------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------- |
-| N1  | `State(Comments{A})`                           | detail open on A                                | re-read `query_comments(A)`                                   |
-| N2  | `State(Comments{A})`                           | detail closed / open on B                       | drop                                                          |
-| N3  | `State(Comments{A})` twice (fast close/reopen) | detail open on A                                | both re-read; idempotent                                      |
-| N4  | `State(Teams)`                                 | modal open                                      | re-read teams; re-anchor selected team by id                  |
-| N5  | `State(Teams)`                                 | no modal                                        | drop                                                          |
-| N6  | `State(Team{T})`                               | modal open, team T selected                     | re-read states+members; preserve picks by id; clear `loading` |
-| N7  | `State(Team{T})`                               | modal closed / team U selected                  | drop (U's own refresh is in flight)                           |
-| N8  | `State(Team{T})`                               | state/assignee popup open, `popup_team_id == T` | rebuild `popup_items`; re-anchor selection                    |
-| N9  | `State(Issues)`                                | `Mode::List`                                    | `do_fetch(false)` (offset-preserving)                         |
-| N10 | `State(Issues)`                                | any other mode                                  | drop (list re-reads on the next List-mode fetch)              |
-| N11 | `Lifecycle(Sync(_))`                           | any                                             | at most one in flight via `syncing` + login-success guard     |
-| N12 | `Lifecycle(Login(_))`                          | any                                             | `login_in_flight` gates `L`; cleared by the lifecycle apply   |
+| #   | Event at apply time                            | Stack contents                            | Handling                                                                             |
+| --- | ---------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------ |
+| N1  | `State(Comments{A})`                           | `Detail(A)` anywhere in the stack         | consume re-reads `query_comments(A)` — even under a future popup                     |
+| N2  | `State(Comments{A})`                           | no `Detail` / `Detail(B)`                 | no consumer exists / id mismatch falls through                                       |
+| N3  | `State(Comments{A})` twice (fast close/reopen) | `Detail(A)`                               | both re-read; idempotent                                                             |
+| N4  | `State(Teams)`                                 | `NewIssue` in the stack                   | re-read teams; re-anchor selected team by id                                         |
+| N5  | `State(Teams)`                                 | no `NewIssue`                             | no consumer exists                                                                   |
+| N6  | `State(Team{T})`                               | `NewIssue`, team T selected               | re-read states+members; preserve picks by id; clear `loading`                        |
+| N7  | `State(Team{T})`                               | `NewIssue` on team U / no consumer        | id mismatch falls through / no consumer (U's own refresh is in flight)               |
+| N8  | `State(Team{T})`                               | `Popup { team_id: Some(T) }` in the stack | rebuild `items`; re-anchor selection                                                 |
+| N9  | `State(Issues)`                                | stack empty                               | base list `do_fetch(false)` (offset-preserving)                                      |
+| N10 | `State(Issues)`                                | stack non-empty                           | base list's guard drops it; a live `Detail` re-reads its issue (`query_issue_by_id`) |
+| N11 | `Lifecycle(Sync(_))`                           | any                                       | `hooks.syncing` gates spawns; `Done` feeds N9/N10 via `route_state_event`            |
+| N12 | `Lifecycle(Login(_))`                          | any                                       | `hooks.login_in_flight` gates `L`; cleared by `consume_lifecycle`                    |
 
 ## Keymap design reconciliation
 
 The keymap redesign ([PR #43](https://github.com/willruggiano/lt/pull/43)) and
 this ADR are open concurrently; whichever lands second rebases its dispatch
 seam. Its keymap core — `Key`/`Action`/`Binding`, contexts, tables, help
-generation, no-timer chords — is entirely unaffected by this design. What
-changes for it:
+generation, no-timer chords — is entirely unaffected. What changes:
 
 - Its assumption that the 100ms poll loop and `EventSource` are untouched no
   longer holds. Chords still need no timer: the pending prefix is `App` state
   and survives any number of idle frames of the `recv_timeout` loop.
-- Its dispatch site
-  `if let Some(ev) = events.next_key(...) { dispatch_key(app, Key::from_event(ev)) }`
-  becomes the `AppEvent::Key` arm:
-  `AppEvent::Key(ev) => dispatch_key(app, Key::from_event(ev))`.
-- The queue's wire type is the raw crossterm `KeyEvent`, not `keymap::Key`:
-  normalization still happens exactly once, at the boundary between transport
-  and keymap, and the queue does not depend on the keymap module.
+- Its dispatch site becomes the `AppEvent::Key` arm:
+  `AppEvent::Key(ev) => dispatch_key(app, Key::from_event(ev))`. The queue's
+  wire type is the raw crossterm `KeyEvent`, not `keymap::Key`: normalization
+  still happens exactly once, at the boundary between transport and keymap.
+- `key_context` derives from the stack top instead of `Mode`, with sub-focus
+  read from view-local fields: `None => List`; `Detail(d)` => `CommentInput` if
+  `d.comment_input.is_some()` else `Detail`; `NewIssue(m)` => text vs picker by
+  `m.focused_field`; `Popup`/`Search`/ `Help` map directly.
+- `Action::Back` = `views.pop()` in every non-list context; the list's `Back`
+  keeps the double-esc reset.
+- **Its "popup return-mode" risk entry is resolved structurally** and should be
+  deleted on rebase: confirm/cancel pop instead of writing `Mode::List`,
+  restoring whatever is beneath. Phase 4's "s/p/a from Detail" pushes a
+  `PopupView` built from the detail's own issue.
 - Its loop-test harness reference (`ScriptedEvents`) becomes
   `EventPump::Scripted` with `AppEvent::Key(...)` entries; the same key
   sequences drive the same assertions.
@@ -595,22 +800,36 @@ changes for it:
 4. Optimistic edits re-read through the active filter: an edit that no longer
    matches (e.g. mark Done under `state:todo`) disappears immediately instead of
    lingering until the next refresh.
-5. Sync completion refreshes the list on any page in List mode (was page-1 only,
-   `sync.rs:109-114`); `do_fetch(false)` preserves the offset.
-6. The optimistic comment author comes from the persisted viewer rather than the
+5. Sync completion refreshes the list on any page when the list has focus (was
+   page-1 only, `sync.rs:109-114`); `do_fetch(false)` preserves the offset.
+6. An open detail pane re-reads its issue when the issues scope changes (N10) —
+   a popup edit or sync upsert is visible in the pane immediately.
+7. The optimistic comment author comes from the persisted viewer rather than the
    in-memory `viewer_name`; it is absent before the first successful sync.
-7. Worker panics surface as `sync error: ...` instead of a silent label repair.
+8. Worker panics surface as `sync error: ...` instead of a silent label repair.
+
+The view-stack restructure itself (sprint PR 2) is behavior-neutral: render
+snapshots must be pixel-identical, which is that PR's acceptance gate.
 
 ## Test migration
 
+- **View-stack migration** (`render_tests.rs`, `loop_tests.rs`): every
+  `app.mode = Mode::X; app.<field> = Some(...)` setup pair becomes one
+  `app.views.push(View::X(...))`. `popup_move`/`popup_cancel` tests construct a
+  `PopupView` and assert `views.is_empty()` after cancel;
+  `close_detail_clears_pane_state` collapses to the same assertion. During the
+  window between the restructure and the queue PR, the comment poller finds its
+  receiver via the stack (`views.iter_mut().find_map(...)`). `confirm_search`
+  pops the `Search` view before touching `app.issues` (the borrow requires it,
+  and it destroys the overlay anyway); `poll_search_debounce` copies
+  `viewport_height`/`args.limit` out before taking `views.last_mut()`.
 - **Loop tests** (`loop_tests.rs`): `drive()` builds `EventPump::Scripted` from
   `AppEvent::Key(...)` entries; the exhaustion-as-error test survives with a
   one-line change. The per-poller channel tests become direct calls:
-  `apply_state_event` unit tests covering N1–N10 (matching and mismatched
-  scopes), `apply_lifecycle_event` tests, `login_in_flight` and
+  `route_state_event` unit tests covering N1–N10 (live and absent consumers,
+  matching and mismatched ids), `consume_lifecycle` tests, `login_in_flight` and
   login-success-guard tests. The `Disconnected` tests die with the state they
-  exercised. The `NewIssueModal` literals in `loop_tests.rs` and
-  `render_tests.rs` lose `modal_rx`.
+  exercised.
 - **Storage**: migration validity is already covered by `migrations_are_valid`;
   add ordering/scoping tests for `query_team_states`, replace-set semantics for
   memberships, and "issue upsert back-fills `team_id` without clobbering
@@ -624,36 +843,46 @@ changes for it:
 ## Delivery: stacked PRs (each green under `make test` + `make check`)
 
 1. **`docs(design)`** — this document.
-2. **`feat(storage,runtime): team-scoped cache and team metadata sync`** —
+2. **`refactor(tui): view stack`** — `View` enum + per-variant structs,
+   `views: Vec<View>`, `Mode` deleted, key router on `views.last()`, push/pop
+   entry/exit, `submit_comment` reads the detail's own issue, the popup anchor
+   write moves behind the sole-entry guard, dead `input_mode`/`input_buf` and
+   their render branch deleted, `detail_comment_rx` moves into `DetailView` for
+   the interim. The `sync.rs:109` guard becomes `views.is_empty()` **keeping the
+   page-1 conditions** so this PR stays behavior-neutral (render snapshots
+   pixel-identical). Test literals migrate. Independent of PR 3.
+3. **`feat(storage,runtime): team-scoped cache and team metadata sync`** —
    `MIGRATION_2`, new statements and query/upsert helpers, `upsert_issue_tx`
    scoping, the `lt-types` position fragment, `lt-runtime/src/teams.rs`, the
    trait gains `sync_teams`/`sync_team_data` (Linear + Noop impls), sim
    membership derivation. `fetch_*` still present; TUI untouched.
-3. **`refactor(tui): AppEvent queue and StateEvent propagation`** —
-   `AppEvent`/`StateEvent`, `events_tx`/`events_rx`, `apply_app_event`, the
-   `apply_state_event` broadcast with the detail and list `on_state_event`
-   handlers; the comment worker goes payload-free;
-   `CommentSyncEvent`/`detail_comment_rx` die; `submit_comment` and
-   `popup_confirm` unify on re-reads (`apply_optimistic_in_memory` dies).
-   Coexists with the remaining pollers and `EventSource` keys. Independent of
-   PR 2.
-4. **`refactor(tui,runtime): cache-first pickers`** — modal and popups read
-   SQLite, `spawn_state_refresh`, the `new_issue` and `popup` `on_state_event`
-   handlers, `popup_team_id`; `ModalEvent`, `modal_rx`, and the three `fetch_*`
-   trait methods die. Requires PRs 2 and 3.
-5. **`refactor(runtime,tui): sync/login completion callbacks`** —
+4. **`refactor(tui): AppEvent queue and StateEvent routing`** —
+   `AppEvent`/`StateEvent`, `events_tx`/`events_rx`, `App::apply`,
+   `route_state_event` + `View::consume` (Detail's `Comments` and `Issues` arms,
+   `list_consume`); the comment worker goes payload-free; `CommentSyncEvent` and
+   `DetailView`'s interim receiver die; `submit_comment` and `popup_confirm`
+   unify on re-reads (`apply_optimistic_in_memory`, `build_optimistic_issue`,
+   and `selected_issue_mut` die). Coexists with the remaining pollers and
+   `EventSource` keys. **Requires PR 2.**
+5. **`refactor(tui,runtime): cache-first pickers`** — modal and popups read
+   SQLite, `spawn_state_refresh`, `NewIssueModal::consume` and
+   `PopupView::consume`; `ModalEvent`, `modal_rx`, and the three `fetch_*` trait
+   methods die. Requires PRs 3 and 4.
+6. **`refactor(runtime,tui): sync/login completion callbacks`** —
    `OnSync`/`OnLogin`, the dead `query` param dropped, the `catch_unwind` guard,
-   `LifecycleEvent` + `apply_lifecycle_event`, `login_in_flight`, the
-   login-success `!syncing` guard, and `App::start_sync` deduplicating the four
-   spawn sites (`lib.rs:657-665`, `lib.rs:749`, `lib.rs:815-822`,
-   `sync.rs:68-74`; `run()` reorders to construct `App` before the startup spawn
-   — behavior-neutral). Requires PR 3; independent of PR 4.
-6. **`refactor(tui): keys through the queue`** — input thread, `EventPump`, the
+   `LifecycleEvent` + `consume_lifecycle`, `SyncState` → `Hooks` with
+   `login_in_flight`, the login-success `!syncing` guard, and `App::start_sync`
+   deduplicating the four spawn sites (`lib.rs:657-665`, `lib.rs:749`,
+   `lib.rs:815-822`, `sync.rs:68-74`; `run()` reorders to construct `App` before
+   the startup spawn — behavior-neutral). Requires PR 4; independent of PR 5.
+7. **`refactor(tui): keys through the queue`** — input thread, `EventPump`, the
    `recv_timeout` loop; `EventSource`/`CrosstermEvents`/`ScriptedEvents` die;
-   loop tests migrate. Requires PR 3; last, so the loop rewrite lands on a fully
+   loop tests migrate. Requires PR 4; last, so the loop rewrite lands on a fully
    queue-fed app.
 
-Ordering: 2 before 4; 3 before 4, 5, and 6; 2∥3 and 4∥5 are parallelizable.
+Ordering: 2 before 4; 3 before 5; 4 before 5, 6, and 7; 2∥3 and 5∥6 are
+parallelizable. Keymap PR #43 phase 1 can land before or after PR 2 (a
+one-function rebase either way); its phase 4 requires PR 2.
 
 ## Open questions
 
