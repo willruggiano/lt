@@ -26,12 +26,11 @@ fake = { version = "5.1.0", default-features = false, optional = true }
 rusqlite_migration = "2.6"
 
 [build-dependencies]
-serde.workspace = true
-# Crate-specific: only lt-storage's build script generates search/sort code.
-graphql-parser = "0.4"
+lt-schema-codegen.workspace = true
 prettyplease = "0.2"
 proc-macro2 = "1"
 quote = "1"
+serde.workspace = true
 syn = { version = "2", default-features = false, features = ["full", "parsing"] }
 toml = "1"
 

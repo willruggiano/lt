@@ -82,7 +82,7 @@ impl From<&IssueArgs> for IssueQuery {
             updated_after: args.updated_after.clone(),
             updated_before: args.updated_before.clone(),
             sort: args.sort.clone(),
-            desc: args.asc == false,
+            desc: !args.asc,
             title: args.title.clone(),
             limit: args.limit,
         }

@@ -17,6 +17,7 @@ dirs = "6"
 insta = "1.48.0"
 lt-config = { path = "crates/lt-config" }
 lt-runtime = { path = "crates/lt-runtime" }
+lt-schema-codegen = { path = "crates/lt-schema-codegen" }
 lt-storage = { path = "crates/lt-storage" }
 lt-tui = { path = "crates/lt-tui" }
 lt-types = { path = "crates/lt-types" }
