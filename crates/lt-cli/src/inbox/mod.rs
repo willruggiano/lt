@@ -40,6 +40,6 @@ pub fn run(out: &mut dyn Write, args: &InboxArgs) -> Result<()> {
         return Ok(());
     }
 
-    display::print_table(out, &filtered, display::now_unix_secs())?;
+    display::print_table(out, &filtered, display::now())?;
     Ok(())
 }

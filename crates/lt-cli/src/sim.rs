@@ -23,20 +23,16 @@ pub struct SimArgs {
 /// Generate a dataset and write it into the active profile's local database.
 ///
 /// Marks the cache fresh so the offline list/TUI serve the generated data
-/// without attempting a network sync, and records a `viewer_name` (a real
-/// assignee from the dataset) so the `--assignee=me` filter resolves.
+/// without attempting a network sync, and records the synced viewer identity
+/// (a real assignee from the dataset) so the `--assignee=me` filter resolves.
 pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     let dataset = generate(args.seed, args.size);
     let conn = db::open_db(db::db_path()?)?;
     db::upsert_issues(&conn, &dataset.issues)?;
     db::upsert_comments(&conn, &dataset.comments)?;
     db::set_meta(&conn, "last_synced_at", &Utc::now().to_rfc3339())?;
-    if let Some(name) = dataset
-        .issues
-        .iter()
-        .find_map(|i| i.assignee.as_ref().map(|u| u.name.clone()))
-    {
-        db::set_meta(&conn, "viewer_name", &name)?;
+    if let Some(viewer) = dataset.issues.iter().find_map(|i| i.assignee.clone()) {
+        db::set_synced_viewer(&conn, viewer.id.inner(), &viewer.name)?;
     }
     writeln!(
         out,

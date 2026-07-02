@@ -504,6 +504,31 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     )
 }
 
+/// The `sync_meta` keys the synced viewer identity is stored under. Kept
+/// private so every reader/writer goes through [`synced_viewer`] /
+/// [`set_synced_viewer`] instead of the raw key strings.
+const VIEWER_ID_KEY: &str = "viewer_id";
+const VIEWER_NAME_KEY: &str = "viewer_name";
+
+/// Persist the authenticated viewer's identity into `sync_meta`, so cached
+/// reads can resolve "me" without a network round-trip.
+pub fn set_synced_viewer(conn: &Connection, id: &str, name: &str) -> Result<()> {
+    set_meta(conn, VIEWER_ID_KEY, id)?;
+    set_meta(conn, VIEWER_NAME_KEY, name)?;
+    Ok(())
+}
+
+/// Look up the persisted viewer identity (id, name). `None` when sync has not
+/// yet recorded one.
+pub fn synced_viewer(conn: &Connection) -> Result<Option<types::User>> {
+    let id = get_meta(conn, VIEWER_ID_KEY)?;
+    let name = get_meta(conn, VIEWER_NAME_KEY)?;
+    Ok(id.zip(name).map(|(id, name)| types::User {
+        id: id.into(),
+        name,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

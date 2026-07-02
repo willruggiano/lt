@@ -85,7 +85,7 @@ mod tests {
         json!({
             "__typename": "ProjectNotification",
             "id": id,
-            "type": "issueAssignedToYou",
+            "category": "assignments",
             "readAt": null,
             "createdAt": "2026-01-01T00:00:00Z",
             "updatedAt": "2026-01-01T00:00:00Z",
@@ -137,7 +137,7 @@ mod tests {
         let node = json!({
             "__typename": "IssueNotification",
             "id": "n1",
-            "type": "issueAssignedToYou",
+            "category": "assignments",
             "readAt": null,
             "createdAt": "2026-01-01T00:00:00Z",
             "updatedAt": "2026-01-01T00:00:00Z",

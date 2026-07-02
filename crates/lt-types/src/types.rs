@@ -1,4 +1,4 @@
-//! The issue fragment types.
+//! The shared entity fragment types and the GraphQL response envelope.
 
 use serde::Deserialize;
 

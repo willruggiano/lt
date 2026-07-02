@@ -221,17 +221,6 @@ pub fn enqueue_issue_create(
     Ok(())
 }
 
-/// Look up the persisted viewer identity (id, name), for tagging an
-/// optimistic comment's author. `None` when sync has not yet recorded one.
-fn synced_viewer(conn: &Connection) -> Result<Option<types::User>> {
-    let id = crate::db::get_meta(conn, "viewer_id")?;
-    let name = crate::db::get_meta(conn, "viewer_name")?;
-    Ok(id.zip(name).map(|(id, name)| types::User {
-        id: id.into(),
-        name,
-    }))
-}
-
 /// Enqueue a comment create: insert an optimistic comment row under the client
 /// `temp_id` and queue the `commentCreate` command. The issue and body come
 /// from `input`; the author is the persisted viewer identity (`sync_meta`), if
@@ -248,7 +237,7 @@ pub fn enqueue_comment_create(
         body: input.body.clone(),
         created_at: now,
         updated_at: now,
-        user: synced_viewer(&tx)?,
+        user: crate::db::synced_viewer(&tx)?,
         issue_id: Some(input.issue_id.clone()),
     };
     crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
@@ -610,8 +599,7 @@ mod tests {
     #[test]
     fn enqueue_comment_tags_author_from_synced_viewer() {
         let conn = db_with_issue("1");
-        crate::db::set_meta(&conn, "viewer_id", "u-ada").unwrap();
-        crate::db::set_meta(&conn, "viewer_name", "Ada").unwrap();
+        crate::db::set_synced_viewer(&conn, "u-ada", "Ada").unwrap();
         let input = CommentCreateInput {
             issue_id: "1".to_string(),
             body: "hi".to_string(),

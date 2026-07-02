@@ -11,7 +11,7 @@ pub use comments::{delete_comments_for_issue, query_comments, upsert_comments};
 pub(crate) use issues::{ISSUE_COLUMNS, ISSUE_JOINS, issue_from_row};
 pub use issues::{
     get_meta, query_children, query_issue_by_id, query_issues, query_issues_page, search_issues,
-    search_issues_like, set_meta, upsert_issues,
+    search_issues_like, set_meta, set_synced_viewer, synced_viewer, upsert_issues,
 };
 pub use rusqlite::Connection;
 use rusqlite::Params;

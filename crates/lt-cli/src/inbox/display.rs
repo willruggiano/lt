@@ -1,16 +1,17 @@
 use std::io::Write;
 
 use anyhow::Result;
+use chrono::Utc;
 use lt_runtime::notifications::Notification;
 use lt_runtime::text;
+use lt_types::notifications::NotificationCategory;
 use lt_types::scalars::DateTime;
 
 /// Format a wire timestamp as a relative age string like '5m ago', '2h ago', '3d ago'.
-/// `now_secs` is the reference "now" (Unix seconds); the binary passes the wall
-/// clock, tests a fixed value.
-fn relative_age(dt: &DateTime, now_secs: u64) -> String {
-    let ts = u64::try_from(dt.0.timestamp()).unwrap_or(0);
-    let diff = now_secs.saturating_sub(ts);
+/// `now` is the reference wall-clock time; the binary passes [`now`], tests a
+/// fixed value.
+fn relative_age(dt: &DateTime, now: chrono::DateTime<Utc>) -> String {
+    let diff = (now - dt.0).num_seconds().max(0);
     if diff < 60 {
         format!("{diff}s ago")
     } else if diff < 3600 {
@@ -22,12 +23,9 @@ fn relative_age(dt: &DateTime, now_secs: u64) -> String {
     }
 }
 
-/// Current Unix timestamp in seconds using `std::time`.
-pub fn now_unix_secs() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+/// The current wall-clock time.
+pub fn now() -> chrono::DateTime<Utc> {
+    Utc::now()
 }
 
 /// The widest value `it` yields, no narrower than `min`.
@@ -35,13 +33,43 @@ fn col_width(it: impl Iterator<Item = usize>, min: usize) -> usize {
     it.fold(min, usize::max)
 }
 
+/// A short, humane label for a notification's `category`, exhaustive over
+/// Linear's `NotificationCategory` enum. `Other` is the decode fallback for a
+/// category added to the schema after this build; render its raw wire value.
+fn category_label(category: &NotificationCategory) -> &str {
+    match category {
+        NotificationCategory::AppsAndIntegrations => "Integration",
+        NotificationCategory::Assignments => "Assigned",
+        NotificationCategory::Billing => "Billing",
+        NotificationCategory::CommentsAndReplies => "Comment",
+        NotificationCategory::Customers => "Customer",
+        NotificationCategory::DocumentChanges => "Document",
+        NotificationCategory::Feed => "Feed",
+        NotificationCategory::Mentions => "Mention",
+        NotificationCategory::PostsAndUpdates => "Post",
+        NotificationCategory::Reactions => "Reaction",
+        NotificationCategory::Reminders => "Reminder",
+        NotificationCategory::Reviews => "Review",
+        NotificationCategory::StatusChanges => "Status",
+        NotificationCategory::Subscriptions => "Subscribed",
+        NotificationCategory::System => "System",
+        NotificationCategory::Triage => "Triage",
+        NotificationCategory::Other(raw) => raw.as_str(),
+    }
+}
+
 pub fn print_table(
     out: &mut dyn Write,
     notifications: &[Notification],
-    now_secs: u64,
+    now: chrono::DateTime<Utc>,
 ) -> Result<()> {
     // Column widths
-    let type_w = col_width(notifications.iter().map(|n| n.type_().len()), 4);
+    let category_w = col_width(
+        notifications
+            .iter()
+            .map(|n| category_label(n.category()).len()),
+        8,
+    );
 
     let issue_w = col_width(
         notifications
@@ -68,32 +96,32 @@ pub fn print_table(
     // Header
     writeln!(
         out,
-        "{:<type_w$}  {:<issue_w$}  {:<title_w$}  {:<actor_w$}  AGE",
-        "TYPE",
+        "{:<category_w$}  {:<issue_w$}  {:<title_w$}  {:<actor_w$}  AGE",
+        "CATEGORY",
         "ISSUE",
         "TITLE",
         "ACTOR",
-        type_w = type_w,
+        category_w = category_w,
         issue_w = issue_w,
         title_w = title_w,
         actor_w = actor_w,
     )?;
 
-    let sep_len = type_w + 2 + issue_w + 2 + title_w + 2 + actor_w + 2 + 6;
+    let sep_len = category_w + 2 + issue_w + 2 + title_w + 2 + actor_w + 2 + 6;
     writeln!(out, "{}", "-".repeat(sep_len))?;
 
     for n in notifications {
-        let type_str = n.type_();
+        let category = category_label(n.category());
         let issue_id = n.issue().map_or("-", |i| i.identifier.as_str());
         let raw_title = n.issue().map_or("-", |i| i.title.as_str());
         // Truncate title if needed
         let title = text::truncate(raw_title, title_w);
         let actor = n.actor().map_or("-", |a| a.name.as_str());
-        let age = relative_age(n.created_at(), now_secs);
+        let age = relative_age(n.created_at(), now);
 
         writeln!(
             out,
-            "{type_str:<type_w$}  {issue_id:<issue_w$}  {title:<title_w$}  {actor:<actor_w$}  {age}",
+            "{category:<category_w$}  {issue_id:<issue_w$}  {title:<title_w$}  {actor:<actor_w$}  {age}",
         )?;
     }
 
@@ -108,14 +136,7 @@ mod tests {
     fn test_relative_age_formatting() {
         // Fixed "now" so the age is deterministic.
         // 2020-01-01T00:00:00Z is 0, 2020-01-02T00:00:00Z is one day later.
-        let now = u64::try_from(
-            "2020-01-02T01:00:00Z"
-                .parse::<DateTime>()
-                .unwrap()
-                .0
-                .timestamp(),
-        )
-        .unwrap();
+        let now = "2020-01-02T01:00:00Z".parse::<DateTime>().unwrap().0;
         assert_eq!(
             relative_age(&"2020-01-01T00:00:00Z".parse().unwrap(), now),
             "1d ago"
@@ -147,7 +168,8 @@ mod tests {
         /// Carries the fields distinguishing one issue-notification fixture,
         /// keeping `issue_notification` under the argument-count limit.
         struct IssueNotificationFixture {
-            type_: &'static str,
+            id: &'static str,
+            category: NotificationCategory,
             issue: lt_types::types::Issue,
             actor: User,
             created_at: &'static str,
@@ -155,8 +177,8 @@ mod tests {
 
         fn issue_notification(f: IssueNotificationFixture) -> Notification {
             Notification::IssueNotification(Box::new(IssueNotification {
-                id: format!("n-{}", f.type_).into(),
-                type_: f.type_.into(),
+                id: f.id.into(),
+                category: f.category,
                 read_at: None,
                 created_at: f.created_at.parse().unwrap(),
                 updated_at: f.created_at.parse().unwrap(),
@@ -165,10 +187,14 @@ mod tests {
             }))
         }
 
-        fn base_notification(type_: &str, created_at: &str) -> Notification {
+        fn base_notification(
+            id: &str,
+            category: NotificationCategory,
+            created_at: &str,
+        ) -> Notification {
             Notification::Other(BaseNotification {
-                id: format!("n-{type_}").into(),
-                type_: type_.into(),
+                id: id.into(),
+                category,
                 read_at: None,
                 created_at: created_at.parse().unwrap(),
                 updated_at: created_at.parse().unwrap(),
@@ -177,28 +203,27 @@ mod tests {
         }
 
         // Fixed "now" so the AGE column is deterministic.
-        let now = u64::try_from(
-            "2026-01-10T00:00:00Z"
-                .parse::<DateTime>()
-                .unwrap()
-                .0
-                .timestamp(),
-        )
-        .unwrap();
+        let now = "2026-01-10T00:00:00Z".parse::<DateTime>().unwrap().0;
         let notifications = vec![
             issue_notification(IssueNotificationFixture {
-                type_: "issueAssignedToYou",
+                id: "n-assigned",
+                category: NotificationCategory::Assignments,
                 issue: sample_issue("1", "ENG-1", "Wire up the deterministic dataset generator"),
                 actor: actor("Ada Lovelace"),
                 created_at: "2026-01-09T23:00:00Z",
             }),
             issue_notification(IssueNotificationFixture {
-                type_: "issueCommentMention",
+                id: "n-mention",
+                category: NotificationCategory::Mentions,
                 issue: sample_issue("2", "ENG-2", "Render markdown in the detail pane"),
                 actor: actor("Grace Hopper"),
                 created_at: "2026-01-08T00:00:00Z",
             }),
-            base_notification("issueStatusChanged", "2026-01-01T00:00:00Z"),
+            base_notification(
+                "n-status",
+                NotificationCategory::StatusChanges,
+                "2026-01-01T00:00:00Z",
+            ),
         ];
 
         let mut buf = Vec::new();

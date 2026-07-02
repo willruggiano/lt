@@ -60,10 +60,10 @@ impl Notification {
         }
     }
 
-    pub fn type_(&self) -> &str {
+    pub fn category(&self) -> &NotificationCategory {
         match self {
-            Self::IssueNotification(n) => &n.type_,
-            Self::Other(n) => &n.type_,
+            Self::IssueNotification(n) => &n.category,
+            Self::Other(n) => &n.category,
         }
     }
 
@@ -106,8 +106,7 @@ impl Notification {
 #[derive(cynic::QueryFragment)]
 pub struct IssueNotification {
     pub id: cynic::Id,
-    #[cynic(rename = "type")]
-    pub type_: String,
+    pub category: NotificationCategory,
     pub read_at: Option<DateTime>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
@@ -120,12 +119,38 @@ pub struct IssueNotification {
 #[cynic(graphql_type = "Notification")]
 pub struct BaseNotification {
     pub id: cynic::Id,
-    #[cynic(rename = "type")]
-    pub type_: String,
+    pub category: NotificationCategory,
     pub read_at: Option<DateTime>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
     pub actor: Option<User>,
+}
+
+/// Linear's stable, public classification of a notification (`title` and
+/// `subtitle` are `[Internal]`, so `category` is the only presentable
+/// discriminator). `Other` is cynic's decode fallback: any category the
+/// schema adds after this build still decodes instead of failing.
+#[derive(cynic::Enum, Clone, Debug, PartialEq, Eq)]
+#[cynic(graphql_type = "NotificationCategory", rename_all = "camelCase")]
+pub enum NotificationCategory {
+    AppsAndIntegrations,
+    Assignments,
+    Billing,
+    CommentsAndReplies,
+    Customers,
+    DocumentChanges,
+    Feed,
+    Mentions,
+    PostsAndUpdates,
+    Reactions,
+    Reminders,
+    Reviews,
+    StatusChanges,
+    Subscriptions,
+    System,
+    Triage,
+    #[cynic(fallback)]
+    Other(String),
 }
 
 #[cfg(test)]
