@@ -2,20 +2,25 @@ pub mod comments;
 pub mod filters;
 pub mod issues;
 pub mod outbox;
+mod sql;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 pub use comments::{delete_comments_for_issue, query_comments, upsert_comments};
-pub(crate) use issues::{ISSUE_COLUMNS, ISSUE_JOINS, issue_from_row};
+pub(crate) use issues::issue_from_row;
 pub use issues::{
-    get_meta, query_children, query_issue_by_id, query_issues, query_issues_page, search_issues,
-    search_issues_like, set_meta, set_synced_viewer, synced_viewer, upsert_issues,
+    count_fts_rows, count_issues, get_meta, query_children, query_issue_by_id, query_issues,
+    query_issues_page, search_issues, search_issues_like, set_meta, set_synced_viewer,
+    synced_viewer, upsert_issues,
 };
 pub use rusqlite::Connection;
-use rusqlite::{Params, Transaction};
+use rusqlite::Transaction;
 use rusqlite_migration::{HookResult, M, Migrations};
+// `search_query.rs`'s dynamic composition is not converted until phase 3
+// (type-safe-sql-adr.md); it still needs the raw column/join text.
+pub(crate) use sql::{ISSUE_COLUMNS, ISSUE_JOINS};
 
 /// Parse a stored RFC3339 timestamp column into the wire [`DateTime`](lt_types::scalars::DateTime)
 /// scalar via its `FromStr` impl. Storage always writes
@@ -27,15 +32,6 @@ pub(crate) fn parse_datetime_column(
 ) -> std::result::Result<lt_types::scalars::DateTime, rusqlite::types::FromSqlError> {
     s.parse()
         .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
-}
-
-/// Run a parameterized write statement, attaching `what` to any error.
-///
-/// `what` reads as the failed action, e.g. `"set sync_meta"`.
-pub(crate) fn execute(conn: &Connection, sql: &str, params: impl Params, what: &str) -> Result<()> {
-    conn.execute(sql, params)
-        .with_context(|| format!("failed to {what}"))?;
-    Ok(())
 }
 
 pub fn db_path() -> Result<PathBuf> {

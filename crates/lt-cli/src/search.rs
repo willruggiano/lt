@@ -29,18 +29,14 @@ pub fn run(out: &mut dyn Write, args: &SearchArgs) -> Result<()> {
     let conn = db::open_db(db::db_path()?).context("failed to open local database")?;
 
     // Check whether any issues exist at all.
-    let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM issues", [], |r| r.get(0))
-        .context("failed to count issues")?;
+    let total = db::count_issues(&conn)?;
 
     if total == 0 {
         bail!("Run 'lt sync' to build the local index first.");
     }
 
     // Check whether the FTS index has any content.
-    let fts_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM issues_fts", [], |r| r.get(0))
-        .unwrap_or(0);
+    let fts_count = db::count_fts_rows(&conn).unwrap_or(0);
 
     let note;
 

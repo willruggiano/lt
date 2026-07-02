@@ -1,0 +1,423 @@
+//! The sole source of SQL statement text in this crate.
+//!
+//! `Sql` wraps a private `&'static str`, so a statement can only come into
+//! existence through the [`statements!`] macro in this module: declaration
+//! and registration into the `STATEMENTS` table (used by the gate's
+//! validator) happen on the same macro invocation, so an unregistered
+//! statement cannot exist. Production code executes SQL only through
+//! [`prepare`] / [`execute`], which take `Sql`, never `&str`.
+//!
+//! `query_issues`/`query_issues_page` (dynamic `WHERE`/`ORDER BY`
+//! composition) and `search_query.rs`'s structured-search builder are not
+//! converted yet -- they still compose plain `String` SQL from
+//! [`ISSUE_COLUMNS`]/[`ISSUE_JOINS`]. That is phase 3 of the ADR (typed
+//! `ComposedSql` composition).
+//!
+//! See docs/design/type-safe-sql-adr.md ("Statement registry", "Enforcement:
+//! the `Sql` newtype", decisions 2-3).
+
+use rusqlite::{Connection, Params, Statement};
+
+/// A registered SQL statement's text. The field is private: constructible
+/// only inside this module.
+#[derive(Clone, Copy)]
+pub(crate) struct Sql(&'static str);
+
+/// Declares one or more registered statements: a `pub(crate) const NAME: Sql`
+/// per entry, plus (test-only) a `STATEMENTS` table of `(name, statement,
+/// declared param count)` the gate's validator iterates.
+macro_rules! statements {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident, $params:expr, $sql:expr;
+    )*) => {
+        $(
+            $(#[$meta])*
+            pub(crate) const $name: Sql = Sql($sql);
+        )*
+
+        /// Every registered statement, for the `sql_validation` gate
+        /// (docs/design/type-safe-sql-adr.md, "Validator"): name, statement,
+        /// and its declared bind-parameter count.
+        #[cfg(test)]
+        pub(crate) const STATEMENTS: &[(&str, Sql, usize)] = &[
+            $((stringify!($name), $name, $params),)*
+        ];
+    };
+}
+
+/// The fragment-typed read model's column list: every field
+/// [`crate::types::Issue`](lt_types::types::Issue) selects, every column
+/// explicitly aliased so [`crate::db::issues::issue_from_row`] reads by name
+/// (ADR decision 4) rather than positional index. Labels are aggregated by a
+/// correlated subquery.
+macro_rules! issue_columns {
+    () => {
+        "i.id AS id, i.identifier AS identifier, i.title AS title, \
+         i.priority_label AS priority_label, i.description AS description, \
+         i.created_at AS created_at, i.updated_at AS updated_at, \
+         i.state_id AS state_id, s.name AS state_name, \
+         i.assignee_id AS assignee_id, ua.name AS assignee_name, \
+         i.team_id AS team_id, t.name AS team_name, \
+         i.project_id AS project_id, p.name AS project_name, \
+         i.cycle_id AS cycle_id, c.name AS cycle_name, \
+         i.creator_id AS creator_id, uc.name AS creator_name, \
+         i.parent_id AS parent_id, pp.identifier AS parent_identifier, \
+         (SELECT GROUP_CONCAT(l.name, ',') FROM issue_labels il \
+            JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id) AS labels"
+    };
+}
+
+/// The entity joins that reconstruct an issue's referenced rows. The base
+/// table is aliased `i`; callers prepend `FROM issues i` (optionally with an
+/// FTS join) before this fragment.
+macro_rules! issue_joins {
+    () => {
+        "JOIN workflow_states s ON s.id = i.state_id \
+         JOIN teams t            ON t.id = i.team_id \
+         LEFT JOIN users ua      ON ua.id = i.assignee_id \
+         LEFT JOIN projects p    ON p.id = i.project_id \
+         LEFT JOIN cycles c      ON c.id = i.cycle_id \
+         LEFT JOIN users uc      ON uc.id = i.creator_id \
+         LEFT JOIN issues pp     ON pp.id = i.parent_id"
+    };
+}
+
+/// The shared template behind the six entity-table upsert statements below:
+/// only the table name varies, so it is single-sourced here rather than
+/// six near-identical literals (which `cargo dupes` would flag).
+macro_rules! entity_upsert_sql {
+    ($table:literal) => {
+        concat!(
+            "INSERT INTO ",
+            $table,
+            " (id, name) VALUES (?1, ?2) \
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name"
+        )
+    };
+}
+
+/// A relational entity table `upsert_named_entity`
+/// ([`crate::db::issues::upsert_named_entity`]) can write to. Replaces a
+/// stringly-typed table name with a closed set matched against the
+/// registered upsert statements below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntityTable {
+    Teams,
+    Users,
+    WorkflowStates,
+    Projects,
+    Cycles,
+    Labels,
+}
+
+impl EntityTable {
+    /// The registered `(id, name)` upsert statement for this table.
+    pub(crate) fn upsert_sql(self) -> Sql {
+        match self {
+            EntityTable::Teams => UPSERT_TEAM,
+            EntityTable::Users => UPSERT_USER,
+            EntityTable::WorkflowStates => UPSERT_WORKFLOW_STATE,
+            EntityTable::Projects => UPSERT_PROJECT,
+            EntityTable::Cycles => UPSERT_CYCLE,
+            EntityTable::Labels => UPSERT_LABEL,
+        }
+    }
+
+    /// The table name, for error messages only.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            EntityTable::Teams => "teams",
+            EntityTable::Users => "users",
+            EntityTable::WorkflowStates => "workflow_states",
+            EntityTable::Projects => "projects",
+            EntityTable::Cycles => "cycles",
+            EntityTable::Labels => "labels",
+        }
+    }
+}
+
+statements! {
+    /// Upsert a fetched issue fragment's intrinsic and FK columns.
+    UPSERT_ISSUE, 15,
+        "INSERT OR REPLACE INTO issues \
+            (id, identifier, title, priority_label, description, \
+             created_at, updated_at, synced_at, parent_id, \
+             team_id, state_id, assignee_id, creator_id, project_id, cycle_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
+
+    /// Clear an issue's label links before rebuilding them.
+    DELETE_ISSUE_LABELS_FOR_ISSUE, 1,
+        "DELETE FROM issue_labels WHERE issue_id = ?1";
+
+    /// Link one label to an issue; a no-op if the link already exists.
+    INSERT_ISSUE_LABEL, 2,
+        "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)";
+
+    /// Load every pending overlay row, resolving the state/assignee name
+    /// through the entity tables in one query.
+    LOAD_OVERLAYS, 0,
+        "SELECT po.entity_id, po.field, po.value, ws.name, u.name \
+         FROM pending_overlay po \
+         LEFT JOIN workflow_states ws ON po.field = 'state'    AND ws.id = po.value \
+         LEFT JOIN users u           ON po.field = 'assignee' AND u.id  = po.value";
+
+    /// Read one `sync_meta` value by key.
+    GET_META, 1,
+        "SELECT value FROM sync_meta WHERE key = ?1";
+
+    /// Insert or replace one `sync_meta` key/value pair.
+    SET_META, 2,
+        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?1, ?2)";
+
+    /// FTS5 full-text search: `?1` is the MATCH query, `?2` the row limit.
+    SEARCH_ISSUES, 2,
+        concat!(
+            "SELECT ", issue_columns!(),
+            " FROM issues i \
+              JOIN issues_fts ON issues_fts.rowid = i.rowid ",
+            issue_joins!(),
+            " WHERE issues_fts MATCH ?1 ORDER BY rank LIMIT ?2"
+        );
+
+    /// Title-substring fallback search when the FTS index is empty: `?1` is
+    /// the `LIKE` pattern, `?2` the row limit.
+    SEARCH_ISSUES_LIKE, 2,
+        concat!(
+            "SELECT ", issue_columns!(),
+            " FROM issues i ",
+            issue_joins!(),
+            " WHERE i.title LIKE ?1 LIMIT ?2"
+        );
+
+    /// Child issues of `?1`, oldest identifier first.
+    QUERY_CHILDREN, 1,
+        concat!(
+            "SELECT ", issue_columns!(),
+            " FROM issues i ",
+            issue_joins!(),
+            " WHERE i.parent_id = ?1 ORDER BY i.identifier ASC"
+        );
+
+    /// A single issue by id.
+    QUERY_ISSUE_BY_ID, 1,
+        concat!(
+            "SELECT ", issue_columns!(),
+            " FROM issues i ",
+            issue_joins!(),
+            " WHERE i.id = ?1"
+        );
+
+    /// Count every locally cached issue, regardless of filters.
+    COUNT_ISSUES, 0,
+        "SELECT COUNT(*) FROM issues";
+
+    /// Count rows in the FTS5 shadow index.
+    COUNT_FTS_ROWS, 0,
+        "SELECT COUNT(*) FROM issues_fts";
+
+    /// Upsert one `(id, name)` row into `teams`.
+    UPSERT_TEAM, 2, entity_upsert_sql!("teams");
+    /// Upsert one `(id, name)` row into `users`.
+    UPSERT_USER, 2, entity_upsert_sql!("users");
+    /// Upsert one `(id, name)` row into `workflow_states`.
+    UPSERT_WORKFLOW_STATE, 2, entity_upsert_sql!("workflow_states");
+    /// Upsert one `(id, name)` row into `projects`.
+    UPSERT_PROJECT, 2, entity_upsert_sql!("projects");
+    /// Upsert one `(id, name)` row into `cycles`.
+    UPSERT_CYCLE, 2, entity_upsert_sql!("cycles");
+    /// Upsert one `(id, name)` row into `labels`.
+    UPSERT_LABEL, 2, entity_upsert_sql!("labels");
+
+    /// Upsert one `(entity_id, field)` pending-overlay row.
+    SET_OVERLAY, 3,
+        "INSERT INTO pending_overlay (entity_id, field, value) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(entity_id, field) DO UPDATE SET value = excluded.value";
+
+    /// Clear a pending outbox command of `op_type` for `entity_id`, ahead of
+    /// re-inserting the coalesced replacement.
+    DELETE_SUPERSEDED_PENDING, 2,
+        "DELETE FROM outbox WHERE op_type = ?1 AND entity_id = ?2 AND status = 'pending'";
+
+    /// Insert a new pending outbox command.
+    INSERT_PENDING, 4,
+        "INSERT INTO outbox (op_type, entity_id, variables, status, attempts, created_at) \
+         VALUES (?1, ?2, ?3, 'pending', 0, ?4)";
+
+    /// Every `(field, value)` overlay row for one issue.
+    OVERLAY_ROWS, 1,
+        "SELECT field, value FROM pending_overlay WHERE entity_id = ?1";
+
+    /// Every pending outbox command, in `seq` order.
+    PENDING_OPERATIONS, 0,
+        "SELECT seq, op_type, entity_id, variables FROM outbox \
+         WHERE status = 'pending' ORDER BY seq";
+
+    /// Apply an acked overlay's state onto the base `issues` row.
+    ACK_UPDATE_STATE, 2,
+        "UPDATE issues SET state_id = ?1 WHERE id = ?2";
+
+    /// Apply an acked overlay's assignee onto the base `issues` row.
+    ACK_UPDATE_ASSIGNEE, 2,
+        "UPDATE issues SET assignee_id = ?1 WHERE id = ?2";
+
+    /// Apply an acked overlay's priority onto the base `issues` row.
+    ACK_UPDATE_PRIORITY, 2,
+        "UPDATE issues SET priority_label = ?1 WHERE id = ?2";
+
+    /// Retire every overlay row for an issue once its command is acked.
+    DELETE_PENDING_OVERLAY_FOR_ENTITY, 1,
+        "DELETE FROM pending_overlay WHERE entity_id = ?1";
+
+    /// Delete an issue row (used to drop the optimistic temp row on create-ack).
+    DELETE_ISSUE_BY_ID, 1,
+        "DELETE FROM issues WHERE id = ?1";
+
+    /// Delete a comment row by id (used to drop the optimistic temp row on
+    /// comment-create-ack).
+    DELETE_ISSUE_COMMENT_BY_ID, 1,
+        "DELETE FROM issue_comments WHERE id = ?1";
+
+    /// Record a failed drain attempt against a pending outbox command.
+    RECORD_ERROR, 2,
+        "UPDATE outbox SET attempts = attempts + 1, last_error = ?1 WHERE seq = ?2";
+
+    /// Retire an outbox command once its ack has been applied.
+    DELETE_COMMAND, 1,
+        "DELETE FROM outbox WHERE seq = ?1";
+
+    /// Insert or replace a comment row.
+    UPSERT_COMMENT, 7,
+        "INSERT OR REPLACE INTO issue_comments \
+            (id, issue_id, body, user_id, created_at, updated_at, synced_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+
+    /// A single issue's comments, oldest first, with author name joined in.
+    QUERY_COMMENTS, 1,
+        "SELECT ic.id AS id, ic.body AS body, ic.created_at AS created_at, \
+                ic.updated_at AS updated_at, ic.user_id AS user_id, u.name AS user_name \
+         FROM issue_comments ic \
+         LEFT JOIN users u ON u.id = ic.user_id \
+         WHERE ic.issue_id = ?1 \
+         ORDER BY ic.created_at ASC";
+
+    /// Delete the synced comments of an issue, preserving un-acked `local:` rows.
+    DELETE_COMMENTS_FOR_ISSUE, 1,
+        "DELETE FROM issue_comments WHERE issue_id = ?1 AND id NOT LIKE 'local:%'";
+}
+
+/// `ISSUE_COLUMNS`/`ISSUE_JOINS` as plain `&str`, for `query_issues` /
+/// `query_issues_page` (`db/issues.rs`) and the structured-search builder
+/// (`search_query.rs`), which still compose their `SELECT` dynamically.
+///
+/// phase 3 (type-safe-sql-adr.md) replaces this with typed `ComposedSql`
+/// composition; until then this is the one place still exposing raw column
+/// text outside the registry.
+pub(crate) const ISSUE_COLUMNS: &str = issue_columns!();
+pub(crate) const ISSUE_JOINS: &str = issue_joins!();
+
+/// The 22 names [`ISSUE_COLUMNS`] aliases to, in order -- the shape
+/// [`crate::db::issues::issue_from_row`] reads by name. Validator-only.
+#[cfg(test)]
+pub(crate) const ISSUE_COLUMN_NAMES: &[&str] = &[
+    "id",
+    "identifier",
+    "title",
+    "priority_label",
+    "description",
+    "created_at",
+    "updated_at",
+    "state_id",
+    "state_name",
+    "assignee_id",
+    "assignee_name",
+    "team_id",
+    "team_name",
+    "project_id",
+    "project_name",
+    "cycle_id",
+    "cycle_name",
+    "creator_id",
+    "creator_name",
+    "parent_id",
+    "parent_identifier",
+    "labels",
+];
+
+/// The 6 names [`QUERY_COMMENTS`] aliases to, in order -- the shape
+/// `query_comments`'s row mapper reads by name. Validator-only.
+#[cfg(test)]
+pub(crate) const COMMENT_COLUMN_NAMES: &[&str] = &[
+    "id",
+    "body",
+    "created_at",
+    "updated_at",
+    "user_id",
+    "user_name",
+];
+
+/// Prepare a registered statement. The only way production code turns a
+/// [`Sql`] into an executable [`Statement`].
+pub(crate) fn prepare(conn: &Connection, sql: Sql) -> rusqlite::Result<Statement<'_>> {
+    conn.prepare(sql.0)
+}
+
+/// Run a parameterized write statement, attaching `what` to any error.
+///
+/// `what` reads as the failed action, e.g. `"set sync_meta"`.
+pub(crate) fn execute(
+    conn: &Connection,
+    sql: Sql,
+    params: impl Params,
+    what: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    conn.execute(sql.0, params)
+        .with_context(|| format!("failed to {what}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn migrated_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&mut conn).unwrap();
+        conn
+    }
+
+    /// The first slice of the gate's schema-adherence validator
+    /// (docs/design/type-safe-sql-adr.md, "Validator"): every registered
+    /// statement must prepare against the real, migrated schema (P1), and
+    /// its declared bind-parameter count must match what SQLite reports
+    /// (P2, const side). Fragment/composer probes are phase 3.
+    #[test]
+    fn every_registered_statement_prepares_and_matches_its_declared_param_count() {
+        let conn = migrated_conn();
+        for (name, sql, declared_params) in STATEMENTS {
+            let stmt = conn
+                .prepare(sql.0)
+                .unwrap_or_else(|e| panic!("failed to prepare {name}: {e}"));
+            assert_eq!(
+                stmt.parameter_count(),
+                *declared_params,
+                "{name}: declared param count does not match the prepared statement"
+            );
+        }
+    }
+
+    #[test]
+    fn query_issue_by_id_columns_match_the_named_row_mapping() {
+        let conn = migrated_conn();
+        let stmt = conn.prepare(QUERY_ISSUE_BY_ID.0).unwrap();
+        assert_eq!(stmt.column_names().as_slice(), ISSUE_COLUMN_NAMES);
+    }
+
+    #[test]
+    fn query_comments_columns_match_the_named_row_mapping() {
+        let conn = migrated_conn();
+        let stmt = conn.prepare(QUERY_COMMENTS.0).unwrap();
+        assert_eq!(stmt.column_names().as_slice(), COMMENT_COLUMN_NAMES);
+    }
+}

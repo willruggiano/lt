@@ -14,6 +14,9 @@ use lt_types::types;
 use rusqlite::{Connection, params};
 use serde_json::json;
 
+use crate::db::issues::EntityTable;
+use crate::db::sql;
+
 pub const OP_ISSUE_UPDATE: &str = "IssueUpdate";
 pub const OP_ISSUE_CREATE: &str = "IssueCreate";
 pub const OP_COMMENT_CREATE: &str = "CommentCreate";
@@ -58,13 +61,12 @@ fn set_overlay(
     field: OverlayField,
     value: Option<&str>,
 ) -> Result<()> {
-    tx.execute(
-        "INSERT INTO pending_overlay (entity_id, field, value) VALUES (?1, ?2, ?3)
-         ON CONFLICT(entity_id, field) DO UPDATE SET value = excluded.value",
+    sql::execute(
+        tx,
+        sql::SET_OVERLAY,
         params![entity_id, field.as_str(), value],
+        "write pending overlay",
     )
-    .context("failed to write pending overlay")?;
-    Ok(())
 }
 
 /// Replace the pending command of `op_type` for `entity_id` with one carrying
@@ -76,11 +78,12 @@ fn replace_pending(
     entity_id: &str,
     variables: &serde_json::Value,
 ) -> Result<()> {
-    tx.execute(
-        "DELETE FROM outbox WHERE op_type = ?1 AND entity_id = ?2 AND status = 'pending'",
+    sql::execute(
+        tx,
+        sql::DELETE_SUPERSEDED_PENDING,
         params![op_type, entity_id],
-    )
-    .context("failed to clear superseded outbox command")?;
+        "clear superseded outbox command",
+    )?;
     insert_pending(tx, op_type, entity_id, variables)
 }
 
@@ -91,25 +94,23 @@ fn insert_pending(
     entity_id: &str,
     variables: &serde_json::Value,
 ) -> Result<()> {
-    tx.execute(
-        "INSERT INTO outbox (op_type, entity_id, variables, status, attempts, created_at)
-         VALUES (?1, ?2, ?3, 'pending', 0, ?4)",
+    sql::execute(
+        tx,
+        sql::INSERT_PENDING,
         params![
             op_type,
             entity_id,
             variables.to_string(),
             Utc::now().to_rfc3339()
         ],
+        "enqueue outbox command",
     )
-    .context("failed to enqueue outbox command")?;
-    Ok(())
 }
 
 /// Read every `(field, value)` overlay row for an issue.
 fn overlay_rows(conn: &Connection, issue_id: &str) -> Result<Vec<(String, Option<String>)>> {
-    let mut stmt = conn
-        .prepare("SELECT field, value FROM pending_overlay WHERE entity_id = ?1")
-        .context("failed to prepare overlay query")?;
+    let mut stmt =
+        sql::prepare(conn, sql::OVERLAY_ROWS).context("failed to prepare overlay query")?;
     let rows = stmt
         .query_map(params![issue_id], |r| Ok((r.get(0)?, r.get(1)?)))
         .context("failed to query overlay rows")?;
@@ -160,7 +161,12 @@ pub fn enqueue_state_change(
     state_name: &str,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    crate::db::issues::upsert_named_entity(&tx, "workflow_states", state_id, Some(state_name))?;
+    crate::db::issues::upsert_named_entity(
+        &tx,
+        EntityTable::WorkflowStates,
+        state_id,
+        Some(state_name),
+    )?;
     set_overlay(&tx, issue_id, OverlayField::State, Some(state_id))?;
     refresh_issue_update_command(&tx, issue_id)?;
     tx.commit().context("failed to commit state change")?;
@@ -190,7 +196,7 @@ pub fn enqueue_assignee_change(
     let tx = conn.unchecked_transaction()?;
     let value = match assignee {
         Some((id, name)) => {
-            crate::db::issues::upsert_named_entity(&tx, "users", id, Some(name))?;
+            crate::db::issues::upsert_named_entity(&tx, EntityTable::Users, id, Some(name))?;
             Some(id)
         }
         None => None,
@@ -265,12 +271,8 @@ pub fn temp_id() -> String {
 
 /// Every pending command in `seq` order.
 pub fn pending_operations(conn: &Connection) -> Result<Vec<PendingOp>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT seq, op_type, entity_id, variables FROM outbox
-             WHERE status = 'pending' ORDER BY seq",
-        )
-        .context("failed to prepare outbox query")?;
+    let mut stmt =
+        sql::prepare(conn, sql::PENDING_OPERATIONS).context("failed to prepare outbox query")?;
     let rows = stmt
         .query_map([], |r| {
             Ok(PendingOp {
@@ -307,15 +309,19 @@ pub fn ack_issue_update(
         for (field, value) in overlay_rows(&tx, issue_id)? {
             match field.as_str() {
                 "state" => {
-                    tx.execute(
-                        "UPDATE issues SET state_id = ?1 WHERE id = ?2",
+                    sql::execute(
+                        &tx,
+                        sql::ACK_UPDATE_STATE,
                         params![value, issue_id],
+                        "apply acked state",
                     )?;
                 }
                 "assignee" => {
-                    tx.execute(
-                        "UPDATE issues SET assignee_id = ?1 WHERE id = ?2",
+                    sql::execute(
+                        &tx,
+                        sql::ACK_UPDATE_ASSIGNEE,
                         params![value, issue_id],
+                        "apply acked assignee",
                     )?;
                 }
                 "priority" => {
@@ -323,18 +329,22 @@ pub fn ack_issue_update(
                         .as_deref()
                         .and_then(|v| v.parse::<u8>().ok())
                         .map_or("No priority", types::priority_u8_to_label);
-                    tx.execute(
-                        "UPDATE issues SET priority_label = ?1 WHERE id = ?2",
+                    sql::execute(
+                        &tx,
+                        sql::ACK_UPDATE_PRIORITY,
                         params![label, issue_id],
+                        "apply acked priority",
                     )?;
                 }
                 _ => {}
             }
         }
     }
-    tx.execute(
-        "DELETE FROM pending_overlay WHERE entity_id = ?1",
+    sql::execute(
+        &tx,
+        sql::DELETE_PENDING_OVERLAY_FOR_ENTITY,
         params![issue_id],
+        "clear acked overlay",
     )?;
     delete_command(&tx, seq)?;
     tx.commit().context("failed to commit issue-update ack")?;
@@ -352,11 +362,18 @@ pub fn ack_issue_create(
     let tx = conn.unchecked_transaction()?;
     let synced_at = Utc::now().to_rfc3339();
     crate::db::issues::upsert_issue_tx(&tx, issue, &synced_at)?;
-    tx.execute(
-        "DELETE FROM issue_labels WHERE issue_id = ?1",
+    sql::execute(
+        &tx,
+        sql::DELETE_ISSUE_LABELS_FOR_ISSUE,
         params![temp_id],
+        "clear temp issue labels",
     )?;
-    tx.execute("DELETE FROM issues WHERE id = ?1", params![temp_id])?;
+    sql::execute(
+        &tx,
+        sql::DELETE_ISSUE_BY_ID,
+        params![temp_id],
+        "delete temp issue",
+    )?;
     delete_command(&tx, seq)?;
     tx.commit().context("failed to commit issue-create ack")?;
     Ok(())
@@ -376,9 +393,11 @@ pub struct CommentAck<'a> {
 /// next per-issue comment sync.
 pub fn ack_comment_create(conn: &Connection, seq: i64, ack: &CommentAck) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM issue_comments WHERE id = ?1",
+    sql::execute(
+        &tx,
+        sql::DELETE_ISSUE_COMMENT_BY_ID,
         params![ack.temp_id],
+        "delete temp comment",
     )?;
     // Stamp the issue id from the ack rather than trusting the server's
     // comment payload for it: the mutation's `issueId` is nullable in the
@@ -396,18 +415,21 @@ pub fn ack_comment_create(conn: &Connection, seq: i64, ack: &CommentAck) -> Resu
 
 /// Record a failed drain attempt; the command stays pending for the next sync.
 pub fn record_error(conn: &Connection, seq: i64, error: &str) -> Result<()> {
-    crate::db::execute(
+    sql::execute(
         conn,
-        "UPDATE outbox SET attempts = attempts + 1, last_error = ?1 WHERE seq = ?2",
+        sql::RECORD_ERROR,
         params![error, seq],
         "record outbox error",
     )
 }
 
 fn delete_command(tx: &Connection, seq: i64) -> Result<()> {
-    tx.execute("DELETE FROM outbox WHERE seq = ?1", params![seq])
-        .context("failed to delete outbox command")?;
-    Ok(())
+    sql::execute(
+        tx,
+        sql::DELETE_COMMAND,
+        params![seq],
+        "delete outbox command",
+    )
 }
 
 /// A minimal base issue for the write-path tests, shared with the sync drainer
