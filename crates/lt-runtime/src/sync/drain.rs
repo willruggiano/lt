@@ -8,8 +8,11 @@
 
 use anyhow::{Result, bail};
 use lt_storage::db::outbox::{self, PendingOp};
-use lt_upstream::client::GraphqlTransport;
-use lt_upstream::{comments, issues};
+use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
+use lt_types::issues::{
+    IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
+};
+use lt_upstream::client::{GraphqlTransport, execute};
 use rusqlite::Connection;
 
 /// Replay every pending outbox command, recording (not propagating) per-command
@@ -24,30 +27,29 @@ pub fn drain(conn: &Connection, transport: &dyn GraphqlTransport) -> Result<()> 
 }
 
 fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -> Result<()> {
-    let variables = serde_json::from_str(&op.variables)?;
     match op.op_type.as_str() {
         outbox::OP_ISSUE_UPDATE => {
+            let vars: IssueUpdateVariables = serde_json::from_str(&op.variables)?;
             // The server issue is nullable in the schema even on success;
             // when present it becomes the new base truth, otherwise the ack
             // falls back to applying the overlay's per-field intent.
-            let server_issue = issues::replay_update(transport, variables)?;
+            let server_issue = execute::<IssueUpdateMutation>(transport, vars)?;
             outbox::ack_issue_update(conn, op.seq, &op.entity_id, server_issue.as_ref())?;
         }
         outbox::OP_ISSUE_CREATE => {
+            let vars: IssueCreateVariables = serde_json::from_str(&op.variables)?;
             // Upsert the server's full issue into the base, replacing the
             // temp row -- server truth, not a hand-stitched id/identifier
             // rewrite.
-            let issue = issues::replay_create(transport, variables)?;
+            let issue = execute::<IssueCreateMutation>(transport, vars)?;
             outbox::ack_issue_create(conn, op.seq, &op.entity_id, &issue)?;
         }
         outbox::OP_COMMENT_CREATE => {
-            let issue_id = variables["input"]["issueId"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
+            let vars: CommentCreateVariables = serde_json::from_str(&op.variables)?;
+            let issue_id = vars.input.issue_id.clone();
             // The server-returned comment is used as-is: it already carries
             // the shared `comments::Comment` shape the base row is built from.
-            let comment = comments::replay_create(transport, variables)?;
+            let comment = execute::<CommentCreateMutation>(transport, vars)?;
             outbox::ack_comment_create(
                 conn,
                 op.seq,

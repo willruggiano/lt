@@ -4,10 +4,5 @@
 pub mod auth;
 pub mod client;
 pub mod comments;
-mod graphql;
 pub mod issues;
-pub mod members;
 pub mod notifications;
-pub mod states;
-pub mod teams;
-pub mod viewer;

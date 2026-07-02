@@ -40,6 +40,20 @@ impl<T: Serialize> Serialize for Field<T> {
     }
 }
 
+/// Deserializes to `Value`/`Null` only -- an absent key never reaches this
+/// impl. Pair with `#[serde(default)]` on the containing field so a missing
+/// key falls back to `Field::Absent` (the `Default` impl above) instead: this
+/// is what makes the outbox's stored `Field<T>` variables round-trip through
+/// JSON without collapsing "unchanged" (absent) and "clear" (null) together.
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Field<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            Some(v) => Field::Value(v),
+            None => Field::Null,
+        })
+    }
+}
+
 // Lets `Field<T>` stand in for a nullable scalar in a cynic `InputObject`: the
 // derive aligns the field to `Option<Field<T>>` and asserts
 // `Option<Field<T>>: IsScalar<Option<Marker>>`, which reduces to
@@ -53,8 +67,9 @@ where
 
 /// Partial update for `issueUpdate`. Every field is optional; omitted fields are
 /// left unchanged. `assignee_id` is three-valued so it can be cleared.
-#[derive(cynic::InputObject, Debug, Default)]
+#[derive(cynic::InputObject, Debug, Default, serde::Deserialize, PartialEq)]
 #[cynic(graphql_type = "IssueUpdateInput", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct IssueUpdateInput {
     #[cynic(skip_serializing_if = "Option::is_none")]
     pub state_id: Option<String>,
@@ -66,24 +81,30 @@ pub struct IssueUpdateInput {
 
 /// New-issue payload for `issueCreate`. `team_id` is required; the rest are
 /// omitted when absent.
-#[derive(cynic::InputObject, Debug)]
+#[derive(cynic::InputObject, Debug, Clone, serde::Deserialize, PartialEq)]
 #[cynic(graphql_type = "IssueCreateInput", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct IssueCreateInput {
     pub title: String,
     pub team_id: String,
     #[cynic(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub description: Option<String>,
     #[cynic(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub state_id: Option<String>,
     #[cynic(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub priority: Option<i32>,
     #[cynic(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub assignee_id: Option<String>,
 }
 
 /// New-comment payload for `commentCreate`.
-#[derive(cynic::InputObject, Debug)]
+#[derive(cynic::InputObject, Debug, Clone, serde::Deserialize, PartialEq)]
 #[cynic(graphql_type = "CommentCreateInput", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct CommentCreateInput {
     pub issue_id: String,
     pub body: String,
@@ -146,5 +167,68 @@ mod tests {
             serde_json::to_value(&input).unwrap(),
             json!({ "issueId": "i1", "body": "hi" })
         );
+    }
+
+    // The outbox stores mutation variables as JSON text and deserializes them
+    // back into these typed inputs at replay time; these round-trips cover the
+    // Field<T> three-valued states that motivated the manual Deserialize impl.
+
+    #[test]
+    fn issue_update_input_round_trips_absent_field() {
+        let input = IssueUpdateInput::default();
+        let round_tripped: IssueUpdateInput =
+            serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
+        assert_eq!(round_tripped, input);
+        assert!(round_tripped.assignee_id.is_absent());
+    }
+
+    #[test]
+    fn issue_update_input_round_trips_null_field() {
+        let input = IssueUpdateInput {
+            assignee_id: Field::Null,
+            ..Default::default()
+        };
+        let round_tripped: IssueUpdateInput =
+            serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
+        assert_eq!(round_tripped, input);
+        assert_eq!(round_tripped.assignee_id, Field::Null);
+    }
+
+    #[test]
+    fn issue_update_input_round_trips_value_field() {
+        let input = IssueUpdateInput {
+            state_id: Some("s1".to_string()),
+            priority: Some(2),
+            assignee_id: Field::Value("u1".to_string()),
+        };
+        let round_tripped: IssueUpdateInput =
+            serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
+        assert_eq!(round_tripped, input);
+    }
+
+    #[test]
+    fn issue_create_input_round_trips_with_absent_optionals() {
+        let input = IssueCreateInput {
+            title: "New".to_string(),
+            team_id: "t1".to_string(),
+            description: None,
+            state_id: None,
+            priority: None,
+            assignee_id: None,
+        };
+        let round_tripped: IssueCreateInput =
+            serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
+        assert_eq!(round_tripped, input);
+    }
+
+    #[test]
+    fn comment_create_input_round_trips() {
+        let input = CommentCreateInput {
+            issue_id: "i1".to_string(),
+            body: "hi".to_string(),
+        };
+        let round_tripped: CommentCreateInput =
+            serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
+        assert_eq!(round_tripped, input);
     }
 }

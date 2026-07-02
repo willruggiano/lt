@@ -3,34 +3,9 @@
 //! the fetched thread into the local DB lives in `lt-runtime`.
 
 use anyhow::Result;
-use lt_types::comments::{Comment, CommentCreateMutation, CommentsQuery, create_mutation, query};
-use serde_json::json;
+use lt_types::comments::{Comment, CommentsQuery, CommentsVariables};
 
-use crate::client::{GraphqlTransport, query_as};
-use crate::graphql::{CreatePayload, post_create};
-
-// ---------------------------------------------------------------------------
-// Mutation replay (driven by the outbox drainer)
-// ---------------------------------------------------------------------------
-
-impl CreatePayload for CommentCreateMutation {
-    type Created = Comment;
-    fn into_created(self) -> (bool, Option<Comment>) {
-        (
-            self.comment_create.success,
-            Some(self.comment_create.comment),
-        )
-    }
-}
-
-/// Replay a `commentCreate`, returning the server's comment so the optimistic
-/// temp row can be replaced.
-pub fn replay_create(
-    transport: &dyn GraphqlTransport,
-    variables: serde_json::Value,
-) -> Result<Comment> {
-    post_create::<CommentCreateMutation>(transport, &create_mutation(), "commentCreate", variables)
-}
+use crate::client::{GraphqlTransport, execute};
 
 // ---------------------------------------------------------------------------
 // Comment fetch (pull an issue's thread from the API)
@@ -43,20 +18,19 @@ pub fn fetch_all(transport: &dyn GraphqlTransport, issue_id: &str) -> Result<Vec
     let mut cursor: Option<String> = None;
 
     loop {
-        let variables = json!({
-            "id": issue_id,
-            "after": cursor,
-        });
+        let variables = CommentsVariables {
+            id: issue_id.to_string(),
+            after: cursor,
+        };
 
-        let data: CommentsQuery = query_as(transport, &query(), variables)?;
+        let page = execute::<CommentsQuery>(transport, variables)?;
 
-        let conn = data.issue.comments;
-        all.extend(conn.nodes);
+        all.extend(page.nodes);
 
-        if !conn.page_info.has_next_page {
+        if !page.info.has_next_page {
             break;
         }
-        cursor = conn.page_info.end_cursor;
+        cursor = page.info.end_cursor;
         if cursor.is_none() {
             break;
         }
@@ -67,11 +41,15 @@ pub fn fetch_all(transport: &dyn GraphqlTransport, issue_id: &str) -> Result<Vec
 
 #[cfg(test)]
 mod tests {
+    use lt_types::comments::CommentCreateMutation;
+    use lt_types::inputs::CommentCreateInput;
+    use serde_json::json;
+
     use super::*;
     use crate::client::FakeTransport;
 
     #[test]
-    fn replay_create_returns_server_comment() {
+    fn comment_create_replay_returns_server_comment() {
         let transport = FakeTransport::new(vec![json!({
             "commentCreate": { "success": true, "comment": {
                 "id": "c1", "body": "hi",
@@ -80,14 +58,41 @@ mod tests {
                 "issueId": "i1"
             }}
         })]);
-        let created = replay_create(
+        let created = execute::<CommentCreateMutation>(
             &transport,
-            json!({ "input": { "issueId": "i1", "body": "hi" } }),
+            lt_types::comments::CommentCreateVariables {
+                input: CommentCreateInput {
+                    issue_id: "i1".to_string(),
+                    body: "hi".to_string(),
+                },
+            },
         )
         .unwrap();
         assert_eq!(created.id.inner(), "c1");
         assert_eq!(created.user.unwrap().name, "Ada");
         assert_eq!(transport.variables(0)["input"]["issueId"], json!("i1"));
+    }
+
+    #[test]
+    fn comment_create_replay_rejects_success_false() {
+        let transport = FakeTransport::new(vec![json!({
+            "commentCreate": { "success": false, "comment": {
+                "id": "c1", "body": "hi",
+                "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+                "user": null, "issueId": "i1"
+            }}
+        })]);
+        let err = execute::<CommentCreateMutation>(
+            &transport,
+            lt_types::comments::CommentCreateVariables {
+                input: CommentCreateInput {
+                    issue_id: "i1".to_string(),
+                    body: "hi".to_string(),
+                },
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("commentCreate"));
     }
 
     fn comment_node(id: &str, body: &str) -> serde_json::Value {

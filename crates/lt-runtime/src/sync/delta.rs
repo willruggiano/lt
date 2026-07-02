@@ -1,8 +1,9 @@
 use anyhow::Result;
 use lt_storage::db;
-use lt_types::issues::{IssuesQuery, query};
+use lt_types::issues::{IssueFilterValue, IssueSortValue, IssuesQuery, IssuesVariables};
+use lt_types::pagination::Page;
 use lt_types::types::Issue;
-use lt_upstream::client::{GraphqlTransport, HttpTransport, query_as};
+use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
 use serde_json::json;
 
 /// Fetch one page of issues updated after `since` (an RFC3339 timestamp).
@@ -10,7 +11,7 @@ fn fetch_page(
     transport: &dyn GraphqlTransport,
     since: &str,
     after: Option<&str>,
-) -> Result<(Vec<Issue>, bool, Option<String>)> {
+) -> Result<Page<Issue>> {
     // Request all states including completed/archived so delta picks up
     // changes to previously-completed issues.
     let filter = json!({
@@ -19,20 +20,14 @@ fn fetch_page(
 
     let sort = json!([{ "updatedAt": { "order": "Descending" } }]);
 
-    let variables = json!({
-        "filter": filter,
-        "sort": sort,
-        "first": 250,
-        "after": after,
-    });
+    let variables = IssuesVariables {
+        filter: Some(IssueFilterValue(filter)),
+        sort: Some(IssueSortValue(sort)),
+        first: Some(250),
+        after: after.map(ToOwned::to_owned),
+    };
 
-    let data: IssuesQuery = query_as(transport, &query(), variables)?;
-    let conn = data.issues;
-    Ok((
-        conn.nodes,
-        conn.page_info.has_next_page,
-        conn.page_info.end_cursor,
-    ))
+    execute::<IssuesQuery>(transport, variables)
 }
 
 /// Run incremental (delta) sync.
@@ -77,10 +72,9 @@ mod tests {
                 "pageInfo": { "hasNextPage": false, "endCursor": null }
             }
         })]);
-        let (issues, has_next, _end) =
-            fetch_page(&transport, "2026-01-01T00:00:00Z", None).unwrap();
-        assert_eq!(issues.len(), 1);
-        assert!(!has_next);
+        let page = fetch_page(&transport, "2026-01-01T00:00:00Z", None).unwrap();
+        assert_eq!(page.nodes.len(), 1);
+        assert!(!page.info.has_next_page);
 
         let vars = transport.variables(0);
         assert_eq!(

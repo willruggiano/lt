@@ -1528,7 +1528,6 @@ dependencies = [
  "lt-types",
  "open",
  "rand 0.10.1",
- "serde",
  "serde_json",
  "sha2 0.11.0",
  "tracing",
