@@ -8,18 +8,15 @@
     clippy::doc_markdown
 )]
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::{env, fs};
 
-use graphql_parser::schema::{Definition, Document, TypeDefinition};
+use lt_schema_codegen::{
+    SortFieldSpec, extract_input_object_fields, to_pascal_case, validate_sort_fields,
+};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use serde::Deserialize;
-
-// Shared with lt-types/build.rs: SortFieldSpec, base_type_name,
-// extract_input_object_fields, validate_sort_fields, to_pascal_case.
-include!("../../build/schema_codegen.rs");
 
 // ---------------------------------------------------------------------------
 // Allowlist config types
@@ -456,10 +453,6 @@ fn main() {
             .display()
     );
     println!("cargo:rerun-if-changed=build.rs");
-    println!(
-        "cargo:rerun-if-changed={}",
-        manifest.join("../../build/schema_codegen.rs").display()
-    );
 
     // -----------------------------------------------------------------------
     // Load the allowlist

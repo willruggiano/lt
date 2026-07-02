@@ -15,10 +15,10 @@ chrono = { workspace = true, features = ["serde"] }
 
 [build-dependencies]
 serde.workspace = true
+lt-schema-codegen.workspace = true
 # Crate-specific: lt-types registers the cynic schema and generates the
 # SortField/build_sort code from the GraphQL schema + sort allowlist.
 cynic-codegen = "3.13"
-graphql-parser = "0.4"
 prettyplease = "0.2"
 proc-macro2 = "1"
 quote = "1"
