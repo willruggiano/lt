@@ -445,8 +445,8 @@ mod tests {
     use super::{sample_base_issue as base_issue, *};
 
     fn db_with_issue(id: &str) -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&mut conn).unwrap();
         crate::db::upsert_issues(&conn, &[base_issue(id)]).unwrap();
         conn
     }
@@ -526,8 +526,8 @@ mod tests {
 
     #[test]
     fn enqueue_create_inserts_temp_row_and_command() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&mut conn).unwrap();
         let mut issue = base_issue("temp");
         issue.id = "local:abc".into();
         issue.identifier = "NEW".to_string();
@@ -558,8 +558,8 @@ mod tests {
 
     #[test]
     fn ack_create_rewrites_temp_id_to_server_id() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&mut conn).unwrap();
         let mut issue = base_issue("temp");
         issue.id = "local:abc".into();
         let input = IssueCreateInput {

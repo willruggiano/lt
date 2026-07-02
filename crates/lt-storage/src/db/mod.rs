@@ -14,7 +14,8 @@ pub use issues::{
     search_issues_like, set_meta, set_synced_viewer, synced_viewer, upsert_issues,
 };
 pub use rusqlite::Connection;
-use rusqlite::Params;
+use rusqlite::{Params, Transaction};
+use rusqlite_migration::{HookResult, M, Migrations};
 
 /// Parse a stored RFC3339 timestamp column into the wire [`DateTime`](lt_types::scalars::DateTime)
 /// scalar via its `FromStr` impl. Storage always writes
@@ -48,14 +49,13 @@ pub fn db_path() -> Result<PathBuf> {
 }
 
 /// Whether `column` exists on `table`.
-fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
         rusqlite::params![table, column],
         |row| row.get::<_, i64>(0),
     )
-    .unwrap_or(0)
-        > 0
+    .map(|n| n > 0)
 }
 
 /// Adds a column to `table` if it does not already exist.
@@ -64,92 +64,127 @@ fn add_column_if_absent(
     table: &str,
     column: &str,
     alter_sql: &str,
-) -> Result<()> {
-    if !has_column(conn, table, column) {
-        conn.execute_batch(alter_sql)
-            .with_context(|| format!("failed to add {column} column"))?;
+) -> rusqlite::Result<()> {
+    if !has_column(conn, table, column)? {
+        conn.execute_batch(alter_sql)?;
     }
     Ok(())
 }
 
 /// Drops a denormalized column left over from an earlier schema. No-op on a
 /// fresh database that never had it.
-fn drop_column_if_present(conn: &Connection, table: &str, column: &str) -> Result<()> {
-    if has_column(conn, table, column) {
-        conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))
-            .with_context(|| format!("failed to drop {column} column"))?;
+fn drop_column_if_present(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+    if has_column(conn, table, column)? {
+        conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))?;
     }
     Ok(())
 }
 
-/// Creates the base schema (tables, FTS index, and triggers) if it is absent.
+/// Migration 1's unconditional DDL: `issues`, `sync_meta`, the FTS5 index and
+/// its sync triggers, and `issue_comments`. Runs as the migration's `up` SQL,
+/// before [`migrate_v1_hook`].
 ///
 /// `issues` holds only the issue's intrinsic columns plus FK columns (added by
-/// migrations); referenced entity names live in their own tables and are joined
+/// the hook); referenced entity names live in their own tables and are joined
 /// back into the fragment read model.
-fn create_base_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS issues (
-            id               TEXT PRIMARY KEY,
-            identifier       TEXT NOT NULL,
-            title            TEXT NOT NULL,
-            priority_label   TEXT NOT NULL,
-            created_at       TEXT NOT NULL,
-            updated_at       TEXT NOT NULL,
-            synced_at        TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS sync_meta (
-            key   TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS issues_fts USING fts5(
-            identifier,
-            title,
-            content='issues',
-            content_rowid='rowid'
-        );
-        CREATE TRIGGER IF NOT EXISTS issues_ai AFTER INSERT ON issues BEGIN
-            INSERT INTO issues_fts(rowid, identifier, title)
-            VALUES (new.rowid, new.identifier, new.title);
-        END;
-        CREATE TRIGGER IF NOT EXISTS issues_ad AFTER DELETE ON issues BEGIN
-            INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
-            VALUES ('delete', old.rowid, old.identifier, old.title);
-        END;
-        CREATE TRIGGER IF NOT EXISTS issues_au AFTER UPDATE ON issues BEGIN
-            INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
-            VALUES ('delete', old.rowid, old.identifier, old.title);
-            INSERT INTO issues_fts(rowid, identifier, title)
-            VALUES (new.rowid, new.identifier, new.title);
-        END;
-        CREATE TABLE IF NOT EXISTS issue_comments (
-            id          TEXT PRIMARY KEY,
-            issue_id    TEXT NOT NULL,
-            body        TEXT NOT NULL,
-            user_id     TEXT,
-            created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL,
-            synced_at   TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_issue_comments_issue_id
-            ON issue_comments (issue_id);
-        CREATE INDEX IF NOT EXISTS idx_issue_comments_created_at
-            ON issue_comments (issue_id, created_at);",
-    )
-    .context("failed to run migrations")?;
+const MIGRATION_1_BASE_SCHEMA: &str = "\
+    CREATE TABLE IF NOT EXISTS issues (
+        id               TEXT PRIMARY KEY,
+        identifier       TEXT NOT NULL,
+        title            TEXT NOT NULL,
+        priority_label   TEXT NOT NULL,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        synced_at        TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS sync_meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS issues_fts USING fts5(
+        identifier,
+        title,
+        content='issues',
+        content_rowid='rowid'
+    );
+    CREATE TRIGGER IF NOT EXISTS issues_ai AFTER INSERT ON issues BEGIN
+        INSERT INTO issues_fts(rowid, identifier, title)
+        VALUES (new.rowid, new.identifier, new.title);
+    END;
+    CREATE TRIGGER IF NOT EXISTS issues_ad AFTER DELETE ON issues BEGIN
+        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
+        VALUES ('delete', old.rowid, old.identifier, old.title);
+    END;
+    CREATE TRIGGER IF NOT EXISTS issues_au AFTER UPDATE ON issues BEGIN
+        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
+        VALUES ('delete', old.rowid, old.identifier, old.title);
+        INSERT INTO issues_fts(rowid, identifier, title)
+        VALUES (new.rowid, new.identifier, new.title);
+    END;
+    CREATE TABLE IF NOT EXISTS issue_comments (
+        id          TEXT PRIMARY KEY,
+        issue_id    TEXT NOT NULL,
+        body        TEXT NOT NULL,
+        user_id     TEXT,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        synced_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_issue_comments_issue_id
+        ON issue_comments (issue_id);
+    CREATE INDEX IF NOT EXISTS idx_issue_comments_created_at
+        ON issue_comments (issue_id, created_at);";
+
+/// Adds the intrinsic and relational FK columns `issues` gained after the
+/// initial schema. The FK columns are what the read model joins through to
+/// the entity tables instead of reading denormalized name columns.
+fn migrate_v1_add_issue_columns(tx: &Transaction) -> HookResult {
+    add_column_if_absent(
+        tx,
+        "issues",
+        "description",
+        "ALTER TABLE issues ADD COLUMN description TEXT;",
+    )?;
+    add_column_if_absent(
+        tx,
+        "issues",
+        "parent_id",
+        "ALTER TABLE issues ADD COLUMN parent_id TEXT;",
+    )?;
+    for (col, sql) in [
+        ("team_id", "ALTER TABLE issues ADD COLUMN team_id TEXT;"),
+        ("state_id", "ALTER TABLE issues ADD COLUMN state_id TEXT;"),
+        (
+            "assignee_id",
+            "ALTER TABLE issues ADD COLUMN assignee_id TEXT;",
+        ),
+        (
+            "creator_id",
+            "ALTER TABLE issues ADD COLUMN creator_id TEXT;",
+        ),
+        (
+            "project_id",
+            "ALTER TABLE issues ADD COLUMN project_id TEXT;",
+        ),
+        ("cycle_id", "ALTER TABLE issues ADD COLUMN cycle_id TEXT;"),
+    ] {
+        add_column_if_absent(tx, "issues", col, sql)?;
+    }
     Ok(())
 }
 
 /// Creates the relational entity tables, the issue/label join table, the
-/// pending-overlay table, and the mutation outbox if they are absent.
+/// pending-overlay table, and the mutation outbox.
 ///
 /// The entity tables are the normalized "base" the sync layer populates from
-/// fetched issue fragments and the read model joins back into the fragment type.
-/// `pending_overlay` is the local-intent half of the base/overlay split: a
-/// delta write touches only the base tables, never it. `outbox` is the
-/// paired command log the sync drainer replays against the API.
-fn create_relational_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+/// fetched issue fragments and the read model joins back into the fragment
+/// type. `pending_overlay` is the local-intent half of the base/overlay
+/// split: a delta write touches only the base tables, never it. `outbox` is
+/// the paired command log the sync drainer replays against the API. The
+/// `issues` indexes here need `team_id`/`state_id` to already exist, hence
+/// this runs after [`migrate_v1_add_issue_columns`].
+fn migrate_v1_relational_schema(tx: &Transaction) -> HookResult {
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, name TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS workflow_states (id TEXT PRIMARY KEY, name TEXT NOT NULL);
@@ -183,54 +218,18 @@ fn create_relational_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_issues_state_id  ON issues (state_id);
         CREATE INDEX IF NOT EXISTS idx_issues_team_state ON issues (team_id, state_id);
         CREATE INDEX IF NOT EXISTS idx_issues_updated_at ON issues (updated_at);",
-    )
-    .context("failed to create relational schema")?;
+    )?;
     Ok(())
 }
 
-pub fn run_migrations(conn: &Connection) -> Result<()> {
-    create_base_schema(conn)?;
-
-    // Intrinsic columns added after the initial schema.
-    add_column_if_absent(
-        conn,
-        "issues",
-        "description",
-        "ALTER TABLE issues ADD COLUMN description TEXT;",
-    )?;
-    add_column_if_absent(
-        conn,
-        "issues",
-        "parent_id",
-        "ALTER TABLE issues ADD COLUMN parent_id TEXT;",
-    )?;
-
-    // Relational FK columns: the read model joins through these to the entity
-    // tables instead of reading denormalized name columns.
-    for (col, sql) in [
-        ("team_id", "ALTER TABLE issues ADD COLUMN team_id TEXT;"),
-        ("state_id", "ALTER TABLE issues ADD COLUMN state_id TEXT;"),
-        (
-            "assignee_id",
-            "ALTER TABLE issues ADD COLUMN assignee_id TEXT;",
-        ),
-        (
-            "creator_id",
-            "ALTER TABLE issues ADD COLUMN creator_id TEXT;",
-        ),
-        (
-            "project_id",
-            "ALTER TABLE issues ADD COLUMN project_id TEXT;",
-        ),
-        ("cycle_id", "ALTER TABLE issues ADD COLUMN cycle_id TEXT;"),
-    ] {
-        add_column_if_absent(conn, "issues", col, sql)?;
-    }
-
-    create_relational_schema(conn)?;
-
-    // Drop the denormalized name columns now that the read model joins. A fresh
-    // database never had them; an existing one is migrated in place.
+/// Drops the denormalized columns superseded by the relational schema: the
+/// `issues` name columns (now joined from the entity tables) and
+/// `issue_comments.author_name` (now the relational `user_id` FK). A fresh
+/// database never had any of them; an existing one is migrated in place.
+/// Existing comment rows lose their author (`user_id` NULL) -- the DB is a
+/// resyncable cache, and un-acked `local:` optimistic rows are untouched by
+/// this column swap.
+fn migrate_v1_drop_legacy_columns(tx: &Transaction) -> HookResult {
     for col in [
         "state_name",
         "assignee_name",
@@ -242,32 +241,60 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         "creator_name",
         "parent_identifier",
     ] {
-        drop_column_if_present(conn, "issues", col)?;
+        drop_column_if_present(tx, "issues", col)?;
     }
-
-    // `issue_comments` moved from a flattened `author_name` column to the
-    // relational `user_id` FK (the ADR's model): a fresh database never had
-    // `author_name`; an existing one is migrated in place. Existing rows lose
-    // their author (`user_id` NULL) -- the DB is a resyncable cache, and
-    // un-acked `local:` optimistic rows are untouched by this column swap.
     add_column_if_absent(
-        conn,
+        tx,
         "issue_comments",
         "user_id",
         "ALTER TABLE issue_comments ADD COLUMN user_id TEXT;",
     )?;
-    drop_column_if_present(conn, "issue_comments", "author_name")?;
-
+    drop_column_if_present(tx, "issue_comments", "author_name")?;
     Ok(())
+}
+
+/// The conditional half of migration 1, run as its hook (i.e. after
+/// [`MIGRATION_1_BASE_SCHEMA`], inside the same migration transaction):
+/// column add/drop probes and the relational schema batch. SQLite has no
+/// `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so these steps stay
+/// hand-written rather than plain `M::up` SQL.
+///
+/// Migration 1 must be idempotent against *any* prior schema shape: a
+/// database from before this crate adopted `rusqlite_migration` arrives at
+/// `user_version = 0`, indistinguishable from a fresh database, and this is
+/// the DDL the old hand-rolled probing code used to run on every open (see
+/// docs/design/type-safe-sql-adr.md, "Migrations"). All future schema changes
+/// are plain versioned `M::up` entries appended after this one -- this hook
+/// is not a pattern to repeat.
+fn migrate_v1_hook(tx: &Transaction) -> HookResult {
+    migrate_v1_add_issue_columns(tx)?;
+    migrate_v1_relational_schema(tx)?;
+    migrate_v1_drop_legacy_columns(tx)?;
+    Ok(())
+}
+
+/// The migration list: the single schema source for both `open_db()` and the
+/// `sql_validation` gate (docs/design/type-safe-sql-adr.md, "Migrations").
+fn migrations() -> Migrations<'static> {
+    Migrations::new(vec![M::up_with_hook(
+        MIGRATION_1_BASE_SCHEMA,
+        migrate_v1_hook,
+    )])
+}
+
+pub fn run_migrations(conn: &mut Connection) -> Result<()> {
+    migrations()
+        .to_latest(conn)
+        .context("failed to run migrations")
 }
 
 /// Open a connection to the SQLite database at `uri` -- a filesystem path or a
 /// `file:...?mode=memory` URI -- and run migrations.
 pub fn open_db(uri: impl AsRef<Path>) -> Result<Connection> {
     let uri = uri.as_ref();
-    let conn = Connection::open(uri)
+    let mut conn = Connection::open(uri)
         .with_context(|| format!("could not open database at {}", uri.display()))?;
-    run_migrations(&conn)?;
+    run_migrations(&mut conn)?;
     Ok(conn)
 }
 
@@ -318,8 +345,8 @@ mod tests {
 
     #[test]
     fn query_issue_by_id_resolves_and_misses() {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
         upsert_issues(&conn, &[outbox::sample_base_issue("9")]).unwrap();
 
         let found = query_issue_by_id(&conn, "9").unwrap().unwrap();
@@ -328,5 +355,33 @@ mod tests {
         assert_eq!(found.state.name, "Todo");
 
         assert!(query_issue_by_id(&conn, "absent").unwrap().is_none());
+    }
+
+    #[test]
+    fn migrations_are_valid() {
+        migrations().validate().unwrap();
+    }
+
+    /// A legacy database from before this crate adopted `rusqlite_migration`
+    /// arrives with `user_version = 0`, indistinguishable from a fresh
+    /// database, so running migration 1 a second time against an
+    /// already-migrated database must be a no-op, not an error.
+    #[test]
+    fn migration_1_is_idempotent_against_an_already_migrated_database() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        conn.pragma_update(None, "user_version", 0).unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        assert!(has_column(&conn, "issues", "team_id").unwrap());
+        let sync_meta_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sync_meta'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sync_meta_exists, 1);
     }
 }

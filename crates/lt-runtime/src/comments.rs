@@ -52,8 +52,8 @@ mod tests {
     }
 
     fn conn_with_stale() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        db::run_migrations(&conn).unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::run_migrations(&mut conn).unwrap();
         db::upsert_comments(
             &conn,
             &[lt_types::comments::Comment {

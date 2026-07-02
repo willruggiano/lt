@@ -73,8 +73,8 @@ mod tests {
     use super::*;
 
     fn db_with_issue(id: &str) -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        lt_storage::db::run_migrations(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        lt_storage::db::run_migrations(&mut conn).unwrap();
         lt_storage::db::upsert_issues(&conn, &[base_issue(id)]).unwrap();
         conn
     }
@@ -136,8 +136,8 @@ mod tests {
 
     #[test]
     fn drains_issue_create_and_rewrites_temp_id() {
-        let conn = Connection::open_in_memory().unwrap();
-        lt_storage::db::run_migrations(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        lt_storage::db::run_migrations(&mut conn).unwrap();
         let mut issue = base_issue("temp");
         issue.id = "local:abc".into();
         issue.identifier = "NEW".to_string();

@@ -24,6 +24,8 @@ tracing.workspace = true
 # Crate-specific: the search parser and the sim generator live only here.
 chumsky = "0.13"
 fake = { version = "5.1.0", default-features = false, optional = true }
+# Crate-specific: only lt-storage runs migrations.
+rusqlite_migration = "2.6"
 
 [build-dependencies]
 serde.workspace = true

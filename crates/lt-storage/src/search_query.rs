@@ -940,8 +940,8 @@ mod run_query_tests {
     }
 
     fn test_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        db::run_migrations(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::run_migrations(&mut conn).unwrap();
 
         let mut r1 = issue("1", "fix oauth login");
         r1.priority_label = "Urgent".to_string();

@@ -382,8 +382,8 @@ mod tests {
     #[test]
     fn round_trips_through_sqlite() {
         let d = generate(5, 30);
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&conn).unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&mut conn).unwrap();
         db::upsert_issues(&conn, &d.issues).unwrap();
         db::upsert_comments(&conn, &d.comments).unwrap();
         // sanity: relational base reconstructs the rows.
