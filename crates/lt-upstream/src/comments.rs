@@ -81,7 +81,8 @@ mod tests {
             "commentCreate": { "success": true, "comment": {
                 "id": "c1", "body": "hi",
                 "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
-                "user": { "id": "u1", "name": "Ada" }
+                "user": { "id": "u1", "name": "Ada" },
+                "issueId": "i1"
             }}
         })]);
         let created = replay_create(
@@ -98,7 +99,8 @@ mod tests {
         json!({
             "id": id, "body": body,
             "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
-            "user": { "id": "u1", "name": "Alice" }
+            "user": { "id": "u1", "name": "Alice" },
+            "issueId": "i1"
         })
     }
 

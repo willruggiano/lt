@@ -249,8 +249,9 @@ pub fn enqueue_comment_create(
         created_at: now,
         updated_at: now,
         user: synced_viewer(&tx)?,
+        issue_id: Some(input.issue_id.clone()),
     };
-    crate::db::comments::upsert_comments(&tx, &input.issue_id, std::slice::from_ref(&comment))?;
+    crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
     // entity_id is the temp comment id so the ack can find and replace the row.
     insert_pending(&tx, OP_COMMENT_CREATE, temp_id, &json!({ "input": input }))?;
     tx.commit().context("failed to commit comment create")?;
@@ -390,7 +391,15 @@ pub fn ack_comment_create(conn: &Connection, seq: i64, ack: &CommentAck) -> Resu
         "DELETE FROM issue_comments WHERE id = ?1",
         params![ack.temp_id],
     )?;
-    crate::db::comments::upsert_comments(&tx, ack.issue_id, std::slice::from_ref(ack.comment))?;
+    // Stamp the issue id from the ack rather than trusting the server's
+    // comment payload for it: the mutation's `issueId` is nullable in the
+    // schema, but the outbox command it replays always carries the issue it
+    // was queued against.
+    let comment = lt_types::comments::Comment {
+        issue_id: Some(ack.issue_id.to_string()),
+        ..ack.comment.clone()
+    };
+    crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
     delete_command(&tx, seq)?;
     tx.commit().context("failed to commit comment-create ack")?;
     Ok(())
@@ -632,6 +641,7 @@ mod tests {
                 id: lt_types::Id::new("u-ada"),
                 name: "Ada".to_string(),
             }),
+            issue_id: Some("1".to_string()),
         };
         ack_comment_create(
             &conn,

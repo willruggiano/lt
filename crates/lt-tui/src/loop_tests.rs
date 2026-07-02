@@ -318,6 +318,7 @@ fn poll_detail_comment_events_done_updates_detail() {
         created_at: "2026-01-06T00:00:00Z".parse().unwrap(),
         updated_at: "2026-01-06T00:00:00Z".parse().unwrap(),
         user: None,
+        issue_id: Some("i1".to_string()),
     }]))
     .unwrap();
     app.detail_comment_rx = Some(rx);

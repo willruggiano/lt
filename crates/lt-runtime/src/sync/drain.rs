@@ -192,7 +192,8 @@ mod tests {
             "commentCreate": { "success": true, "comment": {
                 "id": "c-real", "body": "hi",
                 "createdAt": "2026-01-03T00:00:00Z", "updatedAt": "2026-01-03T00:00:00Z",
-                "user": { "id": "u1", "name": "Ada" }
+                "user": { "id": "u1", "name": "Ada" },
+                "issueId": "1"
             }}
         })]);
         drain(&conn, &transport).unwrap();

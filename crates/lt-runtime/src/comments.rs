@@ -20,7 +20,7 @@ pub fn sync(
 
     // Replace the existing comments for this issue with the fresh set.
     db::delete_comments_for_issue(conn, issue_id)?;
-    db::upsert_comments(conn, issue_id, &comments)?;
+    db::upsert_comments(conn, &comments)?;
     Ok(())
 }
 
@@ -40,7 +40,8 @@ mod tests {
                 json!({
                     "id": id, "body": "b",
                     "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
-                    "user": { "id": "u1", "name": "Alice" }
+                    "user": { "id": "u1", "name": "Alice" },
+                    "issueId": "i1"
                 })
             })
             .collect();
@@ -55,13 +56,13 @@ mod tests {
         db::run_migrations(&conn).unwrap();
         db::upsert_comments(
             &conn,
-            "i1",
             &[lt_types::comments::Comment {
                 id: lt_types::Id::new("old"),
                 body: "stale".to_string(),
                 created_at: "2025-01-01T00:00:00Z".parse().unwrap(),
                 updated_at: "2025-01-01T00:00:00Z".parse().unwrap(),
                 user: None,
+                issue_id: Some("i1".to_string()),
             }],
         )
         .unwrap();

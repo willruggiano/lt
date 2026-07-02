@@ -56,6 +56,9 @@ pub struct Comment {
     pub created_at: DateTime,
     pub updated_at: DateTime,
     pub user: Option<User>,
+    /// The comment's issue, nullable since a comment can attach to something
+    /// other than an issue (e.g. a project update).
+    pub issue_id: Option<String>,
 }
 
 impl Comment {
@@ -111,6 +114,7 @@ mod tests {
         let built = query();
         assert!(built.contains("$id: String!"));
         assert!(built.contains("$after: String"));
+        assert!(built.contains("issueId"));
     }
 
     #[test]
@@ -128,6 +132,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
             updated_at: "2026-01-01T00:00:00Z".parse().unwrap(),
             user: None,
+            issue_id: Some("i1".to_string()),
         };
         assert_eq!(comment.author(), "unknown");
     }

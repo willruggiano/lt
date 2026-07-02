@@ -29,9 +29,7 @@ pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     let dataset = generate(args.seed, args.size);
     let conn = db::open_db(db::db_path()?)?;
     db::upsert_issues(&conn, &dataset.issues)?;
-    for (issue_id, comment) in &dataset.comments {
-        db::upsert_comments(&conn, issue_id, std::slice::from_ref(comment))?;
-    }
+    db::upsert_comments(&conn, &dataset.comments)?;
     db::set_meta(&conn, "last_synced_at", &Utc::now().to_rfc3339())?;
     if let Some(name) = dataset
         .issues

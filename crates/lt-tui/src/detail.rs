@@ -154,6 +154,7 @@ impl App {
                     id: lt_types::Id::new(String::new()),
                     name,
                 }),
+                issue_id: Some(issue_id.clone()),
             });
         }
 

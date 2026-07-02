@@ -6,10 +6,12 @@ use rusqlite::{Connection, params};
 
 use crate::db::parse_datetime_column;
 
-/// Insert or replace a slice of comments for `issue_id`: upsert each comment's
-/// author into the `users` table (relational storage, no more flattened
-/// `author_name`), then the comment row, stamping `synced_at` to now (UTC).
-pub fn upsert_comments(conn: &Connection, issue_id: &str, comments: &[Comment]) -> Result<()> {
+/// Insert or replace a slice of comments: upsert each comment's author into
+/// the `users` table (relational storage, no more flattened `author_name`),
+/// then the comment row, stamping `synced_at` to now (UTC). Errors if a
+/// comment has no `issue_id` -- a comment reaching storage without one is a
+/// bug, since `issue_comments` is keyed on it.
+pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
     let synced_at = Utc::now().to_rfc3339();
     let mut stmt = conn
         .prepare(
@@ -20,6 +22,10 @@ pub fn upsert_comments(conn: &Connection, issue_id: &str, comments: &[Comment]) 
         .context("failed to prepare upsert_comments statement")?;
 
     for c in comments {
+        let issue_id = c
+            .issue_id
+            .as_deref()
+            .with_context(|| format!("comment {} has no issue id", c.id.inner()))?;
         if let Some(user) = &c.user {
             crate::db::issues::upsert_named_entity(
                 conn,
@@ -71,6 +77,7 @@ pub fn query_comments(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>>
                     id: lt_types::Id::new(id),
                     name: user_name.unwrap_or_default(),
                 }),
+                issue_id: Some(issue_id.to_string()),
             })
         })
         .context("failed to execute query_comments")?;
@@ -98,7 +105,7 @@ pub fn delete_comments_for_issue(conn: &Connection, issue_id: &str) -> Result<()
 mod tests {
     use super::*;
 
-    fn comment(id: &str, created_at: &str) -> Comment {
+    fn comment(id: &str, issue_id: &str, created_at: &str) -> Comment {
         Comment {
             id: lt_types::Id::new(id),
             body: format!("body {id}"),
@@ -108,6 +115,7 @@ mod tests {
                 id: lt_types::Id::new("u-alice"),
                 name: "Alice".to_string(),
             }),
+            issue_id: Some(issue_id.to_string()),
         }
     }
 
@@ -122,14 +130,13 @@ mod tests {
         let conn = test_db();
         upsert_comments(
             &conn,
-            "i1",
             &[
-                comment("c2", "2026-01-02T00:00:00Z"),
-                comment("c1", "2026-01-01T00:00:00Z"),
+                comment("c2", "i1", "2026-01-02T00:00:00Z"),
+                comment("c1", "i1", "2026-01-01T00:00:00Z"),
             ],
         )
         .unwrap();
-        upsert_comments(&conn, "i2", &[comment("c3", "2026-01-03T00:00:00Z")]).unwrap();
+        upsert_comments(&conn, &[comment("c3", "i2", "2026-01-03T00:00:00Z")]).unwrap();
 
         let got = query_comments(&conn, "i1").unwrap();
         assert_eq!(
@@ -138,6 +145,7 @@ mod tests {
         );
         assert_eq!(got[0].body, "body c1");
         assert_eq!(got[0].author(), "Alice");
+        assert_eq!(got[0].issue_id.as_deref(), Some("i1"));
     }
 
     #[test]
@@ -149,11 +157,11 @@ mod tests {
     #[test]
     fn upsert_replaces_existing_by_id() {
         let conn = test_db();
-        upsert_comments(&conn, "i1", &[comment("c1", "2026-01-01T00:00:00Z")]).unwrap();
+        upsert_comments(&conn, &[comment("c1", "i1", "2026-01-01T00:00:00Z")]).unwrap();
 
-        let mut updated = comment("c1", "2026-01-01T00:00:00Z");
+        let mut updated = comment("c1", "i1", "2026-01-01T00:00:00Z");
         updated.body = "edited".to_string();
-        upsert_comments(&conn, "i1", &[updated]).unwrap();
+        upsert_comments(&conn, &[updated]).unwrap();
 
         let got = query_comments(&conn, "i1").unwrap();
         assert_eq!(got.len(), 1);
@@ -163,19 +171,27 @@ mod tests {
     #[test]
     fn upsert_with_no_author_leaves_user_none() {
         let conn = test_db();
-        let mut c = comment("c1", "2026-01-01T00:00:00Z");
+        let mut c = comment("c1", "i1", "2026-01-01T00:00:00Z");
         c.user = None;
-        upsert_comments(&conn, "i1", &[c]).unwrap();
+        upsert_comments(&conn, &[c]).unwrap();
 
         let got = query_comments(&conn, "i1").unwrap();
         assert_eq!(got[0].author(), "unknown");
     }
 
     #[test]
+    fn upsert_with_no_issue_id_errors() {
+        let conn = test_db();
+        let mut c = comment("c1", "i1", "2026-01-01T00:00:00Z");
+        c.issue_id = None;
+        assert!(upsert_comments(&conn, &[c]).is_err());
+    }
+
+    #[test]
     fn delete_removes_only_target_issue() {
         let conn = test_db();
-        upsert_comments(&conn, "i1", &[comment("c1", "2026-01-01T00:00:00Z")]).unwrap();
-        upsert_comments(&conn, "i2", &[comment("c2", "2026-01-02T00:00:00Z")]).unwrap();
+        upsert_comments(&conn, &[comment("c1", "i1", "2026-01-01T00:00:00Z")]).unwrap();
+        upsert_comments(&conn, &[comment("c2", "i2", "2026-01-02T00:00:00Z")]).unwrap();
 
         delete_comments_for_issue(&conn, "i1").unwrap();
 
