@@ -7,12 +7,6 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use crate::detail::IssueDetailView;
 use crate::{App, Status, markdown};
 
-/// A comment's `created_at` is the `DateTime` scalar end-to-end; render its
-/// `YYYY-MM-DD` date part.
-fn comment_date(dt: &lt_types::scalars::DateTime) -> String {
-    dt.0.format("%Y-%m-%d").to_string()
-}
-
 /// Render the issue detail as a floating overlay over the right ~60% of the
 /// content area. The underlying issue list is drawn at full width first, so
 /// column widths are never affected by opening the detail view.
@@ -162,11 +156,7 @@ fn build_detail_lines(d: &IssueDetailView) -> Vec<Line<'static>> {
         for comment in &d.comments {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!(
-                    "{} on {}",
-                    comment.author(),
-                    comment_date(&comment.created_at)
-                ),
+                format!("{} on {}", comment.author(), comment.created_at.date()),
                 Style::new().add_modifier(Modifier::BOLD),
             )));
             lines.extend(markdown::render(&comment.body));

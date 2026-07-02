@@ -71,13 +71,8 @@ pub(super) fn row_cells(issue: &Issue) -> [String; 7] {
             .as_ref()
             .map_or_else(|| "-".to_string(), |u| u.name.clone()),
         issue.team.name.clone(),
-        date(&issue.updated_at),
+        issue.updated_at.date(),
     ]
-}
-
-/// Render a wire timestamp as its `YYYY-MM-DD` date part.
-pub(super) fn date(dt: &lt_types::scalars::DateTime) -> String {
-    dt.0.format("%Y-%m-%d").to_string()
 }
 
 // Returns the column index (0-6) that corresponds to the active sort field, if any.

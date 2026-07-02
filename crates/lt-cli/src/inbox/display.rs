@@ -5,23 +5,6 @@ use chrono::Utc;
 use lt_runtime::notifications::Notification;
 use lt_runtime::text;
 use lt_types::notifications::NotificationCategory;
-use lt_types::scalars::DateTime;
-
-/// Format a wire timestamp as a relative age string like '5m ago', '2h ago', '3d ago'.
-/// `now` is the reference wall-clock time; the binary passes [`now`], tests a
-/// fixed value.
-fn relative_age(dt: &DateTime, now: chrono::DateTime<Utc>) -> String {
-    let diff = (now - dt.0).num_seconds().max(0);
-    if diff < 60 {
-        format!("{diff}s ago")
-    } else if diff < 3600 {
-        format!("{}m ago", diff / 60)
-    } else if diff < 86400 {
-        format!("{}h ago", diff / 3600)
-    } else {
-        format!("{}d ago", diff / 86400)
-    }
-}
 
 /// The current wall-clock time.
 pub fn now() -> chrono::DateTime<Utc> {
@@ -117,7 +100,7 @@ pub fn print_table(
         // Truncate title if needed
         let title = text::truncate(raw_title, title_w);
         let actor = n.actor().map_or("-", |a| a.name.as_str());
-        let age = relative_age(n.created_at(), now);
+        let age = n.created_at().relative_age(now);
 
         writeln!(
             out,
@@ -133,27 +116,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_relative_age_formatting() {
-        // Fixed "now" so the age is deterministic.
-        // 2020-01-01T00:00:00Z is 0, 2020-01-02T00:00:00Z is one day later.
-        let now = "2020-01-02T01:00:00Z".parse::<DateTime>().unwrap().0;
-        assert_eq!(
-            relative_age(&"2020-01-01T00:00:00Z".parse().unwrap(), now),
-            "1d ago"
-        );
-        assert_eq!(
-            relative_age(&"2020-01-02T00:00:00Z".parse().unwrap(), now),
-            "1h ago"
-        );
-        assert_eq!(
-            relative_age(&"2020-01-02T00:59:30Z".parse().unwrap(), now),
-            "30s ago"
-        );
-    }
-
-    #[test]
     fn print_table_snapshot() {
         use lt_types::notifications::{BaseNotification, IssueNotification};
+        use lt_types::scalars::DateTime;
         use lt_types::types::User;
 
         use crate::issues::display::tests::sample_issue;

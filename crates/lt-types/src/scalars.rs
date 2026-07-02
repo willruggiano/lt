@@ -25,6 +25,29 @@ impl DateTime {
     pub fn to_rfc3339_millis(self) -> String {
         self.0.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     }
+
+    /// Format as a relative age string like '5m ago', '2h ago', '3d ago'.
+    /// `now` is the reference wall-clock time; callers pass the real value,
+    /// tests a fixed one.
+    #[must_use]
+    pub fn relative_age(&self, now: chrono::DateTime<chrono::Utc>) -> String {
+        let diff = (now - self.0).num_seconds().max(0);
+        if diff < 60 {
+            format!("{diff}s ago")
+        } else if diff < 3600 {
+            format!("{}m ago", diff / 60)
+        } else if diff < 86400 {
+            format!("{}h ago", diff / 3600)
+        } else {
+            format!("{}d ago", diff / 86400)
+        }
+    }
+
+    /// Render as its `YYYY-MM-DD` date part.
+    #[must_use]
+    pub fn date(&self) -> String {
+        self.0.format("%Y-%m-%d").to_string()
+    }
 }
 
 /// An issue's `priority: Float!`, decoded straight into `u8` (Linear's
@@ -85,5 +108,39 @@ mod tests {
             err.to_string(),
             "expected none/urgent/high/normal/medium/low or 0-4, got \"bogus\""
         );
+    }
+
+    #[test]
+    fn relative_age_formatting() {
+        // Fixed "now" so the age is deterministic.
+        // 2020-01-01T00:00:00Z is 0, 2020-01-02T00:00:00Z is one day later.
+        let now = "2020-01-02T01:00:00Z".parse::<DateTime>().unwrap().0;
+        assert_eq!(
+            "2020-01-01T00:00:00Z"
+                .parse::<DateTime>()
+                .unwrap()
+                .relative_age(now),
+            "1d ago"
+        );
+        assert_eq!(
+            "2020-01-02T00:00:00Z"
+                .parse::<DateTime>()
+                .unwrap()
+                .relative_age(now),
+            "1h ago"
+        );
+        assert_eq!(
+            "2020-01-02T00:59:30Z"
+                .parse::<DateTime>()
+                .unwrap()
+                .relative_age(now),
+            "30s ago"
+        );
+    }
+
+    #[test]
+    fn date_formats_as_year_month_day() {
+        let dt = "2026-01-09T23:00:00Z".parse::<DateTime>().unwrap();
+        assert_eq!(dt.date(), "2026-01-09");
     }
 }
