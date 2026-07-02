@@ -1,4 +1,4 @@
-# TUI AppEvent Queue and DB-Update Propagation (ENG-32)
+# TUI AppEvent Queue and State Propagation (ENG-32)
 
 ## Status
 
@@ -60,15 +60,16 @@ the scope that changed; whoever displays that scope re-reads it.** Key input
 joins the same queue, making the loop a single blocking wait.
 
 ```text
-  [input thread] ── Key ──────┐
-  [sync worker] ── Sync ──────┤  Sender<AppEvent> (cloned)
-  [login worker] ── Login ────┼──────────────┐
-  [comment refresh] ─ Db(..) ─┤              v
-  [team refresh] ──── Db(..) ─┘      App.events_rx ── apply_app_event
-                                                          |
-  optimistic writers (same thread) ── apply_db_update <───┘ (Db arm)
+  [input thread] ──── Key ───────┐
+  [sync worker] ── Lifecycle ────┤  Sender<AppEvent> (cloned)
+  [login worker] ── Lifecycle ───┼──────────────┐
+  [comment refresh] ─ State(..) ─┤              v
+  [team refresh] ──── State(..) ─┘      App.events_rx ── apply_app_event
+                                                             |
+  optimistic writers (same thread) ── apply_state_event <────┘ (State arm)
                                         |
-                                        └── re-read scope from SQLite if displayed
+                                        └── broadcast to views; each re-reads
+                                            its scopes from SQLite if displayed
 ```
 
 ### Prior art divergence
@@ -81,26 +82,28 @@ the honest adaptation is the channel half of gitui's split, not the
 `Rc<RefCell<VecDeque>>` half. Same-thread propagation needs no queue at all: it
 is a direct call to the same apply function the drain uses (Decision 2).
 
-## Decision 1: event taxonomy — keys, scoped invalidations, lifecycle results
+## Decision 1: event taxonomy — keys, state invalidations, lifecycle results
+
+Three kinds of message, three variants:
 
 ```rust
 // crates/lt-tui/src/lib.rs
-/// A message to the event loop: a key press from the input thread, a database
+/// A message to the event loop: a key press from the input thread, a state
 /// invalidation, or a background-job lifecycle outcome. One channel, one drain.
 pub enum AppEvent {
     /// A key press (KeyEventKind::Press only), raw from crossterm; normalized
     /// at apply time.
     Key(crossterm::event::KeyEvent),
-    /// The named slice of the local database changed; re-read it if displayed.
-    Db(DbUpdate),
-    Sync(SyncEvent),
-    Login(LoginEvent),
+    /// The named slice of application state changed; re-read it if displayed.
+    State(StateEvent),
+    /// A background job finished; carries the outcome, not data.
+    Lifecycle(LifecycleEvent),
 }
 
-/// A payload-free invalidation. Variants carry only the scope id the apply
-/// side needs to decide "is this displayed?" and which query to re-run.
+/// A payload-free invalidation. Variants carry only the scope id a view needs
+/// to decide "is this displayed?" and which query to re-run.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DbUpdate {
+pub enum StateEvent {
     /// The issues read model changed (optimistic edit/create, or sync upsert).
     Issues,
     /// One issue's comment thread changed.
@@ -108,33 +111,41 @@ pub enum DbUpdate {
     /// The team list changed.
     Teams,
     /// One team's workflow states and memberships changed.
-    TeamData { team_id: String },
+    Team { team_id: String },
+}
+
+/// Background-job outcomes: identity, error text, scheduling — not
+/// invalidations. Wraps the `SyncService` trait's vocabulary.
+pub enum LifecycleEvent {
+    Sync(SyncEvent),
+    Login(LoginEvent),
 }
 ```
 
-- **Granularity is per scope (table + owning id)**, not per table and not per
-  row. The apply function needs exactly (a) a displayed-scope check and (b) a
-  query to re-run; `Comments { issue_id }` and `TeamData { team_id }` are the
-  minimal keys for both. `TeamData` deliberately does not split states from
-  members: one trait call writes both (Decision 3), so one event and one paired
-  re-read is honest.
-- **`Sync`/`Login` stay lifecycle events.** They carry identity, error text, and
-  scheduling information that is not a database invalidation. Sync completion
-  does not additionally emit `Db(Issues)`: `apply_sync_event`'s `Done` arm calls
-  `apply_db_update(app, &DbUpdate::Issues)` directly — the unification happens
-  at the function level, without ordering two events that always travel
+- **`StateEvent` granularity is per scope (table + owning id)**, not per table
+  and not per row. A view needs exactly (a) a displayed-scope check and (b) a
+  query to re-run; `Comments { issue_id }` and `Team { team_id }` are the
+  minimal keys for both. `Team` deliberately does not split states from members:
+  one trait call writes both (Decision 3), so one event and one paired re-read
+  is honest.
+- **`Lifecycle` events are not invalidations.** They carry identity, error text,
+  and scheduling information. Sync completion does not additionally emit
+  `State(Issues)`: the `Done` arm of the lifecycle apply calls
+  `apply_state_event(app, &StateEvent::Issues)` directly — the unification
+  happens at the function level, without ordering two events that always travel
   together.
 - `SyncEvent`/`LoginEvent` stay in `lt-runtime/src/sync/service.rs` (the trait's
-  vocabulary); `AppEvent`/`DbUpdate` live in `lib.rs` next to `App`.
+  vocabulary); `AppEvent`/`StateEvent`/`LifecycleEvent` live in `lib.rs` next to
+  `App`.
 
 Rejected alternatives:
 
-| Option                              | Why rejected                                                                                                 |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Payload-carrying wrapper events     | payloads are what make staleness a problem; a payload-free event can only trigger a re-read of current truth |
-| Events carry rowids / entity diffs  | speculative granularity; every consumer re-reads whole scopes anyway                                         |
-| One `DbUpdate::Any`                 | forces every apply on every event; loses the displayed-scope filter                                          |
-| Emit `Db(Issues)` from sync workers | duplicates `SyncEvent::Done`'s outcome across two ordered events                                             |
+| Option                                 | Why rejected                                                                                                 |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Payload-carrying wrapper events        | payloads are what make staleness a problem; a payload-free event can only trigger a re-read of current truth |
+| Events carry rowids / entity diffs     | speculative granularity; every consumer re-reads whole scopes anyway                                         |
+| One `StateEvent::Any`                  | forces every view to re-read everything on every event; loses the displayed-scope filter                     |
+| Emit `State(Issues)` from sync workers | duplicates the sync `Done` outcome across two ordered events                                                 |
 
 `App` gains two non-optional fields, created in `App::new`:
 
@@ -149,52 +160,65 @@ events_rx: mpsc::Receiver<AppEvent>,
 `NewIssueModal.modal_rx`, and the enums `CommentSyncEvent` and `ModalEvent` are
 deleted.
 
-## Decision 2: one propagation path — `apply_db_update` from the drain and from same-thread writers
+## Decision 2: one propagation path — broadcast `StateEvent`s to views that declare their dependencies
 
 ```rust
 // crates/lt-tui/src/lib.rs
 fn apply_app_event(app: &mut App, event: AppEvent) {
     match event {
         AppEvent::Key(key) => handle_key(app, key), // today's Mode router
-        AppEvent::Db(update) => apply_db_update(app, &update),
-        AppEvent::Sync(ev) => sync::apply_sync_event(app, ev),
-        AppEvent::Login(ev) => sync::apply_login_event(app, ev),
+        AppEvent::State(ev) => apply_state_event(app, &ev),
+        AppEvent::Lifecycle(ev) => sync::apply_lifecycle_event(app, ev),
     }
 }
 
-/// The single subscription dispatcher: re-read the named scope from `app.db`
-/// if the UI displays it, else drop. Applies are pure re-reads, hence
-/// idempotent; events carry no data, so stale data cannot be applied by
-/// construction.
-fn apply_db_update(app: &mut App, update: &DbUpdate) {
-    match update {
-        DbUpdate::Issues => {
-            if matches!(app.mode, Mode::List) {
-                app.do_fetch(false); // offset- and selection-preserving
-            }
-        }
-        DbUpdate::Comments { issue_id } => detail::apply_comments_update(app, issue_id),
-        DbUpdate::Teams => new_issue::apply_teams_update(app),
-        DbUpdate::TeamData { team_id } => {
-            new_issue::apply_team_data_update(app, team_id);
-            popup::apply_team_data_update(app, team_id);
-        }
-    }
+/// Broadcast: every view sees every StateEvent and re-reads the scopes it
+/// depends on from `app.db`. Applies are pure re-reads, hence idempotent;
+/// events carry no data, so stale data cannot be applied by construction.
+/// This list changes only when a view is added.
+fn apply_state_event(app: &mut App, ev: &StateEvent) {
+    App::list_on_state_event(app, ev);  // Issues -> do_fetch(false) in List mode
+    detail::on_state_event(app, ev);    // Comments{id} -> re-read if open on id
+    new_issue::on_state_event(app, ev); // Teams, Team{id} -> re-read pickers
+    popup::on_state_event(app, ev);     // Team{id} -> rebuild popup items
 }
 ```
 
-**Same-thread optimistic writers call `apply_db_update` directly** — a function
-call, not a channel round-trip; same frame, zero latency, one code path. This is
-the review's model: optimistic write → DB → invalidation → re-read, with the
-async completion landing on the same path.
+**Each view declares its own dependencies.** A view module owns one
+`on_state_event(app, &StateEvent)` whose match arms are its subscription: the
+scopes it consumes, with irrelevant scopes falling through. This is the Relay
+idea — components subscribed to updates to their declared dependencies,
+regardless of where the update came from — translated to an immediate-mode TUI,
+where the component set is static (views are fields on `App`) and re-render is
+free (every frame redraws). Adding a consumer of `Teams`/`Team` touches only
+that view's handler; the central broadcast never changes for it. The two
+consumers of `Team { team_id }` (modal and popup) fall out with no central
+coordination.
+
+Rejected stronger forms:
+
+| Option                                                   | Why rejected                                                                                                                  |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Central scope→consumer match                             | a registry that grows with every new scope-consumer pair; dependency declarations live away from the components that own them |
+| Runtime subscription registry (`Vec<(pattern, fn)>`)     | the subscriber set is static; a registry re-encodes the broadcast list as data and loses compile-time visibility              |
+| Relay-proper: dependencies derived from declared queries | needs queries-as-data plus dependency tracking over SQLite — a reactive framework; speculative at 4 scopes and 5 views        |
+
+Trade-off, disclosed: per-view handlers use catch-all arms, so the compiler does
+not force routing of a new `StateEvent` variant the way a central exhaustive
+match would; the scope-relevance tests below cover that instead.
+
+**Same-thread optimistic writers call `apply_state_event` directly** — a
+function call, not a channel round-trip; same frame, zero latency, one code
+path. This is the review's model: optimistic write → DB → invalidation →
+re-read, with the async completion landing on the same path.
 
 - `submit_comment` (`detail.rs:131-173`) keeps the transactional enqueue
   (`enqueue_comment_create` already writes the optimistic `local:` row with the
   persisted viewer as author) and deletes the hand-built in-memory push
-  (`detail.rs:147-160`); it calls `apply_db_update(Comments { issue_id })`,
+  (`detail.rs:147-160`); it calls `apply_state_event(Comments { issue_id })`,
   which re-reads `query_comments` and renders the `local:` row.
 - `popup_confirm` (`popup.rs:318-343`) keeps `enqueue_edit`, then calls
-  `apply_db_update(Issues)`; the pending-overlay merge in `query_issues*`
+  `apply_state_event(Issues)`; the pending-overlay merge in `query_issues*`
   renders the edit. `apply_optimistic_in_memory` and `build_optimistic_issue`
   die — the bespoke second read model goes with them.
 - `new_issue_submit` keeps `do_fetch_and_select(identifier)` — it is a DB
@@ -202,16 +226,16 @@ async completion landing on the same path.
   "rendered state comes from a DB re-read", not "every write travels the
   channel".
 
-**Cross-thread producers send `AppEvent::Db(update)`**; the drain calls the same
-function. Workers shrink to "call the API-to-DB sync, then invalidate":
+**Cross-thread producers send `AppEvent::State(ev)`**; the drain calls the same
+broadcast. Workers shrink to "call the API-to-DB sync, then invalidate":
 
 ```rust
 impl App {
-    /// Run `job` on a background thread, then always send `Db(update)`.
+    /// Run `job` on a background thread, then always send `State(ev)`.
     /// Refresh failures are expected offline: logged, cache kept.
-    fn spawn_db_refresh(
+    fn spawn_state_refresh(
         &self,
-        update: DbUpdate,
+        ev: StateEvent,
         job: impl FnOnce(&dyn SyncService) -> Result<()> + Send + 'static,
     ) {
         let service = Arc::clone(&self.service);
@@ -220,7 +244,7 @@ impl App {
             if let Err(e) = job(service.as_ref()) {
                 tracing::warn!("background refresh failed: {e:#}");
             }
-            let _ = tx.send(AppEvent::Db(update));
+            let _ = tx.send(AppEvent::State(ev));
         });
     }
 }
@@ -237,10 +261,10 @@ error". (`CommentSyncEvent::Error`'s apply was already a silent no-op,
 `detail.rs:223-225`.)
 
 `open_detail`'s worker becomes `sync_comments(&issue_id)` → send
-`Db(Comments { issue_id })`. This also fixes a test wart: the worker's post-sync
-re-read today opens the real profile DB via `db_path()` (`detail.rs:57-60`) even
-when tests install an in-memory database; all reads now go through `app.db` at
-apply time.
+`State(Comments { issue_id })`. This also fixes a test wart: the worker's
+post-sync re-read today opens the real profile DB via `db_path()`
+(`detail.rs:57-60`) even when tests install an in-memory database; all reads now
+go through `app.db` at apply time.
 
 ## Decision 3: team-scoped cache — schema, targeted sync, trait diet
 
@@ -320,7 +344,7 @@ pub trait SyncService: Send + Sync {
     fn spawn_login(&self, on_done: OnLogin);
     /// Startup header identity. Unchanged.
     fn fetch_viewer(&self) -> Option<viewer::User>;
-    /// API -> DB writers; callers re-read via a DbUpdate apply.
+    /// API -> DB writers; callers re-read via a StateEvent apply.
     fn sync_comments(&self, issue_id: &str) -> Result<()>;
     fn sync_teams(&self) -> Result<()>;
     fn sync_team_data(&self, team_id: &str) -> Result<()>;
@@ -330,8 +354,8 @@ pub trait SyncService: Send + Sync {
 - `spawn_sync`/`spawn_login` stop returning receivers and take completion
   callbacks — the trait cannot name `AppEvent` (`lt-runtime` must not depend on
   `lt-tui`), so the TUI passes a closure that wraps into
-  `AppEvent::Sync`/`Login` and sends on `events_tx`. `FnOnce` is the honest
-  type: both jobs send exactly one event.
+  `AppEvent::Lifecycle(Sync(ev))` / `Lifecycle(Login(ev))` and sends on
+  `events_tx`. `FnOnce` is the honest type: both jobs send exactly one event.
 - The dead `query: IssueQuery` parameter is dropped: the concrete impl binds it
   `_query` (`adapter.rs:43`) and every caller clones `app.args` into it for
   nothing; keeping it would also push the new signature past clippy's
@@ -366,38 +390,38 @@ issues), keeping the pickers drivable offline per [[dst.md]].
 - `open_new_issue_modal`: build `teams` from `query_teams(app.db)` (instant; the
   synchronous network fetch dies), preselect from `args.team` as today, read
   `query_team_states`/`query_team_members` for the preselected team, set
-  `loading = true`, then `spawn_db_refresh(Teams, |s| s.sync_teams())` and —
-  when a team is selected — `spawn_db_refresh(TeamData { team_id }, …)`.
+  `loading = true`, then `spawn_state_refresh(Teams, |s| s.sync_teams())` and —
+  when a team is selected — `spawn_state_refresh(Team { team_id }, …)`.
 - Leaving the Team field: instant cache read for the newly selected team plus
-  one `spawn_db_refresh(TeamData)`. `PopupItem` construction moves from the
-  worker thread to apply-time DB reads (`build_assignee_items` survives, fed by
-  `synced_viewer` + `query_team_members`).
-- Applies: `apply_teams_update` re-reads teams and re-anchors the selection by
-  team id (fallback index 0); `apply_team_data_update` — guarded by
+  one `spawn_state_refresh(Team { .. })`. `PopupItem` construction moves from
+  the worker thread to apply-time DB reads (`build_assignee_items` survives, fed
+  by `synced_viewer` + `query_team_members`).
+- The modal's `on_state_event`: on `Teams`, re-read teams and re-anchor the
+  selection by team id (fallback index 0); on `Team { team_id }` — guarded by
   `selected_team_id() == team_id`, a new helper deduplicating the lookup at
-  `new_issue.rs:154-160` and `219-224` — re-reads states/members, preserves the
-  user's picks by item id (today a refresh resets them to 0), and clears
+  `new_issue.rs:154-160` and `219-224` — re-read states/members, preserve the
+  user's picks by item id (today a refresh resets them to 0), and clear
   `loading`. `error` remains for submit validation only.
 
 **State/assignee popups** (`popup.rs:228-303`) migrate to the same pattern —
 they are the other two `fetch_*` callers and today block the UI thread on the
 network: open reads the cache for `issue.team.id`, records it in a new
-`App.popup_team_id: Option<String>`, and spawns `sync_team_data`; the `TeamData`
-apply, when `Mode::Popup(State | Assignee)` matches the team, rebuilds
-`popup_items` and re-anchors the selection. The priority popup is static and
-untouched.
+`App.popup_team_id: Option<String>`, and spawns `sync_team_data`; the popup's
+`on_state_event`, when `Team { team_id }` matches `popup_team_id` and
+`Mode::Popup(State | Assignee)` is active, rebuilds `popup_items` and re-anchors
+the selection. The priority popup is static and untouched.
 
 ## Decision 5: sender lifecycle and worker-panic recovery
 
 `App` holds `events_tx` forever, so the queue never disconnects and every
 `Disconnected` arm dies. What those arms did today:
 
-| Poller                       | `Disconnected` behavior today                         | Subsumed by                                      |
-| ---------------------------- | ----------------------------------------------------- | ------------------------------------------------ |
-| `poll_sync_events`           | clear `syncing`, repair label (`sync.rs:143-150`)     | adapter panic guard (below)                      |
-| `poll_login_events`          | clear `login_rx` (`sync.rs:82-84`)                    | adapter panic guard (below)                      |
-| `poll_detail_comment_events` | drop rx; no state change (`detail.rs:228`)            | `spawn_db_refresh` always sends the invalidation |
-| `poll_modal_events`          | none — `loading` already sticks on worker panic today | `spawn_db_refresh` always sends the invalidation |
+| Poller                       | `Disconnected` behavior today                         | Subsumed by                                         |
+| ---------------------------- | ----------------------------------------------------- | --------------------------------------------------- |
+| `poll_sync_events`           | clear `syncing`, repair label (`sync.rs:143-150`)     | adapter panic guard (below)                         |
+| `poll_login_events`          | clear `login_rx` (`sync.rs:82-84`)                    | adapter panic guard (below)                         |
+| `poll_detail_comment_events` | drop rx; no state change (`detail.rs:228`)            | `spawn_state_refresh` always sends the invalidation |
+| `poll_modal_events`          | none — `loading` already sticks on worker panic today | `spawn_state_refresh` always sends the invalidation |
 
 The real hazard is sync/login: today a panicking worker drops its `tx`,
 `Disconnected` fires, and `syncing`/`login_rx` recover. With a shared sender a
@@ -420,9 +444,9 @@ fn spawn_sync(&self, full: bool, fetch_identity: bool, on_done: OnSync) {
 ```
 
 Strictly better than today: the user sees `sync error: ...` and the 30s retry
-keeps running, instead of a silent label repair. `spawn_db_refresh` workers need
-no guard — the invalidation-on-completion already covers the failure path, and a
-panic between the API call and the send costs only one refresh.
+keeps running, instead of a silent label repair. `spawn_state_refresh` workers
+need no guard — the invalidation-on-completion already covers the failure path,
+and a panic between the API call and the send costs only one refresh.
 
 In-flight gates replace receiver presence: the existing `sync.syncing` (plus a
 `!syncing` guard added to the login-success sync spawn, which today replaces
@@ -509,7 +533,7 @@ enum EventPump {
 ```
 
 `Scripted` supplies the first event each frame — typed `AppEvent`, so tests
-script keys, `Db`, `Sync`, and `Login` events interleaved. The unconditional
+script `Key`, `State`, and `Lifecycle` events interleaved. The unconditional
 `try_recv` drain still runs afterwards, so events that applies push onto the
 real channel are seen in the same frame. Loop tests run thread-free and
 deterministic.
@@ -521,20 +545,20 @@ only check left is scope relevance: compare the event's scope id against what
 the UI displays. No generation counters; duplicate or late events are idempotent
 re-reads of current truth.
 
-| #   | Event at apply time                         | UI state                                        | Handling                                                      |
-| --- | ------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------- |
-| N1  | `Db(Comments{A})`                           | detail open on A                                | re-read `query_comments(A)`                                   |
-| N2  | `Db(Comments{A})`                           | detail closed / open on B                       | drop                                                          |
-| N3  | `Db(Comments{A})` twice (fast close/reopen) | detail open on A                                | both re-read; idempotent                                      |
-| N4  | `Db(Teams)`                                 | modal open                                      | re-read teams; re-anchor selected team by id                  |
-| N5  | `Db(Teams)`                                 | no modal                                        | drop                                                          |
-| N6  | `Db(TeamData{T})`                           | modal open, team T selected                     | re-read states+members; preserve picks by id; clear `loading` |
-| N7  | `Db(TeamData{T})`                           | modal closed / team U selected                  | drop (U's own refresh is in flight)                           |
-| N8  | `Db(TeamData{T})`                           | state/assignee popup open, `popup_team_id == T` | rebuild `popup_items`; re-anchor selection                    |
-| N9  | `Db(Issues)`                                | `Mode::List`                                    | `do_fetch(false)` (offset-preserving)                         |
-| N10 | `Db(Issues)`                                | any other mode                                  | drop (list re-reads on the next List-mode fetch)              |
-| N11 | `Sync(_)`                                   | any                                             | at most one in flight via `syncing` + login-success guard     |
-| N12 | `Login(_)`                                  | any                                             | `login_in_flight` gates `L`; cleared by `apply_login_event`   |
+| #   | Event at apply time                            | UI state                                        | Handling                                                      |
+| --- | ---------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------- |
+| N1  | `State(Comments{A})`                           | detail open on A                                | re-read `query_comments(A)`                                   |
+| N2  | `State(Comments{A})`                           | detail closed / open on B                       | drop                                                          |
+| N3  | `State(Comments{A})` twice (fast close/reopen) | detail open on A                                | both re-read; idempotent                                      |
+| N4  | `State(Teams)`                                 | modal open                                      | re-read teams; re-anchor selected team by id                  |
+| N5  | `State(Teams)`                                 | no modal                                        | drop                                                          |
+| N6  | `State(Team{T})`                               | modal open, team T selected                     | re-read states+members; preserve picks by id; clear `loading` |
+| N7  | `State(Team{T})`                               | modal closed / team U selected                  | drop (U's own refresh is in flight)                           |
+| N8  | `State(Team{T})`                               | state/assignee popup open, `popup_team_id == T` | rebuild `popup_items`; re-anchor selection                    |
+| N9  | `State(Issues)`                                | `Mode::List`                                    | `do_fetch(false)` (offset-preserving)                         |
+| N10 | `State(Issues)`                                | any other mode                                  | drop (list re-reads on the next List-mode fetch)              |
+| N11 | `Lifecycle(Sync(_))`                           | any                                             | at most one in flight via `syncing` + login-success guard     |
+| N12 | `Lifecycle(Login(_))`                          | any                                             | `login_in_flight` gates `L`; cleared by the lifecycle apply   |
 
 ## Keymap design reconciliation
 
@@ -582,8 +606,8 @@ changes for it:
 - **Loop tests** (`loop_tests.rs`): `drive()` builds `EventPump::Scripted` from
   `AppEvent::Key(...)` entries; the exhaustion-as-error test survives with a
   one-line change. The per-poller channel tests become direct calls:
-  `apply_db_update` unit tests covering N1–N10 (matching and mismatched scopes),
-  `apply_sync_event`/`apply_login_event` tests, `login_in_flight` and
+  `apply_state_event` unit tests covering N1–N10 (matching and mismatched
+  scopes), `apply_lifecycle_event` tests, `login_in_flight` and
   login-success-guard tests. The `Disconnected` tests die with the state they
   exercised. The `NewIssueModal` literals in `loop_tests.rs` and
   `render_tests.rs` lose `modal_rx`.
@@ -605,24 +629,25 @@ changes for it:
    scoping, the `lt-types` position fragment, `lt-runtime/src/teams.rs`, the
    trait gains `sync_teams`/`sync_team_data` (Linear + Noop impls), sim
    membership derivation. `fetch_*` still present; TUI untouched.
-3. **`refactor(tui): AppEvent queue and DbUpdate propagation`** —
-   `AppEvent`/`DbUpdate`, `events_tx`/`events_rx`,
-   `apply_app_event`/`apply_db_update`; the comment worker goes payload-free;
+3. **`refactor(tui): AppEvent queue and StateEvent propagation`** —
+   `AppEvent`/`StateEvent`, `events_tx`/`events_rx`, `apply_app_event`, the
+   `apply_state_event` broadcast with the detail and list `on_state_event`
+   handlers; the comment worker goes payload-free;
    `CommentSyncEvent`/`detail_comment_rx` die; `submit_comment` and
    `popup_confirm` unify on re-reads (`apply_optimistic_in_memory` dies).
    Coexists with the remaining pollers and `EventSource` keys. Independent of
    PR 2.
 4. **`refactor(tui,runtime): cache-first pickers`** — modal and popups read
-   SQLite, `spawn_db_refresh`, the `Teams`/`TeamData` applies, `popup_team_id`;
-   `ModalEvent`, `modal_rx`, and the three `fetch_*` trait methods die. Requires
-   PRs 2 and 3.
+   SQLite, `spawn_state_refresh`, the `new_issue` and `popup` `on_state_event`
+   handlers, `popup_team_id`; `ModalEvent`, `modal_rx`, and the three `fetch_*`
+   trait methods die. Requires PRs 2 and 3.
 5. **`refactor(runtime,tui): sync/login completion callbacks`** —
    `OnSync`/`OnLogin`, the dead `query` param dropped, the `catch_unwind` guard,
-   `apply_sync_event`/`apply_login_event`, `login_in_flight`, the login-success
-   `!syncing` guard, and `App::start_sync` deduplicating the four spawn sites
-   (`lib.rs:657-665`, `lib.rs:749`, `lib.rs:815-822`, `sync.rs:68-74`; `run()`
-   reorders to construct `App` before the startup spawn — behavior-neutral).
-   Requires PR 3; independent of PR 4.
+   `LifecycleEvent` + `apply_lifecycle_event`, `login_in_flight`, the
+   login-success `!syncing` guard, and `App::start_sync` deduplicating the four
+   spawn sites (`lib.rs:657-665`, `lib.rs:749`, `lib.rs:815-822`,
+   `sync.rs:68-74`; `run()` reorders to construct `App` before the startup spawn
+   — behavior-neutral). Requires PR 3; independent of PR 4.
 6. **`refactor(tui): keys through the queue`** — input thread, `EventPump`, the
    `recv_timeout` loop; `EventSource`/`CrosstermEvents`/`ScriptedEvents` die;
    loop tests migrate. Requires PR 3; last, so the loop rewrite lands on a fully
