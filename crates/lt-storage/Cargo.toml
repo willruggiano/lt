@@ -21,9 +21,9 @@ rand.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-# Crate-specific: the search parser and the sim generator live only here.
 chumsky = "0.13"
 fake = { version = "5.1.0", default-features = false, optional = true }
+rusqlite_migration = "2.6"
 
 [build-dependencies]
 serde.workspace = true

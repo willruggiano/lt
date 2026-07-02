@@ -38,6 +38,8 @@ use lt_types::types::Issue;
 use rusqlite::Connection;
 use tracing::warn;
 
+use crate::db::sql::{self, BindParams, Frag};
+
 // ---------------------------------------------------------------------------
 // Generated parser (bd-1pl): StemKey, StemKind, parse_query_ast_impl,
 // From<&QueryAst> for ParsedQuery, apply_generated_conditions
@@ -282,8 +284,10 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
     }
 }
 
-// parse_sort_value() is generated into search_stems.rs (bd-2w5).
-// sort_col() is generated into search_stems.rs (bd-2w5).
+// parse_sort_value() is generated into search_stems.rs (bd-2w5). The sort
+// field maps onto a registered `SortCol` via `crate::db::filters::sort_column`
+// (shared with the CLI filter builder -- same generated `SortField` type),
+// not a generated function, so ORDER BY text lives only in `db/sql.rs`.
 
 // ---------------------------------------------------------------------------
 // Normalise priority label
@@ -313,32 +317,31 @@ fn normalise_priority(s: &str) -> Option<&'static str> {
 /// # Errors
 ///
 /// Returns an error if the SQLite query fails (e.g. FTS index unavailable).
-// Build the structured WHERE conditions and their bound parameters from a
-// parsed query. Conditions reference the read model's join aliases (`i` issues,
-// `s` state, `t` team, `ua` assignee, `uc` creator, `p` project, `c` cycle).
-// Each filter stem maps to one or more SQLite conditions:
-//   assignee: LOWER(COALESCE(ua.name,'')) LIKE '%<val>%'
-//             Special case: value "me" -> LOWER(ua.name) = 'me'
-//   priority: i.priority_label = <normalised-label>
-//             Value is normalised via normalise_priority() before binding;
-//             unrecognised values are silently skipped.
-//   state:    LOWER(s.name) LIKE '%<val>%'
-//   team:     LOWER(t.name) LIKE '%<val>%' OR LOWER(COALESCE(i.team_id,'')) LIKE '%<val>%'
-//   label:    EXISTS join over issue_labels/labels matching LOWER(l.name)
-fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::types::ToSql>>) {
-    let mut conditions: Vec<String> = Vec::new();
+// Select the registered WHERE-clause fragments and their bound parameters for
+// a parsed query. Conditions reference the read model's join aliases (`i`
+// issues, `s` state, `t` team, `ua` assignee, `uc` creator, `p` project, `c`
+// cycle). Each filter stem maps to one fragment (see `db/sql.rs`'s
+// `FRAG_*` docs for the exact clause text):
+//   assignee: FRAG_ASSIGNEE_LOWER_LIKE, or FRAG_ASSIGNEE_ME for value "me"
+//   priority: FRAG_PRIORITY_EQ, value normalised via normalise_priority()
+//             first; unrecognised values are silently skipped
+//   state:    FRAG_STATE_LOWER_LIKE
+//   team:     FRAG_TEAM_LOWER_OR_ID
+//   label:    FRAG_LABEL_EXISTS
+fn build_conditions(q: &ParsedQuery) -> (Vec<Frag>, BindParams) {
+    let mut conditions: Vec<Frag> = Vec::new();
     // rusqlite requires heterogeneous param lists via the params! macro or by
     // boxing. We box with Box<dyn ToSql> for flexibility.
-    let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut bind: BindParams = Vec::new();
 
     // -- assignee --
     if let Some(ref a) = q.assignee {
         if a == "me" {
             // "me" without auth context: match the literal string "me" -- callers
             // that have a viewer name should resolve it before calling run_query.
-            conditions.push("LOWER(ua.name) = 'me'".to_string());
+            conditions.push(sql::FRAG_ASSIGNEE_ME);
         } else {
-            conditions.push("LOWER(COALESCE(ua.name,'')) LIKE ?".to_string());
+            conditions.push(sql::FRAG_ASSIGNEE_LOWER_LIKE);
             bind.push(Box::new(format!("%{a}%")));
         }
     }
@@ -347,7 +350,7 @@ fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::type
     if let Some(ref p) = q.priority
         && let Some(label) = normalise_priority(p)
     {
-        conditions.push("i.priority_label = ?".to_string());
+        conditions.push(sql::FRAG_PRIORITY_EQ);
         bind.push(Box::new(label.to_string()));
     }
     // Unknown priority string: skip the filter silently so partial typing
@@ -355,14 +358,13 @@ fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::type
 
     // -- state --
     if let Some(ref s) = q.state {
-        conditions.push("LOWER(s.name) LIKE ?".to_string());
+        conditions.push(sql::FRAG_STATE_LOWER_LIKE);
         bind.push(Box::new(format!("%{s}%")));
     }
 
     // -- team --
     if let Some(ref t) = q.team {
-        conditions
-            .push("(LOWER(t.name) LIKE ? OR LOWER(COALESCE(i.team_id,'')) LIKE ?)".to_string());
+        conditions.push(sql::FRAG_TEAM_LOWER_OR_ID);
         let pat = format!("%{}%", t.to_lowercase());
         bind.push(Box::new(pat.clone()));
         bind.push(Box::new(pat));
@@ -370,100 +372,56 @@ fn build_conditions(q: &ParsedQuery) -> (Vec<String>, Vec<Box<dyn rusqlite::type
 
     // -- label --
     if let Some(ref l) = q.label {
-        conditions.push(
-            "EXISTS (SELECT 1 FROM issue_labels il JOIN labels lb ON lb.id = il.label_id
-                     WHERE il.issue_id = i.id AND LOWER(lb.name) LIKE ?)"
-                .to_string(),
-        );
+        conditions.push(sql::FRAG_LABEL_EXISTS);
         bind.push(Box::new(format!("%{l}%")));
     }
 
     // -- project --
     if let Some(ref p) = q.project {
-        conditions.push("LOWER(COALESCE(p.name,'')) LIKE ?".to_string());
+        conditions.push(sql::FRAG_PROJECT_LOWER_LIKE);
         bind.push(Box::new(format!("%{p}%")));
     }
 
     // -- cycle --
     if let Some(ref c) = q.cycle {
-        conditions.push("LOWER(COALESCE(c.name,'')) LIKE ?".to_string());
+        conditions.push(sql::FRAG_CYCLE_LOWER_LIKE);
         bind.push(Box::new(format!("%{c}%")));
     }
 
     // -- creator --
     if let Some(ref c) = q.creator {
-        conditions.push("LOWER(COALESCE(uc.name,'')) LIKE ?".to_string());
+        conditions.push(sql::FRAG_CREATOR_LOWER_LIKE);
         bind.push(Box::new(format!("%{c}%")));
     }
 
     (conditions, bind)
 }
 
-/// Build the final SELECT statement for the given query and structured
-/// conditions. FTS queries join against `issues_fts`; non-FTS queries scan
-/// `issues` directly.
-fn build_sql(q: &ParsedQuery, conditions: &[String], limit: usize) -> String {
-    let (order_col, order_dir) = match &q.sort {
-        Some((field, dir)) => (
-            sort_col(field),
-            if *dir == SortDir::Desc { "DESC" } else { "ASC" },
-        ),
-        None => ("i.updated_at", "DESC"),
-    };
-
-    let cols = crate::db::ISSUE_COLUMNS;
-    let joins = crate::db::ISSUE_JOINS;
-
-    if q.fts_terms.is_empty() {
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
-        format!(
-            "SELECT {cols}
-             FROM issues i
-             {joins}
-             {where_clause}
-             ORDER BY {order_col} {order_dir}
-             LIMIT {limit}",
-        )
-    } else {
-        // Join issues with FTS results, apply additional structured filters.
-        let extra_cond = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" AND {}", conditions.join(" AND "))
-        };
-        format!(
-            "SELECT {cols}
-             FROM issues i
-             JOIN issues_fts ON issues_fts.rowid = i.rowid
-             {joins}
-             WHERE issues_fts MATCH ?{extra_cond}
-             ORDER BY {order_col} {order_dir}
-             LIMIT {limit}",
-        )
-    }
-}
-
 pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec<Issue>> {
     let (conditions, bind) = build_conditions(q);
 
-    let has_fts = !q.fts_terms.is_empty();
-    let sql = build_sql(q, &conditions, limit);
-
-    // Build the final param list: for FTS queries the FTS term goes first.
-    let all_params: Vec<Box<dyn rusqlite::types::ToSql>> = if has_fts {
-        let mut v: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(q.fts_terms.clone())];
-        v.extend(bind);
-        v
-    } else {
-        bind
+    let (order, desc) = match &q.sort {
+        Some((field, dir)) => (
+            crate::db::filters::sort_column(field),
+            *dir == SortDir::Desc,
+        ),
+        None => (crate::db::filters::sort_column(&SortField::Updated), true),
     };
 
-    let mut stmt = conn
-        .prepare(&sql)
+    let has_fts = !q.fts_terms.is_empty();
+    let composed = sql::select_issues(has_fts, &conditions, order, desc);
+
+    // Build the final param list: for FTS queries the FTS term goes first,
+    // then the condition binds, then the trailing LIMIT bind.
+    let mut all_params: BindParams = if has_fts {
+        vec![Box::new(q.fts_terms.clone())]
+    } else {
+        Vec::new()
+    };
+    all_params.extend(bind);
+    all_params.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
+
+    let mut stmt = sql::prepare_composed(conn, &composed)
         .map_err(|e| anyhow::anyhow!("prepare search_query: {e}"))?;
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -940,8 +898,8 @@ mod run_query_tests {
     }
 
     fn test_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        db::run_migrations(&conn).unwrap();
+        let database = db::Database::memory().unwrap();
+        let conn = database.connect().unwrap();
 
         let mut r1 = issue("1", "fix oauth login");
         r1.priority_label = "Urgent".to_string();

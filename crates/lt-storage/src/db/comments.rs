@@ -5,6 +5,7 @@ use lt_types::types::User;
 use rusqlite::{Connection, params};
 
 use crate::db::parse_datetime_column;
+use crate::db::sql::{self, EntityTable};
 
 /// Insert or replace a slice of comments: upsert each comment's author into
 /// the `users` table (relational storage, no more flattened `author_name`),
@@ -13,12 +14,7 @@ use crate::db::parse_datetime_column;
 /// bug, since `issue_comments` is keyed on it.
 pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
     let synced_at = Utc::now().to_rfc3339();
-    let mut stmt = conn
-        .prepare(
-            "INSERT OR REPLACE INTO issue_comments
-             (id, issue_id, body, user_id, created_at, updated_at, synced_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )
+    let mut stmt = sql::prepare(conn, sql::UPSERT_COMMENT)
         .context("failed to prepare upsert_comments statement")?;
 
     for c in comments {
@@ -29,7 +25,7 @@ pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
         if let Some(user) = &c.user {
             crate::db::issues::upsert_named_entity(
                 conn,
-                "users",
+                EntityTable::Users,
                 user.id.inner(),
                 Some(&user.name),
             )?;
@@ -52,25 +48,18 @@ pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
 /// ascending, reconstructing each comment's author via a `LEFT JOIN` against
 /// `users`.
 pub fn query_comments(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT ic.id, ic.body, ic.created_at, ic.updated_at, ic.user_id, u.name
-             FROM issue_comments ic
-             LEFT JOIN users u ON u.id = ic.user_id
-             WHERE ic.issue_id = ?1
-             ORDER BY ic.created_at ASC",
-        )
+    let mut stmt = sql::prepare(conn, sql::QUERY_COMMENTS)
         .context("failed to prepare query_comments statement")?;
 
     let rows = stmt
         .query_map(params![issue_id], |row| {
-            let created_at: String = row.get(2)?;
-            let updated_at: String = row.get(3)?;
-            let user_id: Option<String> = row.get(4)?;
-            let user_name: Option<String> = row.get(5)?;
+            let created_at: String = row.get("created_at")?;
+            let updated_at: String = row.get("updated_at")?;
+            let user_id: Option<String> = row.get("user_id")?;
+            let user_name: Option<String> = row.get("user_name")?;
             Ok(Comment {
-                id: row.get::<_, String>(0)?.into(),
-                body: row.get(1)?,
+                id: row.get::<_, String>("id")?.into(),
+                body: row.get("body")?,
                 created_at: parse_datetime_column(&created_at)?,
                 updated_at: parse_datetime_column(&updated_at)?,
                 user: user_id.map(|id| User {
@@ -93,9 +82,9 @@ pub fn query_comments(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>>
 /// Optimistic `local:` rows (un-acked comment creates) are preserved so a sync
 /// does not wipe a comment the drainer has not posted yet.
 pub fn delete_comments_for_issue(conn: &Connection, issue_id: &str) -> Result<()> {
-    crate::db::execute(
+    sql::execute(
         conn,
-        "DELETE FROM issue_comments WHERE issue_id = ?1 AND id NOT LIKE 'local:%'",
+        sql::DELETE_COMMENTS_FOR_ISSUE,
         params![issue_id],
         "delete comments for issue",
     )
@@ -120,9 +109,8 @@ mod tests {
     }
 
     fn test_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&conn).unwrap();
-        conn
+        let db = crate::db::Database::memory().unwrap();
+        db.connect().unwrap()
     }
 
     #[test]

@@ -65,9 +65,11 @@ OAuth application credentials (`LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET` or
 
 A single SQLite file holds the `issues` table, its FTS5 index (`issues_fts`,
 kept in sync by triggers), `issue_comments`, and a `sync_meta` key/value table
-(e.g. `last_synced_at`). Schema creation and additive column migrations run on
-every open (`src/db/mod.rs`); there is no migration-version table — columns are
-added if absent. Query and upsert helpers live under `src/db/`.
+(e.g. `last_synced_at`). Versioned migrations (SQLite's `user_version`, via
+`rusqlite_migration`) run on open (`src/db/mod.rs`). All statement text lives in
+a registered statement module (`src/db/sql.rs`) whose entries the test gate
+prepares against the migrated schema; see [[type-safe-sql-adr.md]]. Query and
+upsert helpers live under `src/db/`.
 
 ### Authentication
 

@@ -8,66 +8,43 @@ use lt_types::types;
 use rusqlite::{Connection, params};
 
 use crate::db::parse_datetime_column;
+use crate::db::sql::{self, EntityTable, Sql};
 
-/// The fragment-typed read model's column list: every field
-/// [`types::Issue`] selects, sourced from the relational base via the joins in
-/// [`ISSUE_JOINS`]. Labels are aggregated by a correlated subquery.
-pub(crate) const ISSUE_COLUMNS: &str =
-    "i.id, i.identifier, i.title, i.priority_label, i.description,
-            i.created_at, i.updated_at,
-            i.state_id, s.name,
-            i.assignee_id, ua.name,
-            i.team_id, t.name,
-            i.project_id, p.name,
-            i.cycle_id, c.name,
-            i.creator_id, uc.name,
-            i.parent_id, pp.identifier,
-            (SELECT GROUP_CONCAT(l.name, ',') FROM issue_labels il
-               JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id)";
-
-/// The entity joins that reconstruct an issue's referenced rows. The base table
-/// is aliased `i`; callers prepend `FROM issues i` (optionally with an FTS join)
-/// before this fragment.
-pub(crate) const ISSUE_JOINS: &str = "JOIN workflow_states s ON s.id = i.state_id
-         JOIN teams t            ON t.id = i.team_id
-         LEFT JOIN users ua      ON ua.id = i.assignee_id
-         LEFT JOIN projects p    ON p.id = i.project_id
-         LEFT JOIN cycles c      ON c.id = i.cycle_id
-         LEFT JOIN users uc      ON uc.id = i.creator_id
-         LEFT JOIN issues pp     ON pp.id = i.parent_id";
-
-/// Reconstruct a [`types::Issue`] from a row in [`ISSUE_COLUMNS`] order.
+/// Reconstruct a [`types::Issue`] from a row selected by
+/// [`sql::QUERY_ISSUE_BY_ID`] (or any other statement or composed query built
+/// from the same issue-columns/joins template), reading each field by its
+/// column alias.
 pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Issue> {
-    let priority_label: String = row.get(3)?;
+    let priority_label: String = row.get("priority_label")?;
     let priority = types::priority_label_to_u8(&priority_label);
 
-    let created_at: String = row.get(5)?;
-    let updated_at: String = row.get(6)?;
+    let created_at: String = row.get("created_at")?;
+    let updated_at: String = row.get("updated_at")?;
 
-    let assignee_id: Option<String> = row.get(9)?;
-    let assignee_name: Option<String> = row.get(10)?;
-    let project_id: Option<String> = row.get(13)?;
-    let project_name: Option<String> = row.get(14)?;
-    let cycle_id: Option<String> = row.get(15)?;
-    let cycle_name: Option<String> = row.get(16)?;
-    let creator_id: Option<String> = row.get(17)?;
-    let creator_name: Option<String> = row.get(18)?;
-    let parent_id: Option<String> = row.get(19)?;
-    let parent_identifier: Option<String> = row.get(20)?;
-    let labels: Option<String> = row.get(21)?;
+    let assignee_id: Option<String> = row.get("assignee_id")?;
+    let assignee_name: Option<String> = row.get("assignee_name")?;
+    let project_id: Option<String> = row.get("project_id")?;
+    let project_name: Option<String> = row.get("project_name")?;
+    let cycle_id: Option<String> = row.get("cycle_id")?;
+    let cycle_name: Option<String> = row.get("cycle_name")?;
+    let creator_id: Option<String> = row.get("creator_id")?;
+    let creator_name: Option<String> = row.get("creator_name")?;
+    let parent_id: Option<String> = row.get("parent_id")?;
+    let parent_identifier: Option<String> = row.get("parent_identifier")?;
+    let labels: Option<String> = row.get("labels")?;
 
-    let state_id: String = row.get(7)?;
-    let team_id: String = row.get(11)?;
+    let state_id: String = row.get("state_id")?;
+    let team_id: String = row.get("team_id")?;
 
     Ok(types::Issue {
-        id: row.get::<_, String>(0)?.into(),
-        identifier: row.get(1)?,
-        title: row.get(2)?,
+        id: row.get::<_, String>("id")?.into(),
+        identifier: row.get("identifier")?,
+        title: row.get("title")?,
         priority_label,
         priority: Priority(priority),
         state: types::WorkflowState {
             id: state_id.into(),
-            name: row.get(8)?,
+            name: row.get("state_name")?,
         },
         assignee: assignee_id.map(|id| types::User {
             id: id.into(),
@@ -75,9 +52,9 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
         }),
         team: types::Team {
             id: team_id.into(),
-            name: row.get(12)?,
+            name: row.get("team_name")?,
         },
-        description: row.get(4)?,
+        description: row.get("description")?,
         labels: types::IssueLabelConnection {
             nodes: labels
                 .unwrap_or_default()
@@ -110,22 +87,21 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
     })
 }
 
-/// Upsert one `(id, name)` row into a named entity table, updating the name on
-/// id conflict (so a rename touches a single row). `name` is optional because
+/// Upsert one `(id, name)` row into `table`, updating the name on id conflict
+/// (so a rename touches a single row). `name` is optional because
 /// `cycles.name` is nullable; the other tables always pass `Some`.
 pub(crate) fn upsert_named_entity(
     conn: &Connection,
-    table: &str,
+    table: EntityTable,
     id: &str,
     name: Option<&str>,
 ) -> Result<()> {
-    let sql = format!(
-        "INSERT INTO {table} (id, name) VALUES (?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name"
-    );
-    conn.execute(&sql, params![id, name])
-        .with_context(|| format!("failed to upsert {table}"))?;
-    Ok(())
+    sql::execute(
+        conn,
+        table.upsert_sql(),
+        params![id, name],
+        &format!("upsert {}", table.as_str()),
+    )
 }
 
 /// Upsert fetched issue fragments into the relational base: upsert each
@@ -156,32 +132,34 @@ pub(crate) fn upsert_issue_tx(
     issue: &types::Issue,
     synced_at: &str,
 ) -> Result<()> {
-    upsert_named_entity(tx, "teams", issue.team.id.inner(), Some(&issue.team.name))?;
     upsert_named_entity(
         tx,
-        "workflow_states",
+        EntityTable::Teams,
+        issue.team.id.inner(),
+        Some(&issue.team.name),
+    )?;
+    upsert_named_entity(
+        tx,
+        EntityTable::WorkflowStates,
         issue.state.id.inner(),
         Some(&issue.state.name),
     )?;
     if let Some(a) = &issue.assignee {
-        upsert_named_entity(tx, "users", a.id.inner(), Some(&a.name))?;
+        upsert_named_entity(tx, EntityTable::Users, a.id.inner(), Some(&a.name))?;
     }
     if let Some(c) = &issue.creator {
-        upsert_named_entity(tx, "users", c.id.inner(), Some(&c.name))?;
+        upsert_named_entity(tx, EntityTable::Users, c.id.inner(), Some(&c.name))?;
     }
     if let Some(p) = &issue.project {
-        upsert_named_entity(tx, "projects", p.id.inner(), Some(&p.name))?;
+        upsert_named_entity(tx, EntityTable::Projects, p.id.inner(), Some(&p.name))?;
     }
     if let Some(c) = &issue.cycle {
-        upsert_named_entity(tx, "cycles", c.id.inner(), c.name.as_deref())?;
+        upsert_named_entity(tx, EntityTable::Cycles, c.id.inner(), c.name.as_deref())?;
     }
 
-    tx.execute(
-        "INSERT OR REPLACE INTO issues
-            (id, identifier, title, priority_label, description,
-             created_at, updated_at, synced_at, parent_id,
-             team_id, state_id, assignee_id, creator_id, project_id, cycle_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+    sql::execute(
+        tx,
+        sql::UPSERT_ISSUE,
         params![
             issue.id.inner(),
             issue.identifier,
@@ -199,21 +177,23 @@ pub(crate) fn upsert_issue_tx(
             issue.project.as_ref().map(|p| p.id.inner()),
             issue.cycle.as_ref().map(|c| c.id.inner()),
         ],
-    )
-    .context("failed to upsert issue")?;
+        "upsert issue",
+    )?;
 
-    tx.execute(
-        "DELETE FROM issue_labels WHERE issue_id = ?1",
+    sql::execute(
+        tx,
+        sql::DELETE_ISSUE_LABELS_FOR_ISSUE,
         params![issue.id.inner()],
-    )
-    .context("failed to clear issue labels")?;
+        "clear issue labels",
+    )?;
     for label in &issue.labels.nodes {
-        upsert_named_entity(tx, "labels", label.id.inner(), Some(&label.name))?;
-        tx.execute(
-            "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
+        upsert_named_entity(tx, EntityTable::Labels, label.id.inner(), Some(&label.name))?;
+        sql::execute(
+            tx,
+            sql::INSERT_ISSUE_LABEL,
             params![issue.id.inner(), label.id.inner()],
-        )
-        .context("failed to link issue label")?;
+            "link issue label",
+        )?;
     }
     Ok(())
 }
@@ -230,14 +210,8 @@ struct OverlayApply {
 /// the entity tables in one query. The set is small (only un-synced edits), so
 /// it is read whole and grouped in memory rather than filtered per issue list.
 fn load_overlays(conn: &Connection) -> Result<HashMap<String, Vec<OverlayApply>>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT po.entity_id, po.field, po.value, ws.name, u.name
-             FROM pending_overlay po
-             LEFT JOIN workflow_states ws ON po.field = 'state'    AND ws.id = po.value
-             LEFT JOIN users u           ON po.field = 'assignee' AND u.id  = po.value",
-        )
-        .context("failed to prepare overlay merge query")?;
+    let mut stmt =
+        sql::prepare(conn, sql::LOAD_OVERLAYS).context("failed to prepare overlay merge query")?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -306,26 +280,13 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
 /// An `--assignee=me` filter must be resolved to the viewer's name by the
 /// caller before calling this (see `issues::list::resolve_me`).
 pub fn query_issues(conn: &Connection, args: &IssueQuery) -> Result<Vec<types::Issue>> {
-    let (where_clause, mut bind) = crate::db::filters::build_sql_filter(args)?;
-    let order = crate::db::filters::build_sql_order(args);
-    let where_sql = if where_clause.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {where_clause} ")
-    };
+    let (conditions, mut bind) = crate::db::filters::build_sql_filter(args)?;
+    let order = crate::db::filters::sort_column(&args.sort);
     let limit = i64::from(args.limit.min(250));
     bind.push(Box::new(limit));
 
-    let sql = format!(
-        "SELECT {ISSUE_COLUMNS}
-         FROM issues i
-         {ISSUE_JOINS}
-         {where_sql}ORDER BY {order}
-         LIMIT ?"
-    );
-
-    let mut stmt = conn
-        .prepare(&sql)
+    let composed = sql::select_issues(false, &conditions, order, args.desc);
+    let mut stmt = sql::prepare_composed(conn, &composed)
         .context("failed to prepare query_issues statement")?;
 
     let rows = stmt
@@ -352,23 +313,14 @@ pub fn query_issues_page(
     args: &IssueQuery,
     offset: i64,
 ) -> Result<(Vec<types::Issue>, bool)> {
-    let order_col = crate::db::filters::sort_column(&args.sort);
-    let direction = if args.desc { "DESC" } else { "ASC" };
+    let order = crate::db::filters::sort_column(&args.sort);
     // Fetch one extra row to detect whether there is a next page.
     let cap = args.limit.min(250);
     let fetch_limit = i64::from(cap) + 1;
 
-    let sql = format!(
-        "SELECT {ISSUE_COLUMNS}
-         FROM issues i
-         {ISSUE_JOINS}
-         ORDER BY {order_col} {direction}
-         LIMIT ?1 OFFSET ?2"
-    );
-
-    let mut stmt = conn
-        .prepare(&sql)
-        .context("failed to prepare query statement")?;
+    let composed = sql::select_issues_page(order, args.desc);
+    let mut stmt =
+        sql::prepare_composed(conn, &composed).context("failed to prepare query statement")?;
 
     let rows = stmt
         .query_map(params![fetch_limit, offset], issue_from_row)
@@ -388,21 +340,21 @@ pub fn query_issues_page(
     Ok((issues, has_next))
 }
 
-/// Run a single-parameter `SELECT` and map each row via `issue_from_row`.
+/// Run a registered issue-shaped `SELECT` and map each row via
+/// `issue_from_row`.
 ///
 /// `what` names the query for error context.
 fn query_issues_one(
     conn: &Connection,
-    sql: &str,
-    param: &str,
+    sql: Sql,
+    params: impl rusqlite::Params,
     what: &str,
 ) -> Result<Vec<types::Issue>> {
-    let mut stmt = conn
-        .prepare(sql)
-        .with_context(|| format!("failed to prepare {what} statement"))?;
+    let mut stmt =
+        sql::prepare(conn, sql).with_context(|| format!("failed to prepare {what} statement"))?;
 
     let rows = stmt
-        .query_map(params![param], issue_from_row)
+        .query_map(params, issue_from_row)
         .with_context(|| format!("failed to execute {what} query"))?;
 
     let mut issues = Vec::new();
@@ -421,16 +373,13 @@ fn query_issues_one(
 /// Results are returned ordered by FTS5 rank (best match first), capped at
 /// `limit` rows.
 pub fn search_issues(conn: &Connection, query: &str, limit: usize) -> Result<Vec<types::Issue>> {
-    let sql = format!(
-        "SELECT {ISSUE_COLUMNS}
-         FROM issues i
-         JOIN issues_fts ON issues_fts.rowid = i.rowid
-         {ISSUE_JOINS}
-         WHERE issues_fts MATCH ?1
-         ORDER BY rank
-         LIMIT {limit}"
-    );
-    query_issues_one(conn, &sql, query, "search_issues")
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    query_issues_one(
+        conn,
+        sql::SEARCH_ISSUES,
+        params![query, limit],
+        "search_issues",
+    )
 }
 
 /// Approximate fallback search when the FTS index is empty: match `query` as a
@@ -441,21 +390,19 @@ pub fn search_issues_like(
     limit: usize,
 ) -> Result<Vec<types::Issue>> {
     let pattern = format!("%{query}%");
-    let sql = format!(
-        "SELECT {ISSUE_COLUMNS}
-         FROM issues i
-         {ISSUE_JOINS}
-         WHERE i.title LIKE ?1
-         LIMIT {limit}"
-    );
-    query_issues_one(conn, &sql, &pattern, "search_issues_like")
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    query_issues_one(
+        conn,
+        sql::SEARCH_ISSUES_LIKE,
+        params![pattern, limit],
+        "search_issues_like",
+    )
 }
 
 /// Retrieve a value from the `sync_meta` table. Returns None if key is absent.
 pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
-    let mut stmt = conn
-        .prepare("SELECT value FROM sync_meta WHERE key = ?1")
-        .context("failed to prepare get_meta statement")?;
+    let mut stmt =
+        sql::prepare(conn, sql::GET_META).context("failed to prepare get_meta statement")?;
 
     let mut rows = stmt
         .query(params![key])
@@ -471,37 +418,51 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
 
 /// Query child issues of a given parent issue.
 pub fn query_children(conn: &Connection, parent_id: &str) -> Result<Vec<types::Issue>> {
-    let sql = format!(
-        "SELECT {ISSUE_COLUMNS}
-         FROM issues i
-         {ISSUE_JOINS}
-         WHERE i.parent_id = ?1
-         ORDER BY i.identifier ASC"
-    );
-    query_issues_one(conn, &sql, parent_id, "query_children")
+    query_issues_one(
+        conn,
+        sql::QUERY_CHILDREN,
+        params![parent_id],
+        "query_children",
+    )
 }
 
 /// Look up a single issue by id, for the detail pane's parent reference.
 /// Returns `None` when no issue with that id is cached.
 pub fn query_issue_by_id(conn: &Connection, id: &str) -> Result<Option<types::Issue>> {
-    let sql = format!(
-        "SELECT {ISSUE_COLUMNS}
-         FROM issues i
-         {ISSUE_JOINS}
-         WHERE i.id = ?1"
-    );
-    let mut issues = query_issues_one(conn, &sql, id, "query_issue_by_id")?;
+    let mut issues = query_issues_one(
+        conn,
+        sql::QUERY_ISSUE_BY_ID,
+        params![id],
+        "query_issue_by_id",
+    )?;
     Ok(issues.pop())
 }
 
 /// Insert or replace a key/value pair in the `sync_meta` table.
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    crate::db::execute(
-        conn,
-        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?1, ?2)",
-        params![key, value],
-        "set sync_meta",
-    )
+    sql::execute(conn, sql::SET_META, params![key, value], "set sync_meta")
+}
+
+/// Run a registered zero-parameter `SELECT COUNT(*)` statement.
+///
+/// `what` names the query for error context.
+fn count_rows(conn: &Connection, sql: Sql, what: &str) -> Result<i64> {
+    let mut stmt =
+        sql::prepare(conn, sql).with_context(|| format!("failed to prepare {what} statement"))?;
+    stmt.query_row([], |r| r.get(0))
+        .with_context(|| format!("failed to {what}"))
+}
+
+/// Count every locally cached issue, regardless of filters. Used by `lt
+/// search` to detect an empty index (ADR decision 6).
+pub fn count_issues(conn: &Connection) -> Result<i64> {
+    count_rows(conn, sql::COUNT_ISSUES, "count issues")
+}
+
+/// Count rows in the FTS5 shadow index. Used by `lt search` to detect an
+/// empty or stale index and fall back to `LIKE` search (ADR decision 6).
+pub fn count_fts_rows(conn: &Connection) -> Result<i64> {
+    count_rows(conn, sql::COUNT_FTS_ROWS, "count fts rows")
 }
 
 /// The `sync_meta` keys the synced viewer identity is stored under. Kept
@@ -566,8 +527,8 @@ mod tests {
     }
 
     fn test_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&conn).unwrap();
+        let db = crate::db::Database::memory().unwrap();
+        let conn = db.connect().unwrap();
         upsert_issues(
             &conn,
             &[
@@ -636,8 +597,8 @@ mod tests {
     }
 
     fn graph_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::run_migrations(&conn).unwrap();
+        let db = crate::db::Database::memory().unwrap();
+        let conn = db.connect().unwrap();
         // The parent referenced by sample_api_issue must exist for the parent
         // self-join to resolve its identifier.
         let mut parent = sample_api_issue();
