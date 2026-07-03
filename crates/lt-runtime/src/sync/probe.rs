@@ -79,7 +79,10 @@ pub fn run(out: &mut dyn Write, override_token: Option<String>) -> Result<()> {
                 writeln!(out, "content-type: {content_type}")?;
                 writeln!(out)?;
 
-                let body = res.body_mut().read_to_string().unwrap_or_default();
+                let body = res
+                    .body_mut()
+                    .read_to_string()
+                    .context("reading error response body")?;
                 writeln!(out, "--- error body (up to 500 chars) ---")?;
                 writeln!(out, "{}", &body[..body.len().min(500)])?;
             }

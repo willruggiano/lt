@@ -742,7 +742,9 @@ struct RecordingSyncService {
 impl RecordingSyncService {
     fn new(db: &lt_runtime::db::Database, tx: mpsc::Sender<AppEvent>) -> Result<Self> {
         let on_event: lt_runtime::sync::service::OnEvent = Box::new(move |ev| {
-            let _ = tx.send(AppEvent::Runtime(ev));
+            // Test fixture: the receiving `App` outlives every send in these
+            // tests, so a disconnect is not expected; drop rather than assert.
+            drop(tx.send(AppEvent::Runtime(ev)));
         });
         Ok(Self {
             inner: lt_runtime::LinearSyncService::new(db.share()?, on_event),
@@ -1199,15 +1201,20 @@ impl App {
     /// the sync just finished) when the read fails or the row is
     /// missing/unparseable.
     fn synced_at_now(&self) -> chrono::DateTime<chrono::Utc> {
-        self.db
-            .connect()
-            .ok()
-            .and_then(|conn| {
-                lt_runtime::db::get_meta(&conn, "last_synced_at")
-                    .ok()
-                    .flatten()
-            })
-            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
+        let raw = match self.db.connect() {
+            Ok(conn) => match lt_runtime::db::get_meta(&conn, "last_synced_at") {
+                Ok(ts) => ts,
+                Err(e) => {
+                    tracing::warn!(error = %e, "synced_at: failed to read last_synced_at meta");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "synced_at: failed to open db connection");
+                None
+            }
+        };
+        raw.and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
             .map_or_else(|| self.clock.now(), |dt| dt.with_timezone(&chrono::Utc))
     }
 
@@ -1286,7 +1293,10 @@ pub fn run(
             };
             Ok((issues, has_next, end_cursor))
         })()
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "startup: failed to load cached issues");
+            (Vec::new(), false, None)
+        });
 
     let have_cache = !cached_issues.is_empty();
 
@@ -1334,13 +1344,15 @@ pub fn run(
     // Enter as the same byte, so the Ctrl-Enter submit binding never fires.
     // Enable it where supported; elsewhere the UI falls back to Alt-Enter.
     let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
-    if keyboard_enhanced {
-        let _ = crossterm::execute!(
+    if keyboard_enhanced
+        && let Err(e) = crossterm::execute!(
             std::io::stdout(),
             event::PushKeyboardEnhancementFlags(
                 event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
             )
-        );
+        )
+    {
+        tracing::warn!(error = %e, "failed to push keyboard enhancement flags");
     }
     app.session.keyboard_enhanced = keyboard_enhanced;
     if let Some(list) = app.base_list_mut() {
@@ -1349,8 +1361,10 @@ pub fn run(
     spawn_input_thread(events_tx);
     let mut pump = EventPump::Channel;
     let result = run_app(&mut terminal, &mut pump, &mut app);
-    if keyboard_enhanced {
-        let _ = crossterm::execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
+    if keyboard_enhanced
+        && let Err(e) = crossterm::execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags)
+    {
+        tracing::warn!(error = %e, "failed to pop keyboard enhancement flags");
     }
     ratatui::restore();
     result
@@ -1467,7 +1481,9 @@ fn handle_list_key(app: &mut App, _i: usize, key: KeyEvent) -> KeyFlow {
         KeyCode::Char('o') => {
             if let Some(issue) = app.selected_issue() {
                 let url = format!("https://linear.app/issue/{}", issue.identifier);
-                let _ = open::that(url);
+                if let Err(e) = open::that(url) {
+                    tracing::warn!(error = %e, "failed to open browser for issue url");
+                }
             }
         }
         KeyCode::Char('r') => app.refresh(),

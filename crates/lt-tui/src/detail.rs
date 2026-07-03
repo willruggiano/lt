@@ -28,18 +28,26 @@ impl DetailView {
     pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
         match ev {
             StateEvent::Comments { issue_id } if issue_id == self.issue.id.inner() => {
-                if let Ok(conn) = ctx.db.connect()
-                    && let Ok(comments) = lt_runtime::db::query_comments(&conn, issue_id)
+                match ctx
+                    .db
+                    .connect()
+                    .and_then(|conn| lt_runtime::db::query_comments(&conn, issue_id))
                 {
-                    self.comments = comments;
+                    Ok(comments) => self.comments = comments,
+                    Err(e) => {
+                        tracing::warn!(error = %e, issue_id, "detail pane: failed to re-read comments");
+                    }
                 }
             }
             StateEvent::Issues => {
-                if let Ok(conn) = ctx.db.connect()
-                    && let Ok(Some(fresh)) =
-                        lt_runtime::db::query_issue_by_id(&conn, self.issue.id.inner())
-                {
-                    self.issue = fresh;
+                match ctx.db.connect().and_then(|conn| {
+                    lt_runtime::db::query_issue_by_id(&conn, self.issue.id.inner())
+                }) {
+                    Ok(Some(fresh)) => self.issue = fresh,
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, issue_id = self.issue.id.inner(), "detail pane: failed to re-read issue");
+                    }
                 }
             }
             _ => {}
@@ -134,7 +142,10 @@ impl App {
             .db
             .connect()
             .and_then(|conn| lt_runtime::db::query_comments(&conn, issue.id.inner()))
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, issue_id = issue.id.inner(), "detail pane: failed to load cached comments");
+                Vec::new()
+            });
 
         let mut detail = build_cached_detail(&issue, cached_comments);
         populate_relations(&self.db, &mut detail, &issue);
@@ -164,18 +175,29 @@ pub(crate) fn build_cached_detail(
 
 /// Populate a detail's parent/children fields from the local database.
 pub(crate) fn populate_relations(db: &Database, detail: &mut DetailView, issue: &Issue) {
-    let Ok(conn) = db.connect() else {
-        return;
+    let conn = match db.connect() {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(error = %e, issue_id = issue.id.inner(), "detail pane: failed to open db connection");
+            return;
+        }
     };
     // Look up children.
-    if let Ok(children) = lt_runtime::db::query_children(&conn, issue.id.inner()) {
-        detail.children = children;
+    match lt_runtime::db::query_children(&conn, issue.id.inner()) {
+        Ok(children) => detail.children = children,
+        Err(e) => {
+            tracing::warn!(error = %e, issue_id = issue.id.inner(), "detail pane: failed to query children");
+        }
     }
     // Look up parent.
-    if let Some(ref parent) = issue.parent
-        && let Ok(Some(row)) = lt_runtime::db::query_issue_by_id(&conn, parent.id.inner())
-    {
-        detail.parent = Some(row);
+    if let Some(ref parent) = issue.parent {
+        match lt_runtime::db::query_issue_by_id(&conn, parent.id.inner()) {
+            Ok(Some(row)) => detail.parent = Some(row),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, parent_id = parent.id.inner(), "detail pane: failed to query parent");
+            }
+        }
     }
 }
 
@@ -215,7 +237,9 @@ pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
         KeyCode::Char('o') => {
             if let Some(d) = detail_view_mut(app, i) {
                 let url = format!("https://linear.app/issue/{}", d.issue.identifier);
-                let _ = open::that(url);
+                if let Err(e) = open::that(url) {
+                    tracing::warn!(error = %e, "failed to open browser for issue url");
+                }
             }
         }
         _ => return KeyFlow::Pass,

@@ -130,7 +130,11 @@ fn open_editor_for_description() -> Result<Option<String>> {
     }
 
     let content = std::fs::read_to_string(&tmp)?;
-    let _ = std::fs::remove_file(&tmp);
+    // Best-effort cleanup: the content is already read, so a failure here
+    // just leaves a stray temp file behind.
+    if let Err(e) = std::fs::remove_file(&tmp) {
+        tracing::warn!(error = %e, path = %tmp.display(), "failed to remove temp description file");
+    }
 
     let trimmed = content.trim().to_string();
     if trimmed.is_empty() {

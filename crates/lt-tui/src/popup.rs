@@ -280,7 +280,10 @@ impl SearchOverlay {
 /// picker.
 pub(crate) fn state_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
     lt_runtime::db::query_team_states(conn, team_id)
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, team_id, "failed to query team states");
+            Vec::new()
+        })
         .into_iter()
         .map(PopupItem::from)
         .collect()
@@ -293,8 +296,9 @@ fn assignee_popup_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
         label: "Unassign".to_string(),
         id: None,
     }];
-    if let Ok(members) = lt_runtime::db::query_team_members(conn, team_id) {
-        items.extend(members.into_iter().map(PopupItem::from));
+    match lt_runtime::db::query_team_members(conn, team_id) {
+        Ok(members) => items.extend(members.into_iter().map(PopupItem::from)),
+        Err(e) => tracing::warn!(error = %e, team_id, "failed to query team members"),
     }
     items
 }
@@ -308,11 +312,13 @@ impl super::App {
         let team_id = issue.team.id.inner().to_string();
         let current_state_name = issue.state.name.clone();
 
-        let items = self
-            .db
-            .connect()
-            .map(|conn| state_items(&conn, &team_id))
-            .unwrap_or_default();
+        let items = self.db.connect().map_or_else(
+            |e| {
+                tracing::warn!(error = %e, "state popup: failed to open db connection");
+                Vec::new()
+            },
+            |conn| state_items(&conn, &team_id),
+        );
         let selected = items
             .iter()
             .position(|item| item.label == current_state_name)
@@ -354,11 +360,13 @@ impl super::App {
         let team_id = issue.team.id.inner().to_string();
         let current_assignee = issue.assignee.as_ref().map(|a| a.id.inner().to_string());
 
-        let items = self
-            .db
-            .connect()
-            .map(|conn| assignee_popup_items(&conn, &team_id))
-            .unwrap_or_default();
+        let items = self.db.connect().map_or_else(
+            |e| {
+                tracing::warn!(error = %e, "assignee popup: failed to open db connection");
+                Vec::new()
+            },
+            |conn| assignee_popup_items(&conn, &team_id),
+        );
         let selected = current_assignee
             .and_then(|a| {
                 items
@@ -389,8 +397,12 @@ impl PopupView {
         if self.team_id.as_deref() != Some(team_id.as_str()) {
             return;
         }
-        let Ok(conn) = ctx.db.connect() else {
-            return;
+        let conn = match ctx.db.connect() {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::warn!(error = %e, "popup: failed to open db connection");
+                return;
+            }
         };
         let items = match &self.kind {
             PopupKind::State => state_items(&conn, team_id),

@@ -193,8 +193,21 @@ impl LinearSyncService {
 
     /// Best-effort viewer identity from the stored token.
     fn viewer_identity() -> Option<viewer::User> {
-        let token = lt_config::load_token().ok().flatten()?;
-        execute::<ViewerQuery>(&HttpTransport::new(token.access_token), ()).ok()
+        let token = match lt_config::load_token() {
+            Ok(Some(token)) => token,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::debug!(error = %e, "viewer_identity: failed to load stored token");
+                return None;
+            }
+        };
+        match execute::<ViewerQuery>(&HttpTransport::new(token.access_token), ()) {
+            Ok(viewer) => Some(viewer),
+            Err(e) => {
+                tracing::debug!(error = %e, "viewer_identity: viewer query failed");
+                None
+            }
+        }
     }
 
     /// A transport with a fresh (auto-refreshed) token for a live read.
@@ -296,17 +309,15 @@ impl LinearSyncService {
     /// read (team, state, member); a `state_id` lookup miss or an absent
     /// `state_id` falls back to a name-keyed id ("Backlog") so the
     /// relational join still resolves a label offline.
-    fn optimistic_issue(conn: &Connection, input: &IssueCreateInput) -> types::Issue {
-        let team_name = db::query_teams(conn)
-            .unwrap_or_default()
+    fn optimistic_issue(conn: &Connection, input: &IssueCreateInput) -> Result<types::Issue> {
+        let team_name = db::query_teams(conn)?
             .into_iter()
             .find(|t| t.id.inner() == input.team_id)
             .map_or_else(String::new, |t| t.name);
 
         let (state_id, state_name) = match &input.state_id {
             Some(id) => {
-                let name = db::query_team_states(conn, &input.team_id)
-                    .unwrap_or_default()
+                let name = db::query_team_states(conn, &input.team_id)?
                     .into_iter()
                     .find(|s| s.id.inner() == id)
                     .map_or_else(|| id.clone(), |s| s.name);
@@ -315,24 +326,26 @@ impl LinearSyncService {
             None => ("Backlog".to_string(), "Backlog".to_string()),
         };
 
-        let assignee = input.assignee_id.as_ref().map(|id| {
-            let name = db::query_team_members(conn, &input.team_id)
-                .unwrap_or_default()
-                .into_iter()
-                .find(|u| u.id.inner() == id)
-                .map_or_else(|| id.clone(), |u| u.name);
-            types::User {
-                id: id.clone().into(),
-                name,
+        let assignee = match &input.assignee_id {
+            Some(id) => {
+                let name = db::query_team_members(conn, &input.team_id)?
+                    .into_iter()
+                    .find(|u| u.id.inner() == id)
+                    .map_or_else(|| id.clone(), |u| u.name);
+                Some(types::User {
+                    id: id.clone().into(),
+                    name,
+                })
             }
-        });
+            None => None,
+        };
 
         let priority = input
             .priority
             .and_then(|p| u8::try_from(p).ok())
             .unwrap_or(0);
         let now = lt_types::scalars::DateTime(chrono::Utc::now());
-        types::Issue {
+        Ok(types::Issue {
             id: db::outbox::temp_id().into(),
             identifier: "NEW".to_string(),
             title: input.title.clone(),
@@ -355,7 +368,7 @@ impl LinearSyncService {
             parent: None,
             created_at: now,
             updated_at: now,
-        }
+        })
     }
 }
 
@@ -502,7 +515,7 @@ impl SyncService for LinearSyncService {
 
     fn create_issue(&self, input: &IssueCreateInput) -> Result<String> {
         let conn = self.connect()?;
-        let optimistic = Self::optimistic_issue(&conn, input);
+        let optimistic = Self::optimistic_issue(&conn, input)?;
         let identifier = optimistic.identifier.clone();
         db::outbox::enqueue_issue_create(&conn, &optimistic, input)?;
         (self.on_event)(RuntimeEvent::State(StateEvent::Issues));

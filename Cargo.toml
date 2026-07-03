@@ -60,3 +60,6 @@ unimplemented = "deny"
 dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
+# No silent error drops (docs/design/tui-app-event-queue-adr.md, Decision 11).
+let_underscore_must_use = "deny"
+let_underscore_untyped = "deny"

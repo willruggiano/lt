@@ -99,11 +99,19 @@ impl NewIssueModal {
     pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
         match ev {
             StateEvent::Teams => {
-                let Ok(conn) = ctx.db.connect() else {
-                    return;
+                let conn = match ctx.db.connect() {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "new-issue modal: failed to open db connection");
+                        return;
+                    }
                 };
-                let Ok(teams) = lt_runtime::db::query_teams(&conn) else {
-                    return;
+                let teams = match lt_runtime::db::query_teams(&conn) {
+                    Ok(teams) => teams,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "new-issue modal: failed to query teams");
+                        return;
+                    }
                 };
                 let current_id = self.selected_team_id();
                 self.teams = teams.into_iter().map(PopupItem::from).collect();
@@ -112,8 +120,12 @@ impl NewIssueModal {
             StateEvent::Team { team_id }
                 if self.selected_team_id().as_deref() == Some(team_id.as_str()) =>
             {
-                let Ok(conn) = ctx.db.connect() else {
-                    return;
+                let conn = match ctx.db.connect() {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "new-issue modal: failed to open db connection");
+                        return;
+                    }
                 };
                 let current_state = self
                     .states
@@ -141,8 +153,17 @@ impl NewIssueModal {
 /// `state_items` (the states half) is shared with the state popup --
 /// imported from `popup`, not redefined here.
 fn assignee_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
-    let viewer = lt_runtime::db::synced_viewer(conn).ok().flatten();
-    let members = lt_runtime::db::query_team_members(conn, team_id).unwrap_or_default();
+    let viewer = match lt_runtime::db::synced_viewer(conn) {
+        Ok(viewer) => viewer,
+        Err(e) => {
+            tracing::warn!(error = %e, "new-issue modal: failed to read synced viewer");
+            None
+        }
+    };
+    let members = lt_runtime::db::query_team_members(conn, team_id).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, team_id, "new-issue modal: failed to query team members");
+        Vec::new()
+    });
     build_assignee_items(viewer.as_ref(), members)
 }
 
@@ -155,7 +176,10 @@ fn team_scoped_items(
 ) -> (Vec<PopupItem>, Vec<PopupItem>) {
     match db.connect() {
         Ok(conn) => (state_items(&conn, team_id), assignee_items(&conn, team_id)),
-        Err(_) => (Vec::new(), Vec::new()),
+        Err(e) => {
+            tracing::warn!(error = %e, "new-issue modal: failed to open db connection");
+            (Vec::new(), Vec::new())
+        }
     }
 }
 
@@ -181,7 +205,10 @@ impl super::App {
             .db
             .connect()
             .and_then(|conn| lt_runtime::db::query_teams(&conn))
-            .unwrap_or_default()
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "new-issue modal: failed to load teams");
+                Vec::new()
+            })
             .into_iter()
             .map(PopupItem::from)
             .collect();
@@ -413,8 +440,6 @@ pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
                     if field == NewIssueField::Team {
                         let next = modal.focused_field.next();
                         modal.focused_field = next;
-                        // Release the mutable borrow before calling the method.
-                        let _ = modal;
                         app.new_issue_team_changed(i);
                     } else {
                         modal.focused_field = modal.focused_field.next();
@@ -447,8 +472,6 @@ pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
                     if field == NewIssueField::Team {
                         let next = modal.focused_field.next();
                         modal.focused_field = next;
-                        // Release the mutable borrow before calling the method.
-                        let _ = modal;
                         app.new_issue_team_changed(i);
                     } else {
                         modal.focused_field = modal.focused_field.next();
