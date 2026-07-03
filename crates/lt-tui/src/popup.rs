@@ -1,11 +1,11 @@
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{ALL_KEYBINDINGS, App, Mode, TextInput};
+use super::{ALL_KEYBINDINGS, App, KeyFlow, TextInput, View};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -23,6 +23,23 @@ pub struct PopupItem {
     /// Opaque ID sent to the Linear API (state id, assignee id, etc.).
     /// None means "unassign" for the assignee popup.
     pub id: Option<String>,
+}
+
+/// State/priority/assignee picker: the popup's items plus the target
+/// captured at open.
+pub struct PopupView {
+    pub kind: PopupKind,
+    /// Target issue id, captured at open; confirm no longer depends on the
+    /// list selection being unchanged.
+    pub issue_id: String,
+    /// The issue's team -- the scope key for a future team-scoped refresh
+    /// (state and assignee popups; `None` for the static priority popup).
+    pub team_id: Option<String>,
+    pub items: Vec<PopupItem>,
+    pub selected: usize,
+    /// Written by the renderer when this popup sits directly on the base
+    /// table; `None` => `render_popup` centers.
+    pub anchor: Option<ratatui::layout::Rect>,
 }
 
 /// Linear priority options as popup items.
@@ -226,26 +243,33 @@ impl SearchOverlay {
 
 impl super::App {
     pub(crate) fn open_state_popup(&mut self) {
-        let issue = match self.selected_issue() {
-            Some(i) => i.clone(),
-            None => return,
+        let Some(issue) = self.selected_issue() else {
+            return;
         };
+        let issue_id = issue.id.inner().to_string();
+        let team_id = issue.team.id.inner().to_string();
         let current_state_name = issue.state.name.clone();
-        match self.service.fetch_workflow_states(issue.team.id.inner()) {
+        match self.service.fetch_workflow_states(&team_id) {
             Ok(states) => {
-                self.popup_items = states
+                let items: Vec<PopupItem> = states
                     .into_iter()
                     .map(|s| PopupItem {
                         label: s.name,
                         id: Some(s.id.into_inner()),
                     })
                     .collect();
-                self.popup_selected = self
-                    .popup_items
+                let selected = items
                     .iter()
                     .position(|item| item.label == current_state_name)
                     .unwrap_or(0);
-                self.mode = Mode::Popup(PopupKind::State);
+                self.views.push(View::Popup(PopupView {
+                    kind: PopupKind::State,
+                    issue_id,
+                    team_id: Some(team_id),
+                    items,
+                    selected,
+                    anchor: None,
+                }));
                 self.footer_msg = None;
             }
             Err(e) => {
@@ -255,26 +279,35 @@ impl super::App {
     }
 
     pub(crate) fn open_priority_popup(&mut self) {
-        let Some(priority) = self.selected_issue().map(|i| i.priority) else {
+        let Some(issue) = self.selected_issue() else {
             return;
         };
+        let issue_id = issue.id.inner().to_string();
         // Linear priority: 0=No priority, 1=Urgent, 2=High, 3=Normal, 4=Low
-        self.popup_items = priority_popup_items();
-        self.popup_selected = usize::from(priority.0);
-        self.mode = Mode::Popup(PopupKind::Priority);
+        let selected = usize::from(issue.priority.0);
+        self.views.push(View::Popup(PopupView {
+            kind: PopupKind::Priority,
+            issue_id,
+            team_id: None,
+            items: priority_popup_items(),
+            selected,
+            anchor: None,
+        }));
         self.footer_msg = None;
     }
 
     pub(crate) fn open_assignee_popup(&mut self) {
-        let issue = match self.selected_issue() {
-            Some(i) => i.clone(),
-            None => return,
+        let Some(issue) = self.selected_issue() else {
+            return;
         };
+        let issue_id = issue.id.inner().to_string();
+        let team_id = issue.team.id.inner().to_string();
+        let current_assignee = issue.assignee.as_ref().map(|a| a.id.inner().to_string());
         let mut items: Vec<PopupItem> = vec![PopupItem {
             label: "Unassign".to_string(),
             id: None,
         }];
-        match self.service.fetch_team_members(issue.team.id.inner()) {
+        match self.service.fetch_team_members(&team_id) {
             Ok(members) => {
                 for m in members {
                     items.push(PopupItem {
@@ -288,64 +321,67 @@ impl super::App {
                 return;
             }
         }
-        self.popup_selected = issue
-            .assignee
-            .as_ref()
+        let selected = current_assignee
             .and_then(|a| {
                 items
                     .iter()
-                    .position(|item| item.id.as_deref() == Some(a.id.inner()))
+                    .position(|item| item.id.as_deref() == Some(a.as_str()))
             })
             .unwrap_or(0);
-        self.popup_items = items;
-        self.mode = Mode::Popup(PopupKind::Assignee);
+        self.views.push(View::Popup(PopupView {
+            kind: PopupKind::Assignee,
+            issue_id,
+            team_id: Some(team_id),
+            items,
+            selected,
+            anchor: None,
+        }));
         self.footer_msg = None;
     }
+}
 
-    pub(crate) fn popup_move(&mut self, delta: i32) {
-        let n = self.popup_items.len();
-        if n == 0 {
-            return;
-        }
-        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
-        self.popup_selected = if delta >= 0 {
-            self.popup_selected.saturating_add(step).min(n - 1)
-        } else {
-            self.popup_selected.saturating_sub(step)
-        };
+fn popup_view_mut(app: &mut App, i: usize) -> Option<&mut PopupView> {
+    app.view_at_mut(i, |v| match v {
+        View::Popup(p) => Some(p),
+        _ => None,
+    })
+}
+
+fn popup_move(app: &mut App, i: usize, delta: i32) {
+    let Some(popup) = popup_view_mut(app, i) else {
+        return;
+    };
+    let n = popup.items.len();
+    if n == 0 {
+        return;
     }
+    let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+    popup.selected = if delta >= 0 {
+        popup.selected.saturating_add(step).min(n - 1)
+    } else {
+        popup.selected.saturating_sub(step)
+    };
+}
 
-    fn popup_confirm(&mut self) {
-        let kind = match &self.mode {
-            Mode::Popup(k) => k.clone(),
-            _ => return,
-        };
-        let item = match self.popup_items.get(self.popup_selected) {
-            Some(i) => i.clone(),
-            None => return,
-        };
-        let issue = match self.selected_issue() {
-            Some(i) => i.clone(),
-            None => return,
-        };
+/// Confirm the popup choice: pop it, then enqueue the edit and apply it
+/// optimistically against the issue it was opened for (its captured
+/// `issue_id`, not the current list selection).
+fn popup_confirm(app: &mut App, i: usize) {
+    let Some(View::Popup(popup)) = app.views.get(i) else {
+        return;
+    };
+    let Some(item) = popup.items.get(popup.selected).cloned() else {
+        return;
+    };
+    let issue_id = popup.issue_id.clone();
+    let kind = popup.kind.clone();
+    app.pop_view();
+    enqueue_edit(&issue_id, &kind, &item);
+    apply_optimistic_in_memory(app, &issue_id, &kind, &item);
+}
 
-        // 1. Enqueue local intent (overlay + outbox) in one transaction. No
-        //    network: the sync drainer replays it. The read model merges the
-        //    overlay, so the change renders without a base write.
-        enqueue_edit(issue.id.inner(), &kind, &item);
-
-        // 2. Update the in-memory issue list for instant feedback before the
-        //    next DB-backed fetch reloads the merged read model.
-        apply_optimistic_in_memory(self, &kind, &item);
-
-        self.mode = Mode::List;
-        self.popup_anchor = None;
-    }
-
-    pub(crate) fn popup_cancel(&mut self) {
-        self.mode = Mode::List;
-        self.popup_anchor = None;
-    }
+fn popup_cancel(app: &mut App) {
+    app.pop_view();
 }
 
 // ---------------------------------------------------------------------------
@@ -426,8 +462,17 @@ pub(crate) fn build_optimistic_issue(
     updated
 }
 
-pub(crate) fn apply_optimistic_in_memory(app: &mut App, kind: &PopupKind, item: &PopupItem) {
-    if let Some(issue) = app.selected_issue_mut() {
+/// Apply a popup choice to the base list's copy of the target issue
+/// (captured at open, not the current list selection).
+pub(crate) fn apply_optimistic_in_memory(
+    app: &mut App,
+    issue_id: &str,
+    kind: &PopupKind,
+    item: &PopupItem,
+) {
+    if let Some(list) = app.base_list_mut()
+        && let Some(issue) = list.issues.iter_mut().find(|i| i.id.inner() == issue_id)
+    {
         apply_change(issue, kind, item);
     }
 }
@@ -438,28 +483,28 @@ pub(crate) fn apply_optimistic_in_memory(app: &mut App, kind: &PopupKind, item: 
 
 // -- Popup key handler ----------------------------------------------
 
-pub(crate) fn handle_popup_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Char('j') | KeyCode::Down => app.popup_move(1),
-        KeyCode::Char('k') | KeyCode::Up => app.popup_move(-1),
-        KeyCode::Enter => app.popup_confirm(),
-        KeyCode::Esc => app.popup_cancel(),
+pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => popup_move(app, i, 1),
+        KeyCode::Char('k') | KeyCode::Up => popup_move(app, i, -1),
+        KeyCode::Enter => popup_confirm(app, i),
+        KeyCode::Esc => popup_cancel(app),
         _ => {}
     }
+    KeyFlow::Consumed
 }
 
 // -- Help popup key handler -----------------------------------------
 
-pub(crate) fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+pub(crate) fn handle_help_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    let code = key.code;
+    let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Esc => {
-            app.mode = Mode::List;
-            app.help_popup = None;
-        }
+        KeyCode::Esc => app.pop_view(),
         // Navigation: j/k/<down>/<up> move the filtered list.
         KeyCode::Down | KeyCode::Char('j') if !ctrl => {
-            if let Some(ref mut popup) = app.help_popup {
+            if let Some(View::Help(popup)) = app.views.get_mut(i) {
                 let max = popup.filtered.len().saturating_sub(1);
                 if popup.selected < max {
                     popup.selected += 1;
@@ -467,34 +512,34 @@ pub(crate) fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifi
             }
         }
         KeyCode::Up | KeyCode::Char('k') if !ctrl => {
-            if let Some(ref mut popup) = app.help_popup {
+            if let Some(View::Help(popup)) = app.views.get_mut(i) {
                 popup.selected = popup.selected.saturating_sub(1);
             }
         }
         // Everything else goes to the TextInput search bar.
         _ => {
-            if let Some(ref mut popup) = app.help_popup
+            if let Some(View::Help(popup)) = app.views.get_mut(i)
                 && popup.search.handle_key(code, modifiers)
             {
                 popup.update_filter();
             }
         }
     }
+    KeyFlow::Consumed
 }
 
 // -- FTS search overlay key handler --------------------------------
 
-pub(crate) fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+pub(crate) fn handle_search_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    let code = key.code;
+    let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Esc => {
-            // Esc exits the search overlay and returns to the full list (go back).
-            app.mode = Mode::List;
-            app.search_overlay = None;
-        }
+        // Esc exits the search overlay and returns to the full list (go back).
+        KeyCode::Esc => app.pop_view(),
         KeyCode::Char('c') if ctrl => {
             // Ctrl+C resets the search query back to the default.
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.query = TextInput::from(search_query::DEFAULT_QUERY.to_string());
                 overlay.last_changed = Some(Instant::now());
             }
@@ -503,30 +548,30 @@ pub(crate) fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModi
         // Result-list navigation: <down>/<up> only. Plain j/k must fall
         // through to the query bar so they can be typed as filter text.
         KeyCode::Down => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.move_down();
             }
         }
         KeyCode::Up => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.move_up();
             }
         }
         // Ctrl+N -- cycle completion forward.
         KeyCode::Char('n') if ctrl => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.completer.cycle_next();
             }
         }
         // Ctrl+P -- cycle completion backward.
         KeyCode::Char('p') if ctrl => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.completer.cycle_prev();
             }
         }
         // Ctrl+Y -- accept the highlighted completion candidate.
         KeyCode::Char('y') if ctrl => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
                 if overlay
                     .completer
@@ -541,47 +586,51 @@ pub(crate) fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModi
         }
         // Tab / Shift-Tab: apply stem-key completion.
         // These must NOT be forwarded to TextInput::handle_key.
-        KeyCode::Tab => apply_completion_tab(app, true),
-        KeyCode::BackTab => apply_completion_tab(app, false),
+        KeyCode::Tab => apply_completion_tab(app, i, true),
+        KeyCode::BackTab => apply_completion_tab(app, i, false),
         // Everything else goes to the TextInput query bar.
         _ => {
-            if let Some(ref mut overlay) = app.search_overlay
+            if let Some(View::Search(overlay)) = app.views.get_mut(i)
                 && overlay.query.handle_key(code, modifiers)
             {
                 overlay.last_changed = Some(Instant::now());
             }
         }
     }
+    KeyFlow::Consumed
 }
 
-/// Confirm the search: leave search mode with the filtered results visible by
-/// transferring them into `app.issues` so normal keybindings work.
+/// Confirm the search: pop the overlay (the borrow requires it, and it
+/// destroys the overlay anyway) and transfer its results into the base list
+/// so normal keybindings work.
 fn confirm_search(app: &mut App) {
-    if let Some(ref mut overlay) = app.search_overlay {
-        // Flush any pending debounce so the AST and results reflect every
-        // character the user typed before hitting Enter.
-        if overlay.last_changed.is_some() {
-            overlay.last_changed = None;
-            overlay.run_search(app.viewport_height, app.args.limit as usize);
-        }
-        let results = std::mem::take(&mut overlay.results);
-        let selected = overlay.table_state.selected();
-        // AST is the single source of truth.
-        app.active_filter = overlay.ast.clone();
-        app.sync_args_from_filter();
-        app.issues = results;
-        let n = app.issues.len();
-        let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
-        app.table_state.select(if n > 0 { Some(sel) } else { None });
+    let Some(View::Search(mut overlay)) = app.views.pop() else {
+        return;
+    };
+    // Flush any pending debounce so the AST and results reflect every
+    // character the user typed before hitting Enter.
+    if overlay.last_changed.is_some() {
+        overlay.last_changed = None;
+        overlay.run_search(app.viewport_height, app.args.limit as usize);
     }
-    app.mode = Mode::List;
-    app.search_overlay = None;
+    let results = std::mem::take(&mut overlay.results);
+    let selected = overlay.table_state.selected();
+    // AST is the single source of truth.
+    app.active_filter = overlay.ast.clone();
+    app.sync_args_from_filter();
+    if let Some(list) = app.base_list_mut() {
+        list.issues = results;
+        let n = list.issues.len();
+        let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
+        list.table_state
+            .select(if n > 0 { Some(sel) } else { None });
+    }
 }
 
 /// Apply stem-key completion in the given direction (Tab forward, Shift-Tab
 /// backward) and re-parse the query AST.
-fn apply_completion_tab(app: &mut App, forward: bool) {
-    if let Some(ref mut overlay) = app.search_overlay {
+fn apply_completion_tab(app: &mut App, i: usize, forward: bool) {
+    if let Some(View::Search(overlay)) = app.views.get_mut(i) {
         let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
         overlay
             .completer
@@ -593,17 +642,20 @@ fn apply_completion_tab(app: &mut App, forward: bool) {
     }
 }
 
-/// Fire the FTS search when the debounce interval (150ms) has elapsed.
+/// Fire the FTS search when the debounce interval (150ms) has elapsed. The
+/// search overlay is only ever the top of the stack, so `views.last` is the
+/// live check; `viewport_height`/`args.limit` are copied out before the
+/// `views.last_mut()` borrow since `run_search` needs both simultaneously.
 pub(crate) fn poll_search_debounce(app: &mut App) {
-    let should_search = match app.search_overlay {
-        Some(ref overlay) => match overlay.last_changed {
-            Some(t) => t.elapsed() >= Duration::from_millis(150),
-            None => false,
-        },
-        None => false,
-    };
-    if should_search && let Some(ref mut overlay) = app.search_overlay {
+    let viewport_height = app.viewport_height;
+    let limit = app.args.limit as usize;
+    let should_search = matches!(
+        app.views.last(),
+        Some(View::Search(overlay))
+            if overlay.last_changed.is_some_and(|t| t.elapsed() >= Duration::from_millis(150))
+    );
+    if should_search && let Some(View::Search(overlay)) = app.views.last_mut() {
         overlay.last_changed = None;
-        overlay.run_search(app.viewport_height, app.args.limit as usize);
+        overlay.run_search(viewport_height, limit);
     }
 }

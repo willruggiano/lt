@@ -99,11 +99,11 @@ fn do_fetch_paginated_loads_from_db() {
         db_issue("3", "ENG-3", "Todo", 3),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.do_fetch(true);
-    assert_eq!(app.issues.len(), 3);
-    assert_eq!(app.issues[0].identifier, "ENG-1"); // updated DESC
-    assert_eq!(app.table_state.selected(), Some(0));
-    assert!(!app.pagination.has_next_page);
+    app.fetch_base_list(true);
+    assert_eq!(app.list_mut().issues.len(), 3);
+    assert_eq!(app.list_mut().issues[0].identifier, "ENG-1"); // updated DESC
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
+    assert!(!app.list_mut().pagination.has_next_page);
 }
 
 #[test]
@@ -115,12 +115,12 @@ fn do_fetch_filtered_uses_run_query() {
     ];
     let mut app = app_with_db(&rows).unwrap();
     app.active_filter = search_query::parse_query_ast("state:todo");
-    app.do_fetch(true);
-    assert_eq!(app.issues.len(), 2);
-    assert!(app.issues.iter().all(|i| i.state.name == "Todo"));
+    app.fetch_base_list(true);
+    assert_eq!(app.list_mut().issues.len(), 2);
+    assert!(app.list_mut().issues.iter().all(|i| i.state.name == "Todo"));
     // run_query has no pagination.
-    assert!(!app.pagination.has_next_page);
-    assert!(app.pagination.end_cursor.is_none());
+    assert!(!app.list_mut().pagination.has_next_page);
+    assert!(app.list_mut().pagination.end_cursor.is_none());
 }
 
 #[test]
@@ -131,8 +131,16 @@ fn do_fetch_and_select_seeks_identifier() {
         db_issue("3", "ENG-3", "Todo", 3),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.do_fetch_and_select(Some("ENG-3".to_string()));
-    assert_eq!(app.table_state.selected(), Some(2));
+    let ctx = StateCtx {
+        db: &app.db,
+        args: &app.args,
+        filter: &app.active_filter,
+        viewer_name: app.viewer_name.as_deref(),
+    };
+    if let Some(View::List(list)) = app.views.first_mut() {
+        list.do_fetch_and_select(&ctx, Some("ENG-3".to_string()));
+    }
+    assert_eq!(app.list_mut().table_state.selected(), Some(2));
 }
 
 #[test]
@@ -146,25 +154,28 @@ fn next_and_prev_page_walk_offsets() {
     ];
     let mut app = app_with_db(&rows).unwrap();
     app.args.limit = 2;
-    app.do_fetch(true);
-    assert_eq!(app.issues[0].identifier, "ENG-1");
-    assert!(app.pagination.has_next_page);
+    app.fetch_base_list(true);
+    assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
+    assert!(app.list_mut().pagination.has_next_page);
 
     app.next_page();
-    assert_eq!(app.pagination.current_cursor.as_deref(), Some("2"));
-    assert_eq!(app.issues[0].identifier, "ENG-3");
+    assert_eq!(
+        app.list_mut().pagination.current_cursor.as_deref(),
+        Some("2")
+    );
+    assert_eq!(app.list_mut().issues[0].identifier, "ENG-3");
 
     app.prev_page();
-    assert!(app.pagination.current_cursor.is_none());
-    assert_eq!(app.issues[0].identifier, "ENG-1");
+    assert!(app.list_mut().pagination.current_cursor.is_none());
+    assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
 }
 
 #[test]
 fn prev_page_at_start_is_noop() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    app.do_fetch(true);
+    app.fetch_base_list(true);
     app.prev_page(); // empty cursor stack -> no-op
-    assert_eq!(app.issues.len(), 1);
+    assert_eq!(app.list_mut().issues.len(), 1);
 }
 
 #[test]
@@ -177,12 +188,12 @@ fn cycle_sort_and_toggle_desc_refetch() {
     let before = app.args.sort.clone();
     app.cycle_sort();
     assert_ne!(app.args.sort, before);
-    assert_eq!(app.issues.len(), 2);
+    assert_eq!(app.list_mut().issues.len(), 2);
 
     let desc_before = app.args.desc;
     app.toggle_desc();
     assert_ne!(app.args.desc, desc_before);
-    assert_eq!(app.issues.len(), 2);
+    assert_eq!(app.list_mut().issues.len(), 2);
 }
 
 // -- populate_relations ---------------------------------------------------
@@ -219,16 +230,16 @@ fn run_app_dispatches_keys_and_quits() {
         db_issue("3", "ENG-3", "Todo", 3),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.do_fetch(true); // populate the list the loop renders
+    app.fetch_base_list(true); // populate the list the loop renders
     drive(&mut app, &[key('j'), key('j'), key('q')]).unwrap();
     assert!(app.quit);
-    assert_eq!(app.table_state.selected(), Some(2));
+    assert_eq!(app.list_mut().table_state.selected(), Some(2));
 }
 
 #[test]
 fn run_app_errs_when_events_exhausted_without_quit() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    app.do_fetch(true);
+    app.fetch_base_list(true);
     // No quit key: the scripted source errors once drained, ending the loop.
     assert!(drive(&mut app, &[key('j')]).is_err());
 }
@@ -244,7 +255,7 @@ fn double_esc_resets_to_initial_filter() {
     app.active_filter = app.replace_sort_in_filter();
     app.last_esc_time = Some(Instant::now()); // within the 500ms window
 
-    handle_normal_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.args.sort, initial_sort);
     assert!(app.last_esc_time.is_none());
 }
@@ -253,7 +264,7 @@ fn double_esc_resets_to_initial_filter() {
 fn first_esc_records_timestamp() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     app.last_esc_time = None;
-    handle_normal_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.last_esc_time.is_some());
 }
 
@@ -303,14 +314,13 @@ fn poll_sync_events_done_refreshes_and_sets_identity() {
     assert_eq!(app.viewer_name.as_deref(), Some("Ada"));
     assert!(!app.sync.syncing);
     assert!(app.sync.next_sync_at.is_some());
-    assert_eq!(app.issues.len(), 1); // do_fetch ran against the cache
+    assert_eq!(app.list_mut().issues.len(), 1); // do_fetch ran against the cache
 }
 
 #[test]
 fn poll_detail_comment_events_done_updates_detail() {
     let issue: lt_types::types::Issue = db_issue("c1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(&[]).unwrap();
-    app.detail = Some(build_cached_detail(&issue, Vec::new()));
     let (tx, rx) = mpsc::channel();
     tx.send(CommentSyncEvent::Done(vec![lt_types::comments::Comment {
         id: "c1".into(),
@@ -321,21 +331,32 @@ fn poll_detail_comment_events_done_updates_detail() {
         issue_id: Some("i1".to_string()),
     }]))
     .unwrap();
-    app.detail_comment_rx = Some(rx);
+    let mut detail = build_cached_detail(&issue, Vec::new());
+    detail.detail_comment_rx = Some(rx);
+    app.views.push(View::Detail(Box::new(detail)));
     poll_detail_comment_events(&mut app);
-    assert_eq!(app.detail.unwrap().comments.len(), 1);
-    assert!(app.detail_comment_rx.is_none());
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert_eq!(detail.comments.len(), 1);
+    assert!(detail.detail_comment_rx.is_none());
 }
 
 #[test]
 fn poll_detail_comment_events_error_clears_receiver() {
+    let issue: lt_types::types::Issue = db_issue("c1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(&[]).unwrap();
     let (tx, rx) = mpsc::channel();
     tx.send(CommentSyncEvent::Error("nope".to_string()))
         .unwrap();
-    app.detail_comment_rx = Some(rx);
+    let mut detail = build_cached_detail(&issue, Vec::new());
+    detail.detail_comment_rx = Some(rx);
+    app.views.push(View::Detail(Box::new(detail)));
     poll_detail_comment_events(&mut app);
-    assert!(app.detail_comment_rx.is_none());
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert!(detail.detail_comment_rx.is_none());
 }
 
 #[test]
@@ -373,7 +394,7 @@ fn poll_modal_events_applies_loaded_data() {
         id: Some("u1".to_string()),
     }]))
     .unwrap();
-    app.new_issue_modal = Some(NewIssueModal {
+    app.views.push(View::NewIssue(NewIssueModal {
         focused_field: NewIssueField::Title,
         title: TextInput::from(String::new()),
         description: String::new(),
@@ -388,9 +409,11 @@ fn poll_modal_events_applies_loaded_data() {
         loading: true,
         error: String::new(),
         modal_rx: Some(rx),
-    });
+    }));
     app.poll_modal_events();
-    let modal = app.new_issue_modal.unwrap();
+    let Some(View::NewIssue(modal)) = app.views.last() else {
+        unreachable!("new-issue view expected")
+    };
     assert_eq!(modal.states.len(), 1);
     assert_eq!(modal.assignees.len(), 1);
     assert!(!modal.loading);
@@ -401,5 +424,5 @@ fn poll_search_debounce_is_noop_without_pending_change() {
     let mut app = app_with_db(&[]).unwrap();
     // No overlay -> early return.
     poll_search_debounce(&mut app);
-    assert!(app.search_overlay.is_none());
+    assert_eq!(app.views.len(), 1);
 }

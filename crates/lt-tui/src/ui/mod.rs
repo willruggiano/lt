@@ -8,9 +8,7 @@ mod table;
 mod text_span;
 mod util;
 
-use chrome::{
-    FooterState, Identity, render_footer, render_header, render_header_with_search, render_input,
-};
+use chrome::{FooterState, Identity, render_footer, render_header, render_header_with_search};
 use detail::{render_detail_footer, render_detail_overlay};
 use help::render_help_popup;
 use new_issue::{render_new_issue_modal, submit_key_label};
@@ -21,7 +19,7 @@ use ratatui::widgets::Paragraph;
 use search::{SortOrder, render_search_overlay};
 use table::render_table;
 
-use crate::{App, Mode, search_query};
+use crate::{App, View, search_query};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -37,9 +35,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     app.viewport_height = chunks[2].height.saturating_sub(1);
 
     let context = search_query::render_filter_context(&app.active_filter);
-    let has_next = app.pagination.has_next_page;
-    let has_prev = !app.pagination.cursor_stack.is_empty();
-    let page = app.pagination.cursor_stack.len() + 1;
 
     // Always render the header with user/org context. In search mode, append
     // the search query inline so the identity is always visible.
@@ -47,20 +42,24 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         viewer_name: app.viewer_name.as_deref(),
         org_name: app.org_name.as_deref(),
     };
-    if let Mode::Search = app.mode
-        && let Some(ref overlay) = app.search_overlay
-    {
+    if let Some(View::Search(overlay)) = app.views.last() {
         render_header_with_search(frame, chunks[0], &identity, overlay);
     } else {
         render_header(frame, chunks[0], &context, &identity);
     }
 
-    // Always render the full-width table so column widths never change.
+    // Always render the full-width base view (today: the table) so column
+    // widths never change.
     render_table(frame, chunks[2], app);
 
     // Render the spacer row between the issue table and the statusbar so the
     // terminal cell buffer is explicitly cleared (chunk[3]).
     frame.render_widget(Paragraph::new(""), chunks[3]);
+
+    let base_list = app.base_list();
+    let has_next = base_list.is_some_and(|l| l.pagination.has_next_page);
+    let has_prev = base_list.is_some_and(|l| !l.pagination.cursor_stack.is_empty());
+    let page = base_list.map_or(1, |l| l.pagination.cursor_stack.len() + 1);
 
     let sync_label = app.sync.sync_status_label.clone();
     let footer = FooterState {
@@ -75,10 +74,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 /// Render the bottom status row (chunk 4), which switches between the detail
-/// footer, the filter input, a transient footer message, and the list footer.
+/// footer, a transient footer message, and the list footer, matching on the
+/// stack top.
 fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &FooterState) {
-    if let Mode::Detail = app.mode {
-        if app.comment_input.is_some() {
+    if let Some(View::Detail(d)) = app.views.last() {
+        if d.comment_input.is_some() {
             frame.render_widget(
                 Paragraph::new(format!(
                     "Enter newline  {} submit  Esc cancel",
@@ -91,8 +91,6 @@ fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Foo
         } else {
             render_detail_footer(frame, chunks[4]);
         }
-    } else if app.input_mode {
-        render_input(frame, chunks[4], &app.input_buf);
     } else if let Some(msg) = &app.footer_msg {
         frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
     } else {
@@ -100,53 +98,33 @@ fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Foo
     }
 }
 
-/// Render any active mode overlay on top of the base list/header/footer.
+/// Render every view above the base, bottom to top.
 fn render_overlays(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
-    // Render detail overlay on top if active.
-    if let Mode::Detail = app.mode {
-        render_detail_overlay(frame, chunks[2], app);
-    }
+    let keyboard_enhanced = app.session.keyboard_enhanced;
+    let sort_order = SortOrder {
+        field: &app.args.sort,
+        desc: app.args.desc,
+    };
 
-    // Render popup on top if active.
-    if let Mode::Popup(ref kind) = app.mode {
-        render_popup(
-            frame,
-            frame.area(),
-            &Popup {
-                anchor: app.popup_anchor,
-                kind,
-                items: &app.popup_items,
-                selected: app.popup_selected,
-            },
-        );
-    }
-
-    // Render new-issue modal on top if active.
-    if let Mode::NewIssue = app.mode
-        && let Some(ref modal) = app.new_issue_modal
-    {
-        render_new_issue_modal(frame, frame.area(), modal, app.session.keyboard_enhanced);
-    }
-
-    // Render help popup on top if active.
-    if let Mode::Help = app.mode
-        && let Some(ref popup) = app.help_popup
-    {
-        render_help_popup(frame, frame.area(), popup);
-    }
-
-    // Render FTS search overlay.
-    if let Mode::Search = app.mode
-        && let Some(ref mut overlay) = app.search_overlay
-    {
-        render_search_overlay(
-            frame,
-            chunks,
-            overlay,
-            &SortOrder {
-                field: &app.args.sort,
-                desc: app.args.desc,
-            },
-        );
+    for view in app.views.iter_mut().skip(1) {
+        match view {
+            View::List(_) => {} // unreachable above the base in this stage
+            View::Detail(detail) => render_detail_overlay(frame, chunks[2], detail),
+            View::Popup(popup) => render_popup(
+                frame,
+                frame.area(),
+                &Popup {
+                    anchor: popup.anchor,
+                    kind: &popup.kind,
+                    items: &popup.items,
+                    selected: popup.selected,
+                },
+            ),
+            View::NewIssue(modal) => {
+                render_new_issue_modal(frame, frame.area(), modal, keyboard_enhanced);
+            }
+            View::Help(popup) => render_help_popup(frame, frame.area(), popup),
+            View::Search(overlay) => render_search_overlay(frame, chunks, overlay, &sort_order),
+        }
     }
 }

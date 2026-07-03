@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::{App, Clock, LoginEvent, Mode, Status, SyncEvent};
+use super::{App, Clock, LoginEvent, Status, SyncEvent};
 
 /// Build a human-readable "synced X min ago" or "syncing..." label, reading
 /// `last_synced_at` from the database. The pure formatting lives in
@@ -105,12 +105,15 @@ pub(crate) fn poll_sync_events(app: &mut App) {
                 }
                 // Sync finished: refresh the issue list from SQLite so that
                 // has_next_page and end_cursor are recalculated correctly.
-                // Only refresh if the user is in normal list mode on page 1.
-                if matches!(app.mode, Mode::List)
-                    && app.pagination.cursor_stack.is_empty()
-                    && app.pagination.current_cursor.is_none()
-                {
-                    app.do_fetch(false);
+                // Only refresh if the base list is the sole view (focused)
+                // and on page 1.
+                let should_refresh = app.views.len() == 1
+                    && app.base_list().is_some_and(|l| {
+                        l.pagination.cursor_stack.is_empty()
+                            && l.pagination.current_cursor.is_none()
+                    });
+                if should_refresh {
+                    app.fetch_base_list(false);
                 }
                 app.sync.syncing = false;
                 app.sync.sync_status_label = build_sync_status_label(false, &app.clock);
@@ -121,8 +124,10 @@ pub(crate) fn poll_sync_events(app: &mut App) {
             Ok(SyncEvent::Error(msg)) => {
                 app.sync.syncing = false;
                 app.sync.sync_status_label = format!("sync error: {msg}");
-                if matches!(app.status, Status::Loading) {
-                    app.status = Status::Idle;
+                if let Some(list) = app.base_list_mut()
+                    && matches!(list.status, Status::Loading)
+                {
+                    list.status = Status::Idle;
                 }
                 // Retry periodic sync in 30s even after errors.
                 app.sync.next_sync_at = Some(Instant::now() + Duration::from_secs(30));
@@ -132,8 +137,10 @@ pub(crate) fn poll_sync_events(app: &mut App) {
                 app.sync.syncing = false;
                 app.session.not_authenticated = true;
                 app.sync.sync_status_label = "not authenticated -- press L to log in".to_string();
-                if matches!(app.status, Status::Loading) {
-                    app.status = Status::Idle;
+                if let Some(list) = app.base_list_mut()
+                    && matches!(list.status, Status::Loading)
+                {
+                    list.status = Status::Idle;
                 }
                 // Don't schedule periodic sync when not authenticated.
                 app.sync.next_sync_at = None;

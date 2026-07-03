@@ -43,102 +43,133 @@ fn item(label: &str, id: Option<&str>) -> PopupItem {
 fn list_navigation_clamps_within_bounds() {
     let mut app = app_with_issues(0, 10);
     app.viewport_height = 4;
-    app.table_state.select(Some(0));
+    app.list_mut().table_state.select(Some(0));
 
-    app.move_down();
-    assert_eq!(app.table_state.selected(), Some(1));
-    app.move_up();
-    assert_eq!(app.table_state.selected(), Some(0));
-    app.move_up(); // clamp at top
-    assert_eq!(app.table_state.selected(), Some(0));
-    app.move_bottom();
-    assert_eq!(app.table_state.selected(), Some(9));
-    app.move_top();
-    assert_eq!(app.table_state.selected(), Some(0));
-    app.page_down(); // +viewport (4)
-    assert_eq!(app.table_state.selected(), Some(4));
-    app.half_page_up(); // -2
-    assert_eq!(app.table_state.selected(), Some(2));
-    app.page_up(); // clamp at top
-    assert_eq!(app.table_state.selected(), Some(0));
+    app.list_mut().move_down();
+    assert_eq!(app.list_mut().table_state.selected(), Some(1));
+    app.list_mut().move_up();
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
+    app.list_mut().move_up(); // clamp at top
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
+    app.list_mut().move_bottom();
+    assert_eq!(app.list_mut().table_state.selected(), Some(9));
+    app.list_mut().move_top();
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
+    let vh = app.viewport_height;
+    app.list_mut().page_down(vh); // +viewport (4)
+    assert_eq!(app.list_mut().table_state.selected(), Some(4));
+    app.list_mut().half_page_up(vh); // -2
+    assert_eq!(app.list_mut().table_state.selected(), Some(2));
+    app.list_mut().page_up(vh); // clamp at top
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
 }
 
 #[test]
 fn navigation_on_empty_list_is_noop() {
     let mut app = App::for_test(Vec::new());
-    app.move_down();
-    app.move_bottom();
-    assert_eq!(app.table_state.selected(), None);
+    app.list_mut().move_down();
+    app.list_mut().move_bottom();
+    assert_eq!(app.list_mut().table_state.selected(), None);
 }
 
 #[test]
 fn apply_fetched_selection_resets_or_clamps() {
     let mut app = app_with_issues(0, 3);
-    app.table_state.select(Some(2));
-    app.apply_fetched_selection(true); // reset
-    assert_eq!(app.table_state.selected(), Some(0));
+    app.list_mut().table_state.select(Some(2));
+    app.list_mut().apply_fetched_selection(true); // reset
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
 
-    app.table_state.select(Some(2));
-    app.issues.truncate(1); // selection now out of range
-    app.apply_fetched_selection(false); // clamp
-    assert_eq!(app.table_state.selected(), Some(0));
+    app.list_mut().table_state.select(Some(2));
+    app.list_mut().issues.truncate(1); // selection now out of range
+    app.list_mut().apply_fetched_selection(false); // clamp
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
 
-    app.issues.clear();
-    app.apply_fetched_selection(false);
-    assert_eq!(app.table_state.selected(), None);
+    app.list_mut().issues.clear();
+    app.list_mut().apply_fetched_selection(false);
+    assert_eq!(app.list_mut().table_state.selected(), None);
 }
 
 #[test]
 fn detail_scroll_saturates() {
-    let mut app = app_with_issues(0, 1);
-    app.viewport_height = 10;
-    app.detail_scroll_down();
-    assert_eq!(app.detail_scroll, 1);
-    app.detail_scroll_up();
-    app.detail_scroll_up(); // saturate at 0
-    assert_eq!(app.detail_scroll, 0);
-    app.detail_scroll_to_bottom();
-    assert_eq!(app.detail_scroll, u16::MAX);
-    app.detail_scroll_to_top();
-    assert_eq!(app.detail_scroll, 0);
-    app.detail_scroll_half_page_down(); // +5
-    assert_eq!(app.detail_scroll, 5);
-    app.detail_scroll_page_up(); // -10, saturating
-    assert_eq!(app.detail_scroll, 0);
+    let issue = sim_issues(0, 1)[0].clone();
+    let mut detail = build_cached_detail(&issue, Vec::new());
+    detail.scroll_down();
+    assert_eq!(detail.scroll, 1);
+    detail.scroll_up();
+    detail.scroll_up(); // saturate at 0
+    assert_eq!(detail.scroll, 0);
+    detail.scroll_to_bottom();
+    assert_eq!(detail.scroll, u16::MAX);
+    detail.scroll_to_top();
+    assert_eq!(detail.scroll, 0);
+    detail.scroll_half_page_down(10); // +5
+    assert_eq!(detail.scroll, 5);
+    detail.scroll_page_up(10); // -10, saturating
+    assert_eq!(detail.scroll, 0);
 }
 
 #[test]
-fn popup_move_clamps_and_cancel_resets_mode() {
+fn popup_move_clamps_and_cancel_resets_stack() {
     let mut app = app_with_issues(0, 1);
-    app.popup_items = vec![item("a", None), item("b", None), item("c", None)];
-    app.popup_selected = 0;
-    app.popup_move(1);
-    assert_eq!(app.popup_selected, 1);
-    app.popup_move(5); // clamp at last
-    assert_eq!(app.popup_selected, 2);
-    app.popup_move(-10); // clamp at first
-    assert_eq!(app.popup_selected, 0);
+    let issue_id = app.list_mut().issues[0].id.inner().to_string();
+    app.views.push(View::Popup(PopupView {
+        kind: PopupKind::Priority,
+        issue_id,
+        team_id: None,
+        items: vec![item("a", None), item("b", None), item("c", None)],
+        selected: 0,
+        anchor: Some(ratatui::layout::Rect::new(0, 0, 1, 1)),
+    }));
 
-    app.mode = Mode::Popup(PopupKind::Priority);
-    app.popup_anchor = Some(ratatui::layout::Rect::new(0, 0, 1, 1));
-    app.popup_cancel();
-    assert!(matches!(app.mode, Mode::List));
-    assert!(app.popup_anchor.is_none());
+    handle_popup_key(
+        &mut app,
+        1,
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+    );
+    let Some(View::Popup(popup)) = app.views.get(1) else {
+        unreachable!("popup view expected")
+    };
+    assert_eq!(popup.selected, 1);
+
+    handle_popup_key(
+        &mut app,
+        1,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    );
+    handle_popup_key(
+        &mut app,
+        1,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    );
+    handle_popup_key(
+        &mut app,
+        1,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    );
+    handle_popup_key(
+        &mut app,
+        1,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    );
+    let Some(View::Popup(popup)) = app.views.get(1) else {
+        unreachable!("popup view expected")
+    };
+    assert_eq!(popup.selected, 2); // clamp at last
+
+    handle_popup_key(&mut app, 1, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.views.len(), 1);
 }
 
 #[test]
 fn close_detail_clears_pane_state() {
     let mut app = app_with_issues(0, 1);
-    let issue = app.issues[0].clone();
-    app.mode = Mode::Detail;
-    app.detail = Some(build_cached_detail(&issue, Vec::new()));
-    app.detail_scroll = 5;
-    app.comment_input = Some("draft".to_string());
+    let issue = app.list_mut().issues[0].clone();
+    let mut detail = build_cached_detail(&issue, Vec::new());
+    detail.scroll = 5;
+    detail.comment_input = Some("draft".to_string());
+    app.views.push(View::Detail(Box::new(detail)));
     app.close_detail();
-    assert!(matches!(app.mode, Mode::List));
-    assert!(app.detail.is_none());
-    assert_eq!(app.detail_scroll, 0);
-    assert!(app.comment_input.is_none());
+    assert_eq!(app.views.len(), 1);
 }
 
 #[test]
@@ -185,7 +216,8 @@ fn priority_label_to_u8_maps_levels() {
 #[test]
 fn optimistic_builders_apply_popup_choice() {
     let mut app = app_with_issues(0, 1);
-    let issue = app.issues[0].clone();
+    let issue = app.list_mut().issues[0].clone();
+    let issue_id = issue.id.inner().to_string();
 
     let built = build_optimistic_issue(&issue, &PopupKind::Priority, &item("Urgent", Some("1")));
     assert_eq!(built.priority_label, "Urgent");
@@ -193,12 +225,24 @@ fn optimistic_builders_apply_popup_choice() {
     let unassigned = build_optimistic_issue(&issue, &PopupKind::Assignee, &item("x", None));
     assert!(unassigned.assignee.is_none());
 
-    app.table_state.select(Some(0));
-    apply_optimistic_in_memory(&mut app, &PopupKind::Priority, &item("Urgent", Some("1")));
-    assert_eq!(app.issues[0].priority_label, "Urgent");
-    assert_eq!(app.issues[0].priority, lt_types::scalars::Priority(1));
-    apply_optimistic_in_memory(&mut app, &PopupKind::Assignee, &item("none", None));
-    assert!(app.issues[0].assignee.is_none());
+    apply_optimistic_in_memory(
+        &mut app,
+        &issue_id,
+        &PopupKind::Priority,
+        &item("Urgent", Some("1")),
+    );
+    assert_eq!(app.list_mut().issues[0].priority_label, "Urgent");
+    assert_eq!(
+        app.list_mut().issues[0].priority,
+        lt_types::scalars::Priority(1)
+    );
+    apply_optimistic_in_memory(
+        &mut app,
+        &issue_id,
+        &PopupKind::Assignee,
+        &item("none", None),
+    );
+    assert!(app.list_mut().issues[0].assignee.is_none());
 }
 
 #[test]
@@ -249,18 +293,26 @@ fn empty_list() {
 #[test]
 fn detail_overlay() {
     let mut app = app_with_issues(0, 12);
-    let issue = app.issues[0].clone();
-    app.detail = Some(build_cached_detail(&issue, Vec::new()));
-    app.mode = Mode::Detail;
+    let issue = app.list_mut().issues[0].clone();
+    app.views.push(View::Detail(Box::new(build_cached_detail(
+        &issue,
+        Vec::new(),
+    ))));
     insta::assert_snapshot!(draw(&mut app, 100, 24));
 }
 
 #[test]
 fn priority_popup() {
     let mut app = app_with_issues(0, 12);
-    app.popup_items = priority_popup_items();
-    app.popup_selected = 1;
-    app.mode = Mode::Popup(PopupKind::Priority);
+    let issue_id = app.list_mut().issues[0].id.inner().to_string();
+    app.views.push(View::Popup(PopupView {
+        kind: PopupKind::Priority,
+        issue_id,
+        team_id: None,
+        items: priority_popup_items(),
+        selected: 1,
+        anchor: None,
+    }));
     insta::assert_snapshot!(draw(&mut app, 100, 20));
 }
 
@@ -271,23 +323,21 @@ fn search_overlay() {
     overlay.results = sim_issues(0, 12);
     overlay.has_searched = true;
     overlay.table_state.select(Some(0));
-    app.search_overlay = Some(overlay);
-    app.mode = Mode::Search;
+    app.views.push(View::Search(overlay));
     insta::assert_snapshot!(draw(&mut app, 100, 20));
 }
 
 #[test]
 fn help_popup() {
     let mut app = app_with_issues(0, 12);
-    app.help_popup = Some(HelpPopup::new());
-    app.mode = Mode::Help;
+    app.views.push(View::Help(HelpPopup::new()));
     insta::assert_snapshot!(draw(&mut app, 100, 24));
 }
 
 #[test]
 fn new_issue_modal() {
     let mut app = app_with_issues(0, 12);
-    app.new_issue_modal = Some(NewIssueModal {
+    app.views.push(View::NewIssue(NewIssueModal {
         focused_field: NewIssueField::Title,
         title: TextInput::from("Fix the renderer".to_string()),
         description: "Some description.".to_string(),
@@ -311,7 +361,6 @@ fn new_issue_modal() {
         loading: false,
         error: String::new(),
         modal_rx: None,
-    });
-    app.mode = Mode::NewIssue;
+    }));
     insta::assert_snapshot!(draw(&mut app, 100, 30));
 }

@@ -116,7 +116,3 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, state: &FooterState) 
     frame.render_widget(Paragraph::new(parts.join("  ")), chunks[0]);
     frame.render_widget(Paragraph::new(sync_str), chunks[1]);
 }
-
-pub(super) fn render_input(frame: &mut Frame, area: Rect, buf: &str) {
-    frame.render_widget(Paragraph::new(format!("/ {buf}_")), area);
-}

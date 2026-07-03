@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-pub use detail::IssueDetailView;
+pub use detail::DetailView;
+pub(crate) use detail::poll_detail_comment_events;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
-pub(crate) use detail::{handle_detail_key, poll_detail_comment_events};
 use lt_runtime::query::IssueQuery;
 use lt_runtime::search_query;
 use lt_runtime::sync::service::{LoginEvent, SyncEvent, SyncService};
@@ -32,13 +32,15 @@ pub(crate) use lt_types::types::priority_label_to_u8;
 use lt_types::types::{Team, User, WorkflowState};
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use new_issue::{ModalEvent, build_assignee_items};
-pub(crate) use new_issue::{NewIssueField, NewIssueModal, handle_new_issue_key};
+pub(crate) use new_issue::{NewIssueField, NewIssueModal};
 pub(crate) use popup::{
-    HelpPopup, PopupItem, PopupKind, SearchOverlay, handle_help_key, handle_popup_key,
-    handle_search_key, poll_search_debounce, priority_popup_items,
+    HelpPopup, PopupItem, PopupKind, PopupView, SearchOverlay, poll_search_debounce,
+    priority_popup_items,
 };
 #[cfg(all(test, feature = "sim"))]
-pub(crate) use popup::{apply_optimistic_in_memory, build_optimistic_issue};
+pub(crate) use popup::{
+    apply_optimistic_in_memory, build_optimistic_issue, handle_key as handle_popup_key,
+};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::widgets::TableState;
@@ -97,10 +99,6 @@ pub enum Status {
 }
 
 // ---------------------------------------------------------------------------
-// Background sync events
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Background comment sync events
 // ---------------------------------------------------------------------------
 
@@ -113,24 +111,218 @@ pub enum CommentSyncEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Background login events
+// The view stack
 // ---------------------------------------------------------------------------
 
-/// Application mode -- only one active at a time.
-pub enum Mode {
-    /// Normal list browsing mode.
-    List,
-    /// Detail pane showing full issue content.
-    Detail,
-    /// A generic list-picker popup is open.
-    Popup(PopupKind),
-    /// New-issue modal form.
-    NewIssue,
-    /// Searchable help popup.
-    Help,
-    /// FTS incremental search overlay.
-    Search,
+/// One view's complete state. A view exists iff it is displayed; there is no
+/// separate mode flag to keep consistent.
+pub enum View {
+    List(ListView),
+    // Boxed: `DetailView` is by far the largest variant (owns comments,
+    // parent/children issues, and the comment-sync receiver), so boxing it
+    // keeps every other `View` push/pop from paying for its size.
+    Detail(Box<DetailView>),
+    Popup(PopupView),
+    NewIssue(NewIssueModal),
+    Search(SearchOverlay),
+    Help(HelpPopup),
 }
+
+/// The issue-list view: the base-list fields, owned. `status`'s only render
+/// site is the base table's Loading/Error overlay (`ui/table.rs`); its
+/// writers are `do_fetch` and the sync lifecycle's Loading->Idle repair
+/// (reached from other views through `App::base_list_mut`).
+pub struct ListView {
+    pub issues: Vec<Issue>,
+    pub table_state: TableState,
+    pub pagination: Pagination,
+    pub status: Status,
+}
+
+impl ListView {
+    fn new(issues: Vec<Issue>, pagination: Pagination) -> Self {
+        let mut table_state = TableState::default();
+        if !issues.is_empty() {
+            table_state.select(Some(0));
+        }
+        Self {
+            issues,
+            table_state,
+            pagination,
+            status: Status::Idle,
+        }
+    }
+
+    fn selected_issue(&self) -> Option<&Issue> {
+        self.table_state.selected().and_then(|i| self.issues.get(i))
+    }
+
+    fn move_by(&mut self, delta: i32) {
+        let n = self.issues.len();
+        if n == 0 {
+            return;
+        }
+        let cur = self.table_state.selected().unwrap_or(0);
+        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+        let new_i = if delta >= 0 {
+            cur.saturating_add(step).min(n - 1)
+        } else {
+            cur.saturating_sub(step)
+        };
+        self.table_state.select(Some(new_i));
+    }
+
+    fn move_down(&mut self) {
+        self.move_by(1);
+    }
+    fn move_up(&mut self) {
+        self.move_by(-1);
+    }
+    fn move_top(&mut self) {
+        self.move_by(i32::MIN / 2);
+    }
+    fn move_bottom(&mut self) {
+        self.move_by(i32::MAX / 2);
+    }
+    fn page_down(&mut self, viewport_height: u16) {
+        self.move_by(i32::from(viewport_height));
+    }
+    fn page_up(&mut self, viewport_height: u16) {
+        self.move_by(-i32::from(viewport_height));
+    }
+    fn half_page_down(&mut self, viewport_height: u16) {
+        self.move_by(i32::from(viewport_height) / 2);
+    }
+    fn half_page_up(&mut self, viewport_height: u16) {
+        self.move_by(-(i32::from(viewport_height) / 2));
+    }
+
+    /// The base list's re-read: `db` + `args.limit` + the active filter + the
+    /// viewer name for `assignee:me` resolution.
+    fn do_fetch(&mut self, ctx: &StateCtx, reset_selection: bool) {
+        self.status = Status::Loading;
+        let mut parsed = search_query::ParsedQuery::from(ctx.filter);
+        search_query::resolve_me(&mut parsed, ctx.viewer_name);
+
+        if parsed.has_filters() {
+            // Active filter has constraints beyond sort -- use run_query to
+            // preserve them.
+            let limit = ctx.args.limit.min(250) as usize;
+            match ctx
+                .db
+                .connect()
+                .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
+            {
+                Ok(issues) => {
+                    self.issues = issues;
+                    self.pagination.has_next_page = false; // run_query has no pagination
+                    self.pagination.end_cursor = None;
+                    self.apply_fetched_selection(reset_selection);
+                }
+                Err(e) => {
+                    self.status = Status::Error(e.to_string());
+                }
+            }
+        } else {
+            // No active filters -- use paginated query as before.
+            let offset: i64 = self
+                .pagination
+                .current_cursor
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            match ctx
+                .db
+                .connect()
+                .and_then(|conn| lt_runtime::db::query_issues_page(&conn, ctx.args, offset))
+            {
+                Ok((issues, has_next_page)) => {
+                    self.issues = issues;
+                    self.pagination.has_next_page = has_next_page;
+                    let limit = i64::from(ctx.args.limit.min(250));
+                    self.pagination.end_cursor = if has_next_page {
+                        Some((offset + limit).to_string())
+                    } else {
+                        None
+                    };
+                    self.apply_fetched_selection(reset_selection);
+                }
+                Err(e) => {
+                    self.status = Status::Error(e.to_string());
+                }
+            }
+        }
+    }
+
+    /// After replacing `self.issues`, clamp/reset the selection and mark idle.
+    fn apply_fetched_selection(&mut self, reset_selection: bool) {
+        let n = self.issues.len();
+        let sel = if reset_selection {
+            0
+        } else {
+            self.table_state
+                .selected()
+                .unwrap_or(0)
+                .min(n.saturating_sub(1))
+        };
+        self.table_state
+            .select(if n > 0 { Some(sel) } else { None });
+        self.status = Status::Idle;
+    }
+
+    /// Fetch and then seek to the newly created issue by identifier.
+    fn do_fetch_and_select(&mut self, ctx: &StateCtx, target_identifier: Option<String>) {
+        self.do_fetch(ctx, true);
+        if let Some(id) = target_identifier
+            && let Some(idx) = self.issues.iter().position(|i| i.identifier == id)
+        {
+            self.table_state.select(Some(idx));
+        }
+    }
+
+    fn next_page(&mut self, ctx: &StateCtx) {
+        if !self.pagination.has_next_page {
+            return;
+        }
+        let end = self.pagination.end_cursor.clone();
+        self.pagination
+            .cursor_stack
+            .push(self.pagination.current_cursor.clone());
+        self.pagination.current_cursor = end;
+        self.do_fetch(ctx, true);
+    }
+
+    fn prev_page(&mut self, ctx: &StateCtx) {
+        let Some(cursor) = self.pagination.cursor_stack.pop() else {
+            return;
+        };
+        self.pagination.current_cursor = cursor;
+        self.do_fetch(ctx, true);
+    }
+}
+
+/// Read-only context the base list's re-read needs. Built inline from
+/// disjoint `App` field borrows at each call site: an `App::state_ctx(&self)`
+/// accessor would borrow all of `self` and conflict with any simultaneous
+/// `&mut self.views` access.
+pub struct StateCtx<'a> {
+    pub db: &'a lt_runtime::db::Database,
+    pub args: &'a IssueQuery,
+    pub filter: &'a search_query::QueryAst,
+    pub viewer_name: Option<&'a str>,
+}
+
+/// What a key handler did with a key. `Pass` hands it to the next view down;
+/// a handler that returns `Pass` must not have mutated anything (in
+/// particular the stack), so the walk's indices stay valid. Mechanism-only in
+/// this stage: every handler returns `Consumed` unconditionally, so no key
+/// cascades yet and behavior is unchanged from today's mode dispatch.
+pub enum KeyFlow {
+    Consumed,
+    Pass,
+}
+
+type KeyHandler = fn(&mut App, usize, KeyEvent) -> KeyFlow;
 
 // ---------------------------------------------------------------------------
 // Help popup state
@@ -314,62 +506,24 @@ impl SyncService for NoopSyncService {
 }
 
 pub struct App {
-    pub issues: Vec<Issue>,
-    pub table_state: TableState,
+    /// The live view stack, bottom to top. Never empty: `views[0]` is the
+    /// base view for this CLI invocation -- today always the issue list. The
+    /// top view is focused; every view renders, bottom to top.
+    pub views: Vec<View>,
+
     pub args: IssueQuery,
-    pub pagination: Pagination,
-    pub status: Status,
     pub quit: bool,
-    // Filter overlay (input_mode mirrors Mode::InputFilter for compatibility).
-    pub input_mode: bool,
-    pub input_buf: String,
     // Set by ui::render each frame so key handlers know page size.
     pub viewport_height: u16,
-
-    // -- mode -----------------------------------------------------------------
-    pub mode: Mode,
-
-    // -- detail pane -------------------------------------------------
-    /// Loaded detail for the currently-open issue.
-    pub detail: Option<IssueDetailView>,
-    /// Vertical scroll offset inside the detail pane (in lines).
-    pub detail_scroll: u16,
-
-    // -- popup state -------------------------------------------------
-    pub popup_items: Vec<PopupItem>,
-    pub popup_selected: usize,
 
     // -- footer message ----------------------------------------------
     pub footer_msg: Option<String>,
 
-    // -- new-issue modal --------------------------------------------
-    pub new_issue_modal: Option<NewIssueModal>,
-
     // -- background sync --------------------------------------------
     pub sync: SyncState,
 
-    // -- background comment sync ------------------------------------
-    /// Receiver for background comment-sync events.
-    pub detail_comment_rx: Option<mpsc::Receiver<CommentSyncEvent>>,
-
-    // -- comment input --------------------------------------------------------
-    /// Multiline buffer for a new comment, open in the detail pane.
-    /// The cursor is always at the end (same model as the new-issue
-    /// description field).
-    pub comment_input: Option<String>,
-
     /// Terminal/session capability flags.
     pub session: Session,
-
-    // -- help popup -------------------------------------------------
-    pub help_popup: Option<HelpPopup>,
-
-    // -- FTS search overlay -------------------------------------------
-    pub search_overlay: Option<SearchOverlay>,
-
-    // -- popup anchor ------------------------------------------------
-    /// Screen rect of the cell that triggered the popup, used to position it.
-    pub popup_anchor: Option<ratatui::layout::Rect>,
 
     // -- active filter AST -------------------------------------------
     /// Single source of truth for the active filter/search state.
@@ -418,40 +572,20 @@ impl App {
         sync: SyncState,
         service: Arc<dyn SyncService>,
     ) -> Self {
-        let mut table_state = TableState::default();
-        if !issues.is_empty() {
-            table_state.select(Some(0));
-        }
         let initial_args = args.clone();
         let active_filter = search_query::args_to_ast(&args);
         let initial_filter = active_filter.clone();
         Self {
-            issues,
-            table_state,
+            views: vec![View::List(ListView::new(issues, pagination))],
             args,
-            pagination,
-            status: Status::Idle,
             quit: false,
-            input_mode: false,
-            input_buf: String::new(),
             viewport_height: 0,
-            mode: Mode::List,
-            detail: None,
-            detail_scroll: 0,
-            popup_items: Vec::new(),
-            popup_selected: 0,
             footer_msg: None,
-            new_issue_modal: None,
             sync,
-            detail_comment_rx: None,
-            comment_input: None,
             session: Session {
                 keyboard_enhanced: false,
                 not_authenticated: false,
             },
-            help_popup: None,
-            search_overlay: None,
-            popup_anchor: None,
             active_filter,
             initial_filter,
             viewer_name: None,
@@ -466,11 +600,11 @@ impl App {
     }
 
     /// Build an `App` for rendering tests: no background sync channel, no
-    /// threads, no DB. Callers populate `mode`/`detail`/`viewer_name` directly
+    /// threads, no DB. Callers populate the view stack/`viewer_name` directly
     /// and drive `ui::render`. See `docs/design/visual-rendering-tests.md`.
     #[cfg(all(test, feature = "sim"))]
     fn for_test(issues: Vec<Issue>) -> Self {
-        let mut app = Self::new(
+        Self::new(
             issues,
             Pagination {
                 has_next_page: false,
@@ -486,9 +620,7 @@ impl App {
                 next_sync_at: None,
             },
             Arc::new(NoopSyncService),
-        );
-        app.status = Status::Idle;
-        app
+        )
     }
 
     /// Keep app.args.sort/desc in sync with `active_filter`.
@@ -518,140 +650,82 @@ impl App {
         search_query::parse_query_ast(&parts.join(" "))
     }
 
+    /// Read-only access to the base view, when it is a list. Non-list writers
+    /// reach the base through this and `base_list_mut`; `None` (a future
+    /// non-list base) degrades those writes to no-ops.
+    fn base_list(&self) -> Option<&ListView> {
+        match self.views.first() {
+            Some(View::List(list)) => Some(list),
+            _ => None,
+        }
+    }
+
+    fn base_list_mut(&mut self) -> Option<&mut ListView> {
+        match self.views.first_mut() {
+            Some(View::List(list)) => Some(list),
+            _ => None,
+        }
+    }
+
+    /// Test-only infallible accessor: render/loop tests always seed a list
+    /// base, so a panic here signals a broken fixture, not a runtime state to
+    /// handle.
+    #[cfg(all(test, feature = "sim"))]
+    fn list_mut(&mut self) -> &mut ListView {
+        match self.views.first_mut() {
+            Some(View::List(list)) => list,
+            _ => unreachable!("test base view is not a list"),
+        }
+    }
+
     fn selected_issue(&self) -> Option<&Issue> {
-        self.table_state.selected().and_then(|i| self.issues.get(i))
+        self.base_list().and_then(ListView::selected_issue)
     }
 
-    fn selected_issue_mut(&mut self) -> Option<&mut Issue> {
-        self.table_state
-            .selected()
-            .and_then(|i| self.issues.get_mut(i))
-    }
-
-    fn move_by(&mut self, delta: i32) {
-        let n = self.issues.len();
-        if n == 0 {
-            return;
-        }
-        let cur = self.table_state.selected().unwrap_or(0);
-        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
-        let new_i = if delta >= 0 {
-            cur.saturating_add(step).min(n - 1)
+    /// Pop the focused view. The stack is never empty: popping the base
+    /// resets it to the default base view for this CLI invocation instead
+    /// (today: the issue list rebuilt from `initial_args`/`initial_filter` -- the
+    /// same reset double-esc performs). No path reaches the `else` branch
+    /// today (the list's Esc is the double-esc reset below, and never pops
+    /// through here); the branch defines the semantics rather than defending
+    /// against a bug.
+    fn pop_view(&mut self) {
+        if self.views.len() > 1 {
+            self.views.pop();
         } else {
-            cur.saturating_sub(step)
-        };
-        self.table_state.select(Some(new_i));
-    }
-
-    fn move_down(&mut self) {
-        self.move_by(1);
-    }
-    fn move_up(&mut self) {
-        self.move_by(-1);
-    }
-    fn move_top(&mut self) {
-        self.move_by(i32::MIN / 2);
-    }
-    fn move_bottom(&mut self) {
-        self.move_by(i32::MAX / 2);
-    }
-    fn page_down(&mut self) {
-        self.move_by(i32::from(self.viewport_height));
-    }
-    fn page_up(&mut self) {
-        self.move_by(-i32::from(self.viewport_height));
-    }
-    fn half_page_down(&mut self) {
-        self.move_by(i32::from(self.viewport_height) / 2);
-    }
-    fn half_page_up(&mut self) {
-        self.move_by(-(i32::from(self.viewport_height) / 2));
-    }
-
-    fn do_fetch(&mut self, reset_selection: bool) {
-        self.status = Status::Loading;
-        let mut parsed = search_query::ParsedQuery::from(&self.active_filter);
-        // Resolve "me" to actual viewer name for assignee filter.
-        search_query::resolve_me(&mut parsed, self.viewer_name.as_deref());
-
-        if parsed.has_filters() {
-            // Active filter has constraints beyond sort -- use run_query to
-            // preserve them.
-            let limit = self.args.limit.min(250) as usize;
-            match self
-                .db
-                .connect()
-                .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
-            {
-                Ok(issues) => {
-                    self.issues = issues;
-                    self.pagination.has_next_page = false; // run_query has no pagination
-                    self.pagination.end_cursor = None;
-                    self.apply_fetched_selection(reset_selection);
-                }
-                Err(e) => {
-                    self.status = Status::Error(e.to_string());
-                }
-            }
-        } else {
-            // No active filters -- use paginated query as before.
-            let offset: i64 = self
-                .pagination
-                .current_cursor
-                .as_deref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            match self
-                .db
-                .connect()
-                .and_then(|conn| lt_runtime::db::query_issues_page(&conn, &self.args, offset))
-            {
-                Ok((issues, has_next_page)) => {
-                    self.issues = issues;
-                    self.pagination.has_next_page = has_next_page;
-                    let limit = i64::from(self.args.limit.min(250));
-                    self.pagination.end_cursor = if has_next_page {
-                        Some((offset + limit).to_string())
-                    } else {
-                        None
-                    };
-                    self.apply_fetched_selection(reset_selection);
-                }
-                Err(e) => {
-                    self.status = Status::Error(e.to_string());
-                }
-            }
+            self.reset_base_view();
         }
     }
 
-    /// After replacing `self.issues`, clamp/reset the selection and mark idle.
-    fn apply_fetched_selection(&mut self, reset_selection: bool) {
-        let n = self.issues.len();
-        let sel = if reset_selection {
-            0
-        } else {
-            self.table_state
-                .selected()
-                .unwrap_or(0)
-                .min(n.saturating_sub(1))
-        };
-        self.table_state
-            .select(if n > 0 { Some(sel) } else { None });
-        self.status = Status::Idle;
+    /// Full reset to the state the TUI was launched with: sort, filters, and
+    /// search query. The same reset the list's double-esc performs and
+    /// `pop_view` falls back to at the floor.
+    fn reset_base_view(&mut self) {
+        self.args = self.initial_args.clone();
+        self.active_filter = self.initial_filter.clone();
+        if let Some(list) = self.base_list_mut() {
+            list.pagination.cursor_stack.clear();
+            list.pagination.current_cursor = None;
+        }
+        self.last_esc_time = None;
+        self.fetch_base_list(true);
     }
 
-    /// Fetch and then seek to the newly created issue by identifier.
-    fn do_fetch_and_select(&mut self, target_identifier: Option<String>) {
-        self.do_fetch(true);
-        if let Some(id) = target_identifier
-            && let Some(idx) = self.issues.iter().position(|i| i.identifier == id)
-        {
-            self.table_state.select(Some(idx));
+    /// Build a `StateCtx` from disjoint fields and re-fetch the base list.
+    fn fetch_base_list(&mut self, reset_selection: bool) {
+        let ctx = StateCtx {
+            db: &self.db,
+            args: &self.args,
+            filter: &self.active_filter,
+            viewer_name: self.viewer_name.as_deref(),
+        };
+        if let Some(View::List(list)) = self.views.first_mut() {
+            list.do_fetch(&ctx, reset_selection);
         }
     }
 
     fn refresh(&mut self) {
-        self.do_fetch(false); // immediate cache read for responsiveness
+        self.fetch_base_list(false); // immediate cache read for responsiveness
         // Manual refresh triggers a full sync (not delta) to pick up all
         // remote changes, including any the delta window might miss.
         if !self.sync.syncing {
@@ -668,37 +742,102 @@ impl App {
     fn cycle_sort(&mut self) {
         self.args.sort = self.args.sort.next();
         self.active_filter = self.replace_sort_in_filter();
-        self.pagination.cursor_stack.clear();
-        self.pagination.current_cursor = None;
-        self.do_fetch(true);
+        if let Some(list) = self.base_list_mut() {
+            list.pagination.cursor_stack.clear();
+            list.pagination.current_cursor = None;
+        }
+        self.fetch_base_list(true);
     }
 
     fn toggle_desc(&mut self) {
         self.args.desc = !self.args.desc;
         self.active_filter = self.replace_sort_in_filter();
-        self.pagination.cursor_stack.clear();
-        self.pagination.current_cursor = None;
-        self.do_fetch(true);
+        if let Some(list) = self.base_list_mut() {
+            list.pagination.cursor_stack.clear();
+            list.pagination.current_cursor = None;
+        }
+        self.fetch_base_list(true);
     }
 
     fn next_page(&mut self) {
-        if !self.pagination.has_next_page {
-            return;
-        }
-        let end = self.pagination.end_cursor.clone();
-        self.pagination
-            .cursor_stack
-            .push(self.pagination.current_cursor.clone());
-        self.pagination.current_cursor = end;
-        self.do_fetch(true);
+        self.paginate(ListView::next_page);
     }
 
     fn prev_page(&mut self) {
-        let Some(cursor) = self.pagination.cursor_stack.pop() else {
-            return;
+        self.paginate(ListView::prev_page);
+    }
+
+    /// Shared by `next_page`/`prev_page`: build the `StateCtx` and drive `op`
+    /// against the base list.
+    fn paginate(&mut self, op: fn(&mut ListView, &StateCtx)) {
+        let ctx = StateCtx {
+            db: &self.db,
+            args: &self.args,
+            filter: &self.active_filter,
+            viewer_name: self.viewer_name.as_deref(),
         };
-        self.pagination.current_cursor = cursor;
-        self.do_fetch(true);
+        if let Some(View::List(list)) = self.views.first_mut() {
+            op(list, &ctx);
+        }
+    }
+
+    /// Downcast the view at `i` via `extract`. Shared by handlers that reach
+    /// their own view by stack index (detail/popup key handlers).
+    fn view_at_mut<T>(
+        &mut self,
+        i: usize,
+        extract: fn(&mut View) -> Option<&mut T>,
+    ) -> Option<&mut T> {
+        self.views.get_mut(i).and_then(extract)
+    }
+
+    fn handle_list_esc(&mut self) {
+        // Double-esc (within 500ms) resets sort, filters, and search query
+        // back to the state the TUI was launched with.
+        let now = Instant::now();
+        let is_double_esc = self
+            .last_esc_time
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+        if is_double_esc {
+            self.reset_base_view();
+        } else {
+            // First esc: standard refresh.
+            self.last_esc_time = Some(now);
+            self.fetch_base_list(true);
+        }
+    }
+
+    fn open_search_overlay(&mut self) {
+        let mut overlay = SearchOverlay::new();
+        // Restore active filter when re-opening, unless it is just the
+        // default sort stem.
+        if self.active_filter.raw != search_query::DEFAULT_QUERY {
+            overlay.query = TextInput::from(self.active_filter.raw.clone());
+            overlay.ast = self.active_filter.clone();
+            overlay.last_changed = Some(Instant::now());
+        }
+        self.views.push(View::Search(overlay));
+    }
+
+    /// Keys go to the focused view and cascade toward the base: an unbound
+    /// key falls through to the view beneath, with `views[0]` as the floor.
+    /// Mechanism-only in this stage: every handler returns `Consumed`
+    /// unconditionally, so the loop always stops at the top view, matching
+    /// today's single-mode dispatch exactly.
+    fn dispatch_key(&mut self, key: KeyEvent) {
+        for i in (0..self.views.len()).rev() {
+            let handler: KeyHandler = match &self.views[i] {
+                View::List(_) => handle_list_key,
+                View::Detail(_) => detail::handle_key,
+                View::Popup(_) => popup::handle_key,
+                View::NewIssue(_) => new_issue::handle_key,
+                View::Search(_) => popup::handle_search_key,
+                View::Help(_) => popup::handle_help_key,
+            };
+            if matches!(handler(self, i, key), KeyFlow::Consumed) {
+                return;
+            }
+        }
     }
 }
 
@@ -785,7 +924,9 @@ pub fn run(args: IssueQuery, service: Arc<dyn SyncService>) -> Result<()> {
         );
     }
     app.session.keyboard_enhanced = keyboard_enhanced;
-    app.status = initial_status;
+    if let Some(list) = app.base_list_mut() {
+        list.status = initial_status;
+    }
     let result = run_app(&mut terminal, &mut CrosstermEvents, &mut app);
     if keyboard_enhanced {
         let _ = crossterm::execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
@@ -841,57 +982,67 @@ where
         }
 
         if let Some(key) = events.next_key(Duration::from_millis(100))? {
-            match app.mode {
-                Mode::Popup(_) => handle_popup_key(app, key.code),
-                Mode::Detail => handle_detail_key(app, key.code, key.modifiers),
-                Mode::NewIssue => handle_new_issue_key(app, key.code, key.modifiers),
-                Mode::Help => handle_help_key(app, key.code, key.modifiers),
-                Mode::Search => handle_search_key(app, key.code, key.modifiers),
-                Mode::List => handle_normal_key(app, key.code, key.modifiers),
-            }
+            app.dispatch_key(key);
         }
     }
 }
 
 // -- Normal list keybindings -------------------------------------------------
 
-fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+fn handle_list_key(app: &mut App, _i: usize, key: KeyEvent) -> KeyFlow {
+    // The list is always the base view in this stage, so it reaches its own
+    // state through `base_list_mut` rather than the index.
+    let code = key.code;
+    let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let viewport_height = app.viewport_height;
     match code {
         KeyCode::Char('q') => app.quit = true,
-        KeyCode::Esc => {
-            // Double-esc (within 500ms) resets sort, filters, and search query
-            // back to the state the TUI was launched with.
-            let now = Instant::now();
-            let is_double_esc = app
-                .last_esc_time
-                .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
-            if is_double_esc {
-                // Full reset to initial state.
-                app.args = app.initial_args.clone();
-                app.active_filter = app.initial_filter.clone();
-                app.pagination.cursor_stack.clear();
-                app.pagination.current_cursor = None;
-                app.last_esc_time = None;
-                app.do_fetch(true);
-            } else {
-                // First esc: standard refresh.
-                app.last_esc_time = Some(now);
-                app.do_fetch(true);
-            }
-        }
+        KeyCode::Esc => app.handle_list_esc(),
         // Open detail pane (space opens detail)
         KeyCode::Char(' ') => app.open_detail(),
-        KeyCode::Char('j') | KeyCode::Down => app.move_down(),
-        KeyCode::Char('k') | KeyCode::Up => app.move_up(),
-        KeyCode::Char('g') => app.move_top(),
-        KeyCode::Char('G') => app.move_bottom(),
-        KeyCode::Char('d') if ctrl => app.half_page_down(),
-        KeyCode::Char('u') if ctrl => app.half_page_up(),
+        KeyCode::Char('j') | KeyCode::Down => {
+            if let Some(l) = app.base_list_mut() {
+                l.move_down();
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let Some(l) = app.base_list_mut() {
+                l.move_up();
+            }
+        }
+        KeyCode::Char('g') => {
+            if let Some(l) = app.base_list_mut() {
+                l.move_top();
+            }
+        }
+        KeyCode::Char('G') => {
+            if let Some(l) = app.base_list_mut() {
+                l.move_bottom();
+            }
+        }
+        KeyCode::Char('d') if ctrl => {
+            if let Some(l) = app.base_list_mut() {
+                l.half_page_down(viewport_height);
+            }
+        }
+        KeyCode::Char('u') if ctrl => {
+            if let Some(l) = app.base_list_mut() {
+                l.half_page_up(viewport_height);
+            }
+        }
         KeyCode::Char('n') if ctrl => app.next_page(),
         KeyCode::Char('p') if ctrl => app.prev_page(),
-        KeyCode::PageDown => app.page_down(),
-        KeyCode::PageUp => app.page_up(),
+        KeyCode::PageDown => {
+            if let Some(l) = app.base_list_mut() {
+                l.page_down(viewport_height);
+            }
+        }
+        KeyCode::PageUp => {
+            if let Some(l) = app.base_list_mut() {
+                l.page_up(viewport_height);
+            }
+        }
         KeyCode::Char('o') => {
             if let Some(issue) = app.selected_issue() {
                 let url = format!("https://linear.app/issue/{}", issue.identifier);
@@ -902,18 +1053,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         // 'S' (capital) cycles sort field to avoid collision with 's' (state popup)
         KeyCode::Char('S') => app.cycle_sort(),
         KeyCode::Char('d') => app.toggle_desc(),
-        KeyCode::Char('/') => {
-            let mut overlay = SearchOverlay::new();
-            // Restore active filter when re-opening, unless it is just the
-            // default sort stem.
-            if app.active_filter.raw != search_query::DEFAULT_QUERY {
-                overlay.query = TextInput::from(app.active_filter.raw.clone());
-                overlay.ast = app.active_filter.clone();
-                overlay.last_changed = Some(Instant::now());
-            }
-            app.search_overlay = Some(overlay);
-            app.mode = Mode::Search;
-        }
+        KeyCode::Char('/') => app.open_search_overlay(),
         // Write op keybindings
         KeyCode::Char('s') => app.open_state_popup(),
         KeyCode::Char('p') => app.open_priority_popup(),
@@ -921,10 +1061,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         // New issue modal
         KeyCode::Char('n') => app.open_new_issue_modal(),
         // Help popup
-        KeyCode::Char('?') => {
-            app.help_popup = Some(HelpPopup::new());
-            app.mode = Mode::Help;
-        }
+        KeyCode::Char('?') => app.views.push(View::Help(HelpPopup::new())),
         // Re-authenticate: background OAuth login.
         KeyCode::Char('L') if app.login_rx.is_none() => {
             app.login_rx = Some(app.service.spawn_login());
@@ -933,4 +1070,5 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         }
         _ => {}
     }
+    KeyFlow::Consumed
 }

@@ -4,13 +4,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
-use crate::detail::IssueDetailView;
-use crate::{App, Status, markdown};
+use crate::{DetailView, markdown};
 
 /// Render the issue detail as a floating overlay over the right ~60% of the
 /// content area. The underlying issue list is drawn at full width first, so
 /// column widths are never affected by opening the detail view.
-pub(super) fn render_detail_overlay(frame: &mut Frame, area: Rect, app: &App) {
+pub(super) fn render_detail_overlay(frame: &mut Frame, area: Rect, detail: &DetailView) {
     // Overlay covers the right 60% of the content area.
     let overlay_width = area.width * 3 / 5;
     let overlay_x = area.x + area.width - overlay_width;
@@ -18,44 +17,29 @@ pub(super) fn render_detail_overlay(frame: &mut Frame, area: Rect, app: &App) {
 
     // Clear the background so the list does not bleed through.
     frame.render_widget(Clear, overlay_area);
-    render_detail(frame, overlay_area, app);
+    render_detail(frame, overlay_area, detail);
 }
 
-fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
+fn render_detail(frame: &mut Frame, area: Rect, detail: &DetailView) {
     let block = Block::default().borders(Borders::LEFT);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Show loading / error overlay if applicable.
-    match &app.status {
-        Status::Loading => {
-            frame.render_widget(Paragraph::new("Loading..."), inner);
-            return;
-        }
-        Status::Error(msg) => {
-            frame.render_widget(Paragraph::new(format!("Error: {msg}")), inner);
-            return;
-        }
-        Status::Idle => {}
-    }
-
     // Reserve the bottom rows for the comment input box when it is open.
-    let (content_area, comment_area) = if app.comment_input.is_some() {
+    let (content_area, comment_area) = if detail.comment_input.is_some() {
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(6)]).split(inner);
         (chunks[0], Some(chunks[1]))
     } else {
         (inner, None)
     };
 
-    if let Some(detail) = &app.detail {
-        let lines = build_detail_lines(detail);
-        let para = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.detail_scroll, 0));
-        frame.render_widget(para, content_area);
-    }
+    let lines = build_detail_lines(detail);
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((detail.scroll, 0));
+    frame.render_widget(para, content_area);
 
-    if let (Some(buf), Some(area)) = (&app.comment_input, comment_area) {
+    if let (Some(buf), Some(area)) = (&detail.comment_input, comment_area) {
         let block = Block::default()
             .title(" New Comment ")
             .borders(Borders::ALL)
@@ -71,7 +55,7 @@ fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn build_detail_lines(d: &IssueDetailView) -> Vec<Line<'static>> {
+fn build_detail_lines(d: &DetailView) -> Vec<Line<'static>> {
     let issue = &d.issue;
     let mut lines: Vec<Line<'static>> = Vec::new();
 

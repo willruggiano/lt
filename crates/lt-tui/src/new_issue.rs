@@ -1,10 +1,10 @@
 use std::sync::{Arc, mpsc};
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_types::types::User;
 use lt_types::viewer;
 
-use super::{App, Mode, PopupItem, TextInput, priority_popup_items};
+use super::{App, KeyFlow, PopupItem, StateCtx, TextInput, View, priority_popup_items};
 
 // ---------------------------------------------------------------------------
 // New-issue modal state
@@ -141,14 +141,13 @@ impl super::App {
             }
         }
 
-        self.mode = Mode::NewIssue;
-        self.new_issue_modal = Some(modal);
+        self.views.push(View::NewIssue(modal));
     }
 
     /// Kick off background loading of states and assignees for the selected team.
-    fn new_issue_load_states_and_assignees_bg(&mut self) {
+    fn new_issue_load_states_and_assignees_bg(&mut self, i: usize) {
         let service = Arc::clone(&self.service);
-        let Some(modal) = self.new_issue_modal.as_mut() else {
+        let Some(View::NewIssue(modal)) = self.views.get_mut(i) else {
             return;
         };
         let Some(team_id) = modal
@@ -204,13 +203,13 @@ impl super::App {
         });
     }
 
-    fn new_issue_submit(&mut self) {
-        let Some(modal) = self.new_issue_modal.as_ref() else {
+    fn new_issue_submit(&mut self, i: usize) {
+        let Some(View::NewIssue(modal)) = self.views.get(i) else {
             return;
         };
 
         if modal.title.value.trim().is_empty() {
-            if let Some(m) = self.new_issue_modal.as_mut() {
+            if let Some(View::NewIssue(m)) = self.views.get_mut(i) {
                 m.error = "Title is required".to_string();
                 m.focused_field = NewIssueField::Title;
             }
@@ -222,7 +221,7 @@ impl super::App {
             .get(modal.team_selected)
             .and_then(|t| t.id.clone())
         else {
-            if let Some(m) = self.new_issue_modal.as_mut() {
+            if let Some(View::NewIssue(m)) = self.views.get_mut(i) {
                 m.error = "Select a team".to_string();
             }
             return;
@@ -240,24 +239,35 @@ impl super::App {
         match result {
             Ok(()) => {
                 let identifier = optimistic.identifier.clone();
-                self.mode = Mode::List;
-                self.new_issue_modal = None;
+                self.pop_view();
                 self.footer_msg = Some("Created issue (pending sync)".to_string());
-                self.do_fetch_and_select(Some(identifier));
+                let ctx = StateCtx {
+                    db: &self.db,
+                    args: &self.args,
+                    filter: &self.active_filter,
+                    viewer_name: self.viewer_name.as_deref(),
+                };
+                if let Some(View::List(list)) = self.views.first_mut() {
+                    list.do_fetch_and_select(&ctx, Some(identifier));
+                }
             }
             Err(e) => {
-                if let Some(m) = self.new_issue_modal.as_mut() {
+                if let Some(View::NewIssue(m)) = self.views.get_mut(i) {
                     m.error = format!("Failed to queue issue: {e}");
                 }
             }
         }
     }
 
-    /// Poll modal background channel and update modal state.
+    /// Poll modal background channel and update modal state. The modal lives
+    /// on whichever `NewIssue` view is in the stack -- there is at most one.
     pub(crate) fn poll_modal_events(&mut self) {
         // Collect events before mutating -- avoids borrow issues.
         let events: Vec<ModalEvent> = {
-            let Some(modal) = self.new_issue_modal.as_ref() else {
+            let Some(modal) = self.views.iter().find_map(|v| match v {
+                View::NewIssue(m) => Some(m),
+                _ => None,
+            }) else {
                 return;
             };
             let Some(rx) = modal.modal_rx.as_ref() else {
@@ -270,10 +280,13 @@ impl super::App {
             evts
         };
 
+        let Some(modal) = self.views.iter_mut().find_map(|v| match v {
+            View::NewIssue(m) => Some(m),
+            _ => None,
+        }) else {
+            return;
+        };
         for ev in events {
-            let Some(modal) = self.new_issue_modal.as_mut() else {
-                break;
-            };
             match ev {
                 ModalEvent::StatesLoaded(items) => {
                     modal.states = items;
@@ -407,7 +420,9 @@ pub(crate) fn build_assignee_items(
 // Key handlers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    let code = key.code;
+    let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     let alt = modifiers.contains(KeyModifiers::ALT);
@@ -415,19 +430,18 @@ pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyM
     // Ctrl-Enter submits the form (Alt-Enter on terminals that cannot
     // distinguish Ctrl-Enter from Enter).
     if (ctrl || alt) && code == KeyCode::Enter {
-        app.new_issue_submit();
-        return;
+        app.new_issue_submit(i);
+        return KeyFlow::Consumed;
     }
 
     // Esc cancels.
     if code == KeyCode::Esc {
-        app.mode = Mode::List;
-        app.new_issue_modal = None;
-        return;
+        app.pop_view();
+        return KeyFlow::Consumed;
     }
 
-    let Some(modal) = app.new_issue_modal.as_mut() else {
-        return;
+    let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
+        return KeyFlow::Consumed;
     };
 
     match &modal.focused_field.clone() {
@@ -455,7 +469,7 @@ pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyM
                         modal.focused_field = next;
                         // Release the mutable borrow before calling the method.
                         let _ = modal;
-                        app.new_issue_load_states_and_assignees_bg();
+                        app.new_issue_load_states_and_assignees_bg(i);
                     } else {
                         modal.focused_field = modal.focused_field.next();
                     }
@@ -489,7 +503,7 @@ pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyM
                         modal.focused_field = next;
                         // Release the mutable borrow before calling the method.
                         let _ = modal;
-                        app.new_issue_load_states_and_assignees_bg();
+                        app.new_issue_load_states_and_assignees_bg(i);
                     } else {
                         modal.focused_field = modal.focused_field.next();
                     }
@@ -498,6 +512,7 @@ pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyM
             }
         }
     }
+    KeyFlow::Consumed
 }
 
 /// Handle a key press while the new-issue Description field is focused.
