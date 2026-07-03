@@ -312,6 +312,57 @@ statements! {
     /// Delete the synced comments of an issue, preserving un-acked `local:` rows.
     DELETE_COMMENTS_FOR_ISSUE, 1,
         "DELETE FROM issue_comments WHERE issue_id = ?1 AND id NOT LIKE 'local:%'";
+
+    /// Upsert one workflow state scoped to its team. `position` is `COALESCE`d
+    /// against the stored value so an issue-driven upsert (which knows only the
+    /// state's team) can pass `NULL` without clobbering a position recorded by
+    /// a targeted team sync.
+    UPSERT_WORKFLOW_STATE_SCOPED, 4,
+        "INSERT INTO workflow_states (id, name, team_id, position) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(id) DO UPDATE SET \
+            name = excluded.name, \
+            team_id = excluded.team_id, \
+            position = COALESCE(excluded.position, workflow_states.position)";
+
+    /// Every team, alphabetically by name.
+    QUERY_TEAMS, 0,
+        "SELECT id, name FROM teams ORDER BY name";
+
+    /// A team's workflow states in Linear's stored order; states known only
+    /// from issue upserts (`position IS NULL`) sort last, by name.
+    QUERY_TEAM_STATES, 1,
+        "SELECT id, name FROM workflow_states \
+         WHERE team_id = ?1 \
+         ORDER BY position IS NULL, position, name";
+
+    /// A team's members, resolved through `team_memberships`, by name.
+    QUERY_TEAM_MEMBERS, 1,
+        "SELECT u.id AS id, u.name AS name \
+         FROM team_memberships tm \
+         JOIN users u ON u.id = tm.user_id \
+         WHERE tm.team_id = ?1 \
+         ORDER BY u.name";
+
+    /// Clear a team's membership rows ahead of inserting the freshly fetched
+    /// set (replace-set semantics: a member no longer on the team is removed).
+    DELETE_TEAM_MEMBERSHIPS_FOR_TEAM, 1,
+        "DELETE FROM team_memberships WHERE team_id = ?1";
+
+    /// Insert one team membership row.
+    INSERT_TEAM_MEMBERSHIP, 2,
+        "INSERT OR IGNORE INTO team_memberships (team_id, user_id) VALUES (?1, ?2)";
+
+    /// Sim compatibility (`lt sim`): derive `team_memberships` from the seeded
+    /// issues' distinct team/assignee and team/creator pairs, since there is no
+    /// real team-membership API to seed from.
+    DERIVE_TEAM_MEMBERSHIPS_FROM_ISSUES, 0,
+        "INSERT OR IGNORE INTO team_memberships (team_id, user_id) \
+         SELECT team_id, assignee_id FROM issues \
+            WHERE team_id IS NOT NULL AND assignee_id IS NOT NULL \
+         UNION \
+         SELECT team_id, creator_id FROM issues \
+            WHERE team_id IS NOT NULL AND creator_id IS NOT NULL";
 }
 
 // ---------------------------------------------------------------------------

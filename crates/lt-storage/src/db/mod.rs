@@ -3,6 +3,7 @@ pub mod filters;
 pub mod issues;
 pub mod outbox;
 pub(crate) mod sql;
+pub mod teams;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,10 @@ pub use issues::{
 };
 pub use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
+pub use teams::{
+    TeamState, derive_team_memberships_from_issues, query_team_members, query_team_states,
+    query_teams, replace_team_memberships, upsert_team_state, upsert_teams, upsert_users,
+};
 
 /// Parse a stored RFC3339 timestamp column into the wire [`DateTime`](lt_types::scalars::DateTime)
 /// scalar via its `FromStr` impl. Storage always writes
@@ -127,10 +132,24 @@ const MIGRATION_1: &str = "\
     CREATE INDEX idx_issues_team_state ON issues (team_id, state_id);
     CREATE INDEX idx_issues_updated_at ON issues (updated_at);";
 
+/// Team-scoped cache: `workflow_states` gains the columns the state/assignee
+/// pickers need (`docs/design/tui-app-event-queue-adr.md`, "Decision 4"), and
+/// `team_memberships` records who is on which team -- not inferrable from
+/// issues (an assignee is not provably a member).
+const MIGRATION_2: &str = "\
+    ALTER TABLE workflow_states ADD COLUMN team_id TEXT;
+    ALTER TABLE workflow_states ADD COLUMN position REAL;
+    CREATE INDEX idx_workflow_states_team_id ON workflow_states (team_id);
+    CREATE TABLE team_memberships (
+        team_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        PRIMARY KEY (team_id, user_id)
+    );";
+
 /// The migration list: the single schema source for both `open_db()` and the
 /// `sql_validation` gate (docs/design/type-safe-sql-adr.md, "Migrations").
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(MIGRATION_1)])
+    Migrations::new(vec![M::up(MIGRATION_1), M::up(MIGRATION_2)])
 }
 
 /// Refuse a pre-versioning database (`user_version` 0 but tables exist): delete it and re-sync.

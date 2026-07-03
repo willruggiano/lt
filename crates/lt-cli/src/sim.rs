@@ -30,6 +30,10 @@ pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     let conn = db::open_db(db::db_path()?)?;
     db::upsert_issues(&conn, &dataset.issues)?;
     db::upsert_comments(&conn, &dataset.comments)?;
+    // No team-membership API to seed from offline: derive it from the
+    // seeded issues' team/assignee and team/creator pairs (ADR "Sim
+    // compatibility").
+    db::derive_team_memberships_from_issues(&conn)?;
     db::set_meta(&conn, "last_synced_at", &Utc::now().to_rfc3339())?;
     if let Some(viewer) = dataset.issues.iter().find_map(|i| i.assignee.clone()) {
         db::set_synced_viewer(&conn, viewer.id.inner(), &viewer.name)?;

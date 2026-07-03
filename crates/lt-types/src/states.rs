@@ -45,6 +45,55 @@ pub struct WorkflowStateConnection {
     pub nodes: Vec<WorkflowState>,
 }
 
+// ---------------------------------------------------------------------------
+// Team-scoped fetch with position (lt-runtime::teams::sync_team_data)
+// ---------------------------------------------------------------------------
+
+/// A workflow state carrying `position`, used only by [`TeamStatesQuery`] --
+/// the local cache's state/assignee pickers need Linear's stored ordering.
+/// The shared [`WorkflowState`] fragment used by the issue fragment stays
+/// `{ id, name }`.
+#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[cynic(graphql_type = "WorkflowState")]
+pub struct WorkflowStateWithPosition {
+    pub id: cynic::Id,
+    pub name: String,
+    pub position: f64,
+}
+
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "Team")]
+pub struct TeamWithPositionedStates {
+    pub states: WorkflowStateWithPositionConnection,
+}
+
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "WorkflowStateConnection")]
+pub struct WorkflowStateWithPositionConnection {
+    pub nodes: Vec<WorkflowStateWithPosition>,
+}
+
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "Query", variables = "TeamVariables")]
+pub struct TeamStatesQuery {
+    #[arguments(id: $team_id)]
+    pub team: TeamWithPositionedStates,
+}
+
+impl GraphqlOperation for TeamStatesQuery {
+    type Variables = TeamVariables;
+    type Output = Vec<WorkflowStateWithPosition>;
+    const NAME: &'static str = "teamStates";
+
+    fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
+        Self::build(variables)
+    }
+
+    fn extract(self) -> anyhow::Result<Self::Output> {
+        Ok(self.team.states.nodes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +123,37 @@ mod tests {
         assert_eq!(
             states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             ["Todo", "Done"]
+        );
+    }
+
+    #[test]
+    fn team_states_query_declares_team_id_variable_and_position() {
+        let built = TeamStatesQuery::operation(TeamVariables {
+            team_id: String::new(),
+        })
+        .query;
+        assert!(built.contains("$teamId: String!"));
+        assert!(built.contains("position"));
+    }
+
+    #[test]
+    fn team_states_query_extract_returns_state_nodes_with_position() {
+        let data = serde_json::json!({
+            "team": { "states": { "nodes": [
+                { "id": "s1", "name": "Todo", "position": 1.0 },
+                { "id": "s2", "name": "Done", "position": 2.5 }
+            ] } }
+        });
+        let states = serde_json::from_value::<TeamStatesQuery>(data)
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(
+            states
+                .iter()
+                .map(|s| (s.name.as_str(), s.position))
+                .collect::<Vec<_>>(),
+            [("Todo", 1.0), ("Done", 2.5)]
         );
     }
 }

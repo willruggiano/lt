@@ -18,6 +18,7 @@ use lt_types::viewer::ViewerQuery;
 use lt_upstream::auth::login_non_interactive;
 use lt_upstream::auth::refresh::load_or_refresh_token;
 use lt_upstream::client::{HttpTransport, execute};
+use rusqlite::Connection;
 
 use crate::sync::service::{LoginEvent, SyncEvent, SyncService};
 
@@ -34,6 +35,14 @@ impl LinearSyncService {
     fn transport() -> Result<HttpTransport> {
         let token = load_or_refresh_token()?;
         Ok(HttpTransport::new(token.access_token))
+    }
+
+    /// The shared shape behind every targeted API-to-DB writer
+    /// (`sync_comments`/`sync_teams`/`sync_team_data`): open the profile DB,
+    /// build a fresh transport, then run `f`.
+    fn sync_with(f: impl FnOnce(&Connection, &HttpTransport) -> Result<()>) -> Result<()> {
+        let conn = db::open_db(db::db_path()?)?;
+        f(&conn, &Self::transport()?)
     }
 }
 
@@ -129,7 +138,14 @@ impl SyncService for LinearSyncService {
     }
 
     fn sync_comments(&self, issue_id: &str) -> Result<()> {
-        let conn = db::open_db(db::db_path()?)?;
-        crate::comments::sync(&conn, &Self::transport()?, issue_id)
+        Self::sync_with(|conn, transport| crate::comments::sync(conn, transport, issue_id))
+    }
+
+    fn sync_teams(&self) -> Result<()> {
+        Self::sync_with(|conn, transport| crate::teams::sync_teams(conn, transport))
+    }
+
+    fn sync_team_data(&self, team_id: &str) -> Result<()> {
+        Self::sync_with(|conn, transport| crate::teams::sync_team_data(conn, transport, team_id))
     }
 }

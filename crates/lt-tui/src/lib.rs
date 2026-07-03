@@ -503,6 +503,12 @@ impl SyncService for NoopSyncService {
     fn sync_comments(&self, _issue_id: &str) -> Result<()> {
         Ok(())
     }
+    fn sync_teams(&self) -> Result<()> {
+        Ok(())
+    }
+    fn sync_team_data(&self, _team_id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct App {

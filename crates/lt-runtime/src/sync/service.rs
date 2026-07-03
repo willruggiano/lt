@@ -61,4 +61,11 @@ pub trait SyncService: Send + Sync {
 
     /// Sync an issue's comments from the API into the local database.
     fn sync_comments(&self, issue_id: &str) -> Result<()>;
+
+    /// Sync the team list from the API into the local database.
+    fn sync_teams(&self) -> Result<()>;
+
+    /// Sync one team's workflow states and memberships from the API into the
+    /// local database.
+    fn sync_team_data(&self, team_id: &str) -> Result<()>;
 }

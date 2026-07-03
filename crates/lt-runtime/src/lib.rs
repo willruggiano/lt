@@ -7,6 +7,7 @@
 
 pub mod comments;
 pub mod sync;
+pub mod teams;
 
 mod adapter;
 pub use adapter::LinearSyncService;
