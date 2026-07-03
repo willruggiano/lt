@@ -5,32 +5,43 @@
 //! positions.
 
 use anyhow::{Context, Result};
+use lt_types::states::WorkflowStateWithPosition;
 use lt_types::types;
 use lt_types::types::{User, WorkflowState};
 use rusqlite::{Connection, params};
 
 use crate::db::sql::{self, EntityTable, Sql};
 
-/// One workflow state to upsert, scoped to its team. Grouped into a struct so
-/// [`upsert_team_state`] stays under clippy's `too-many-arguments` threshold.
-#[derive(Clone, Copy)]
-pub struct TeamState<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    pub team_id: &'a str,
-    /// `None` (issue-driven upserts) never clobbers a position already
-    /// recorded by a targeted team sync -- see
-    /// [`sql::UPSERT_WORKFLOW_STATE_SCOPED`].
-    pub position: Option<f64>,
-}
-
-/// Upsert one workflow state scoped to its team.
-pub fn upsert_team_state(conn: &Connection, state: TeamState<'_>) -> Result<()> {
+/// Upsert one workflow state scoped to its team, with Linear's stored
+/// position (a targeted team sync -- the only writer that knows it).
+pub fn upsert_team_state(
+    conn: &Connection,
+    team_id: &str,
+    state: &WorkflowStateWithPosition,
+) -> Result<()> {
     sql::execute(
         conn,
         sql::UPSERT_WORKFLOW_STATE_SCOPED,
-        params![state.id, state.name, state.team_id, state.position],
+        params![state.id.inner(), state.name, team_id, state.position],
         "upsert team-scoped workflow state",
+    )
+}
+
+/// Back-fill a workflow state's `team_id` from an issue upsert, which knows
+/// no position. Binds `UPSERT_WORKFLOW_STATE_SCOPED` directly with a SQL
+/// `NULL` position; its `COALESCE` keeps a position already recorded by a
+/// targeted team sync (see [`upsert_team_state`]).
+pub(crate) fn upsert_workflow_state_team_only(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    team_id: &str,
+) -> Result<()> {
+    sql::execute(
+        conn,
+        sql::UPSERT_WORKFLOW_STATE_SCOPED,
+        params![id, name, team_id, Option::<f64>::None],
+        "upsert workflow state team-only",
     )
 }
 
@@ -182,8 +193,20 @@ mod tests {
         db.connect().unwrap()
     }
 
-    fn upsert_state(conn: &Connection, state: TeamState<'_>) {
-        upsert_team_state(conn, state).unwrap();
+    /// `state` is `(id, name, position)`, grouped so the helper stays under
+    /// clippy's `too-many-arguments` threshold.
+    fn upsert_state(conn: &Connection, team_id: &str, state: (&str, &str, f64)) {
+        let (id, name, position) = state;
+        upsert_team_state(
+            conn,
+            team_id,
+            &WorkflowStateWithPosition {
+                id: id.into(),
+                name: name.to_string(),
+                position,
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -213,53 +236,13 @@ mod tests {
     #[test]
     fn query_team_states_orders_by_position_then_nulls_last_by_name() {
         let conn = test_db();
-        upsert_state(
-            &conn,
-            TeamState {
-                id: "s-todo",
-                name: "Todo",
-                team_id: "t1",
-                position: Some(1.0),
-            },
-        );
-        upsert_state(
-            &conn,
-            TeamState {
-                id: "s-done",
-                name: "Done",
-                team_id: "t1",
-                position: Some(2.0),
-            },
-        );
+        upsert_state(&conn, "t1", ("s-todo", "Todo", 1.0));
+        upsert_state(&conn, "t1", ("s-done", "Done", 2.0));
         // No position recorded yet -- an issue-driven upsert only.
-        upsert_state(
-            &conn,
-            TeamState {
-                id: "s-zeta",
-                name: "Zeta",
-                team_id: "t1",
-                position: None,
-            },
-        );
-        upsert_state(
-            &conn,
-            TeamState {
-                id: "s-alpha",
-                name: "Alpha",
-                team_id: "t1",
-                position: None,
-            },
-        );
+        upsert_workflow_state_team_only(&conn, "s-zeta", "Zeta", "t1").unwrap();
+        upsert_workflow_state_team_only(&conn, "s-alpha", "Alpha", "t1").unwrap();
         // A different team's state must not leak in.
-        upsert_state(
-            &conn,
-            TeamState {
-                id: "s-other",
-                name: "Other",
-                team_id: "t2",
-                position: Some(0.5),
-            },
-        );
+        upsert_state(&conn, "t2", ("s-other", "Other", 0.5));
 
         let states = query_team_states(&conn, "t1").unwrap();
         assert_eq!(
@@ -272,25 +255,9 @@ mod tests {
     fn scoped_upsert_backfills_team_id_without_clobbering_position() {
         let conn = test_db();
         // A targeted team sync records a real position.
-        upsert_state(
-            &conn,
-            TeamState {
-                id: "s1",
-                name: "Todo",
-                team_id: "t1",
-                position: Some(3.5),
-            },
-        );
+        upsert_state(&conn, "t1", ("s1", "Todo", 3.5));
         // An issue-driven upsert passes NULL and must not clobber it.
-        upsert_state(
-            &conn,
-            TeamState {
-                id: "s1",
-                name: "Todo",
-                team_id: "t1",
-                position: None,
-            },
-        );
+        upsert_workflow_state_team_only(&conn, "s1", "Todo", "t1").unwrap();
 
         let position: Option<f64> = conn
             .query_row(

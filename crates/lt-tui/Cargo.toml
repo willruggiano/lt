@@ -11,7 +11,6 @@ lt-runtime.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 open.workspace = true
-tracing.workspace = true
 # Crate-specific: only the TUI renders and reads the terminal.
 crossterm = "0.29"
 pulldown-cmark = { version = "0.13.4", default-features = false }

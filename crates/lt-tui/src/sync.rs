@@ -36,8 +36,6 @@ fn format_sync_label(synced_at: chrono::DateTime<chrono::Utc>, clock: &Clock) ->
 
 #[cfg(all(test, feature = "sim"))]
 mod tests {
-    use std::time::Instant;
-
     use super::{AuthStatus, Clock, SyncStatus, format_sync_label, sync_status_label};
 
     fn fixed_clock() -> (Clock, chrono::DateTime<chrono::Utc>) {
@@ -90,10 +88,7 @@ mod tests {
         );
         assert_eq!(
             sync_status_label(
-                &SyncStatus::Synced {
-                    synced_at: now,
-                    next_sync_at: Instant::now(),
-                },
+                &SyncStatus::Synced { synced_at: now },
                 &AuthStatus::Unknown,
                 &clock
             ),
@@ -103,7 +98,6 @@ mod tests {
             sync_status_label(
                 &SyncStatus::Failed {
                     message: "boom".to_string(),
-                    next_sync_at: Instant::now(),
                 },
                 &AuthStatus::Unknown,
                 &clock

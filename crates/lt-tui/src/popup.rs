@@ -297,21 +297,15 @@ impl super::App {
             .iter()
             .position(|item| item.label == current_state_name)
             .unwrap_or(0);
-        self.views.push(View::Popup(PopupView {
+        self.push_view(View::Popup(PopupView {
             kind: PopupKind::State,
             issue_id,
-            team_id: Some(team_id.clone()),
+            team_id: Some(team_id),
             items,
             selected,
             anchor: None,
         }));
         self.footer_msg = None;
-        self.spawn_state_refresh(
-            StateEvent::Team {
-                team_id: team_id.clone(),
-            },
-            move |s| s.sync_team_data(&team_id),
-        );
     }
 
     pub(crate) fn open_priority_popup(&mut self) {
@@ -321,7 +315,7 @@ impl super::App {
         let issue_id = issue.id.inner().to_string();
         // Linear priority: 0=No priority, 1=Urgent, 2=High, 3=Normal, 4=Low
         let selected = usize::from(issue.priority.0);
-        self.views.push(View::Popup(PopupView {
+        self.push_view(View::Popup(PopupView {
             kind: PopupKind::Priority,
             issue_id,
             team_id: None,
@@ -352,21 +346,15 @@ impl super::App {
                     .position(|item| item.id.as_deref() == Some(a.as_str()))
             })
             .unwrap_or(0);
-        self.views.push(View::Popup(PopupView {
+        self.push_view(View::Popup(PopupView {
             kind: PopupKind::Assignee,
             issue_id,
-            team_id: Some(team_id.clone()),
+            team_id: Some(team_id),
             items,
             selected,
             anchor: None,
         }));
         self.footer_msg = None;
-        self.spawn_state_refresh(
-            StateEvent::Team {
-                team_id: team_id.clone(),
-            },
-            move |s| s.sync_team_data(&team_id),
-        );
     }
 }
 
@@ -423,11 +411,10 @@ fn popup_move(app: &mut App, i: usize, delta: i32) {
     };
 }
 
-/// Confirm the popup choice: pop it, enqueue the edit against the issue it
-/// was opened for (its captured `issue_id`, not the current list selection),
-/// then route the resulting `Issues` invalidation -- a function call, not a
-/// channel round-trip: same frame, zero latency, one code path with the
-/// async completions.
+/// Confirm the popup choice: pop it, then edit the issue it was opened for
+/// (its captured `issue_id`, not the current list selection) through the
+/// sync service, which enqueues the write and emits the matching `State`
+/// event on the queue. A failure surfaces in the footer.
 fn popup_confirm(app: &mut App, i: usize) {
     let Some(View::Popup(popup)) = app.views.get(i) else {
         return;
@@ -438,8 +425,11 @@ fn popup_confirm(app: &mut App, i: usize) {
     let issue_id = popup.issue_id.clone();
     let kind = popup.kind.clone();
     app.pop_view();
-    enqueue_edit(&app.db, &issue_id, &kind, &item);
-    app.route_state_event(&StateEvent::Issues);
+    if let Some(edit) = popup_edit(&kind, &item)
+        && let Err(e) = app.service.edit_issue(&issue_id, edit)
+    {
+        app.footer_msg = Some(format!("Failed to save: {e}"));
+    }
 }
 
 fn popup_cancel(app: &mut App) {
@@ -450,35 +440,25 @@ fn popup_cancel(app: &mut App) {
 // Optimistic SQLite helpers
 // ---------------------------------------------------------------------------
 
-/// Enqueue a popup edit as local intent: the matching overlay row plus the
-/// coalesced `issueUpdate` outbox command, in one transaction. Unset choices
-/// (a priority/state item with no id) are no-ops; an assignee item with no id
-/// clears the assignee. Writes through `db` (rather than resolving
-/// `db_path()` directly) so the write lands on the same connection
-/// `route_state_event`'s re-read uses -- in production both resolve to the
-/// same profile file; tests install an in-memory database instead.
-fn enqueue_edit(db: &lt_runtime::db::Database, issue_id: &str, kind: &PopupKind, item: &PopupItem) {
-    use lt_runtime::db::outbox::{
-        enqueue_assignee_change, enqueue_priority_change, enqueue_state_change,
-    };
-    let Ok(conn) = db.connect() else {
-        return;
-    };
-    let _ = match kind {
-        PopupKind::State => match &item.id {
-            Some(id) => enqueue_state_change(&conn, issue_id, id, &item.label),
-            None => Ok(()),
-        },
-        PopupKind::Priority => match item.id.as_deref().and_then(|s| s.parse::<u8>().ok()) {
-            Some(p) => enqueue_priority_change(&conn, issue_id, p),
-            None => Ok(()),
-        },
-        PopupKind::Assignee => enqueue_assignee_change(
-            &conn,
-            issue_id,
-            item.id.as_deref().map(|id| (id, item.label.as_str())),
-        ),
-    };
+/// Map a popup selection onto an `IssueEdit`. Unset choices (a priority/state
+/// item with no id) are no-ops (`None`); an assignee item with no id clears
+/// the assignee.
+fn popup_edit(kind: &PopupKind, item: &PopupItem) -> Option<lt_runtime::sync::service::IssueEdit> {
+    use lt_runtime::sync::service::IssueEdit;
+    match kind {
+        PopupKind::State => item.id.clone().map(|id| IssueEdit::State {
+            id,
+            name: item.label.clone(),
+        }),
+        PopupKind::Priority => item
+            .id
+            .as_deref()
+            .and_then(|s| s.parse::<u8>().ok())
+            .map(IssueEdit::Priority),
+        PopupKind::Assignee => Some(IssueEdit::Assignee(
+            item.id.clone().map(|id| (id, item.label.clone())),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------

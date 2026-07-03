@@ -34,15 +34,7 @@ pub fn sync_team_data(
         },
     )?;
     for state in &states {
-        db::upsert_team_state(
-            conn,
-            db::TeamState {
-                id: state.id.inner(),
-                name: &state.name,
-                team_id,
-                position: Some(state.position),
-            },
-        )?;
+        db::upsert_team_state(conn, team_id, state)?;
     }
 
     let members = execute::<TeamMembersQuery>(

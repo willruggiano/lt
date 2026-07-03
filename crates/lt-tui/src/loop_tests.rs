@@ -3,18 +3,28 @@
 // These drive the DB- and event-coupled surface that the render tests skip:
 // `do_fetch` and pagination against a shared in-memory SQLite, `run_app`
 // driven by an `EventPump::Scripted` into a `TestBackend`, the double-esc
-// reset, and the lifecycle typestate transitions (`consume_lifecycle`) fed
-// directly (no live threads). Per the agreed scope, no network-spawning
-// method is invoked.
+// reset, and the sync/login typestate transitions (`consume_sync_event`/
+// `consume_login_event`) fed directly (no live threads). Writers go through
+// `RecordingSyncService`, which performs the real enqueue synchronously and
+// emits onto the app's queue -- `drain_events` applies it, mirroring
+// `run_app`'s post-wait drain.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 use lt_runtime::db::Database;
-use lt_runtime::sync::service::{OnLogin, OnSync};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
+
+/// Apply every event currently queued -- the test-side equivalent of
+/// `run_app`'s post-wait drain, for handlers that write through the service
+/// (whose events land on the queue, not a direct function call).
+fn drain_events(app: &mut App) {
+    while let Ok(event) = app.events_rx.try_recv() {
+        app.apply(event);
+    }
+}
 
 fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -70,15 +80,16 @@ fn comment(id: &str, issue_id: &str, body: &str) -> lt_types::comments::Comment 
     }
 }
 
-/// Build an `App` backed by a fresh in-memory `Database` seeded with `rows`.
+/// Build an `App` backed by a fresh in-memory `Database` seeded with `rows`,
+/// with its `RecordingSyncService` sharing that same database.
 fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
     let db = Database::memory()?;
     {
         let conn = db.connect()?;
         lt_runtime::db::upsert_issues(&conn, rows)?;
     }
-    let mut app = App::for_test(Vec::new());
-    app.db = db;
+    let mut app = App::for_test(Vec::new())?;
+    app.install_db(db)?;
     Ok(app)
 }
 
@@ -123,23 +134,22 @@ fn do_fetch_filtered_uses_run_query() {
 }
 
 #[test]
-fn do_fetch_and_select_seeks_identifier() {
+fn pending_select_seeks_identifier_on_next_issues_event() {
     let rows = [
         db_issue("1", "ENG-1", "Todo", 5),
         db_issue("2", "ENG-2", "Todo", 4),
         db_issue("3", "ENG-3", "Todo", 3),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    let ctx = StateCtx {
-        db: &app.db,
-        args: &app.args,
-        filter: &app.active_filter,
-        viewer_name: app.auth.viewer_name(),
-    };
-    if let Some(View::List(list)) = app.views.first_mut() {
-        list.do_fetch_and_select(&ctx, Some("ENG-3".to_string()));
+    app.fetch_base_list(true);
+    if let Some(list) = app.base_list_mut() {
+        list.pending_select = Some("ENG-3".to_string());
     }
+
+    app.route_state_event(&StateEvent::Issues);
+
     assert_eq!(app.list_mut().table_state.selected(), Some(2));
+    assert!(app.list_mut().pending_select.is_none());
 }
 
 #[test]
@@ -373,10 +383,14 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
         1,
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
     );
+    // The write goes through the service, which emits `State(Issues)` onto
+    // the queue rather than routing it directly; drain it, as `run_app`
+    // would in the same frame.
+    drain_events(&mut app);
 
     // The popup pops...
     assert_eq!(app.views.len(), 1);
-    // ...and the routed `Issues` invalidation re-reads the overlay-merged
+    // ...and the queued `Issues` invalidation re-reads the overlay-merged
     // state from the DB.
     assert_eq!(app.list_mut().issues[0].state.name, "Done");
 }
@@ -394,6 +408,7 @@ fn submit_comment_writes_through_the_db_and_refreshes_the_open_detail() {
         1,
         KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
     );
+    drain_events(&mut app);
 
     let Some(View::Detail(detail)) = app.views.last() else {
         unreachable!("detail view expected")
@@ -451,45 +466,7 @@ fn first_esc_records_timestamp() {
     assert!(app.last_esc_time.is_some());
 }
 
-// -- lifecycle typestates: consume_lifecycle, L/refresh/periodic gates ----
-
-/// A counting `SyncService` for asserting the `Syncing`/`Authenticating`
-/// gates: it never sends a completion event (nothing waits on one in these
-/// tests), only records how many times each spawn site fired.
-struct CountingSyncService {
-    sync_calls: AtomicUsize,
-    login_calls: AtomicUsize,
-}
-
-impl CountingSyncService {
-    fn new() -> Self {
-        Self {
-            sync_calls: AtomicUsize::new(0),
-            login_calls: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl SyncService for CountingSyncService {
-    fn spawn_sync(&self, _full: bool, _fetch_identity: bool, _on_done: OnSync) {
-        self.sync_calls.fetch_add(1, Ordering::SeqCst);
-    }
-    fn spawn_login(&self, _on_done: OnLogin) {
-        self.login_calls.fetch_add(1, Ordering::SeqCst);
-    }
-    fn fetch_viewer(&self) -> Option<lt_types::viewer::User> {
-        None
-    }
-    fn sync_comments(&self, _issue_id: &str) -> Result<()> {
-        Ok(())
-    }
-    fn sync_teams(&self) -> Result<()> {
-        Ok(())
-    }
-    fn sync_team_data(&self, _team_id: &str) -> Result<()> {
-        Ok(())
-    }
-}
+// -- typestates: consume_sync_event / consume_login_event, L/refresh -----
 
 fn ada() -> lt_types::viewer::User {
     lt_types::viewer::User {
@@ -503,83 +480,99 @@ fn ada() -> lt_types::viewer::User {
 }
 
 #[test]
-fn consume_lifecycle_sync_done_sets_identity_and_refreshes_the_focused_base() {
-    let rows = [db_issue("1", "ENG-1", "Todo", 5)];
-    let mut app = app_with_db(&rows).unwrap();
-    app.sync = SyncStatus::Syncing;
+fn consume_sync_event_started_sets_syncing() {
+    let mut app = app_with_db(&[]).unwrap();
+    app.sync = SyncStatus::Idle;
 
-    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Done(Some(ada()))));
+    app.consume_sync_event(SyncEvent::Started);
 
-    assert_eq!(app.auth.viewer_name(), Some("Ada"));
-    assert!(matches!(app.sync, SyncStatus::Synced { .. }));
-    assert_eq!(app.list_mut().issues.len(), 1); // do_fetch ran against the cache
+    assert!(matches!(app.sync, SyncStatus::Syncing));
 }
 
 #[test]
-fn consume_lifecycle_sync_done_without_identity_leaves_auth_unchanged() {
+fn consume_sync_event_done_sets_identity_and_synced() {
+    // N11: `Sync(Done)` only transitions the typestate now -- the `State
+    // (Issues)` the loop emits alongside is a separate queued event.
+    let mut app = app_with_db(&[]).unwrap();
+    app.sync = SyncStatus::Syncing;
+
+    app.consume_sync_event(SyncEvent::Done(Some(ada())));
+
+    assert_eq!(app.auth.viewer_name(), Some("Ada"));
+    assert!(matches!(app.sync, SyncStatus::Synced { .. }));
+}
+
+#[test]
+fn consume_sync_event_done_without_identity_leaves_auth_unchanged() {
     let mut app = app_with_db(&[]).unwrap();
     app.auth = AuthStatus::Unauthenticated;
 
-    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Done(None)));
+    app.consume_sync_event(SyncEvent::Done(None));
 
     assert!(matches!(app.auth, AuthStatus::Unauthenticated));
     assert!(matches!(app.sync, SyncStatus::Synced { .. }));
 }
 
 #[test]
-fn consume_lifecycle_sync_done_reads_synced_at_from_db_meta() {
+fn consume_sync_event_done_reads_synced_at_from_db_meta() {
     let mut app = app_with_db(&[]).unwrap();
     {
         let conn = app.db.connect().unwrap();
         lt_runtime::db::set_meta(&conn, "last_synced_at", "2026-01-10T12:00:00Z").unwrap();
     }
 
-    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Done(None)));
+    app.consume_sync_event(SyncEvent::Done(None));
 
     match &app.sync {
-        SyncStatus::Synced { synced_at, .. } => {
+        SyncStatus::Synced { synced_at } => {
             assert_eq!(synced_at.to_rfc3339(), "2026-01-10T12:00:00+00:00");
         }
-        _ => unreachable!("expected Synced"),
+        SyncStatus::Idle | SyncStatus::Syncing | SyncStatus::Failed { .. } => {
+            unreachable!("expected Synced")
+        }
     }
 }
 
 #[test]
-fn consume_lifecycle_sync_done_falls_back_to_the_clock_without_meta() {
+fn consume_sync_event_done_falls_back_to_the_clock_without_meta() {
     let mut app = app_with_db(&[]).unwrap();
     let now = chrono::DateTime::parse_from_rfc3339("2026-02-01T00:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
     app.clock = Clock::Fixed(now);
 
-    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Done(None)));
+    app.consume_sync_event(SyncEvent::Done(None));
 
     match &app.sync {
-        SyncStatus::Synced { synced_at, .. } => assert_eq!(*synced_at, now),
-        _ => unreachable!("expected Synced"),
+        SyncStatus::Synced { synced_at } => assert_eq!(*synced_at, now),
+        SyncStatus::Idle | SyncStatus::Syncing | SyncStatus::Failed { .. } => {
+            unreachable!("expected Synced")
+        }
     }
 }
 
 #[test]
-fn consume_lifecycle_sync_error_sets_failed_and_repairs_a_loading_base() {
+fn consume_sync_event_error_sets_failed_and_repairs_a_loading_base() {
     let mut app = app_with_db(&[]).unwrap();
     app.list_mut().status = Status::Loading;
 
-    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Error("boom".to_string())));
+    app.consume_sync_event(SyncEvent::Error("boom".to_string()));
 
     match &app.sync {
-        SyncStatus::Failed { message, .. } => assert_eq!(message, "boom"),
-        _ => unreachable!("expected Failed"),
+        SyncStatus::Failed { message } => assert_eq!(message, "boom"),
+        SyncStatus::Idle | SyncStatus::Syncing | SyncStatus::Synced { .. } => {
+            unreachable!("expected Failed")
+        }
     }
     assert!(matches!(app.list_mut().status, Status::Idle));
 }
 
 #[test]
-fn consume_lifecycle_sync_not_authenticated_sets_auth_and_goes_idle() {
+fn consume_sync_event_not_authenticated_sets_auth_and_goes_idle() {
     let mut app = app_with_db(&[]).unwrap();
     app.list_mut().status = Status::Loading;
 
-    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::NotAuthenticated));
+    app.consume_sync_event(SyncEvent::NotAuthenticated);
 
     assert!(matches!(app.auth, AuthStatus::Unauthenticated));
     assert!(matches!(app.sync, SyncStatus::Idle));
@@ -587,38 +580,23 @@ fn consume_lifecycle_sync_not_authenticated_sets_auth_and_goes_idle() {
 }
 
 #[test]
-fn consume_lifecycle_login_success_spawns_delta_when_not_already_syncing() {
+fn consume_login_event_success_sets_identity_without_touching_sync() {
+    // The follow-up delta sync after a successful login is the loop's now
+    // (Decision 2); this consumer only transitions `auth`.
     let mut app = app_with_db(&[]).unwrap();
-    let service = Arc::new(CountingSyncService::new());
-    app.service = service.clone();
     app.sync = SyncStatus::Idle;
 
-    app.consume_lifecycle(LifecycleEvent::Login(LoginEvent::Success(Some(ada()))));
+    app.consume_login_event(LoginEvent::Success { viewer: ada() });
 
     assert_eq!(app.auth.viewer_name(), Some("Ada"));
-    assert!(matches!(app.sync, SyncStatus::Syncing));
-    assert_eq!(service.sync_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(app.sync, SyncStatus::Idle));
 }
 
 #[test]
-fn consume_lifecycle_login_success_does_not_spawn_when_already_syncing() {
-    let mut app = app_with_db(&[]).unwrap();
-    let service = Arc::new(CountingSyncService::new());
-    app.service = service.clone();
-    app.sync = SyncStatus::Syncing;
-
-    app.consume_lifecycle(LifecycleEvent::Login(LoginEvent::Success(None)));
-
-    assert!(matches!(app.auth, AuthStatus::Unknown));
-    assert!(matches!(app.sync, SyncStatus::Syncing));
-    assert_eq!(service.sync_calls.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn consume_lifecycle_login_error_sets_failed_and_footer() {
+fn consume_login_event_error_sets_failed_and_footer() {
     let mut app = app_with_db(&[]).unwrap();
 
-    app.consume_lifecycle(LifecycleEvent::Login(LoginEvent::Error("bad".to_string())));
+    app.consume_login_event(LoginEvent::Error("bad".to_string()));
 
     match &app.auth {
         AuthStatus::Failed { message } => assert_eq!(message, "bad"),
@@ -630,72 +608,33 @@ fn consume_lifecycle_login_error_sets_failed_and_footer() {
 #[test]
 fn l_key_gates_on_authenticating() {
     let mut app = app_with_db(&[]).unwrap();
-    let service = Arc::new(CountingSyncService::new());
-    app.service = service.clone();
+    let db = app.db.share().unwrap();
+    let service = app.install_recording_service(&db).unwrap();
 
     app.dispatch_key(key('L'));
     assert!(matches!(app.auth, AuthStatus::Authenticating));
     assert_eq!(service.login_calls.load(Ordering::SeqCst), 1);
 
-    // A second press while already authenticating is a no-op.
+    // A second press while already authenticating is a no-op -- the TUI's
+    // own gate; the loop separately ignores a second `Login` command while
+    // one is in flight (`lt-runtime`'s service-loop tests).
     app.dispatch_key(key('L'));
     assert_eq!(service.login_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn refresh_gates_on_syncing() {
+fn refresh_requests_sync_on_every_press() {
+    // Item 13: `r` no longer gates on `Syncing` -- a press mid-cycle
+    // coalesces into a follow-up sync instead of being ignored.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let service = Arc::new(CountingSyncService::new());
-    app.service = service.clone();
+    let db = app.db.share().unwrap();
+    let service = app.install_recording_service(&db).unwrap();
 
     app.dispatch_key(key('r'));
-    assert!(matches!(app.sync, SyncStatus::Syncing));
-    assert_eq!(service.sync_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(service.request_sync_calls.load(Ordering::SeqCst), 1);
 
-    // A second press while already syncing is a no-op.
     app.dispatch_key(key('r'));
-    assert_eq!(service.sync_calls.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn periodic_sync_due_gates_on_sync_and_auth_state() {
-    let mut app = app_with_db(&[]).unwrap();
-
-    // Never started: not due.
-    app.sync = SyncStatus::Idle;
-    app.auth = AuthStatus::Unknown;
-    assert!(!app.periodic_sync_due());
-
-    // Synced with an elapsed schedule and a non-terminal auth: due.
-    app.sync = SyncStatus::Synced {
-        synced_at: chrono::Utc::now(),
-        next_sync_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
-    };
-    assert!(app.periodic_sync_due());
-
-    // Synced but the schedule has not elapsed yet: not due.
-    app.sync = SyncStatus::Synced {
-        synced_at: chrono::Utc::now(),
-        next_sync_at: Instant::now() + Duration::from_secs(30),
-    };
-    assert!(!app.periodic_sync_due());
-
-    // Elapsed schedule but unauthenticated/failed auth: gated off regardless.
-    app.sync = SyncStatus::Failed {
-        message: "boom".to_string(),
-        next_sync_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
-    };
-    app.auth = AuthStatus::Unauthenticated;
-    assert!(!app.periodic_sync_due());
-    app.auth = AuthStatus::Failed {
-        message: "nope".to_string(),
-    };
-    assert!(!app.periodic_sync_due());
-
-    // Already syncing: never due.
-    app.sync = SyncStatus::Syncing;
-    app.auth = AuthStatus::Unknown;
-    assert!(!app.periodic_sync_due());
+    assert_eq!(service.request_sync_calls.load(Ordering::SeqCst), 2);
 }
 
 /// Seed team `team_id` with two ordered workflow states ("Todo" @1.0, "Done"
@@ -703,20 +642,20 @@ fn periodic_sync_due_gates_on_sync_and_auth_state() {
 fn seed_team_states(conn: &lt_runtime::db::Connection, team_id: &str) -> Result<()> {
     lt_runtime::db::upsert_team_state(
         conn,
-        lt_runtime::db::TeamState {
-            id: "s-todo",
-            name: "Todo",
-            team_id,
-            position: Some(1.0),
+        team_id,
+        &lt_types::states::WorkflowStateWithPosition {
+            id: "s-todo".into(),
+            name: "Todo".to_string(),
+            position: 1.0,
         },
     )?;
     lt_runtime::db::upsert_team_state(
         conn,
-        lt_runtime::db::TeamState {
-            id: "s-done",
-            name: "Done",
-            team_id,
-            position: Some(2.0),
+        team_id,
+        &lt_types::states::WorkflowStateWithPosition {
+            id: "s-done".into(),
+            name: "Done".to_string(),
+            position: 2.0,
         },
     )?;
     Ok(())
@@ -739,6 +678,7 @@ fn bare_new_issue_modal() -> NewIssueModal {
         assignee_selected: 0,
         loading: true,
         error: String::new(),
+        watched_team_id: None,
     }
 }
 

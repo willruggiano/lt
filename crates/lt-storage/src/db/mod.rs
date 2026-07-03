@@ -19,8 +19,8 @@ pub use issues::{
 pub use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 pub use teams::{
-    TeamState, derive_team_memberships_from_issues, query_team_members, query_team_states,
-    query_teams, replace_team_memberships, upsert_team_state, upsert_teams, upsert_users,
+    derive_team_memberships_from_issues, query_team_members, query_team_states, query_teams,
+    replace_team_memberships, upsert_team_state, upsert_teams, upsert_users,
 };
 
 /// Parse a stored RFC3339 timestamp column into the wire [`DateTime`](lt_types::scalars::DateTime)
@@ -229,6 +229,25 @@ impl Database {
             Database::File => open_db(db_path()?),
             #[cfg(any(test, feature = "test-util"))]
             Database::Memory { uri, .. } => open_db(uri),
+        }
+    }
+
+    /// Open another handle onto the same database: for `File`, the same path
+    /// (there is only one); for `Memory`, a second keepalive connection on the
+    /// same shared-cache URI, so a second owner (e.g. a test's fake
+    /// `SyncService`) reads and writes the exact rows the first sees. Neither
+    /// handle's lifetime depends on the other's.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn share(&self) -> Result<Self> {
+        match self {
+            Database::File => Ok(Database::File),
+            Database::Memory { uri, .. } => {
+                let keepalive = open_db(uri)?;
+                Ok(Database::Memory {
+                    uri: uri.clone(),
+                    _keepalive: keepalive,
+                })
+            }
         }
     }
 }

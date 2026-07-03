@@ -40,10 +40,12 @@ fn authenticated(name: &str, org: &str) -> AuthStatus {
 }
 
 /// An `App` seeded with sim issues and a fixed identity for a stable header.
-fn app_with_issues(seed: u64, size: usize) -> App {
-    let mut app = App::for_test(sim_issues(seed, size));
+/// Fallible (in-memory SQLite setup); callers -- always `#[test]` fns --
+/// unwrap.
+fn app_with_issues(seed: u64, size: usize) -> Result<App> {
+    let mut app = App::for_test(sim_issues(seed, size))?;
     app.auth = authenticated("Ada Lovelace", "Acme");
-    app
+    Ok(app)
 }
 
 fn item(label: &str, id: Option<&str>) -> PopupItem {
@@ -55,7 +57,7 @@ fn item(label: &str, id: Option<&str>) -> PopupItem {
 
 #[test]
 fn list_navigation_clamps_within_bounds() {
-    let mut app = app_with_issues(0, 10);
+    let mut app = app_with_issues(0, 10).unwrap();
     app.viewport_height = 4;
     app.list_mut().table_state.select(Some(0));
 
@@ -80,7 +82,7 @@ fn list_navigation_clamps_within_bounds() {
 
 #[test]
 fn navigation_on_empty_list_is_noop() {
-    let mut app = App::for_test(Vec::new());
+    let mut app = App::for_test(Vec::new()).unwrap();
     app.list_mut().move_down();
     app.list_mut().move_bottom();
     assert_eq!(app.list_mut().table_state.selected(), None);
@@ -88,7 +90,7 @@ fn navigation_on_empty_list_is_noop() {
 
 #[test]
 fn apply_fetched_selection_resets_or_clamps() {
-    let mut app = app_with_issues(0, 3);
+    let mut app = app_with_issues(0, 3).unwrap();
     app.list_mut().table_state.select(Some(2));
     app.list_mut().apply_fetched_selection(true); // reset
     assert_eq!(app.list_mut().table_state.selected(), Some(0));
@@ -124,7 +126,7 @@ fn detail_scroll_saturates() {
 
 #[test]
 fn popup_move_clamps_and_cancel_resets_stack() {
-    let mut app = app_with_issues(0, 1);
+    let mut app = app_with_issues(0, 1).unwrap();
     let issue_id = app.list_mut().issues[0].id.inner().to_string();
     app.views.push(View::Popup(PopupView {
         kind: PopupKind::Priority,
@@ -176,7 +178,7 @@ fn popup_move_clamps_and_cancel_resets_stack() {
 
 #[test]
 fn close_detail_clears_pane_state() {
-    let mut app = app_with_issues(0, 1);
+    let mut app = app_with_issues(0, 1).unwrap();
     let issue = app.list_mut().issues[0].clone();
     let mut detail = build_cached_detail(&issue, Vec::new());
     detail.scroll = 5;
@@ -188,7 +190,7 @@ fn close_detail_clears_pane_state() {
 
 #[test]
 fn filter_sort_sync_and_replacement() {
-    let mut app = app_with_issues(0, 1);
+    let mut app = app_with_issues(0, 1).unwrap();
     app.active_filter = search_query::parse_query_ast("sort:title+");
     app.sync_args_from_filter();
     assert!(matches!(app.args.sort, lt_runtime::query::SortField::Title));
@@ -259,20 +261,20 @@ fn assignee_items_put_me_first_and_skip_viewer() {
 
 #[test]
 fn list_view() {
-    let mut app = app_with_issues(0, 12);
+    let mut app = app_with_issues(0, 12).unwrap();
     insta::assert_snapshot!(draw(&mut app, 100, 20));
 }
 
 #[test]
 fn empty_list() {
-    let mut app = App::for_test(Vec::new());
+    let mut app = App::for_test(Vec::new()).unwrap();
     app.auth = authenticated("Ada Lovelace", "Acme");
     insta::assert_snapshot!(draw(&mut app, 80, 10));
 }
 
 #[test]
 fn detail_overlay() {
-    let mut app = app_with_issues(0, 12);
+    let mut app = app_with_issues(0, 12).unwrap();
     let issue = app.list_mut().issues[0].clone();
     app.views.push(View::Detail(Box::new(build_cached_detail(
         &issue,
@@ -283,7 +285,7 @@ fn detail_overlay() {
 
 #[test]
 fn priority_popup() {
-    let mut app = app_with_issues(0, 12);
+    let mut app = app_with_issues(0, 12).unwrap();
     let issue_id = app.list_mut().issues[0].id.inner().to_string();
     app.views.push(View::Popup(PopupView {
         kind: PopupKind::Priority,
@@ -298,7 +300,7 @@ fn priority_popup() {
 
 #[test]
 fn search_overlay() {
-    let mut app = app_with_issues(0, 12);
+    let mut app = app_with_issues(0, 12).unwrap();
     let mut overlay = SearchOverlay::new();
     overlay.results = sim_issues(0, 12);
     overlay.has_searched = true;
@@ -309,14 +311,14 @@ fn search_overlay() {
 
 #[test]
 fn help_popup() {
-    let mut app = app_with_issues(0, 12);
+    let mut app = app_with_issues(0, 12).unwrap();
     app.views.push(View::Help(HelpPopup::new()));
     insta::assert_snapshot!(draw(&mut app, 100, 24));
 }
 
 #[test]
 fn new_issue_modal() {
-    let mut app = app_with_issues(0, 12);
+    let mut app = app_with_issues(0, 12).unwrap();
     app.views.push(View::NewIssue(NewIssueModal {
         focused_field: NewIssueField::Title,
         title: TextInput::from("Fix the renderer".to_string()),
@@ -340,6 +342,7 @@ fn new_issue_modal() {
         assignee_selected: 0,
         loading: false,
         error: String::new(),
+        watched_team_id: Some("ENG".to_string()),
     }));
     insta::assert_snapshot!(draw(&mut app, 100, 30));
 }

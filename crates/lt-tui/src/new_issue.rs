@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Connection;
+use lt_runtime::sync::service::Scope;
 use lt_types::types::User;
 
 use super::{
@@ -72,13 +73,19 @@ pub struct NewIssueModal {
     /// surfaced here (offline, every targeted refresh would fail, making the
     /// field constant noise); those go to `tracing`.
     pub error: String,
+    /// The team scope the service is currently watching on this modal's
+    /// behalf, distinct from `team_selected` (the live picker cursor, which
+    /// can move via j/k before the user tabs away and commits it). Diffed by
+    /// `new_issue_team_changed` to unwatch the old team and watch the new
+    /// one in the same handler (Decision 3).
+    pub watched_team_id: Option<String>,
 }
 
 impl NewIssueModal {
-    /// This modal's own team-id lookup, deduplicating the two call sites
-    /// that need it: submit validation and the `Team{team_id}` consume
-    /// guard.
-    fn selected_team_id(&self) -> Option<String> {
+    /// This modal's own team-id lookup, deduplicating the call sites that
+    /// need it: submit validation, the `Team{team_id}` consume guard, and
+    /// `View::scopes()`.
+    pub(crate) fn selected_team_id(&self) -> Option<String> {
         self.teams
             .get(self.team_selected)
             .and_then(|t| t.id.clone())
@@ -200,7 +207,7 @@ impl super::App {
             None => (Vec::new(), Vec::new()),
         };
 
-        self.views.push(View::NewIssue(NewIssueModal {
+        self.push_view(View::NewIssue(NewIssueModal {
             focused_field: NewIssueField::Title,
             title: TextInput::new(),
             description: String::new(),
@@ -214,27 +221,33 @@ impl super::App {
             assignee_selected: 0,
             loading: true,
             error: String::new(),
+            watched_team_id: team_id,
         }));
-
-        self.spawn_state_refresh(StateEvent::Teams, |s| s.sync_teams());
-        if let Some(team_id) = team_id {
-            self.spawn_state_refresh(
-                StateEvent::Team {
-                    team_id: team_id.clone(),
-                },
-                move |s| s.sync_team_data(&team_id),
-            );
-        }
     }
 
-    /// Leaving the Team field (Tab/Enter): instant cache read for the newly
-    /// selected team plus one background refresh.
+    /// Leaving the Team field (Tab/Enter): unwatch the previously-watched
+    /// team and watch the newly-selected one (Decision 3), then an instant
+    /// cache read for it.
     fn new_issue_team_changed(&mut self, i: usize) {
-        let team_id = match self.views.get(i) {
-            Some(View::NewIssue(modal)) => modal.selected_team_id(),
-            _ => None,
+        let (old_team_id, new_team_id) = match self.views.get(i) {
+            Some(View::NewIssue(modal)) => {
+                (modal.watched_team_id.clone(), modal.selected_team_id())
+            }
+            _ => return,
         };
-        let Some(team_id) = team_id else {
+        if old_team_id != new_team_id {
+            if let Some(old) = old_team_id {
+                self.service.unwatch(Scope::Team { team_id: old });
+            }
+            if let Some(new) = new_team_id.clone() {
+                self.service.watch(Scope::Team { team_id: new });
+            }
+            if let Some(View::NewIssue(modal)) = self.views.get_mut(i) {
+                modal.watched_team_id.clone_from(&new_team_id);
+            }
+        }
+
+        let Some(team_id) = new_team_id else {
             return;
         };
 
@@ -246,13 +259,6 @@ impl super::App {
             modal.assignee_selected = 0;
             modal.loading = true;
         }
-
-        self.spawn_state_refresh(
-            StateEvent::Team {
-                team_id: team_id.clone(),
-            },
-            move |s| s.sync_team_data(&team_id),
-        );
     }
 
     fn new_issue_submit(&mut self, i: usize) {
@@ -275,28 +281,13 @@ impl super::App {
             return;
         };
 
-        // Offline create: write an optimistic temp row and queue the command.
-        // The sync drainer posts it and reconciles the temp id with the server.
-        let (input, optimistic) = build_create_request(modal, team_id);
-        let result = lt_runtime::db::db_path()
-            .and_then(lt_runtime::db::open_db)
-            .and_then(|conn| {
-                lt_runtime::db::outbox::enqueue_issue_create(&conn, &optimistic, &input)
-            });
-
-        match result {
-            Ok(()) => {
-                let identifier = optimistic.identifier.clone();
+        let input = build_issue_create_input(modal, &team_id);
+        match self.service.create_issue(&input) {
+            Ok(identifier) => {
                 self.pop_view();
                 self.footer_msg = Some("Created issue (pending sync)".to_string());
-                let ctx = StateCtx {
-                    db: &self.db,
-                    args: &self.args,
-                    filter: &self.active_filter,
-                    viewer_name: self.auth.viewer_name(),
-                };
-                if let Some(View::List(list)) = self.views.first_mut() {
-                    list.do_fetch_and_select(&ctx, Some(identifier));
+                if let Some(list) = self.base_list_mut() {
+                    list.pending_select = Some(identifier);
                 }
             }
             Err(e) => {
@@ -312,80 +303,43 @@ impl super::App {
 // Issue creation
 // ---------------------------------------------------------------------------
 
-/// Build the typed `issueCreate` input and the optimistic issue fragment from
-/// the modal's current selections. The optimistic fragment carries a `local:`
-/// temp id and a `NEW` placeholder identifier; the drainer rewrites both with
-/// the server's values on ack. `team_id` is the resolved (validated) team id.
-fn build_create_request(
+/// Build the typed `issueCreate` input (ids only) from the modal's current
+/// picker selections. `team_id` is the resolved (validated) team id. The
+/// optimistic issue fragment used to live here too; it moved into
+/// `LinearSyncService::create_issue`, which resolves display names from its
+/// own lookup tables -- the fragment is a database row, not presentation.
+fn build_issue_create_input(
     modal: &NewIssueModal,
-    team_id: String,
-) -> (lt_types::inputs::IssueCreateInput, lt_types::types::Issue) {
-    use lt_types::types;
-
+    team_id: &str,
+) -> lt_types::inputs::IssueCreateInput {
     let title = modal.title.value.trim().to_string();
     let description = if modal.description.trim().is_empty() {
         None
     } else {
         Some(modal.description.trim().to_string())
     };
-    let state = modal.states.get(modal.state_selected);
-    let state_id = state.and_then(|s| s.id.clone());
-    let state_name = state.map_or_else(|| "Backlog".to_string(), |s| s.label.clone());
+    let state_id = modal
+        .states
+        .get(modal.state_selected)
+        .and_then(|s| s.id.clone());
     let priority = modal
         .priorities
         .get(modal.priority_selected)
         .and_then(|p| p.id.as_ref())
         .and_then(|s| s.parse::<u8>().ok());
-    let assignee = modal.assignees.get(modal.assignee_selected);
-    let assignee_id = assignee.and_then(|a| a.id.clone());
-    let team_name = modal
-        .teams
-        .get(modal.team_selected)
-        .map(|t| t.label.clone())
-        .unwrap_or_default();
+    let assignee_id = modal
+        .assignees
+        .get(modal.assignee_selected)
+        .and_then(|a| a.id.clone());
 
-    let input = lt_types::inputs::IssueCreateInput {
-        title: title.clone(),
-        team_id: team_id.clone(),
-        description: description.clone(),
-        state_id: state_id.clone(),
-        priority: priority.map(i32::from),
-        assignee_id: assignee_id.clone(),
-    };
-
-    let priority = priority.unwrap_or(0);
-    let now = lt_types::scalars::DateTime(chrono::Utc::now());
-    let optimistic = types::Issue {
-        id: lt_runtime::db::outbox::temp_id().into(),
-        identifier: "NEW".to_string(),
+    lt_types::inputs::IssueCreateInput {
         title,
-        priority: lt_types::scalars::Priority(priority),
-        priority_label: types::priority_u8_to_label(priority).to_string(),
-        // Fall back to a name-keyed id when the modal lacked one so the
-        // relational join still resolves a label.
-        state: types::WorkflowState {
-            id: state_id.unwrap_or_else(|| state_name.clone()).into(),
-            name: state_name,
-        },
-        assignee: assignee_id.map(|id| types::User {
-            id: id.into(),
-            name: assignee.map(|a| a.label.clone()).unwrap_or_default(),
-        }),
-        team: types::Team {
-            id: team_id.into(),
-            name: team_name,
-        },
+        team_id: team_id.to_string(),
         description,
-        labels: types::IssueLabelConnection { nodes: Vec::new() },
-        project: None,
-        cycle: None,
-        creator: None,
-        parent: None,
-        created_at: now,
-        updated_at: now,
-    };
-
-    (input, optimistic)
+        state_id,
+        priority: priority.map(i32::from),
+        assignee_id,
+    }
 }
 
 /// Build the assignee popup items: "Me (name)" at top if the viewer is known,

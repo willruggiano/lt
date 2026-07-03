@@ -93,12 +93,10 @@ impl App {
     /// Open the detail pane for the currently selected issue.
     ///
     /// The detail is populated instantly from the local SQLite cache so the
-    /// pane appears without any network round-trip. A background thread then
-    /// calls `sync_comments` via the Linear API and sends a payload-free
-    /// `Comments{issue_id}` invalidation on the app event queue -- even on
-    /// failure, so `route_state_event` always gets a chance to re-read
-    /// whatever is cached; the re-read itself happens through `app.db` at
-    /// consume time (`DetailView::consume`).
+    /// pane appears without any network round-trip. `push_view` declares the
+    /// pane's `Comments{issue_id}` interest, which prompts the loop to
+    /// refresh it; the re-read happens at consume time, not here
+    /// (`DetailView::consume`).
     pub(crate) fn open_detail(&mut self) {
         let Some(issue) = self.selected_issue().cloned() else {
             return;
@@ -114,17 +112,7 @@ impl App {
         let mut detail = build_cached_detail(&issue, cached_comments);
         populate_relations(&self.db, &mut detail, &issue);
 
-        // Refresh comments through the sync service in the background; the
-        // re-read happens at consume time, not here.
-        let issue_id = issue.id.into_inner();
-        self.spawn_state_refresh(
-            StateEvent::Comments {
-                issue_id: issue_id.clone(),
-            },
-            move |s| s.sync_comments(&issue_id),
-        );
-
-        self.views.push(View::Detail(Box::new(detail)));
+        self.push_view(View::Detail(Box::new(detail)));
         if let Some(list) = self.base_list_mut() {
             list.status = Status::Idle;
         }
@@ -264,18 +252,11 @@ fn detail_view_mut(app: &mut App, i: usize) -> Option<&mut DetailView> {
     })
 }
 
-/// Enqueue the comment buffer as a local create, then route the resulting
-/// `Comments` invalidation directly -- a function call, not a channel
-/// round-trip: same frame, zero latency, one code path with the async
-/// completion (`open_detail`'s worker) that follows a real sync.
-///
-/// The comment is written to the local DB (an optimistic `local:` row plus a
-/// `commentCreate` outbox command) in one transaction; the sync drainer posts
-/// it and reconciles the temp row with the server copy. The write goes
-/// through `app.db` (rather than resolving `db_path()` directly) so it lands
-/// on the same connection `route_state_event`'s re-read uses -- in
-/// production both resolve to the same profile file; tests install an
-/// in-memory database instead.
+/// Enqueue the comment buffer as a local create through the sync service: the
+/// optimistic `local:` row plus a `commentCreate` outbox command, in one
+/// transaction, followed by the matching `State(Comments)` event on the
+/// queue -- the sync drainer later posts the command and reconciles the temp
+/// row with the server copy. A failure surfaces in the footer.
 fn submit_comment(app: &mut App, i: usize) {
     let Some(detail) = detail_view_mut(app, i) else {
         return;
@@ -290,18 +271,10 @@ fn submit_comment(app: &mut App, i: usize) {
     let issue_id = detail.issue.id.inner().to_string();
     detail.comment_input = None;
 
-    let input = lt_types::inputs::CommentCreateInput {
-        issue_id: issue_id.clone(),
-        body,
-    };
-    if let Ok(conn) = app.db.connect() {
-        let _ = lt_runtime::db::outbox::enqueue_comment_create(
-            &conn,
-            &lt_runtime::db::outbox::temp_id(),
-            &input,
-        );
+    let input = lt_types::inputs::CommentCreateInput { issue_id, body };
+    if let Err(e) = app.service.create_comment(&input) {
+        app.footer_msg = Some(format!("Failed to save comment: {e}"));
     }
-    app.route_state_event(&StateEvent::Comments { issue_id });
 }
 
 /// Key handling for the comment input box (same editing model as the

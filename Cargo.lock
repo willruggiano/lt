@@ -1457,6 +1457,7 @@ dependencies = [
  "lt-upstream",
  "rusqlite",
  "serde_json",
+ "tracing",
  "ureq",
 ]
 
@@ -1507,7 +1508,6 @@ dependencies = [
  "open",
  "pulldown-cmark",
  "ratatui",
- "tracing",
 ]
 
 [[package]]
