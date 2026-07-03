@@ -13,6 +13,8 @@ mod render_tests;
 #[cfg(all(test, feature = "sim"))]
 mod loop_tests;
 
+#[cfg(all(test, feature = "sim"))]
+use std::collections::VecDeque;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -66,28 +68,6 @@ impl Clock {
     }
 }
 
-/// Source of key events for the event loop. Abstracts crossterm so tests can
-/// feed a scripted sequence instead of reading the real terminal.
-trait EventSource {
-    /// Return the next key press, or `None` if none arrived within `timeout`.
-    fn next_key(&mut self, timeout: std::time::Duration) -> Result<Option<KeyEvent>>;
-}
-
-/// Production event source: poll-and-read from the real terminal.
-struct CrosstermEvents;
-
-impl EventSource for CrosstermEvents {
-    fn next_key(&mut self, timeout: std::time::Duration) -> Result<Option<KeyEvent>> {
-        if event::poll(timeout)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            return Ok(Some(key));
-        }
-        Ok(None)
-    }
-}
-
 pub enum Status {
     Idle,
     Loading,
@@ -98,10 +78,13 @@ pub enum Status {
 // The app event queue
 // ---------------------------------------------------------------------------
 
-/// A message to the event loop: a state invalidation or a background-job
-/// lifecycle outcome. Key presses stay on `EventSource` in this stage; PR 7
-/// folds them into this queue.
+/// A message to the event loop: a key press from the input thread, a state
+/// invalidation, or a background-job lifecycle outcome. One channel, one
+/// drain.
 pub enum AppEvent {
+    /// A key press (`KeyEventKind::Press` only), raw from crossterm;
+    /// normalized at apply time.
+    Key(KeyEvent),
     /// The named slice of application state changed; re-read it if displayed.
     State(StateEvent),
     /// A background job finished; carries the outcome, not data.
@@ -889,10 +872,12 @@ impl App {
         self.views.push(View::Search(overlay));
     }
 
-    /// Apply a queued app event. `State` and `Lifecycle` land in this stage;
-    /// `Key` arrives in a later stage (PR 7).
+    /// Apply a queued app event: a key cascades through `dispatch_key`, a
+    /// state invalidation walks the view stack, a lifecycle outcome
+    /// transitions the sync/auth typestates.
     fn apply(&mut self, event: AppEvent) {
         match event {
+            AppEvent::Key(key) => self.dispatch_key(key),
             AppEvent::State(ev) => self.route_state_event(&ev),
             AppEvent::Lifecycle(ev) => self.consume_lifecycle(ev),
         }
@@ -1159,7 +1144,9 @@ pub fn run(args: IssueQuery, service: Arc<dyn SyncService>) -> Result<()> {
     if let Some(list) = app.base_list_mut() {
         list.status = initial_status;
     }
-    let result = run_app(&mut terminal, &mut CrosstermEvents, &mut app);
+    spawn_input_thread(app.events_tx.clone());
+    let mut pump = EventPump::Channel;
+    let result = run_app(&mut terminal, &mut pump, &mut app);
     if keyboard_enhanced {
         let _ = crossterm::execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
     }
@@ -1167,39 +1154,102 @@ pub fn run(args: IssueQuery, service: Arc<dyn SyncService>) -> Result<()> {
     result
 }
 
+/// Detached input thread: blocks on `event::read()` and forwards every key
+/// press onto the app event queue. Resize/mouse/release events are dropped,
+/// as today. The thread outlives `run_app` -- it exits on a `send` failure
+/// (the app dropped `events_rx`) or a read error (the terminal is gone).
+fn spawn_input_thread(tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        loop {
+            match event::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    if tx.send(AppEvent::Key(key)).is_err() {
+                        return;
+                    }
+                }
+                Ok(_) => {}       // resize/mouse/release: dropped, as today
+                Err(_) => return, // terminal gone
+            }
+        }
+    });
+}
+
+/// Where the loop's blocking wait gets its first event each frame. A closed
+/// set (cf. `Clock` and `db::Database`): the channel in the binary, a script
+/// in tests.
+enum EventPump {
+    Channel,
+    /// Scripted events for loop tests; errors when exhausted so a test that
+    /// forgot to quit fails fast instead of hanging.
+    #[cfg(all(test, feature = "sim"))]
+    Scripted(VecDeque<AppEvent>),
+}
+
+impl EventPump {
+    /// Block up to `timeout` for this frame's first event: `recv_timeout` on
+    /// the real channel in production, the next scripted event in tests.
+    /// `Disconnected` is unreachable in production -- `App` owns a sender for
+    /// the lifetime of the loop -- so the `Channel` arm treats it as an idle
+    /// tick, same as a timeout.
+    // `Scripted`'s exhaustion error only exists under `#[cfg(test, feature =
+    // "sim")]`; without it this function's only path is infallible, which
+    // clippy flags on that compile.
+    #[cfg_attr(not(all(test, feature = "sim")), allow(clippy::unnecessary_wraps))]
+    fn next(
+        &mut self,
+        rx: &mpsc::Receiver<AppEvent>,
+        timeout: Duration,
+    ) -> Result<Option<AppEvent>> {
+        match self {
+            EventPump::Channel => match rx.recv_timeout(timeout) {
+                Ok(event) => Ok(Some(event)),
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                    Ok(None)
+                }
+            },
+            #[cfg(all(test, feature = "sim"))]
+            EventPump::Scripted(events) => events
+                .pop_front()
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("scripted events exhausted")),
+        }
+    }
+}
+
+/// The periodic 30s delta sync: fire when `periodic_sync_due`'s clock gate
+/// says one is due.
+fn maybe_start_periodic_sync(app: &mut App) {
+    if app.periodic_sync_due() {
+        let fetch_identity = !matches!(app.auth, AuthStatus::Authenticated { .. });
+        app.start_sync(false, fetch_identity);
+    }
+}
+
 fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
-    events: &mut dyn EventSource,
+    pump: &mut EventPump,
     app: &mut App,
 ) -> Result<()>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     loop {
-        // Periodic delta sync: fire every 30s per `periodic_sync_due`'s gate.
-        if app.periodic_sync_due() {
-            let fetch_identity = !matches!(app.auth, AuthStatus::Authenticated { .. });
-            app.start_sync(false, fetch_identity);
-        }
-
-        // Drain the app event queue: state invalidations and lifecycle
-        // outcomes from background workers, plus same-thread writers, land
-        // here.
-        while let Ok(event) = app.events_rx.try_recv() {
-            app.apply(event);
-        }
-
-        // Poll FTS search debounce.
+        maybe_start_periodic_sync(app);
         poll_search_debounce(app);
 
         terminal.draw(|frame| ui::render(frame, app))?;
-
         if app.quit {
             return Ok(());
         }
 
-        if let Some(key) = events.next_key(Duration::from_millis(100))? {
-            app.dispatch_key(key);
+        // Block up to 100ms for the first event, then drain without
+        // blocking: events same-thread writers pushed onto the real channel
+        // while we were blocked are seen in the same frame.
+        if let Some(event) = pump.next(&app.events_rx, Duration::from_millis(100))? {
+            app.apply(event);
+        }
+        while let Ok(event) = app.events_rx.try_recv() {
+            app.apply(event);
         }
     }
 }

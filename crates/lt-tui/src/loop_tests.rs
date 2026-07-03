@@ -2,12 +2,11 @@
 //
 // These drive the DB- and event-coupled surface that the render tests skip:
 // `do_fetch` and pagination against a shared in-memory SQLite, `run_app`
-// driven by a scripted `EventSource` into a `TestBackend`, the double-esc
+// driven by an `EventPump::Scripted` into a `TestBackend`, the double-esc
 // reset, and the lifecycle typestate transitions (`consume_lifecycle`) fed
 // directly (no live threads). Per the agreed scope, no network-spawning
 // method is invoked.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lt_runtime::db::Database;
@@ -16,21 +15,6 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
-
-/// Scripted key source for `run_app`. Yields the queued keys, then errors so
-/// a forgotten quit key terminates the loop instead of hanging.
-struct ScriptedEvents {
-    keys: VecDeque<KeyEvent>,
-}
-
-impl EventSource for ScriptedEvents {
-    fn next_key(&mut self, _timeout: Duration) -> Result<Option<KeyEvent>> {
-        match self.keys.pop_front() {
-            Some(k) => Ok(Some(k)),
-            None => Err(anyhow::anyhow!("scripted events exhausted")),
-        }
-    }
-}
 
 fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -100,10 +84,8 @@ fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
 
 fn drive(app: &mut App, keys: &[KeyEvent]) -> Result<()> {
     let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    let mut events = ScriptedEvents {
-        keys: keys.iter().copied().collect(),
-    };
-    run_app(&mut term, &mut events, app)
+    let mut pump = EventPump::Scripted(keys.iter().copied().map(AppEvent::Key).collect());
+    run_app(&mut term, &mut pump, app)
 }
 
 // -- do_fetch / pagination ------------------------------------------------
