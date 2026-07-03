@@ -360,9 +360,12 @@ new_issue.rs:433.
 Two layers, resolved context-first:
 
 - The context's own table.
-- `GLOBAL` — **navigation vocabulary only** (`j`/`k`/arrows, `g g`, `G`,
-  `ctrl+d`/`ctrl+u`, page keys). Action keys (`q`, `c`, `ctrl+/`, `/`) are
-  per-context. This eliminates shadowing surprises at the cost of repeating
+- `GLOBAL` — navigation vocabulary (`j`/`k`/arrows, `g g`, `G`,
+  `ctrl+d`/`ctrl+u`, page keys) plus `q` → Back, which maps to `App::pop_view`:
+  closing the focused view is the same act everywhere, so no view's table
+  concerns itself with `q`. List shadows it with Quit at the base (context table
+  wins), and text contexts skip GLOBAL, so `q` stays typeable. All other action
+  keys (`c`, `ctrl+/`, `/`) are per-context, at the cost of repeating
   `esc → Back` in each table. The stack cascade delivers _keys_ downward; GLOBAL
   delivers per-context _semantics_ for the same key (`j` scrolls in Detail,
   moves the selection in List) — so it remains a resolution layer within each
@@ -380,11 +383,10 @@ Contexts split by what `Unbound` means:
 - **`NewIssuePicker`** consumes unbound keys without forwarding: the modal is a
   form, and a stray letter acting on a view underneath it would be hostile.
 - **Pass-through contexts** (`Detail`, `Popup`) let an unbound key cascade to
-  the view beneath, ending at `views[0]` — this is what makes list bindings
-  reachable from overlays with no global action layer. The price: pass-through
-  tables must bind `q` → Back, or an unbound `q` would fall through to List's
-  Quit ([[tui-app-event-queue-adr.md]] discloses this as the q-leak; the binding
-  tables here own the policy).
+  the view beneath, ending at `views[0]`. This is what makes list bindings
+  reachable from overlays. The q-leak [[tui-app-event-queue-adr.md]] discloses
+  (an unbound `q` falling through to List's Quit) cannot occur: GLOBAL's `q` →
+  Back resolves in the focused view, before the cascade.
 
 ### Resolution and chords
 
@@ -469,15 +471,15 @@ performs at the stack floor, so the two `Back` semantics converge on one helper.
 
 ### Conflict resolutions
 
-| Conflict                                  | Resolution                                                                                                                                             |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `lt` `g` = top vs Linear `g` chord prefix | `g g` = top (vim), `G` = bottom unchanged. `g` becomes a prefix; `g i`/`g m`/`g t` slot in when those features exist.                                  |
-| `lt` `o` = browser vs Linear `o` prefix   | Open-in-browser moves to `ctrl+o`. `o` is left unbound (reserved) — an empty prefix would be dead weight; chords register per feature.                 |
-| `lt` `n` = new issue vs Linear `c`        | `c` = create issue in List; `n` unbound. `c` in Detail stays comment: a key bound in the focused view never cascades, so Detail shadows List's create. |
-| `lt` `space` = open vs Linear `enter`     | `enter` opens detail; `space` kept as alias. Revisit if multi-select ever wants `space`.                                                               |
-| `lt` `S` = cycle sort vs Linear `S`       | Cycle-sort functionality is removed (sort remains expressible via `/` `sort:` stems). `S` reserved for subscribe, `V` for display options.             |
-| `lt` `?` = keybind help vs Linear `?`     | Linear's `?` opens the help panel, which `lt` lacks; the keybinds panel mirrors Linear's `ctrl+/`. `?` reserved for a future help panel.               |
-| Non-conflicts after normalization         | `d` (sort dir) vs `D` (due date), `L` (login) vs `l` (labels), pagination `ctrl+n`/`ctrl+p` vs completion `ctrl+n`/`ctrl+p` (layering).                |
+| Conflict                                  | Resolution                                                                                                                                                     |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lt` `g` = top vs Linear `g` chord prefix | `g g` = top (vim), `G` = bottom unchanged. `g` becomes a prefix; `g i`/`g m`/`g t` slot in when those features exist.                                          |
+| `lt` `o` = browser vs Linear `o` prefix   | `o` becomes a prefix now: open-in-browser moves to `o b`, an `lt`-specific chord (Linear, being the browser, has none). `o i`/`o p`/`o w` slot in per feature. |
+| `lt` `n` = new issue vs Linear `c`        | `c` = create issue in List; `n` unbound. `c` in Detail stays comment: a key bound in the focused view never cascades, so Detail shadows List's create.         |
+| `lt` `space` = open vs Linear `enter`     | `enter` opens detail; `space` kept as alias. Revisit if multi-select ever wants `space`.                                                                       |
+| `lt` `S` = cycle sort vs Linear `S`       | Cycle-sort functionality is removed (sort remains expressible via `/` `sort:` stems). `S` reserved for subscribe, `V` for display options.                     |
+| `lt` `?` = keybind help vs Linear `?`     | Linear's `?` opens the help panel, which `lt` lacks; the keybinds panel mirrors Linear's `ctrl+/`. `?` reserved for a future help panel.                       |
+| Non-conflicts after normalization         | `d` (sort dir) vs `D` (due date), `L` (login) vs `l` (labels), pagination `ctrl+n`/`ctrl+p` vs completion `ctrl+n`/`ctrl+p` (layering).                        |
 
 ### GLOBAL (skipped by text contexts)
 
@@ -490,6 +492,7 @@ performs at the stack floor, so the two `Back` semantics converge on one helper.
 | `ctrl+d`        | HalfPageDown |
 | `ctrl+u`        | HalfPageUp   |
 | `pgdn` / `pgup` | PageDown/Up  |
+| `q`             | Back         |
 
 ### List
 
@@ -497,7 +500,7 @@ performs at the stack floor, so the two `Back` semantics converge on one helper.
 | ------------------- | ----------------- | -------- | ------------------- |
 | `enter` / `space`   | OpenDetail        | `ctrl+r` | Refresh             |
 | `esc`               | Back (double-esc) | `d`      | ToggleSortDirection |
-| `/`                 | OpenSearch        | `ctrl+o` | OpenInBrowser       |
+| `/`                 | OpenSearch        | `o b`    | OpenInBrowser       |
 | `ctrl+/` / `ctrl+7` | OpenHelp          | `ctrl+n` | NextPage            |
 | `c`                 | CreateIssue       | `ctrl+p` | PrevPage            |
 | `s`                 | SetStatus         | `L`      | Login               |
@@ -513,17 +516,17 @@ reachable via `/` `sort:` stems.
 
 ### Detail
 
-`esc` / `q` → Back, `c` → Comment, `ctrl+o` → OpenInBrowser, plus GLOBAL
-(navigation = scrolling; `g g` replaces today's `g` for scroll-to-top).
-Pass-through: unbound keys cascade to the base list (e.g. `/` opens Search,
-`s`/`p`/`a` act on the list selection until phase 4 binds them here).
+`esc` → Back, `c` → Comment, `o b` → OpenInBrowser, plus GLOBAL (navigation =
+scrolling; `g g` replaces today's `g` for scroll-to-top; `q` → Back preserves
+today's close-on-`q`, detail.rs:258). Pass-through: unbound keys cascade to the
+base list (e.g. `/` opens Search, `s`/`p`/`a` act on the list selection until
+phase 4 binds them here).
 
 ### Popup
 
-`enter` → Confirm, `esc` / `q` → Back, plus GLOBAL (MoveTop/MoveBottom clamp to
-first/last item). Pass-through; `q` = Back is the q-leak guard — today's handler
-ignores unbound keys (popup.rs:441-449), so binding `q` costs nothing and
-closing on `q` matches Detail.
+`enter` → Confirm, `esc` → Back, plus GLOBAL (MoveTop/MoveBottom clamp to
+first/last item; `q` → Back closes — today's handler ignores it,
+popup.rs:441-449). Pass-through.
 
 ### New issue — picker fields
 
@@ -602,14 +605,14 @@ Inline `#[cfg(test)]` modules per [[testing.md]].
    leniency (`"shift+p"` == `"P"`); `Binding` round-trip (`"g g"`).
 2. **Resolution units** (mod.rs): chord hit (`g`,`g` → MoveTop); chord miss
    falls through (`g`,`j` → MoveDown); text context ignores GLOBAL (`c` in
-   Search → Unbound); layer precedence (`q` → Back in Detail, Quit in List).
-   Cascade units (dispatch level): an unbound key in a Popup resolves in the
-   List beneath; `q` in a Popup is Back, never Quit; a printable key in Search
-   never cascades.
+   Search → Unbound); layer precedence (`q` → Back in Detail via GLOBAL, Quit in
+   List whose context table shadows GLOBAL). Cascade units (dispatch level): an
+   unbound key in a Popup resolves in the List beneath; `q` in a Popup is Back,
+   never Quit; a printable key in Search never cascades.
 3. **Invariants** (mod.rs), over every context's effective layers: no duplicate
    `Binding`; no key both `Single`-bound and a chord prefix; every table binding
-   round-trips through Display/FromStr; every pass-through context binds `q` →
-   Back (the q-leak guard).
+   round-trips through Display/FromStr; no context table besides List binds `q`
+   (Back is GLOBAL's; only the base may shadow it).
 4. **Binding snapshot** (insta): render every context's `binding → label` lines
    and snapshot them. Any binding change becomes a reviewed snapshot diff — the
    drift guard, mirroring this document's tables. A second snapshot pins
@@ -636,10 +639,10 @@ Each phase lands gate-green (`make check` / `make test`).
    ADR's delivery plan. Convert
    `handle_normal_key`/`handle_detail_key`/`handle_popup_key` to `apply_*` (the
    comment-input gate temporarily keeps forwarding to the old comment handler).
-   The pass-through policy (which contexts `Pass` on `Unbound`; Popup `q` =
-   Back) lands here with the tables — the ADR ships the cascade mechanism with
-   every handler returning `Consumed`. Binding changes land here: `g g`/`G`,
-   `enter`+`space`, `c` create, `ctrl+o` browser, `ctrl+r` refresh,
+   The pass-through policy (which contexts `Pass` on `Unbound`) lands here with
+   the tables — the ADR ships the cascade mechanism with every handler returning
+   `Consumed`. Binding changes land here: `g g`/`G`, `enter`+`space`, `c`
+   create, `o b` browser (the first `o` chord), `ctrl+r` refresh,
    `ctrl+/`+`ctrl+7` help. Cycle-sort is removed outright (`App::cycle_sort`,
    its `S` binding, and its help entry). The dead `App.input_mode`/`input_buf`
    filter state (lib.rs:323-325) and the unreachable footer branch
@@ -661,16 +664,12 @@ Each phase lands gate-green (`make check` / `make test`).
    `enqueue_assignee_change`), `s`/`p`/`a` from Detail (requires the view stack
    of [[tui-app-event-queue-adr.md]]: the binding pushes a `PopupView` built
    from the detail's own issue, and confirm/cancel pop back to the Detail
-   beneath), first real `g`/`o` chords as inbox/my-issues /workspaces land
-   (ENG-41 = `o w`).
+   beneath), first `g` chords and further `o` chords as inbox/my-issues/
+   workspaces land (ENG-41 = `o w`).
 
 ## Risks and flagged issues
 
-- **The q-leak is a standing table invariant.** Any future pass-through context
-  that omits `q` → Back lets an unbound `q` cascade to List's Quit. Guarded by
-  the invariant tests (every pass-through table binds `q`), but it is a policy
-  every new overlay must remember, not a structural impossibility.
-- **Muscle-memory breaks.** `g` → `g g`, `o` → `ctrl+o`, `n` → `c`, `r` →
-  `ctrl+r`, `?` → `ctrl+/`, and the removal of `S` cycle-sort are deliberate
-  breaking changes, acceptable in 0.1.x per [[posture.md]]; the help overlay and
-  footer hints are updated in the same phases.
+- **Muscle-memory breaks.** `g` → `g g`, `o` → `o b`, `n` → `c`, `r` → `ctrl+r`,
+  `?` → `ctrl+/`, and the removal of `S` cycle-sort are deliberate breaking
+  changes, acceptable in 0.1.x per [[posture.md]]; the help overlay and footer
+  hints are updated in the same phases.
