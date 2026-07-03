@@ -379,10 +379,11 @@ pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
         return KeyFlow::Consumed;
     }
 
-    // Esc cancels.
+    // Esc is not bound here: it resolves at the floor (Decision 6). Checked
+    // before the per-field dispatch below so it isn't swallowed as literal
+    // text by the Title/Description fields.
     if code == KeyCode::Esc {
-        app.pop_view();
-        return KeyFlow::Consumed;
+        return KeyFlow::Pass;
     }
 
     let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {

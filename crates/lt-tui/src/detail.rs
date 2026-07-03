@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
 use lt_types::types::Issue;
 
-use super::{App, KeyFlow, StateCtx, StateEvent, Status, View};
+use super::{App, KeyFlow, Scroll, StateCtx, StateEvent, Status, View};
 
 /// The detail pane's complete state: the shared `types`/`comments` fragments
 /// the TUI composes for display, plus the panel's scroll offset and comment
@@ -89,6 +89,34 @@ impl DetailView {
     }
 }
 
+/// This view's scroll override: offset scrolling (Decision 6).
+impl Scroll for DetailView {
+    fn motion_down(&mut self) {
+        self.scroll_down();
+    }
+    fn motion_up(&mut self) {
+        self.scroll_up();
+    }
+    fn motion_top(&mut self) {
+        self.scroll_to_top();
+    }
+    fn motion_bottom(&mut self) {
+        self.scroll_to_bottom();
+    }
+    fn motion_half_page_down(&mut self, viewport_height: u16) {
+        self.scroll_half_page_down(viewport_height);
+    }
+    fn motion_half_page_up(&mut self, viewport_height: u16) {
+        self.scroll_half_page_up(viewport_height);
+    }
+    fn motion_page_down(&mut self, viewport_height: u16) {
+        self.scroll_page_down(viewport_height);
+    }
+    fn motion_page_up(&mut self, viewport_height: u16) {
+        self.scroll_page_up(viewport_height);
+    }
+}
+
 impl App {
     /// Open the detail pane for the currently selected issue.
     ///
@@ -112,14 +140,6 @@ impl App {
         populate_relations(&self.db, &mut detail, &issue);
 
         self.push_view(View::Detail(Box::new(detail)));
-        if let Some(list) = self.base_list_mut() {
-            list.status = Status::Idle;
-        }
-    }
-
-    /// Close the detail pane and return to the list.
-    pub(crate) fn close_detail(&mut self) {
-        self.pop_view();
         if let Some(list) = self.base_list_mut() {
             list.status = Status::Idle;
         }
@@ -174,7 +194,6 @@ pub(crate) fn populate_relations(db: &Database, detail: &mut DetailView, issue: 
 pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
     let code = key.code;
     let modifiers = key.modifiers;
-    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
 
     // When the comment input is open, all keys go to it.
     let comment_open = detail_view_mut(app, i).is_some_and(|d| d.comment_input.is_some());
@@ -183,9 +202,9 @@ pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
         return KeyFlow::Consumed;
     }
 
-    let viewport_height = app.viewport_height;
+    // Esc/q (Back) and the scroll motions are not bound here: they resolve
+    // at the floor and scroll-default layers of `dispatch_key` (Decision 6).
     match code {
-        KeyCode::Esc | KeyCode::Char('q') => app.close_detail(),
         // Open the comment input.
         KeyCode::Char('c') => {
             if let Some(d) = detail_view_mut(app, i) {
@@ -193,53 +212,13 @@ pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
             }
             app.footer_msg = None;
         }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if let Some(d) = detail_view_mut(app, i) {
-                d.scroll_down();
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if let Some(d) = detail_view_mut(app, i) {
-                d.scroll_up();
-            }
-        }
-        KeyCode::Char('g') => {
-            if let Some(d) = detail_view_mut(app, i) {
-                d.scroll_to_top();
-            }
-        }
-        KeyCode::Char('G') => {
-            if let Some(d) = detail_view_mut(app, i) {
-                d.scroll_to_bottom();
-            }
-        }
-        KeyCode::Char('d') if ctrl => {
-            if let Some(d) = detail_view_mut(app, i) {
-                d.scroll_half_page_down(viewport_height);
-            }
-        }
-        KeyCode::Char('u') if ctrl => {
-            if let Some(d) = detail_view_mut(app, i) {
-                d.scroll_half_page_up(viewport_height);
-            }
-        }
-        KeyCode::PageDown => {
-            if let Some(d) = detail_view_mut(app, i) {
-                d.scroll_page_down(viewport_height);
-            }
-        }
-        KeyCode::PageUp => {
-            if let Some(d) = detail_view_mut(app, i) {
-                d.scroll_page_up(viewport_height);
-            }
-        }
         KeyCode::Char('o') => {
             if let Some(d) = detail_view_mut(app, i) {
                 let url = format!("https://linear.app/issue/{}", d.issue.identifier);
                 let _ = open::that(url);
             }
         }
-        _ => {}
+        _ => return KeyFlow::Pass,
     }
     KeyFlow::Consumed
 }

@@ -145,6 +145,57 @@ impl View {
             View::List(_) | View::Search(_) | View::Help(_) => Vec::new(),
         }
     }
+
+    /// Resolve a scroll motion against this view's own semantics: selection
+    /// movement for `List`/`Popup`, offset scrolling for `Detail` (Decision
+    /// 6). No-op default for views with no scrollable content of their own --
+    /// `Search`/`Help` keep their navigation in-handler (they are text
+    /// contexts and never reach this layer); `NewIssue`'s tab-focused fields
+    /// have no scroll concept.
+    fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        match self {
+            View::List(list) => list.scroll(motion, viewport_height),
+            View::Detail(detail) => detail.scroll(motion, viewport_height),
+            View::Popup(popup) => popup.scroll(motion, viewport_height),
+            View::NewIssue(_) | View::Search(_) | View::Help(_) => {}
+        }
+    }
+}
+
+/// A scroll/selection motion, resolved at the focused view's [`View::scroll`]
+/// when no handler in the key cascade binds the key (Decision 6). One method
+/// over the shared `j`/`k`/`g`/`G`/Ctrl-d/Ctrl-u/PageDown/PageUp family,
+/// rather than one method per motion: avoids eight near-identical trait
+/// methods for the same dispatch seam.
+#[derive(Clone, Copy)]
+pub(crate) enum ScrollMotion {
+    Down,
+    Up,
+    Top,
+    Bottom,
+    HalfPageDown,
+    HalfPageUp,
+    PageDown,
+    PageUp,
+}
+
+impl ScrollMotion {
+    /// The shared scroll-key set, checked once per key after the focused
+    /// view's own bindings pass on it.
+    fn from_key(key: KeyEvent) -> Option<Self> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => Some(Self::Down),
+            KeyCode::Char('k') | KeyCode::Up => Some(Self::Up),
+            KeyCode::Char('g') => Some(Self::Top),
+            KeyCode::Char('G') => Some(Self::Bottom),
+            KeyCode::Char('d') if ctrl => Some(Self::HalfPageDown),
+            KeyCode::Char('u') if ctrl => Some(Self::HalfPageUp),
+            KeyCode::PageDown => Some(Self::PageDown),
+            KeyCode::PageUp => Some(Self::PageUp),
+            _ => None,
+        }
+    }
 }
 
 /// The issue-list view: the base-list fields, owned. `status`'s only render
@@ -399,6 +450,63 @@ impl ListView {
     }
 }
 
+/// The eight scroll-motion primitives a stepped/offset view (`List`,
+/// `Detail`) is built from. The provided `scroll` method maps a
+/// [`ScrollMotion`] onto them once, so the same eight-arm dispatch isn't
+/// duplicated per view (`cpd`/`cargo dupes`); implementors just name their
+/// own movement primitives.
+trait Scroll {
+    fn motion_down(&mut self);
+    fn motion_up(&mut self);
+    fn motion_top(&mut self);
+    fn motion_bottom(&mut self);
+    fn motion_half_page_down(&mut self, viewport_height: u16);
+    fn motion_half_page_up(&mut self, viewport_height: u16);
+    fn motion_page_down(&mut self, viewport_height: u16);
+    fn motion_page_up(&mut self, viewport_height: u16);
+
+    fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        match motion {
+            ScrollMotion::Down => self.motion_down(),
+            ScrollMotion::Up => self.motion_up(),
+            ScrollMotion::Top => self.motion_top(),
+            ScrollMotion::Bottom => self.motion_bottom(),
+            ScrollMotion::HalfPageDown => self.motion_half_page_down(viewport_height),
+            ScrollMotion::HalfPageUp => self.motion_half_page_up(viewport_height),
+            ScrollMotion::PageDown => self.motion_page_down(viewport_height),
+            ScrollMotion::PageUp => self.motion_page_up(viewport_height),
+        }
+    }
+}
+
+/// This view's scroll override: selection movement (Decision 6).
+impl Scroll for ListView {
+    fn motion_down(&mut self) {
+        self.move_down();
+    }
+    fn motion_up(&mut self) {
+        self.move_up();
+    }
+    fn motion_top(&mut self) {
+        self.move_top();
+    }
+    fn motion_bottom(&mut self) {
+        self.move_bottom();
+    }
+    fn motion_half_page_down(&mut self, viewport_height: u16) {
+        self.half_page_down(viewport_height);
+    }
+    fn motion_half_page_up(&mut self, viewport_height: u16) {
+        self.half_page_up(viewport_height);
+    }
+    fn motion_page_down(&mut self, viewport_height: u16) {
+        self.page_down(viewport_height);
+    }
+    fn motion_page_up(&mut self, viewport_height: u16) {
+        self.page_up(viewport_height);
+    }
+}
+
 /// Read-only context a view's consume/re-query needs. Built inline from
 /// disjoint `App` field borrows at each call site: an `App::state_ctx(&self)`
 /// accessor would borrow all of `self` and conflict with any simultaneous
@@ -408,11 +516,11 @@ pub struct StateCtx<'a> {
     pub viewer_name: Option<&'a str>,
 }
 
-/// What a key handler did with a key. `Pass` hands it to the next view down;
-/// a handler that returns `Pass` must not have mutated anything (in
-/// particular the stack), so the walk's indices stay valid. Mechanism-only in
-/// this stage: every handler returns `Consumed` unconditionally, so no key
-/// cascades yet and behavior is unchanged from today's mode dispatch.
+/// What a key handler did with a key. `Pass` hands it to the next layer:
+/// the shared scroll defaults, then the cascade toward the base, then the
+/// Esc/q floor (Decision 6). A handler that returns `Pass` must not have
+/// mutated anything (in particular the stack), so the walk's indices stay
+/// valid.
 pub enum KeyFlow {
     Consumed,
     Pass,
@@ -1015,25 +1123,48 @@ impl App {
         }
     }
 
-    /// Keys go to the focused view and cascade toward the base: an unbound
-    /// key falls through to the view beneath, with `views[0]` as the floor.
-    /// Mechanism-only in this stage: every handler returns `Consumed`
-    /// unconditionally, so the loop always stops at the top view, matching
-    /// today's single-mode dispatch exactly.
+    /// Four layers, checked in order (Decision 6): the focused view's own
+    /// bindings; the shared scroll defaults, resolved at the focused view
+    /// only (they never cascade); the cascade toward the base for anything
+    /// else unbound; and the Esc/q floor -- Back above the base, reset/quit
+    /// at it.
     fn dispatch_key(&mut self, key: KeyEvent) {
-        for i in (0..self.views.len()).rev() {
-            let handler: KeyHandler = match &self.views[i] {
-                View::List(_) => handle_list_key,
-                View::Detail(_) => detail::handle_key,
-                View::Popup(_) => popup::handle_key,
-                View::NewIssue(_) => new_issue::handle_key,
-                View::Search(_) => popup::handle_search_key,
-                View::Help(_) => popup::handle_help_key,
-            };
-            if matches!(handler(self, i, key), KeyFlow::Consumed) {
+        let top = self.views.len() - 1;
+        if matches!(self.handle_view_key(top, key), KeyFlow::Consumed) {
+            return;
+        }
+        if let Some(motion) = ScrollMotion::from_key(key) {
+            let viewport = self.viewport_height;
+            if let Some(view) = self.views.last_mut() {
+                view.scroll(motion, viewport);
+            }
+            return;
+        }
+        for i in (0..top).rev() {
+            if matches!(self.handle_view_key(i, key), KeyFlow::Consumed) {
                 return;
             }
         }
+        match key.code {
+            // Back, above the base: `q` never reaches Quit from an overlay.
+            KeyCode::Esc | KeyCode::Char('q') if top > 0 => self.pop_view(),
+            KeyCode::Esc => self.handle_list_esc(), // double-esc reset, unchanged
+            KeyCode::Char('q') => self.quit = true,
+            _ => {}
+        }
+    }
+
+    /// Dispatch `key` to the view at stack index `i`'s own key handler.
+    fn handle_view_key(&mut self, i: usize, key: KeyEvent) -> KeyFlow {
+        let handler: KeyHandler = match &self.views[i] {
+            View::List(_) => handle_list_key,
+            View::Detail(_) => detail::handle_key,
+            View::Popup(_) => popup::handle_key,
+            View::NewIssue(_) => new_issue::handle_key,
+            View::Search(_) => popup::handle_search_key,
+            View::Help(_) => popup::handle_help_key,
+        };
+        handler(self, i, key)
     }
 
     /// Route a state invalidation down the stack, top first. Applies are
@@ -1321,58 +1452,18 @@ where
 
 fn handle_list_key(app: &mut App, _i: usize, key: KeyEvent) -> KeyFlow {
     // The list is always the base view in this stage, so it reaches its own
-    // state through `base_list_mut` rather than the index.
+    // state through `base_list_mut` rather than the index. Movement
+    // (j/k/g/G/Ctrl-d/Ctrl-u/PageDown/PageUp) and Esc/q are not bound here:
+    // they resolve at the scroll-default and floor layers of `dispatch_key`
+    // (Decision 6).
     let code = key.code;
     let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-    let viewport_height = app.viewport_height;
     match code {
-        KeyCode::Char('q') => app.quit = true,
-        KeyCode::Esc => app.handle_list_esc(),
         // Open detail pane (space opens detail)
         KeyCode::Char(' ') => app.open_detail(),
-        KeyCode::Char('j') | KeyCode::Down => {
-            if let Some(l) = app.base_list_mut() {
-                l.move_down();
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if let Some(l) = app.base_list_mut() {
-                l.move_up();
-            }
-        }
-        KeyCode::Char('g') => {
-            if let Some(l) = app.base_list_mut() {
-                l.move_top();
-            }
-        }
-        KeyCode::Char('G') => {
-            if let Some(l) = app.base_list_mut() {
-                l.move_bottom();
-            }
-        }
-        KeyCode::Char('d') if ctrl => {
-            if let Some(l) = app.base_list_mut() {
-                l.half_page_down(viewport_height);
-            }
-        }
-        KeyCode::Char('u') if ctrl => {
-            if let Some(l) = app.base_list_mut() {
-                l.half_page_up(viewport_height);
-            }
-        }
         KeyCode::Char('n') if ctrl => app.next_page(),
         KeyCode::Char('p') if ctrl => app.prev_page(),
-        KeyCode::PageDown => {
-            if let Some(l) = app.base_list_mut() {
-                l.page_down(viewport_height);
-            }
-        }
-        KeyCode::PageUp => {
-            if let Some(l) = app.base_list_mut() {
-                l.page_up(viewport_height);
-            }
-        }
         KeyCode::Char('o') => {
             if let Some(issue) = app.selected_issue() {
                 let url = format!("https://linear.app/issue/{}", issue.identifier);
@@ -1382,7 +1473,9 @@ fn handle_list_key(app: &mut App, _i: usize, key: KeyEvent) -> KeyFlow {
         KeyCode::Char('r') => app.refresh(),
         // 'S' (capital) cycles sort field to avoid collision with 's' (state popup)
         KeyCode::Char('S') => app.cycle_sort(),
-        KeyCode::Char('d') => app.toggle_desc(),
+        // 'd' toggles sort direction; guarded so Ctrl-d (half-page-down, a
+        // scroll default) doesn't also match this bare pattern.
+        KeyCode::Char('d') if !ctrl => app.toggle_desc(),
         KeyCode::Char('/') => app.open_search_overlay(),
         // Write op keybindings
         KeyCode::Char('s') => app.open_state_popup(),
@@ -1397,7 +1490,7 @@ fn handle_list_key(app: &mut App, _i: usize, key: KeyEvent) -> KeyFlow {
             app.auth = AuthStatus::Authenticating;
             app.service.login();
         }
-        _ => {}
+        _ => return KeyFlow::Pass,
     }
     KeyFlow::Consumed
 }

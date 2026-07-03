@@ -6,7 +6,7 @@ use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{ALL_KEYBINDINGS, App, KeyFlow, StateCtx, StateEvent, TextInput, View};
+use super::{ALL_KEYBINDINGS, App, KeyFlow, ScrollMotion, StateCtx, StateEvent, TextInput, View};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -405,29 +405,36 @@ impl PopupView {
             .position(|i| i.id.as_deref() == current_id.as_deref())
             .unwrap_or(0);
     }
-}
 
-fn popup_view_mut(app: &mut App, i: usize) -> Option<&mut PopupView> {
-    app.view_at_mut(i, |v| match v {
-        View::Popup(p) => Some(p),
-        _ => None,
-    })
-}
-
-fn popup_move(app: &mut App, i: usize, delta: i32) {
-    let Some(popup) = popup_view_mut(app, i) else {
-        return;
-    };
-    let n = popup.items.len();
-    if n == 0 {
-        return;
+    /// Move the selection by `delta` items, clamped to the item list.
+    fn move_by(&mut self, delta: i32) {
+        let n = self.items.len();
+        if n == 0 {
+            return;
+        }
+        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+        self.selected = if delta >= 0 {
+            self.selected.saturating_add(step).min(n - 1)
+        } else {
+            self.selected.saturating_sub(step)
+        };
     }
-    let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
-    popup.selected = if delta >= 0 {
-        popup.selected.saturating_add(step).min(n - 1)
-    } else {
-        popup.selected.saturating_sub(step)
-    };
+
+    /// This popup's scroll override: selection movement over the shared
+    /// motion set (Decision 6). Previously only j/k moved the selection;
+    /// g/G/Ctrl-d/Ctrl-u/PageDown/PageUp were ignored (behavior change 14).
+    pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        match motion {
+            ScrollMotion::Down => self.move_by(1),
+            ScrollMotion::Up => self.move_by(-1),
+            ScrollMotion::Top => self.move_by(i32::MIN / 2),
+            ScrollMotion::Bottom => self.move_by(i32::MAX / 2),
+            ScrollMotion::HalfPageDown => self.move_by(i32::from(viewport_height) / 2),
+            ScrollMotion::HalfPageUp => self.move_by(-(i32::from(viewport_height) / 2)),
+            ScrollMotion::PageDown => self.move_by(i32::from(viewport_height)),
+            ScrollMotion::PageUp => self.move_by(-i32::from(viewport_height)),
+        }
+    }
 }
 
 /// Confirm the popup choice: pop it, then edit the issue it was opened for
@@ -449,10 +456,6 @@ fn popup_confirm(app: &mut App, i: usize) {
     {
         app.footer_msg = Some(format!("Failed to save: {e}"));
     }
-}
-
-fn popup_cancel(app: &mut App) {
-    app.pop_view();
 }
 
 // ---------------------------------------------------------------------------
@@ -487,12 +490,11 @@ fn popup_edit(kind: &PopupKind, item: &PopupItem) -> Option<lt_runtime::sync::se
 // -- Popup key handler ----------------------------------------------
 
 pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    // Esc (Back) and the scroll motions are not bound here: they resolve at
+    // the floor and scroll-default layers of `dispatch_key` (Decision 6).
     match key.code {
-        KeyCode::Char('j') | KeyCode::Down => popup_move(app, i, 1),
-        KeyCode::Char('k') | KeyCode::Up => popup_move(app, i, -1),
         KeyCode::Enter => popup_confirm(app, i),
-        KeyCode::Esc => popup_cancel(app),
-        _ => {}
+        _ => return KeyFlow::Pass,
     }
     KeyFlow::Consumed
 }
@@ -504,7 +506,10 @@ pub(crate) fn handle_help_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow
     let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Esc => app.pop_view(),
+        // Esc (Back) is not bound here: it resolves at the floor (Decision
+        // 6). The catch-all below forwards it to the search bar, so this arm
+        // must return `Pass` explicitly rather than fall out of the match.
+        KeyCode::Esc => return KeyFlow::Pass,
         // Navigation: j/k/<down>/<up> move the filtered list.
         KeyCode::Down | KeyCode::Char('j') if !ctrl => {
             if let Some(View::Help(popup)) = app.views.get_mut(i) {
@@ -538,8 +543,10 @@ pub(crate) fn handle_search_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFl
     let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
-        // Esc exits the search overlay and returns to the full list (go back).
-        KeyCode::Esc => app.pop_view(),
+        // Esc (Back) is not bound here: it resolves at the floor (Decision
+        // 6). The catch-all below forwards it to the query bar, so this arm
+        // must return `Pass` explicitly rather than fall out of the match.
+        KeyCode::Esc => return KeyFlow::Pass,
         KeyCode::Char('c') if ctrl => {
             // Ctrl+C resets the search query back to the default.
             if let Some(View::Search(overlay)) = app.views.get_mut(i) {

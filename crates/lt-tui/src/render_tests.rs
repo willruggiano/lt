@@ -126,6 +126,10 @@ fn detail_scroll_saturates() {
 
 #[test]
 fn popup_move_clamps_and_cancel_resets_stack() {
+    // j/Down and Esc are no longer bound in the popup's own handler -- they
+    // resolve at the scroll-default and floor layers of `dispatch_key`
+    // (Decision 6), so this test drives them through it rather than
+    // `handle_popup_key` directly.
     let mut app = app_with_issues(0, 1).unwrap();
     let issue_id = app.list_mut().issues[0].id.inner().to_string();
     app.views.push(View::Popup(PopupView {
@@ -137,54 +141,44 @@ fn popup_move_clamps_and_cancel_resets_stack() {
         anchor: Some(ratatui::layout::Rect::new(0, 0, 1, 1)),
     }));
 
-    handle_popup_key(
-        &mut app,
-        1,
-        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
-    );
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
     let Some(View::Popup(popup)) = app.views.get(1) else {
         unreachable!("popup view expected")
     };
     assert_eq!(popup.selected, 1);
 
-    handle_popup_key(
-        &mut app,
-        1,
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-    );
-    handle_popup_key(
-        &mut app,
-        1,
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-    );
-    handle_popup_key(
-        &mut app,
-        1,
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-    );
-    handle_popup_key(
-        &mut app,
-        1,
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-    );
+    for _ in 0..4 {
+        app.dispatch_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
     let Some(View::Popup(popup)) = app.views.get(1) else {
         unreachable!("popup view expected")
     };
     assert_eq!(popup.selected, 2); // clamp at last
 
-    handle_popup_key(&mut app, 1, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.views.len(), 1);
 }
 
 #[test]
 fn close_detail_clears_pane_state() {
+    // Esc is no longer bound in the detail pane's own handler; it resolves
+    // at the floor (Decision 6), which pops the pane the same way -- except
+    // the comment input's own narrower Esc (cancel the draft) wins first.
     let mut app = app_with_issues(0, 1).unwrap();
     let issue = app.list_mut().issues[0].clone();
     let mut detail = build_cached_detail(&issue, Vec::new());
     detail.scroll = 5;
     detail.comment_input = Some("draft".to_string());
     app.views.push(View::Detail(Box::new(detail)));
-    app.close_detail();
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert!(detail.comment_input.is_none());
+    assert_eq!(app.views.len(), 2); // the pane itself is still open
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.views.len(), 1);
 }
 

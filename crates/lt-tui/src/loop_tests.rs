@@ -468,6 +468,189 @@ fn first_esc_records_timestamp() {
     assert!(app.last_esc_time.is_some());
 }
 
+// -- dispatch floor: Esc/q pop overlays, reset/quit at the base (Decision 6,
+// N13) ----------------------------------------------------------------------
+
+/// A bare priority popup, pushed on top of `app`'s base list.
+fn push_priority_popup(app: &mut App, items: Vec<PopupItem>) {
+    app.views.push(View::Popup(PopupView {
+        kind: PopupKind::Priority,
+        issue_id: "1".to_string(),
+        team_id: None,
+        items,
+        selected: 0,
+        anchor: None,
+    }));
+}
+
+#[test]
+fn floor_esc_pops_detail_overlay() {
+    let issue = db_issue("1", "ENG-1", "Todo", 5);
+    let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
+    app.views.push(View::Detail(Box::new(build_cached_detail(
+        &issue,
+        Vec::new(),
+    ))));
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.views.len(), 1);
+}
+
+#[test]
+fn floor_esc_pops_popup_overlay() {
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    push_priority_popup(&mut app, priority_popup_items());
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.views.len(), 1);
+}
+
+#[test]
+fn floor_esc_pops_search_overlay() {
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.views.push(View::Search(SearchOverlay::new()));
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.views.len(), 1);
+}
+
+#[test]
+fn floor_esc_pops_help_overlay() {
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.views.push(View::Help(HelpPopup::new()));
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.views.len(), 1);
+}
+
+#[test]
+fn floor_esc_pops_new_issue_overlay() {
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.views.push(View::NewIssue(bare_new_issue_modal()));
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.views.len(), 1);
+}
+
+#[test]
+fn floor_q_pops_overlay_never_quits() {
+    // The round-1 q-leak hazard is resolved structurally: `q` from an
+    // overlay is Back, never Quit.
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    push_priority_popup(&mut app, priority_popup_items());
+    app.dispatch_key(key('q'));
+    assert_eq!(app.views.len(), 1);
+    assert!(!app.quit);
+}
+
+#[test]
+fn floor_q_at_base_quits() {
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.dispatch_key(key('q'));
+    assert!(app.quit);
+}
+
+// -- cascade: unbound keys fall through toward the base; scroll and text
+// contexts never cascade (Decision 6, N13-N15) -------------------------------
+
+#[test]
+fn cascade_unbound_key_in_an_overlay_reaches_the_base() {
+    // 'S' (cycle sort) is unbound in the popup's own handler; it should fall
+    // through the cascade to the list's binding underneath.
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    let before = app.list_mut().args.sort.clone();
+    push_priority_popup(&mut app, priority_popup_items());
+
+    app.dispatch_key(key('S'));
+
+    assert_ne!(app.list_mut().args.sort, before);
+}
+
+#[test]
+fn cascade_bound_key_stops_at_the_overlay() {
+    // The new-issue modal consumes every key but Esc (a text/form context);
+    // `q` must not reach the base's quit.
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.views.push(View::NewIssue(bare_new_issue_modal()));
+
+    app.dispatch_key(key('q'));
+
+    assert!(!app.quit);
+    assert_eq!(app.views.len(), 2);
+}
+
+#[test]
+fn scroll_key_moves_the_focused_view_and_never_a_view_beneath() {
+    // N15: an unconsumed scroll key resolves at the focused view's `scroll`
+    // and never reaches the view beneath.
+    let rows = [
+        db_issue("1", "ENG-1", "Todo", 5),
+        db_issue("2", "ENG-2", "Todo", 4),
+    ];
+    let mut app = app_with_db(&rows).unwrap();
+    app.fetch_base_list(true);
+    let base_selected_before = app.list_mut().table_state.selected();
+
+    let issue = app.list_mut().issues[0].clone();
+    app.views.push(View::Detail(Box::new(build_cached_detail(
+        &issue,
+        Vec::new(),
+    ))));
+
+    app.dispatch_key(key('j'));
+
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert_eq!(detail.scroll, 1);
+    // The list beneath never saw the scroll key.
+    assert_eq!(app.list_mut().table_state.selected(), base_selected_before);
+}
+
+#[test]
+fn printable_key_in_a_text_context_never_cascades() {
+    // N14: `q` typed into the search query bar must be consumed as text, not
+    // reach the floor's Back.
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.views.push(View::Search(SearchOverlay::new()));
+
+    app.dispatch_key(key('q'));
+
+    assert_eq!(app.views.len(), 2);
+    let Some(View::Search(overlay)) = app.views.last() else {
+        unreachable!("search view expected")
+    };
+    assert!(overlay.query.value.ends_with('q'));
+}
+
+#[test]
+fn popup_scroll_supports_the_shared_motion_set() {
+    // Behavior change 14: g/G/Ctrl-d/Ctrl-u/PageUp/PageDown, previously
+    // ignored by the state/priority/assignee popups.
+    let items: Vec<PopupItem> = (0..10)
+        .map(|i| PopupItem {
+            label: i.to_string(),
+            id: None,
+        })
+        .collect();
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.viewport_height = 4;
+    push_priority_popup(&mut app, items);
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+    let Some(View::Popup(popup)) = app.views.last() else {
+        unreachable!("popup view expected")
+    };
+    assert_eq!(popup.selected, 9); // bottom
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    let Some(View::Popup(popup)) = app.views.last() else {
+        unreachable!("popup view expected")
+    };
+    assert_eq!(popup.selected, 0); // top
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    let Some(View::Popup(popup)) = app.views.last() else {
+        unreachable!("popup view expected")
+    };
+    assert_eq!(popup.selected, 2); // half of viewport_height (4)
+}
+
 // -- typestates: consume_sync_event / consume_login_event, L/refresh -----
 
 fn ada() -> lt_types::viewer::User {
