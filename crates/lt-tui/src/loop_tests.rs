@@ -69,6 +69,20 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
     }
 }
 
+/// A comment fixture for seeding the DB directly (bypassing the sync/outbox
+/// paths) in `route_state_event` tests.
+fn comment(id: &str, issue_id: &str, body: &str) -> lt_types::comments::Comment {
+    let ts = lt_types::scalars::DateTime("2026-01-06T00:00:00Z".parse().unwrap_or_default());
+    lt_types::comments::Comment {
+        id: id.into(),
+        body: body.to_string(),
+        created_at: ts,
+        updated_at: ts,
+        user: None,
+        issue_id: Some(issue_id.to_string()),
+    }
+}
+
 /// Build an `App` backed by a fresh in-memory `Database` seeded with `rows`.
 fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
     let db = Database::memory()?;
@@ -220,6 +234,190 @@ fn populate_relations_fills_parent_and_children() {
     assert_eq!(detail.children[0].identifier, "ENG-10");
 }
 
+// -- route_state_event (scope-relevance matrix N1-N3, N9-N10) -------------
+
+/// Shared N1/N3 fixture: an app seeded with `issue`, a fresh `"cm1"` comment
+/// already in the DB, and a `Detail(issue)` already pushed.
+fn app_with_open_detail_and_fresh_comment(
+    issue: &lt_types::types::Issue,
+    body: &str,
+) -> Result<App> {
+    let mut app = app_with_db(std::slice::from_ref(issue))?;
+    let conn = app.db.connect()?;
+    lt_runtime::db::upsert_comments(&conn, &[comment("cm1", issue.id.inner(), body)])?;
+    drop(conn);
+    app.views.push(View::Detail(Box::new(build_cached_detail(
+        issue,
+        Vec::new(),
+    ))));
+    Ok(app)
+}
+
+#[test]
+fn route_state_event_comments_updates_a_live_matching_detail() {
+    // N1: `Comments{A}` with `Detail(A)` live -- re-reads `query_comments(A)`.
+    let issue = db_issue("c1", "ENG-1", "Todo", 5);
+    let mut app = app_with_open_detail_and_fresh_comment(&issue, "fresh").unwrap();
+
+    app.route_state_event(&StateEvent::Comments {
+        issue_id: "c1".to_string(),
+    });
+
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert_eq!(detail.comments.len(), 1);
+    assert_eq!(detail.comments[0].body, "fresh");
+}
+
+#[test]
+fn route_state_event_comments_falls_through_without_a_matching_detail() {
+    // N2: no consumer at all, then a `Detail(B)` whose id does not match --
+    // both drop the event.
+    let a = db_issue("a", "ENG-1", "Todo", 5);
+    let b = db_issue("b", "ENG-2", "Todo", 4);
+    let mut app = app_with_db(&[a.clone(), b.clone()]).unwrap();
+    {
+        let conn = app.db.connect().unwrap();
+        lt_runtime::db::upsert_comments(&conn, &[comment("cm1", "a", "fresh")]).unwrap();
+    }
+
+    // No consumer: no-op, no panic.
+    app.route_state_event(&StateEvent::Comments {
+        issue_id: "a".to_string(),
+    });
+
+    // Detail(b) live: id mismatch falls through.
+    app.views
+        .push(View::Detail(Box::new(build_cached_detail(&b, Vec::new()))));
+    app.route_state_event(&StateEvent::Comments {
+        issue_id: "a".to_string(),
+    });
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert!(detail.comments.is_empty());
+}
+
+#[test]
+fn route_state_event_comments_applied_twice_is_idempotent() {
+    // N3: duplicate/late events are idempotent re-reads of current truth.
+    let issue = db_issue("c1", "ENG-1", "Todo", 5);
+    let mut app = app_with_open_detail_and_fresh_comment(&issue, "fresh").unwrap();
+
+    let ev = StateEvent::Comments {
+        issue_id: "c1".to_string(),
+    };
+    app.route_state_event(&ev);
+    app.route_state_event(&ev);
+
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert_eq!(detail.comments.len(), 1);
+}
+
+#[test]
+fn route_state_event_issues_refreshes_the_focused_base() {
+    // N9: `[List]` -- the base is focused, so `Issues` re-fetches.
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.fetch_base_list(true);
+    assert_eq!(app.list_mut().issues.len(), 1);
+
+    {
+        let conn = app.db.connect().unwrap();
+        lt_runtime::db::upsert_issues(&conn, &[db_issue("2", "ENG-2", "Todo", 4)]).unwrap();
+    }
+    app.route_state_event(&StateEvent::Issues);
+    assert_eq!(app.list_mut().issues.len(), 2);
+}
+
+#[test]
+fn route_state_event_issues_under_an_overlay_skips_the_base_but_refreshes_detail() {
+    // N10: an overlay above the base -- the base's `focused` guard drops the
+    // refresh, but a live `Detail` still re-reads its own issue.
+    let issue = db_issue("1", "ENG-1", "Todo", 5);
+    let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
+    app.fetch_base_list(true);
+    app.views.push(View::Detail(Box::new(build_cached_detail(
+        &issue,
+        Vec::new(),
+    ))));
+
+    let mut renamed = issue.clone();
+    renamed.title = "renamed".to_string();
+    {
+        let conn = app.db.connect().unwrap();
+        lt_runtime::db::upsert_issues(&conn, &[renamed]).unwrap();
+    }
+    app.route_state_event(&StateEvent::Issues);
+
+    // The base is stale -- it never re-fetched.
+    assert_eq!(app.list_mut().issues[0].title, "issue ENG-1");
+    // The detail pane, being live, reflects the change immediately.
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert_eq!(detail.issue.title, "renamed");
+}
+
+// -- optimistic writers: popup_confirm / submit_comment round trips -------
+
+#[test]
+fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
+    let issue = db_issue("1", "ENG-1", "Todo", 5);
+    let issue_id = issue.id.inner().to_string();
+    let mut app = app_with_db(&[issue]).unwrap();
+    app.fetch_base_list(true);
+    assert_eq!(app.list_mut().issues[0].state.name, "Todo");
+
+    app.views.push(View::Popup(PopupView {
+        kind: PopupKind::State,
+        issue_id,
+        team_id: Some("ENG".to_string()),
+        items: vec![PopupItem {
+            label: "Done".to_string(),
+            id: Some("done-state".to_string()),
+        }],
+        selected: 0,
+        anchor: None,
+    }));
+
+    handle_popup_key(
+        &mut app,
+        1,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+
+    // The popup pops...
+    assert_eq!(app.views.len(), 1);
+    // ...and the routed `Issues` invalidation re-reads the overlay-merged
+    // state from the DB.
+    assert_eq!(app.list_mut().issues[0].state.name, "Done");
+}
+
+#[test]
+fn submit_comment_writes_through_the_db_and_refreshes_the_open_detail() {
+    let issue = db_issue("1", "ENG-1", "Todo", 5);
+    let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
+    let mut detail = build_cached_detail(&issue, Vec::new());
+    detail.comment_input = Some("a new comment".to_string());
+    app.views.push(View::Detail(Box::new(detail)));
+
+    detail::handle_key(
+        &mut app,
+        1,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+    );
+
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert!(detail.comment_input.is_none());
+    assert_eq!(detail.comments.len(), 1);
+    assert_eq!(detail.comments[0].body, "a new comment");
+}
+
 // -- run_app loop ---------------------------------------------------------
 
 #[test]
@@ -315,48 +513,6 @@ fn poll_sync_events_done_refreshes_and_sets_identity() {
     assert!(!app.sync.syncing);
     assert!(app.sync.next_sync_at.is_some());
     assert_eq!(app.list_mut().issues.len(), 1); // do_fetch ran against the cache
-}
-
-#[test]
-fn poll_detail_comment_events_done_updates_detail() {
-    let issue: lt_types::types::Issue = db_issue("c1", "ENG-1", "Todo", 5);
-    let mut app = app_with_db(&[]).unwrap();
-    let (tx, rx) = mpsc::channel();
-    tx.send(CommentSyncEvent::Done(vec![lt_types::comments::Comment {
-        id: "c1".into(),
-        body: "fresh".to_string(),
-        created_at: "2026-01-06T00:00:00Z".parse().unwrap(),
-        updated_at: "2026-01-06T00:00:00Z".parse().unwrap(),
-        user: None,
-        issue_id: Some("i1".to_string()),
-    }]))
-    .unwrap();
-    let mut detail = build_cached_detail(&issue, Vec::new());
-    detail.detail_comment_rx = Some(rx);
-    app.views.push(View::Detail(Box::new(detail)));
-    poll_detail_comment_events(&mut app);
-    let Some(View::Detail(detail)) = app.views.last() else {
-        unreachable!("detail view expected")
-    };
-    assert_eq!(detail.comments.len(), 1);
-    assert!(detail.detail_comment_rx.is_none());
-}
-
-#[test]
-fn poll_detail_comment_events_error_clears_receiver() {
-    let issue: lt_types::types::Issue = db_issue("c1", "ENG-1", "Todo", 5);
-    let mut app = app_with_db(&[]).unwrap();
-    let (tx, rx) = mpsc::channel();
-    tx.send(CommentSyncEvent::Error("nope".to_string()))
-        .unwrap();
-    let mut detail = build_cached_detail(&issue, Vec::new());
-    detail.detail_comment_rx = Some(rx);
-    app.views.push(View::Detail(Box::new(detail)));
-    poll_detail_comment_events(&mut app);
-    let Some(View::Detail(detail)) = app.views.last() else {
-        unreachable!("detail view expected")
-    };
-    assert!(detail.detail_comment_rx.is_none());
 }
 
 #[test]

@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 pub use detail::DetailView;
-pub(crate) use detail::poll_detail_comment_events;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
 use lt_runtime::query::IssueQuery;
@@ -33,13 +32,11 @@ use lt_types::types::{Team, User, WorkflowState};
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use new_issue::{ModalEvent, build_assignee_items};
 pub(crate) use new_issue::{NewIssueField, NewIssueModal};
+#[cfg(all(test, feature = "sim"))]
+pub(crate) use popup::handle_key as handle_popup_key;
 pub(crate) use popup::{
     HelpPopup, PopupItem, PopupKind, PopupView, SearchOverlay, poll_search_debounce,
     priority_popup_items,
-};
-#[cfg(all(test, feature = "sim"))]
-pub(crate) use popup::{
-    apply_optimistic_in_memory, build_optimistic_issue, handle_key as handle_popup_key,
 };
 use ratatui::Terminal;
 use ratatui::backend::Backend;
@@ -99,15 +96,29 @@ pub enum Status {
 }
 
 // ---------------------------------------------------------------------------
-// Background comment sync events
+// The app event queue
 // ---------------------------------------------------------------------------
 
-/// Events sent from the background comment-sync thread to the TUI event loop.
-pub enum CommentSyncEvent {
-    /// Comments refreshed successfully from the Linear API.
-    Done(Vec<lt_types::comments::Comment>),
-    /// Comment sync error (non-fatal; cached data remains shown).
-    Error(String),
+/// A message to the event loop. Only a state invalidation lands in this
+/// stage; key presses stay on `EventSource` and background-job lifecycle
+/// outcomes (`Lifecycle`) arrive in a later stage.
+pub enum AppEvent {
+    /// The named slice of application state changed; re-read it if displayed.
+    State(StateEvent),
+}
+
+/// A payload-free invalidation. Variants carry only the scope id a view needs
+/// to decide relevance and which query to re-run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StateEvent {
+    /// The issues read model changed (optimistic edit/create, or sync upsert).
+    Issues,
+    /// One issue's comment thread changed.
+    Comments { issue_id: String },
+    /// The team list changed.
+    Teams,
+    /// One team's workflow states and memberships changed.
+    Team { team_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -118,14 +129,28 @@ pub enum CommentSyncEvent {
 /// separate mode flag to keep consistent.
 pub enum View {
     List(ListView),
-    // Boxed: `DetailView` is by far the largest variant (owns comments,
-    // parent/children issues, and the comment-sync receiver), so boxing it
-    // keeps every other `View` push/pop from paying for its size.
+    // Boxed: `DetailView` is by far the largest variant (owns comments and
+    // parent/children issues), so boxing it keeps every other `View`
+    // push/pop from paying for its size.
     Detail(Box<DetailView>),
     Popup(PopupView),
     NewIssue(NewIssueModal),
     Search(SearchOverlay),
     Help(HelpPopup),
+}
+
+impl View {
+    /// Route a state invalidation to this view's consumer, if it has one.
+    /// `focused` is true iff this is the top of the stack. Popup/NewIssue/
+    /// Search/Help have no consumer yet -- their `StateEvent` dependencies
+    /// (`Team`/`Teams`) arrive in the cache-first pickers stage.
+    fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
+        match self {
+            View::List(list) => list.consume(ctx, focused, ev),
+            View::Detail(detail) => detail.consume(ctx, focused, ev),
+            View::Popup(_) | View::NewIssue(_) | View::Search(_) | View::Help(_) => {}
+        }
+    }
 }
 
 /// The issue-list view: the base-list fields, owned. `status`'s only render
@@ -195,6 +220,16 @@ impl ListView {
     }
     fn half_page_up(&mut self, viewport_height: u16) {
         self.move_by(-(i32::from(viewport_height) / 2));
+    }
+
+    /// The base list's subscription: `Issues`, only while focused -- the
+    /// don't-clobber policy expressed as `focused` instead of a mode check: a
+    /// refresh must not swap the rows a popup is anchored to or a search
+    /// overlay was opened over.
+    fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
+        if matches!(ev, StateEvent::Issues) && focused {
+            self.do_fetch(ctx, false); // offset- and selection-preserving
+        }
     }
 
     /// The base list's re-read: `db` + `args.limit` + the active filter + the
@@ -565,6 +600,12 @@ pub struct App {
     /// The sync/API edge, injected by `lt-cli`. The TUI drives all network
     /// work through this trait object, so it has no dependency on `lt-sync`.
     pub service: Arc<dyn SyncService>,
+
+    /// Producer end of the app event queue; cloned into every background
+    /// worker that emits a `StateEvent`.
+    pub events_tx: mpsc::Sender<AppEvent>,
+    /// The single consumer, drained once per frame in `run_app`.
+    events_rx: mpsc::Receiver<AppEvent>,
 }
 
 impl App {
@@ -581,6 +622,7 @@ impl App {
         let initial_args = args.clone();
         let active_filter = search_query::args_to_ast(&args);
         let initial_filter = active_filter.clone();
+        let (events_tx, events_rx) = mpsc::channel();
         Self {
             views: vec![View::List(ListView::new(issues, pagination))],
             args,
@@ -602,6 +644,8 @@ impl App {
             db: lt_runtime::db::Database::File,
             clock: Clock::System,
             service,
+            events_tx,
+            events_rx,
         }
     }
 
@@ -825,6 +869,14 @@ impl App {
         self.views.push(View::Search(overlay));
     }
 
+    /// Apply a queued app event. Only `State` lands in this stage; `Key` and
+    /// `Lifecycle` arrive in later stages.
+    fn apply(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::State(ev) => self.route_state_event(&ev),
+        }
+    }
+
     /// Keys go to the focused view and cascade toward the base: an unbound
     /// key falls through to the view beneath, with `views[0]` as the floor.
     /// Mechanism-only in this stage: every handler returns `Consumed`
@@ -843,6 +895,24 @@ impl App {
             if matches!(handler(self, i, key), KeyFlow::Consumed) {
                 return;
             }
+        }
+    }
+
+    /// Route a state invalidation down the stack, top first. Applies are
+    /// idempotent payload-free re-reads, so the order is semantically
+    /// irrelevant; top-down is chosen for coherence with the key cascade --
+    /// one direction to reason about. The base list is just `views[0]`'s
+    /// consumer.
+    fn route_state_event(&mut self, ev: &StateEvent) {
+        let ctx = StateCtx {
+            db: &self.db,
+            args: &self.args,
+            filter: &self.active_filter,
+            viewer_name: self.viewer_name.as_deref(),
+        };
+        let len = self.views.len();
+        for (i, view) in self.views.iter_mut().enumerate().rev() {
+            view.consume(&ctx, i + 1 == len, ev);
         }
     }
 }
@@ -972,8 +1042,11 @@ where
         // Poll modal background loader channel.
         app.poll_modal_events();
 
-        // Poll background comment-sync channel.
-        poll_detail_comment_events(app);
+        // Drain the app event queue: state invalidations from background
+        // workers and same-thread writers land here.
+        while let Ok(event) = app.events_rx.try_recv() {
+            app.apply(event);
+        }
 
         // Poll FTS search debounce.
         poll_search_debounce(app);

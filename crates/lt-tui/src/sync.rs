@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::{App, Clock, LoginEvent, Status, SyncEvent};
+use super::{App, Clock, LoginEvent, StateEvent, Status, SyncEvent};
 
 /// Build a human-readable "synced X min ago" or "syncing..." label, reading
 /// `last_synced_at` from the database. The pure formatting lives in
@@ -103,18 +103,12 @@ pub(crate) fn poll_sync_events(app: &mut App) {
                     app.org_name = Some(v.organization.name);
                     app.session.not_authenticated = false;
                 }
-                // Sync finished: refresh the issue list from SQLite so that
-                // has_next_page and end_cursor are recalculated correctly.
-                // Only refresh if the base list is the sole view (focused)
-                // and on page 1.
-                let should_refresh = app.views.len() == 1
-                    && app.base_list().is_some_and(|l| {
-                        l.pagination.cursor_stack.is_empty()
-                            && l.pagination.current_cursor.is_none()
-                    });
-                if should_refresh {
-                    app.fetch_base_list(false);
-                }
+                // Sync finished: route an Issues invalidation down the
+                // stack. The base list refreshes only while focused
+                // (`ListView::consume`'s don't-clobber policy), on any page
+                // -- offset-preserving; a live Detail re-reads its own issue
+                // regardless of focus.
+                app.route_state_event(&StateEvent::Issues);
                 app.sync.syncing = false;
                 app.sync.sync_status_label = build_sync_status_label(false, &app.clock);
                 // Schedule next periodic delta sync in 30s.

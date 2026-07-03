@@ -5,7 +5,7 @@ use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{ALL_KEYBINDINGS, App, KeyFlow, TextInput, View};
+use super::{ALL_KEYBINDINGS, App, KeyFlow, StateEvent, TextInput, View};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -165,8 +165,14 @@ impl SearchOverlay {
     /// `viewport_rows` is the number of visible rows in the content area
     /// (excluding the table header).  The result set is capped at this value
     /// so that the search overlay never grows taller than the normal list
-    ///.
-    pub fn run_search(&mut self, viewport_rows: u16, list_limit: usize) {
+    ///. Reads through `db` rather than resolving `db_path()` directly, so
+    /// tests that install an in-memory database are honored.
+    pub fn run_search(
+        &mut self,
+        db: &lt_runtime::db::Database,
+        viewport_rows: u16,
+        list_limit: usize,
+    ) {
         self.fts_unavailable = false;
         self.has_searched = true;
         let raw = self.query.value.trim().to_string();
@@ -190,8 +196,8 @@ impl SearchOverlay {
         } else {
             list_limit
         };
-        match lt_runtime::db::db_path()
-            .and_then(lt_runtime::db::open_db)
+        match db
+            .connect()
             .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
         {
             Ok(issues) => {
@@ -363,9 +369,11 @@ fn popup_move(app: &mut App, i: usize, delta: i32) {
     };
 }
 
-/// Confirm the popup choice: pop it, then enqueue the edit and apply it
-/// optimistically against the issue it was opened for (its captured
-/// `issue_id`, not the current list selection).
+/// Confirm the popup choice: pop it, enqueue the edit against the issue it
+/// was opened for (its captured `issue_id`, not the current list selection),
+/// then route the resulting `Issues` invalidation -- a function call, not a
+/// channel round-trip: same frame, zero latency, one code path with the
+/// async completions.
 fn popup_confirm(app: &mut App, i: usize) {
     let Some(View::Popup(popup)) = app.views.get(i) else {
         return;
@@ -376,8 +384,8 @@ fn popup_confirm(app: &mut App, i: usize) {
     let issue_id = popup.issue_id.clone();
     let kind = popup.kind.clone();
     app.pop_view();
-    enqueue_edit(&issue_id, &kind, &item);
-    apply_optimistic_in_memory(app, &issue_id, &kind, &item);
+    enqueue_edit(&app.db, &issue_id, &kind, &item);
+    app.route_state_event(&StateEvent::Issues);
 }
 
 fn popup_cancel(app: &mut App) {
@@ -391,12 +399,15 @@ fn popup_cancel(app: &mut App) {
 /// Enqueue a popup edit as local intent: the matching overlay row plus the
 /// coalesced `issueUpdate` outbox command, in one transaction. Unset choices
 /// (a priority/state item with no id) are no-ops; an assignee item with no id
-/// clears the assignee.
-fn enqueue_edit(issue_id: &str, kind: &PopupKind, item: &PopupItem) {
+/// clears the assignee. Writes through `db` (rather than resolving
+/// `db_path()` directly) so the write lands on the same connection
+/// `route_state_event`'s re-read uses -- in production both resolve to the
+/// same profile file; tests install an in-memory database instead.
+fn enqueue_edit(db: &lt_runtime::db::Database, issue_id: &str, kind: &PopupKind, item: &PopupItem) {
     use lt_runtime::db::outbox::{
         enqueue_assignee_change, enqueue_priority_change, enqueue_state_change,
     };
-    let Ok(conn) = lt_runtime::db::db_path().and_then(lt_runtime::db::open_db) else {
+    let Ok(conn) = db.connect() else {
         return;
     };
     let _ = match kind {
@@ -414,67 +425,6 @@ fn enqueue_edit(issue_id: &str, kind: &PopupKind, item: &PopupItem) {
             item.id.as_deref().map(|id| (id, item.label.as_str())),
         ),
     };
-}
-
-/// Apply a popup choice to an issue fragment in place. Shared by the in-memory
-/// update and the optimistic DB write so they never diverge.
-fn apply_change(issue: &mut lt_types::types::Issue, kind: &PopupKind, item: &PopupItem) {
-    match kind {
-        PopupKind::State => {
-            issue.state.name.clone_from(&item.label);
-            if let Some(id) = &item.id {
-                issue.state.id = id.clone().into();
-            }
-        }
-        PopupKind::Priority => {
-            issue.priority_label.clone_from(&item.label);
-            if let Some(pstr) = &item.id {
-                issue.priority = pstr
-                    .parse()
-                    .map_or(issue.priority, lt_types::scalars::Priority);
-            }
-        }
-        PopupKind::Assignee => {
-            if item.id.is_none() {
-                issue.assignee = None;
-            } else {
-                issue.assignee = Some(lt_types::types::User {
-                    id: item.id.clone().unwrap_or_default().into(),
-                    name: item.label.clone(),
-                });
-            }
-        }
-    }
-}
-
-/// The optimistic issue fragment a popup choice produces: the selected issue
-/// with the chosen field applied. Used by the render tests to exercise the
-/// applied-change shape; the live write path applies the change in-memory via
-/// [`apply_optimistic_in_memory`].
-#[cfg(all(test, feature = "sim"))]
-pub(crate) fn build_optimistic_issue(
-    issue: &lt_types::types::Issue,
-    kind: &PopupKind,
-    item: &PopupItem,
-) -> lt_types::types::Issue {
-    let mut updated = issue.clone();
-    apply_change(&mut updated, kind, item);
-    updated
-}
-
-/// Apply a popup choice to the base list's copy of the target issue
-/// (captured at open, not the current list selection).
-pub(crate) fn apply_optimistic_in_memory(
-    app: &mut App,
-    issue_id: &str,
-    kind: &PopupKind,
-    item: &PopupItem,
-) {
-    if let Some(list) = app.base_list_mut()
-        && let Some(issue) = list.issues.iter_mut().find(|i| i.id.inner() == issue_id)
-    {
-        apply_change(issue, kind, item);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -611,7 +561,7 @@ fn confirm_search(app: &mut App) {
     // character the user typed before hitting Enter.
     if overlay.last_changed.is_some() {
         overlay.last_changed = None;
-        overlay.run_search(app.viewport_height, app.args.limit as usize);
+        overlay.run_search(&app.db, app.viewport_height, app.args.limit as usize);
     }
     let results = std::mem::take(&mut overlay.results);
     let selected = overlay.table_state.selected();
@@ -644,11 +594,13 @@ fn apply_completion_tab(app: &mut App, i: usize, forward: bool) {
 
 /// Fire the FTS search when the debounce interval (150ms) has elapsed. The
 /// search overlay is only ever the top of the stack, so `views.last` is the
-/// live check; `viewport_height`/`args.limit` are copied out before the
-/// `views.last_mut()` borrow since `run_search` needs both simultaneously.
+/// live check; `viewport_height`/`args.limit` are copied out and `&app.db`
+/// borrowed before the `views.last_mut()` borrow since `run_search` needs
+/// all three simultaneously.
 pub(crate) fn poll_search_debounce(app: &mut App) {
     let viewport_height = app.viewport_height;
     let limit = app.args.limit as usize;
+    let db = &app.db;
     let should_search = matches!(
         app.views.last(),
         Some(View::Search(overlay))
@@ -656,6 +608,6 @@ pub(crate) fn poll_search_debounce(app: &mut App) {
     );
     if should_search && let Some(View::Search(overlay)) = app.views.last_mut() {
         overlay.last_changed = None;
-        overlay.run_search(viewport_height, limit);
+        overlay.run_search(db, viewport_height, limit);
     }
 }

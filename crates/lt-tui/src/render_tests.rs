@@ -214,38 +214,6 @@ fn priority_label_to_u8_maps_levels() {
 }
 
 #[test]
-fn optimistic_builders_apply_popup_choice() {
-    let mut app = app_with_issues(0, 1);
-    let issue = app.list_mut().issues[0].clone();
-    let issue_id = issue.id.inner().to_string();
-
-    let built = build_optimistic_issue(&issue, &PopupKind::Priority, &item("Urgent", Some("1")));
-    assert_eq!(built.priority_label, "Urgent");
-    assert_eq!(built.priority, lt_types::scalars::Priority(1));
-    let unassigned = build_optimistic_issue(&issue, &PopupKind::Assignee, &item("x", None));
-    assert!(unassigned.assignee.is_none());
-
-    apply_optimistic_in_memory(
-        &mut app,
-        &issue_id,
-        &PopupKind::Priority,
-        &item("Urgent", Some("1")),
-    );
-    assert_eq!(app.list_mut().issues[0].priority_label, "Urgent");
-    assert_eq!(
-        app.list_mut().issues[0].priority,
-        lt_types::scalars::Priority(1)
-    );
-    apply_optimistic_in_memory(
-        &mut app,
-        &issue_id,
-        &PopupKind::Assignee,
-        &item("none", None),
-    );
-    assert!(app.list_mut().issues[0].assignee.is_none());
-}
-
-#[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
     let viewer = lt_types::viewer::User {
         id: "v".into(),

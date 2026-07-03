@@ -1507,6 +1507,7 @@ dependencies = [
  "open",
  "pulldown-cmark",
  "ratatui",
+ "tracing",
 ]
 
 [[package]]

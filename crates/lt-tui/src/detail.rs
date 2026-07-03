@@ -1,16 +1,14 @@
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
 use lt_types::types::Issue;
 
-use super::{App, CommentSyncEvent, KeyFlow, Status, View};
+use super::{App, AppEvent, KeyFlow, StateCtx, StateEvent, Status, View};
 
 /// The detail pane's complete state: the shared `types`/`comments` fragments
 /// the TUI composes for display, plus the panel's scroll offset and comment
-/// draft (owned here, not on `App`) and the background comment-sync
-/// receiver, carried here for the interim between the view-stack restructure
-/// and the app-event queue.
+/// draft (owned here, not on `App`).
 pub struct DetailView {
     pub issue: Issue,
     pub comments: Vec<lt_types::comments::Comment>,
@@ -22,11 +20,34 @@ pub struct DetailView {
     /// cursor is always at the end (same model as the new-issue description
     /// field).
     pub comment_input: Option<String>,
-    /// Receiver for background comment-sync events.
-    pub detail_comment_rx: Option<mpsc::Receiver<CommentSyncEvent>>,
 }
 
 impl DetailView {
+    /// This pane's `StateEvent` subscriptions: `Comments{issue_id}` matching
+    /// its own issue re-reads the thread; `Issues` re-reads the displayed
+    /// issue itself (a popup edit confirmed above this pane, or a sync
+    /// upsert). Both are payload-free idempotent re-reads through `ctx.db`.
+    pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
+        match ev {
+            StateEvent::Comments { issue_id } if issue_id == self.issue.id.inner() => {
+                if let Ok(conn) = ctx.db.connect()
+                    && let Ok(comments) = lt_runtime::db::query_comments(&conn, issue_id)
+                {
+                    self.comments = comments;
+                }
+            }
+            StateEvent::Issues => {
+                if let Ok(conn) = ctx.db.connect()
+                    && let Ok(Some(fresh)) =
+                        lt_runtime::db::query_issue_by_id(&conn, self.issue.id.inner())
+                {
+                    self.issue = fresh;
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn scroll_down(&mut self) {
         self.scroll = self.scroll.saturating_add(1);
     }
@@ -74,9 +95,12 @@ impl App {
     /// Open the detail pane for the currently selected issue.
     ///
     /// The detail is populated instantly from the local SQLite cache so the
-    /// pane appears without any network round-trip.  A background thread then
-    /// calls `sync_comments` via the Linear API and sends the refreshed comment
-    /// list back through `detail_comment_rx`.
+    /// pane appears without any network round-trip. A background thread then
+    /// calls `sync_comments` via the Linear API and sends a payload-free
+    /// `Comments{issue_id}` invalidation on the app event queue -- even on
+    /// failure, so `route_state_event` always gets a chance to re-read
+    /// whatever is cached; the re-read itself happens through `app.db` at
+    /// consume time (`DetailView::consume`).
     pub(crate) fn open_detail(&mut self) {
         let Some(issue) = self.selected_issue().cloned() else {
             return;
@@ -92,24 +116,16 @@ impl App {
         let mut detail = build_cached_detail(&issue, cached_comments);
         populate_relations(&self.db, &mut detail, &issue);
 
-        // Spawn background thread to refresh comments through the sync service,
-        // then re-read them from the local DB.
+        // Spawn background thread to refresh comments through the sync
+        // service; the re-read happens at consume time, not here.
         let issue_id = issue.id.into_inner();
         let service = Arc::clone(&self.service);
-        let (tx, rx) = mpsc::channel::<CommentSyncEvent>();
-        detail.detail_comment_rx = Some(rx);
-
-        std::thread::spawn(move || match service.sync_comments(&issue_id) {
-            Ok(()) => {
-                let fresh = lt_runtime::db::db_path()
-                    .and_then(lt_runtime::db::open_db)
-                    .and_then(|conn| lt_runtime::db::query_comments(&conn, &issue_id))
-                    .unwrap_or_default();
-                let _ = tx.send(CommentSyncEvent::Done(fresh));
+        let events_tx = self.events_tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = service.sync_comments(&issue_id) {
+                tracing::warn!("comment sync failed: {e:#}");
             }
-            Err(e) => {
-                let _ = tx.send(CommentSyncEvent::Error(e.to_string()));
-            }
+            let _ = events_tx.send(AppEvent::State(StateEvent::Comments { issue_id }));
         });
 
         self.views.push(View::Detail(Box::new(detail)));
@@ -140,7 +156,6 @@ pub(crate) fn build_cached_detail(
         children: Vec::new(),
         scroll: 0,
         comment_input: None,
-        detail_comment_rx: None,
     }
 }
 
@@ -158,40 +173,6 @@ pub(crate) fn populate_relations(db: &Database, detail: &mut DetailView, issue: 
         && let Ok(Some(row)) = lt_runtime::db::query_issue_by_id(&conn, parent.id.inner())
     {
         detail.parent = Some(row);
-    }
-}
-
-/// Non-blocking poll of the background comment-sync channel. The receiver
-/// lives on whichever `DetailView` is in the stack -- there is at most one.
-///
-/// When the background thread finishes syncing comments from the Linear API,
-/// the refreshed list replaces the cached comments shown in the detail pane.
-pub(crate) fn poll_detail_comment_events(app: &mut App) {
-    let Some(detail) = app.views.iter_mut().find_map(|v| match v {
-        View::Detail(d) => Some(d),
-        _ => None,
-    }) else {
-        return;
-    };
-    let Some(rx) = detail.detail_comment_rx.take() else {
-        return;
-    };
-
-    let finished = match rx.try_recv() {
-        Ok(CommentSyncEvent::Done(comments)) => {
-            detail.comments = comments;
-            true
-        }
-        Ok(CommentSyncEvent::Error(_msg)) => {
-            // Non-fatal: keep whatever cached comments are already shown.
-            true
-        }
-        Err(mpsc::TryRecvError::Empty) => false,
-        Err(mpsc::TryRecvError::Disconnected) => true,
-    };
-
-    if !finished {
-        detail.detail_comment_rx = Some(rx);
     }
 }
 
@@ -287,17 +268,19 @@ fn detail_view_mut(app: &mut App, i: usize) -> Option<&mut DetailView> {
     })
 }
 
-/// Enqueue the comment buffer as a local create.
+/// Enqueue the comment buffer as a local create, then route the resulting
+/// `Comments` invalidation directly -- a function call, not a channel
+/// round-trip: same frame, zero latency, one code path with the async
+/// completion (`open_detail`'s worker) that follows a real sync.
 ///
-/// The comment is appended to the detail pane optimistically and written to
-/// the local DB (an optimistic `local:` row plus a `commentCreate` outbox
-/// command) in one transaction. No network: the sync drainer posts it and
-/// reconciles the temp row with the server copy.
+/// The comment is written to the local DB (an optimistic `local:` row plus a
+/// `commentCreate` outbox command) in one transaction; the sync drainer posts
+/// it and reconciles the temp row with the server copy. The write goes
+/// through `app.db` (rather than resolving `db_path()` directly) so it lands
+/// on the same connection `route_state_event`'s re-read uses -- in
+/// production both resolve to the same profile file; tests install an
+/// in-memory database instead.
 fn submit_comment(app: &mut App, i: usize) {
-    // Copied out before borrowing `detail`: `detail_view_mut` takes `&mut
-    // App`, so the returned borrow covers all of `app` for its lifetime.
-    let viewer_name = app.viewer_name.clone();
-
     let Some(detail) = detail_view_mut(app, i) else {
         return;
     };
@@ -311,31 +294,18 @@ fn submit_comment(app: &mut App, i: usize) {
     let issue_id = detail.issue.id.inner().to_string();
     detail.comment_input = None;
 
-    // Optimistic: show the comment immediately in the open detail pane.
-    let now = lt_types::scalars::DateTime(chrono::Utc::now());
-    detail.comments.push(lt_types::comments::Comment {
-        id: lt_runtime::db::outbox::temp_id().into(),
-        body: body.clone(),
-        created_at: now,
-        updated_at: now,
-        user: viewer_name.map(|name| lt_types::types::User {
-            id: String::new().into(),
-            name,
-        }),
-        issue_id: Some(issue_id.clone()),
-    });
-
     let input = lt_types::inputs::CommentCreateInput {
         issue_id: issue_id.clone(),
-        body: body.clone(),
+        body,
     };
-    if let Ok(conn) = lt_runtime::db::db_path().and_then(lt_runtime::db::open_db) {
+    if let Ok(conn) = app.db.connect() {
         let _ = lt_runtime::db::outbox::enqueue_comment_create(
             &conn,
             &lt_runtime::db::outbox::temp_id(),
             &input,
         );
     }
+    app.route_state_event(&StateEvent::Comments { issue_id });
 }
 
 /// Key handling for the comment input box (same editing model as the
