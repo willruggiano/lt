@@ -92,17 +92,16 @@ impl DetailView {
 impl App {
     /// Open the detail pane for the currently selected issue.
     ///
-    /// The detail is populated instantly from the local SQLite cache so the
-    /// pane appears without any network round-trip. `push_view` declares the
-    /// pane's `Comments{issue_id}` interest, which prompts the loop to
-    /// refresh it; the re-read happens at consume time, not here
-    /// (`DetailView::consume`).
+    /// The detail pane is populated instantly from local data so it appears
+    /// without waiting on the network. `push_view` declares the pane's
+    /// `Comments{issue_id}` interest, which prompts the loop to refresh it;
+    /// the re-read happens at consume time, not here (`DetailView::consume`).
     pub(crate) fn open_detail(&mut self) {
         let Some(issue) = self.selected_issue().cloned() else {
             return;
         };
 
-        // Build the detail view instantly from cached data.
+        // Build the detail view instantly from local data.
         let cached_comments = self
             .db
             .connect()
@@ -127,8 +126,8 @@ impl App {
     }
 }
 
-/// Build a detail view from a cached list `Issue` plus its cached comments.
-/// Parent/children are left empty; `populate_relations` fills them in.
+/// Build a detail view from a list `Issue` plus its comments. Parent/children
+/// are left empty; `populate_relations` fills them in.
 pub(crate) fn build_cached_detail(
     issue: &Issue,
     cached_comments: Vec<lt_types::comments::Comment>,
@@ -143,7 +142,7 @@ pub(crate) fn build_cached_detail(
     }
 }
 
-/// Populate a detail's parent/children fields from the local DB cache.
+/// Populate a detail's parent/children fields from the local database.
 pub(crate) fn populate_relations(db: &Database, detail: &mut DetailView, issue: &Issue) {
     let Ok(conn) = db.connect() else {
         return;

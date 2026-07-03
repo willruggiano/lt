@@ -124,7 +124,7 @@ fn do_fetch_filtered_uses_run_query() {
         db_issue("3", "ENG-3", "Todo", 3),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.active_filter = search_query::parse_query_ast("state:todo");
+    app.list_mut().filter = search_query::parse_query_ast("state:todo");
     app.fetch_base_list(true);
     assert_eq!(app.list_mut().issues.len(), 2);
     assert!(app.list_mut().issues.iter().all(|i| i.state.name == "Todo"));
@@ -162,7 +162,7 @@ fn next_and_prev_page_walk_offsets() {
         db_issue("5", "ENG-5", "Todo", 1),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.args.limit = 2;
+    app.list_mut().args.limit = 2;
     app.fetch_base_list(true);
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
     assert!(app.list_mut().pagination.has_next_page);
@@ -194,14 +194,14 @@ fn cycle_sort_and_toggle_desc_refetch() {
         db_issue("2", "ENG-2", "Todo", 4),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    let before = app.args.sort.clone();
+    let before = app.list_mut().args.sort.clone();
     app.cycle_sort();
-    assert_ne!(app.args.sort, before);
+    assert_ne!(app.list_mut().args.sort, before);
     assert_eq!(app.list_mut().issues.len(), 2);
 
-    let desc_before = app.args.desc;
+    let desc_before = app.list_mut().args.desc;
     app.toggle_desc();
-    assert_ne!(app.args.desc, desc_before);
+    assert_ne!(app.list_mut().args.desc, desc_before);
     assert_eq!(app.list_mut().issues.len(), 2);
 }
 
@@ -449,12 +449,14 @@ fn double_esc_resets_to_initial_filter() {
     let rows = [db_issue("1", "ENG-1", "Todo", 5)];
     let mut app = app_with_db(&rows).unwrap();
     let initial_sort = app.initial_args.sort.clone();
-    app.args.sort = app.args.sort.next();
-    app.active_filter = app.replace_sort_in_filter();
+    let next_sort = app.list_mut().args.sort.next();
+    app.list_mut().args.sort = next_sort;
+    let replaced = app.list_mut().replace_sort_in_filter();
+    app.list_mut().filter = replaced;
     app.last_esc_time = Some(Instant::now()); // within the 500ms window
 
     app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.args.sort, initial_sort);
+    assert_eq!(app.list_mut().args.sort, initial_sort);
     assert!(app.last_esc_time.is_none());
 }
 

@@ -106,7 +106,7 @@ impl NewIssueModal {
                     return;
                 };
                 let current_id = self.selected_team_id();
-                self.teams = teams.into_iter().map(team_item).collect();
+                self.teams = teams.into_iter().map(PopupItem::from).collect();
                 self.team_selected = reanchor(&self.teams, current_id.as_deref());
             }
             StateEvent::Team { team_id }
@@ -136,10 +136,10 @@ impl NewIssueModal {
     }
 }
 
-/// The modal's assignee picker items for `team_id`, from the local cache
-/// only: `build_assignee_items` fed by the persisted `db::synced_viewer` and
-/// `query_team_members`. `state_items` (the states half) is shared with the
-/// state popup -- imported from `popup`, not redefined here.
+/// The modal's assignee picker items for `team_id`: `build_assignee_items`
+/// fed by the persisted `db::synced_viewer` and `query_team_members`.
+/// `state_items` (the states half) is shared with the state popup --
+/// imported from `popup`, not redefined here.
 fn assignee_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
     let viewer = lt_runtime::db::synced_viewer(conn).ok().flatten();
     let members = lt_runtime::db::query_team_members(conn, team_id).unwrap_or_default();
@@ -159,13 +159,6 @@ fn team_scoped_items(
     }
 }
 
-fn team_item(team: lt_types::types::Team) -> PopupItem {
-    PopupItem {
-        label: team.name,
-        id: Some(team.id.into_inner()),
-    }
-}
-
 /// Find `id`'s position in `items`, falling back to index 0 when it is gone
 /// (or `id` is `None`, e.g. nothing was selected yet).
 fn reanchor(items: &[PopupItem], id: Option<&str>) -> usize {
@@ -181,8 +174,8 @@ fn reanchor(items: &[PopupItem], id: Option<&str>) -> usize {
 
 impl super::App {
     pub(crate) fn open_new_issue_modal(&mut self) {
-        // Pre-fill team from active filter if set.
-        let preset_team = self.args.team.clone();
+        // Pre-fill team from the base list's active filter if set.
+        let preset_team = self.base_list().and_then(|l| l.args.team.clone());
 
         let teams: Vec<PopupItem> = self
             .db
@@ -190,7 +183,7 @@ impl super::App {
             .and_then(|conn| lt_runtime::db::query_teams(&conn))
             .unwrap_or_default()
             .into_iter()
-            .map(team_item)
+            .map(PopupItem::from)
             .collect();
 
         let team_selected = preset_team
@@ -227,7 +220,7 @@ impl super::App {
 
     /// Leaving the Team field (Tab/Enter): unwatch the previously-watched
     /// team and watch the newly-selected one (Decision 3), then an instant
-    /// cache read for it.
+    /// read for it.
     fn new_issue_team_changed(&mut self, i: usize) {
         let (old_team_id, new_team_id) = match self.views.get(i) {
             Some(View::NewIssue(modal)) => {
@@ -363,10 +356,7 @@ pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) ->
         if viewer.is_some_and(|v| v.id.inner() == m.id.inner()) {
             continue;
         }
-        items.push(PopupItem {
-            label: m.name,
-            id: Some(m.id.into_inner()),
-        });
+        items.push(m.into());
     }
     items
 }

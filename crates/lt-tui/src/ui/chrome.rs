@@ -6,35 +6,27 @@ use ratatui::widgets::Paragraph;
 
 use super::text_span::append_text_input_spans;
 use super::util::to_u16;
-use crate::SearchOverlay;
+use crate::{AuthStatus, SearchOverlay};
 
-/// User/org identity shown in the header row.
-pub(super) struct Identity<'a> {
-    pub(super) viewer_name: Option<&'a str>,
-    pub(super) org_name: Option<&'a str>,
-}
-
-impl Identity<'_> {
-    /// Render the identity as a single `user:..  org:..` string, falling back to
-    /// an explicit unauthenticated placeholder when neither part is present.
-    fn label(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(u) = self.viewer_name {
-            parts.push(format!("user:{u}"));
-        }
-        if let Some(o) = self.org_name {
-            parts.push(format!("org:{o}"));
-        }
-        if parts.is_empty() {
-            "(not authenticated)".to_string()
-        } else {
-            parts.join("  ")
-        }
+/// Render the identity as a single `user:..  org:..` string, falling back to
+/// an explicit unauthenticated placeholder when neither part is present.
+fn identity_label(auth: &AuthStatus) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(u) = auth.viewer_name() {
+        parts.push(format!("user:{u}"));
+    }
+    if let Some(o) = auth.org_name() {
+        parts.push(format!("org:{o}"));
+    }
+    if parts.is_empty() {
+        "(not authenticated)".to_string()
+    } else {
+        parts.join("  ")
     }
 }
 
-pub(super) fn render_header(frame: &mut Frame, area: Rect, context: &str, identity: &Identity) {
-    let identity = identity.label();
+pub(super) fn render_header(frame: &mut Frame, area: Rect, context: &str, auth: &AuthStatus) {
+    let identity = identity_label(auth);
     let text = if context.is_empty() {
         identity
     } else {
@@ -49,12 +41,12 @@ pub(super) fn render_header(frame: &mut Frame, area: Rect, context: &str, identi
 pub(super) fn render_header_with_search(
     frame: &mut Frame,
     area: Rect,
-    identity: &Identity,
+    auth: &AuthStatus,
     overlay: &SearchOverlay,
 ) {
     let mut line = Line::default();
 
-    let identity = identity.label();
+    let identity = identity_label(auth);
 
     if overlay.fts_unavailable {
         let prefix = format!("{identity}  ");

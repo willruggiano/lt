@@ -191,16 +191,19 @@ fn close_detail_clears_pane_state() {
 #[test]
 fn filter_sort_sync_and_replacement() {
     let mut app = app_with_issues(0, 1).unwrap();
-    app.active_filter = search_query::parse_query_ast("sort:title+");
-    app.sync_args_from_filter();
-    assert!(matches!(app.args.sort, lt_runtime::query::SortField::Title));
-    assert!(!app.args.desc);
+    app.list_mut().filter = search_query::parse_query_ast("sort:title+");
+    app.list_mut().sync_args_from_filter();
+    assert!(matches!(
+        app.list_mut().args.sort,
+        lt_runtime::query::SortField::Title
+    ));
+    assert!(!app.list_mut().args.desc);
 
     // replace_sort_in_filter rewrites the sort token, preserving other stems.
-    app.args.sort = lt_runtime::query::SortField::Updated;
-    app.args.desc = true;
-    app.active_filter = search_query::parse_query_ast("state:todo sort:title+");
-    let replaced = app.replace_sort_in_filter();
+    app.list_mut().args.sort = lt_runtime::query::SortField::Updated;
+    app.list_mut().args.desc = true;
+    app.list_mut().filter = search_query::parse_query_ast("state:todo sort:title+");
+    let replaced = app.list_mut().replace_sort_in_filter();
     let parsed = search_query::ParsedQuery::from(&replaced);
     assert_eq!(
         parsed.sort.map(|(_, d)| d),

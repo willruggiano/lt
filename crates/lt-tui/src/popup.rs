@@ -26,6 +26,33 @@ pub struct PopupItem {
     pub id: Option<String>,
 }
 
+impl From<lt_types::types::Team> for PopupItem {
+    fn from(team: lt_types::types::Team) -> Self {
+        Self {
+            label: team.name,
+            id: Some(team.id.into_inner()),
+        }
+    }
+}
+
+impl From<lt_types::types::WorkflowState> for PopupItem {
+    fn from(state: lt_types::types::WorkflowState) -> Self {
+        Self {
+            label: state.name,
+            id: Some(state.id.into_inner()),
+        }
+    }
+}
+
+impl From<lt_types::types::User> for PopupItem {
+    fn from(user: lt_types::types::User) -> Self {
+        Self {
+            label: user.name,
+            id: Some(user.id.into_inner()),
+        }
+    }
+}
+
 /// State/priority/assignee picker: the popup's items plus the target
 /// captured at open.
 pub struct PopupView {
@@ -248,33 +275,26 @@ impl SearchOverlay {
 // Popup open/move/confirm methods
 // ---------------------------------------------------------------------------
 
-/// A team's workflow states, from the local cache only. Shared by
-/// `open_state_popup`/`PopupView::consume`'s `State` arm and the new-issue
-/// modal's own state picker.
+/// A team's workflow states. Shared by `open_state_popup`/
+/// `PopupView::consume`'s `State` arm and the new-issue modal's own state
+/// picker.
 pub(crate) fn state_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
     lt_runtime::db::query_team_states(conn, team_id)
         .unwrap_or_default()
         .into_iter()
-        .map(|s| PopupItem {
-            label: s.name,
-            id: Some(s.id.into_inner()),
-        })
+        .map(PopupItem::from)
         .collect()
 }
 
-/// The assignee popup's items -- "Unassign" plus a team's members, from the
-/// local cache only. Shared by `open_assignee_popup` and `PopupView::consume`'s
-/// `Assignee` arm.
+/// The assignee popup's items -- "Unassign" plus a team's members. Shared by
+/// `open_assignee_popup` and `PopupView::consume`'s `Assignee` arm.
 fn assignee_popup_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = vec![PopupItem {
         label: "Unassign".to_string(),
         id: None,
     }];
     if let Ok(members) = lt_runtime::db::query_team_members(conn, team_id) {
-        items.extend(members.into_iter().map(|m| PopupItem {
-            label: m.name,
-            id: Some(m.id.into_inner()),
-        }));
+        items.extend(members.into_iter().map(PopupItem::from));
     }
     items
 }
@@ -360,9 +380,8 @@ impl super::App {
 
 impl PopupView {
     /// The state and assignee popups' subscription: a matching
-    /// `Team{team_id}` rebuilds `items` from the cache and re-anchors the
-    /// selection by item id. The priority popup is static (`team_id: None`)
-    /// and never matches.
+    /// `Team{team_id}` rebuilds `items` and re-anchors the selection by item
+    /// id. The priority popup is static (`team_id: None`) and never matches.
     pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
         let StateEvent::Team { team_id } = ev else {
             return;
@@ -437,7 +456,7 @@ fn popup_cancel(app: &mut App) {
 }
 
 // ---------------------------------------------------------------------------
-// Optimistic SQLite helpers
+// Popup selection -> IssueEdit mapping
 // ---------------------------------------------------------------------------
 
 /// Map a popup selection onto an `IssueEdit`. Unset choices (a priority/state
@@ -595,14 +614,15 @@ fn confirm_search(app: &mut App) {
     // character the user typed before hitting Enter.
     if overlay.last_changed.is_some() {
         overlay.last_changed = None;
-        overlay.run_search(&app.db, app.viewport_height, app.args.limit as usize);
+        let limit = app.list_limit() as usize;
+        overlay.run_search(&app.db, app.viewport_height, limit);
     }
     let results = std::mem::take(&mut overlay.results);
     let selected = overlay.table_state.selected();
-    // AST is the single source of truth.
-    app.active_filter = overlay.ast.clone();
-    app.sync_args_from_filter();
     if let Some(list) = app.base_list_mut() {
+        // AST is the single source of truth.
+        list.filter = overlay.ast.clone();
+        list.sync_args_from_filter();
         list.issues = results;
         let n = list.issues.len();
         let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
@@ -633,7 +653,7 @@ fn apply_completion_tab(app: &mut App, i: usize, forward: bool) {
 /// all three simultaneously.
 pub(crate) fn poll_search_debounce(app: &mut App) {
     let viewport_height = app.viewport_height;
-    let limit = app.args.limit as usize;
+    let limit = app.list_limit() as usize;
     let db = &app.db;
     let should_search = matches!(
         app.views.last(),

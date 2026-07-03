@@ -29,8 +29,8 @@ fn format_sync_label(synced_at: chrono::DateTime<chrono::Utc>, clock: &Clock) ->
     let elapsed = clock.now().signed_duration_since(synced_at);
     match elapsed.num_minutes() {
         ..=0 => "synced just now".to_string(),
-        1 => "synced 1 min ago".to_string(),
-        mins => format!("synced {mins} min ago"),
+        mins @ 1..60 => format!("synced {mins} min ago"),
+        _ => "synced over an hour ago".to_string(),
     }
 }
 
@@ -53,6 +53,16 @@ mod tests {
         assert_eq!(format_sync_label(ago(30), &clock), "synced 30 min ago");
         // A future timestamp clamps to "just now" rather than reporting negative.
         assert_eq!(format_sync_label(ago(-5), &clock), "synced just now");
+        // Past an hour, the age caps rather than reporting an unbounded count.
+        assert_eq!(format_sync_label(ago(59), &clock), "synced 59 min ago");
+        assert_eq!(
+            format_sync_label(ago(60), &clock),
+            "synced over an hour ago"
+        );
+        assert_eq!(
+            format_sync_label(ago(120), &clock),
+            "synced over an hour ago"
+        );
     }
 
     #[test]

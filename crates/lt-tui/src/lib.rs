@@ -160,10 +160,22 @@ pub struct ListView {
     /// `new_issue_submit` after `create_issue` returns the optimistic
     /// identifier. Consumed (and cleared) by that re-read.
     pub pending_select: Option<String>,
+    /// The issue-list query: sort/team/limit and the rest of the fields
+    /// `do_fetch` reads. Kept in sync with `filter`'s `sort:` token by
+    /// `sync_args_from_filter`.
+    pub args: IssueQuery,
+    /// Single source of truth for the active filter/search state. Updated on
+    /// Enter (confirm search), double-esc (reset), and sort shortcuts.
+    pub filter: search_query::QueryAst,
 }
 
 impl ListView {
-    fn new(issues: Vec<Issue>, pagination: Pagination) -> Self {
+    fn new(
+        issues: Vec<Issue>,
+        pagination: Pagination,
+        args: IssueQuery,
+        filter: search_query::QueryAst,
+    ) -> Self {
         let mut table_state = TableState::default();
         if !issues.is_empty() {
             table_state.select(Some(0));
@@ -174,6 +186,8 @@ impl ListView {
             pagination,
             status: Status::Idle,
             pending_select: None,
+            args,
+            filter,
         }
     }
 
@@ -232,17 +246,17 @@ impl ListView {
         }
     }
 
-    /// The base list's re-read: `db` + `args.limit` + the active filter + the
-    /// viewer name for `assignee:me` resolution.
+    /// The base list's re-read: `self.args`/`self.filter` plus `ctx.db` and
+    /// the viewer name for `assignee:me` resolution.
     fn do_fetch(&mut self, ctx: &StateCtx, reset_selection: bool) {
         self.status = Status::Loading;
-        let mut parsed = search_query::ParsedQuery::from(ctx.filter);
+        let mut parsed = search_query::ParsedQuery::from(&self.filter);
         search_query::resolve_me(&mut parsed, ctx.viewer_name);
 
         if parsed.has_filters() {
             // Active filter has constraints beyond sort -- use run_query to
             // preserve them.
-            let limit = ctx.args.limit.min(250) as usize;
+            let limit = self.args.limit.min(250) as usize;
             match ctx
                 .db
                 .connect()
@@ -269,12 +283,12 @@ impl ListView {
             match ctx
                 .db
                 .connect()
-                .and_then(|conn| lt_runtime::db::query_issues_page(&conn, ctx.args, offset))
+                .and_then(|conn| lt_runtime::db::query_issues_page(&conn, &self.args, offset))
             {
                 Ok((issues, has_next_page)) => {
                     self.issues = issues;
                     self.pagination.has_next_page = has_next_page;
-                    let limit = i64::from(ctx.args.limit.min(250));
+                    let limit = i64::from(self.args.limit.min(250));
                     self.pagination.end_cursor = if has_next_page {
                         Some((offset + limit).to_string())
                     } else {
@@ -287,6 +301,53 @@ impl ListView {
                 }
             }
         }
+    }
+
+    /// Keep `args.sort`/`args.desc` in sync with `filter`. Called after
+    /// `filter` is updated so that `do_fetch()` and the table sort-column
+    /// marker reflect the confirmed filter state.
+    fn sync_args_from_filter(&mut self) {
+        let parsed = search_query::ParsedQuery::from(&self.filter);
+        if let Some((field, dir)) = parsed.sort {
+            self.args.sort = field;
+            self.args.desc = dir == search_query::SortDir::Desc;
+        }
+    }
+
+    /// Produce a new `QueryAst` with the sort: token replaced to match
+    /// `args.sort`/`args.desc`. Used by `cycle_sort` and `toggle_desc`.
+    fn replace_sort_in_filter(&self) -> search_query::QueryAst {
+        let dir = if self.args.desc { "-" } else { "+" };
+        let new_sort = format!("sort:{}{}", self.args.sort.label(), dir);
+        let mut parts: Vec<String> = self
+            .filter
+            .raw
+            .split_whitespace()
+            .filter(|t| !t.to_lowercase().starts_with("sort:"))
+            .map(std::string::ToString::to_string)
+            .collect();
+        parts.push(new_sort);
+        search_query::parse_query_ast(&parts.join(" "))
+    }
+
+    /// `S`: cycle the sort field, rewrite `filter`'s `sort:` token to match,
+    /// reset pagination, and re-fetch from the top.
+    fn cycle_sort(&mut self, ctx: &StateCtx) {
+        self.args.sort = self.args.sort.next();
+        self.filter = self.replace_sort_in_filter();
+        self.pagination.cursor_stack.clear();
+        self.pagination.current_cursor = None;
+        self.do_fetch(ctx, true);
+    }
+
+    /// `d`: toggle sort direction, rewrite `filter`'s `sort:` token to match,
+    /// reset pagination, and re-fetch from the top.
+    fn toggle_desc(&mut self, ctx: &StateCtx) {
+        self.args.desc = !self.args.desc;
+        self.filter = self.replace_sort_in_filter();
+        self.pagination.cursor_stack.clear();
+        self.pagination.current_cursor = None;
+        self.do_fetch(ctx, true);
     }
 
     /// After replacing `self.issues`, clamp/reset the selection and mark idle.
@@ -338,14 +399,12 @@ impl ListView {
     }
 }
 
-/// Read-only context the base list's re-read needs. Built inline from
+/// Read-only context a view's consume/re-query needs. Built inline from
 /// disjoint `App` field borrows at each call site: an `App::state_ctx(&self)`
 /// accessor would borrow all of `self` and conflict with any simultaneous
 /// `&mut self.views` access.
 pub struct StateCtx<'a> {
     pub db: &'a lt_runtime::db::Database,
-    pub args: &'a IssueQuery,
-    pub filter: &'a search_query::QueryAst,
     pub viewer_name: Option<&'a str>,
 }
 
@@ -638,7 +697,6 @@ pub struct App {
     /// top view is focused; every view renders, bottom to top.
     pub views: Vec<View>,
 
-    pub args: IssueQuery,
     pub quit: bool,
     // Set by ui::render each frame so key handlers know page size.
     pub viewport_height: u16,
@@ -653,15 +711,12 @@ pub struct App {
     /// Terminal/session capability flags.
     pub session: Session,
 
-    // -- active filter AST -------------------------------------------
-    /// Single source of truth for the active filter/search state.
-    /// Updated on Enter (confirm search), double-esc (reset), and sort shortcuts.
-    pub active_filter: search_query::QueryAst,
-    /// Snapshot of the filter at startup; used to reset on double-esc.
+    // -- launch seeds / double-esc reset -------------------------------
+    /// Snapshot of the filter at startup; the base list's own `filter`
+    /// (Decision 5) is the live copy. Used to reset on double-esc.
     pub initial_filter: search_query::QueryAst,
-
-    // -- double-esc reset --------------------------------------------
-    /// The args as passed at startup; used to restore state on double-esc.
+    /// The args as passed at startup; the base list's own `args`
+    /// (Decision 5) is the live copy. Used to restore state on double-esc.
     pub initial_args: IssueQuery,
     /// Timestamp of the last Esc keypress (used to detect double-esc).
     pub last_esc_time: Option<Instant>,
@@ -693,16 +748,13 @@ impl App {
     // `Sync(Started)`.
     fn new(
         list: ListView,
-        args: IssueQuery,
         service: Arc<dyn SyncService>,
         events_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
-        let initial_args = args.clone();
-        let active_filter = search_query::args_to_ast(&args);
-        let initial_filter = active_filter.clone();
+        let initial_args = list.args.clone();
+        let initial_filter = list.filter.clone();
         Self {
             views: vec![View::List(list)],
-            args,
             quit: false,
             viewport_height: 0,
             footer_msg: None,
@@ -711,7 +763,6 @@ impl App {
             session: Session {
                 keyboard_enhanced: false,
             },
-            active_filter,
             initial_filter,
             initial_args,
             last_esc_time: None,
@@ -732,6 +783,8 @@ impl App {
         let db = lt_runtime::db::Database::memory()?;
         let (tx, rx) = mpsc::channel();
         let service = RecordingSyncService::new(&db, tx)?;
+        let args = IssueQuery::default();
+        let filter = search_query::args_to_ast(&args);
         let list = ListView::new(
             issues,
             Pagination {
@@ -740,8 +793,10 @@ impl App {
                 cursor_stack: Vec::new(),
                 end_cursor: None,
             },
+            args,
+            filter,
         );
-        let mut app = Self::new(list, IssueQuery::default(), Arc::new(service), rx);
+        let mut app = Self::new(list, Arc::new(service), rx);
         app.db = db;
         Ok(app)
     }
@@ -773,33 +828,6 @@ impl App {
         Ok(service)
     }
 
-    /// Keep app.args.sort/desc in sync with `active_filter`.
-    /// Called after `active_filter` is updated so that `do_fetch()` and the
-    /// table sort-column marker reflect the confirmed filter state.
-    fn sync_args_from_filter(&mut self) {
-        let parsed = search_query::ParsedQuery::from(&self.active_filter);
-        if let Some((field, dir)) = parsed.sort {
-            self.args.sort = field;
-            self.args.desc = dir == search_query::SortDir::Desc;
-        }
-    }
-
-    /// Produce a new `QueryAst` with the sort: token replaced to match
-    /// self.args.sort/desc.  Used by `cycle_sort` and `toggle_desc`.
-    fn replace_sort_in_filter(&self) -> search_query::QueryAst {
-        let dir = if self.args.desc { "-" } else { "+" };
-        let new_sort = format!("sort:{}{}", self.args.sort.label(), dir);
-        let mut parts: Vec<String> = self
-            .active_filter
-            .raw
-            .split_whitespace()
-            .filter(|t| !t.to_lowercase().starts_with("sort:"))
-            .map(std::string::ToString::to_string)
-            .collect();
-        parts.push(new_sort);
-        search_query::parse_query_ast(&parts.join(" "))
-    }
-
     /// Read-only access to the base view, when it is a list. Non-list writers
     /// reach the base through this and `base_list_mut`; `None` (a future
     /// non-list base) degrades those writes to no-ops.
@@ -815,6 +843,14 @@ impl App {
             Some(View::List(list)) => Some(list),
             _ => None,
         }
+    }
+
+    /// The base list's query limit, degrading to `IssueQuery::default()`'s
+    /// when the base is not a list (a future non-list base has none). Used
+    /// by the search overlay, which caps its results at the same limit.
+    fn list_limit(&self) -> u32 {
+        self.base_list()
+            .map_or_else(|| IssueQuery::default().limit, |l| l.args.limit)
     }
 
     /// Test-only infallible accessor: render/loop tests always seed a list
@@ -864,9 +900,11 @@ impl App {
     /// search query. The same reset the list's double-esc performs and
     /// `pop_view` falls back to at the floor.
     fn reset_base_view(&mut self) {
-        self.args = self.initial_args.clone();
-        self.active_filter = self.initial_filter.clone();
+        let args = self.initial_args.clone();
+        let filter = self.initial_filter.clone();
         if let Some(list) = self.base_list_mut() {
+            list.args = args;
+            list.filter = filter;
             list.pagination.cursor_stack.clear();
             list.pagination.current_cursor = None;
         }
@@ -878,8 +916,6 @@ impl App {
     fn fetch_base_list(&mut self, reset_selection: bool) {
         let ctx = StateCtx {
             db: &self.db,
-            args: &self.args,
-            filter: &self.active_filter,
             viewer_name: self.auth.viewer_name(),
         };
         if let Some(View::List(list)) = self.views.first_mut() {
@@ -887,51 +923,38 @@ impl App {
         }
     }
 
-    /// `r`: an immediate cache re-read plus a request to the loop for a full
+    /// `r`: an immediate re-read plus a request to the loop for a full
     /// sync -- no typestate write; `Syncing` arrives via the loop's own
     /// `Sync(Started)`. Pressed mid-cycle, it coalesces into a follow-up
     /// sync instead of being ignored (the loop processes commands one at a
     /// time; this one just queues behind the in-flight cycle).
     fn refresh(&mut self) {
-        self.fetch_base_list(false); // immediate cache read for responsiveness
+        self.fetch_base_list(false); // immediate re-read for responsiveness
         self.service.request_sync();
     }
 
     fn cycle_sort(&mut self) {
-        self.args.sort = self.args.sort.next();
-        self.active_filter = self.replace_sort_in_filter();
-        if let Some(list) = self.base_list_mut() {
-            list.pagination.cursor_stack.clear();
-            list.pagination.current_cursor = None;
-        }
-        self.fetch_base_list(true);
+        self.with_base_list(ListView::cycle_sort);
     }
 
     fn toggle_desc(&mut self) {
-        self.args.desc = !self.args.desc;
-        self.active_filter = self.replace_sort_in_filter();
-        if let Some(list) = self.base_list_mut() {
-            list.pagination.cursor_stack.clear();
-            list.pagination.current_cursor = None;
-        }
-        self.fetch_base_list(true);
+        self.with_base_list(ListView::toggle_desc);
     }
 
     fn next_page(&mut self) {
-        self.paginate(ListView::next_page);
+        self.with_base_list(ListView::next_page);
     }
 
     fn prev_page(&mut self) {
-        self.paginate(ListView::prev_page);
+        self.with_base_list(ListView::prev_page);
     }
 
-    /// Shared by `next_page`/`prev_page`: build the `StateCtx` and drive `op`
-    /// against the base list.
-    fn paginate(&mut self, op: fn(&mut ListView, &StateCtx)) {
+    /// Build the (now slim) `StateCtx` and drive `op` against the base list
+    /// -- shared by pagination and the sort commands, which just mutate
+    /// list-owned query/pagination state and re-fetch.
+    fn with_base_list(&mut self, op: fn(&mut ListView, &StateCtx)) {
         let ctx = StateCtx {
             db: &self.db,
-            args: &self.args,
-            filter: &self.active_filter,
             viewer_name: self.auth.viewer_name(),
         };
         if let Some(View::List(list)) = self.views.first_mut() {
@@ -967,11 +990,14 @@ impl App {
 
     fn open_search_overlay(&mut self) {
         let mut overlay = SearchOverlay::new();
-        // Restore active filter when re-opening, unless it is just the
-        // default sort stem.
-        if self.active_filter.raw != search_query::DEFAULT_QUERY {
-            overlay.query = TextInput::from(self.active_filter.raw.clone());
-            overlay.ast = self.active_filter.clone();
+        // Restore the base list's filter when re-opening, unless it is just
+        // the default sort stem. `base_list()` degrades a future non-list
+        // base to the freshly-created default overlay (Decision 5).
+        if let Some(filter) = self.base_list().map(|l| l.filter.clone())
+            && filter.raw != search_query::DEFAULT_QUERY
+        {
+            overlay.query = TextInput::from(filter.raw.clone());
+            overlay.ast = filter;
             overlay.last_changed = Some(Instant::now());
         }
         self.push_view(View::Search(overlay));
@@ -1018,8 +1044,6 @@ impl App {
     fn route_state_event(&mut self, ev: &StateEvent) {
         let ctx = StateCtx {
             db: &self.db,
-            args: &self.args,
-            filter: &self.active_filter,
             viewer_name: self.auth.viewer_name(),
         };
         let len = self.views.len();
@@ -1117,8 +1141,8 @@ pub fn run(
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
-    // Try to load issues from the local SQLite cache first (local-first UX).
-    // Use query_issues_page so we can capture the correct has_next_page flag.
+    // Try to load issues already synced locally first (local-first UX). Use
+    // query_issues_page so we can capture the correct has_next_page flag.
     let (cached_issues, initial_has_next_page, initial_end_cursor) =
         (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
             let conn = lt_runtime::db::open_db(lt_runtime::db::db_path()?)?;
@@ -1135,7 +1159,7 @@ pub fn run(
 
     let have_cache = !cached_issues.is_empty();
 
-    // Determine whether to show "Syncing..." overlay (no cache yet).
+    // Determine whether to show "Syncing..." overlay (nothing synced yet).
     let (issues, has_next_page, end_cursor, initial_status) = if have_cache {
         (
             cached_issues,
@@ -1152,6 +1176,7 @@ pub fn run(
     // either way; the identity is needed to seed `auth` regardless).
     let viewer = service.fetch_viewer();
 
+    let filter = search_query::args_to_ast(&args);
     let list = ListView::new(
         issues,
         Pagination {
@@ -1160,8 +1185,10 @@ pub fn run(
             cursor_stack: Vec::new(),
             end_cursor,
         },
+        args,
+        filter,
     );
-    let mut app = App::new(list, args, service, events_rx);
+    let mut app = App::new(list, service, events_rx);
 
     app.auth = match viewer {
         Some(viewer) => AuthStatus::Authenticated { viewer },
