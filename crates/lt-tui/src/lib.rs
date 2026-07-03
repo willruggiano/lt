@@ -27,6 +27,7 @@ use lt_runtime::sync::service::{LoginEvent, SyncEvent, SyncService};
 use lt_types::types::Issue;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use lt_types::types::priority_label_to_u8;
+use lt_types::viewer;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use new_issue::build_assignee_items;
 pub(crate) use new_issue::{NewIssueField, NewIssueModal};
@@ -39,7 +40,7 @@ pub(crate) use popup::{
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::widgets::TableState;
-pub(crate) use sync::{build_sync_status_label, poll_login_events, poll_sync_events};
+pub(crate) use sync::sync_status_label;
 pub(crate) use text_input::TextInput;
 
 /// Wall-clock source. The set of clocks is closed -- the real system clock in
@@ -97,12 +98,21 @@ pub enum Status {
 // The app event queue
 // ---------------------------------------------------------------------------
 
-/// A message to the event loop. Only a state invalidation lands in this
-/// stage; key presses stay on `EventSource` and background-job lifecycle
-/// outcomes (`Lifecycle`) arrive in a later stage.
+/// A message to the event loop: a state invalidation or a background-job
+/// lifecycle outcome. Key presses stay on `EventSource` in this stage; PR 7
+/// folds them into this queue.
 pub enum AppEvent {
     /// The named slice of application state changed; re-read it if displayed.
     State(StateEvent),
+    /// A background job finished; carries the outcome, not data.
+    Lifecycle(LifecycleEvent),
+}
+
+/// Background-job outcomes: identity, error text, scheduling -- not
+/// invalidations. Wraps the `SyncService` trait's vocabulary.
+pub enum LifecycleEvent {
+    Sync(SyncEvent),
+    Login(LoginEvent),
 }
 
 /// A payload-free invalidation. Variants carry only the scope id a view needs
@@ -480,16 +490,65 @@ pub struct Pagination {
     pub end_cursor: Option<String>,
 }
 
-/// Background sync state.
-pub struct SyncState {
-    /// Receiver for background sync events.
-    pub sync_rx: Option<mpsc::Receiver<SyncEvent>>,
-    /// True while a background sync thread is running.
-    pub syncing: bool,
-    /// Human-readable description of sync status, shown in footer.
-    pub sync_status_label: String,
-    /// When to fire the next periodic delta sync (30s cadence).
-    pub next_sync_at: Option<Instant>,
+/// Background-sync typestate. The footer label is derived state and no
+/// longer stored: it is formatted at render time from `(SyncStatus,
+/// AuthStatus, Clock)` (`sync::sync_status_label`).
+pub enum SyncStatus {
+    /// Nothing running, nothing scheduled: the honest "not synced" pre-state,
+    /// also entered when the sync layer reports `NotAuthenticated`.
+    Idle,
+    /// A sync worker is in flight; gates every spawn site.
+    Syncing,
+    Synced {
+        synced_at: chrono::DateTime<chrono::Utc>,
+        next_sync_at: Instant,
+    },
+    Failed {
+        message: String,
+        next_sync_at: Instant,
+    },
+}
+
+/// Authentication typestate. The TUI never holds tokens (they live in
+/// `lt-config`/`lt-upstream` behind the `SyncService` seam); its witness of
+/// authentication is the viewer identity.
+pub enum AuthStatus {
+    /// The startup identity fetch failed but a token may exist; the
+    /// in-flight startup sync resolves this. Not `Unauthenticated`: the
+    /// periodic-retry gate must not block a token-holding user who is merely
+    /// offline (`fetch_viewer` `None` + first sync `Error`).
+    Unknown,
+    /// The OAuth login flow is in flight; gates `L`.
+    Authenticating,
+    Authenticated {
+        viewer: viewer::User,
+    },
+    /// The sync layer reported no stored token.
+    Unauthenticated,
+    /// The last login attempt failed.
+    Failed {
+        message: String,
+    },
+}
+
+impl AuthStatus {
+    /// The authenticated user's display name, for the header identity and
+    /// `assignee:me` resolution. `None` on every non-`Authenticated` state.
+    pub fn viewer_name(&self) -> Option<&str> {
+        match self {
+            AuthStatus::Authenticated { viewer } => Some(&viewer.name),
+            _ => None,
+        }
+    }
+
+    /// The authenticated user's Linear organization name, for the header
+    /// identity.
+    pub fn org_name(&self) -> Option<&str> {
+        match self {
+            AuthStatus::Authenticated { viewer } => Some(&viewer.organization.name),
+            _ => None,
+        }
+    }
 }
 
 /// Terminal/session capability flags.
@@ -498,12 +557,11 @@ pub struct Session {
     /// Ctrl-Enter is indistinguishable from Enter, so submit hints show
     /// Alt-Enter instead (which legacy terminals can encode).
     pub keyboard_enhanced: bool,
-    /// True when the last sync reported `NotAuthenticated` (no token stored).
-    pub not_authenticated: bool,
 }
 
 /// A do-nothing [`SyncService`] for render/loop tests: performs no I/O and
-/// returns empty results, so tests never touch the network.
+/// never invokes its completion callback -- tests drive `consume_lifecycle`
+/// directly instead of waiting on a background thread.
 #[cfg(all(test, feature = "sim"))]
 struct NoopSyncService;
 
@@ -511,17 +569,12 @@ struct NoopSyncService;
 impl SyncService for NoopSyncService {
     fn spawn_sync(
         &self,
-        _query: IssueQuery,
         _full: bool,
-        _identity: bool,
-    ) -> mpsc::Receiver<SyncEvent> {
-        let (_tx, rx) = mpsc::channel();
-        rx
+        _fetch_identity: bool,
+        _on_done: lt_runtime::sync::service::OnSync,
+    ) {
     }
-    fn spawn_login(&self) -> mpsc::Receiver<LoginEvent> {
-        let (_tx, rx) = mpsc::channel();
-        rx
-    }
+    fn spawn_login(&self, _on_done: lt_runtime::sync::service::OnLogin) {}
     fn fetch_viewer(&self) -> Option<lt_types::viewer::User> {
         None
     }
@@ -550,8 +603,9 @@ pub struct App {
     // -- footer message ----------------------------------------------
     pub footer_msg: Option<String>,
 
-    // -- background sync --------------------------------------------
-    pub sync: SyncState,
+    // -- background-job typestates (Decision 6) -----------------------
+    pub sync: SyncStatus,
+    pub auth: AuthStatus,
 
     /// Terminal/session capability flags.
     pub session: Session,
@@ -563,21 +617,11 @@ pub struct App {
     /// Snapshot of the filter at startup; used to reset on double-esc.
     pub initial_filter: search_query::QueryAst,
 
-    // -- identity info -----------------------------------------------
-    /// Authenticated user's display name.
-    pub viewer_name: Option<String>,
-    /// Linear organization (workspace) name.
-    pub org_name: Option<String>,
-
     // -- double-esc reset --------------------------------------------
     /// The args as passed at startup; used to restore state on double-esc.
     pub initial_args: IssueQuery,
     /// Timestamp of the last Esc keypress (used to detect double-esc).
     pub last_esc_time: Option<Instant>,
-
-    // -- re-auth -----------------------------------------------------
-    /// Receiver for the background login thread, if one is in progress.
-    pub login_rx: Option<mpsc::Receiver<LoginEvent>>,
 
     /// Database handle. Defaults to the per-profile SQLite file; tests install
     /// an in-memory database via `Database::memory`.
@@ -599,14 +643,14 @@ pub struct App {
 }
 
 impl App {
-    // A private constructor that wires the app's initial state plus the injected
-    // sync service; the fields are distinct concerns, not worth a params struct.
-    #[allow(clippy::too_many_arguments)]
+    // A private constructor that wires the app's initial state plus the
+    // injected sync service. `sync`/`auth` start at their unstarted
+    // typestates (`Idle`/`Unknown`); `run()` transitions `auth` from
+    // `fetch_viewer()` and `sync` via `start_sync` before the loop starts.
     fn new(
         issues: Vec<Issue>,
         pagination: Pagination,
         args: IssueQuery,
-        sync: SyncState,
         service: Arc<dyn SyncService>,
     ) -> Self {
         let initial_args = args.clone();
@@ -619,18 +663,15 @@ impl App {
             quit: false,
             viewport_height: 0,
             footer_msg: None,
-            sync,
+            sync: SyncStatus::Idle,
+            auth: AuthStatus::Unknown,
             session: Session {
                 keyboard_enhanced: false,
-                not_authenticated: false,
             },
             active_filter,
             initial_filter,
-            viewer_name: None,
-            org_name: None,
             initial_args,
             last_esc_time: None,
-            login_rx: None,
             db: lt_runtime::db::Database::File,
             clock: Clock::System,
             service,
@@ -640,8 +681,8 @@ impl App {
     }
 
     /// Build an `App` for rendering tests: no background sync channel, no
-    /// threads, no DB. Callers populate the view stack/`viewer_name` directly
-    /// and drive `ui::render`. See `docs/design/visual-rendering-tests.md`.
+    /// threads, no DB. Callers populate the view stack/`auth` directly and
+    /// drive `ui::render`. See `docs/design/visual-rendering-tests.md`.
     #[cfg(all(test, feature = "sim"))]
     fn for_test(issues: Vec<Issue>) -> Self {
         Self::new(
@@ -653,12 +694,6 @@ impl App {
                 end_cursor: None,
             },
             IssueQuery::default(),
-            SyncState {
-                sync_rx: None,
-                syncing: false,
-                sync_status_label: String::new(),
-                next_sync_at: None,
-            },
             Arc::new(NoopSyncService),
         )
     }
@@ -757,7 +792,7 @@ impl App {
             db: &self.db,
             args: &self.args,
             filter: &self.active_filter,
-            viewer_name: self.viewer_name.as_deref(),
+            viewer_name: self.auth.viewer_name(),
         };
         if let Some(View::List(list)) = self.views.first_mut() {
             list.do_fetch(&ctx, reset_selection);
@@ -768,14 +803,9 @@ impl App {
         self.fetch_base_list(false); // immediate cache read for responsiveness
         // Manual refresh triggers a full sync (not delta) to pick up all
         // remote changes, including any the delta window might miss.
-        if !self.sync.syncing {
-            self.sync.syncing = true;
-            self.sync.sync_status_label = "full sync...".to_string();
-            self.sync.sync_rx = Some(self.service.spawn_sync(
-                self.args.clone(),
-                true,
-                self.viewer_name.is_none(),
-            ));
+        if !matches!(self.sync, SyncStatus::Syncing) {
+            let fetch_identity = !matches!(self.auth, AuthStatus::Authenticated { .. });
+            self.start_sync(true, fetch_identity);
         }
     }
 
@@ -814,7 +844,7 @@ impl App {
             db: &self.db,
             args: &self.args,
             filter: &self.active_filter,
-            viewer_name: self.viewer_name.as_deref(),
+            viewer_name: self.auth.viewer_name(),
         };
         if let Some(View::List(list)) = self.views.first_mut() {
             op(list, &ctx);
@@ -859,11 +889,12 @@ impl App {
         self.views.push(View::Search(overlay));
     }
 
-    /// Apply a queued app event. Only `State` lands in this stage; `Key` and
-    /// `Lifecycle` arrive in later stages.
+    /// Apply a queued app event. `State` and `Lifecycle` land in this stage;
+    /// `Key` arrives in a later stage (PR 7).
     fn apply(&mut self, event: AppEvent) {
         match event {
             AppEvent::State(ev) => self.route_state_event(&ev),
+            AppEvent::Lifecycle(ev) => self.consume_lifecycle(ev),
         }
     }
 
@@ -898,7 +929,7 @@ impl App {
             db: &self.db,
             args: &self.args,
             filter: &self.active_filter,
-            viewer_name: self.viewer_name.as_deref(),
+            viewer_name: self.auth.viewer_name(),
         };
         let len = self.views.len();
         for (i, view) in self.views.iter_mut().enumerate().rev() {
@@ -924,6 +955,128 @@ impl App {
             }
             let _ = tx.send(AppEvent::State(ev));
         });
+    }
+
+    /// Spawn a sync (full or delta) and transition to `Syncing`. The one
+    /// site every spawn call goes through: manual refresh, startup, the
+    /// periodic gate, and login success.
+    fn start_sync(&mut self, full: bool, fetch_identity: bool) {
+        self.sync = SyncStatus::Syncing;
+        let tx = self.events_tx.clone();
+        self.service.spawn_sync(
+            full,
+            fetch_identity,
+            Box::new(move |ev| {
+                let _ = tx.send(AppEvent::Lifecycle(LifecycleEvent::Sync(ev)));
+            }),
+        );
+    }
+
+    /// Spawn the background OAuth login flow and transition to
+    /// `Authenticating`.
+    fn start_login(&mut self) {
+        self.auth = AuthStatus::Authenticating;
+        let tx = self.events_tx.clone();
+        self.service.spawn_login(Box::new(move |ev| {
+            let _ = tx.send(AppEvent::Lifecycle(LifecycleEvent::Login(ev)));
+        }));
+    }
+
+    /// The periodic 30s gate (`run_app`): due iff `sync` is `Synced`/`Failed`
+    /// with `next_sync_at` elapsed, and `auth` is not
+    /// `Unauthenticated`/`Failed` -- a revoked or failed login must not
+    /// retry until re-auth.
+    fn periodic_sync_due(&self) -> bool {
+        let elapsed = match &self.sync {
+            SyncStatus::Synced { next_sync_at, .. } | SyncStatus::Failed { next_sync_at, .. } => {
+                Instant::now() >= *next_sync_at
+            }
+            SyncStatus::Idle | SyncStatus::Syncing => false,
+        };
+        elapsed
+            && !matches!(
+                self.auth,
+                AuthStatus::Unauthenticated | AuthStatus::Failed { .. }
+            )
+    }
+
+    /// The base list's Loading->Idle repair: a sync outcome that will not
+    /// itself route an `Issues` invalidation (`Error`/`NotAuthenticated`)
+    /// must not leave the list's own status stuck at `Loading` forever.
+    fn repair_loading_list(&mut self) {
+        if let Some(list) = self.base_list_mut()
+            && matches!(list.status, Status::Loading)
+        {
+            list.status = Status::Idle;
+        }
+    }
+
+    /// `synced_at` for a `Done` transition: the DB meta `last_synced_at`
+    /// every successful sync writes, falling back to the clock (exact, since
+    /// the sync just finished) when the read fails or the row is
+    /// missing/unparseable.
+    fn synced_at_now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.db
+            .connect()
+            .ok()
+            .and_then(|conn| {
+                lt_runtime::db::get_meta(&conn, "last_synced_at")
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
+            .map_or_else(|| self.clock.now(), |dt| dt.with_timezone(&chrono::Utc))
+    }
+
+    /// Transition the `sync`/`auth` typestates per Decision 6's table --
+    /// the sole consumer of `AppEvent::Lifecycle`.
+    fn consume_lifecycle(&mut self, ev: LifecycleEvent) {
+        match ev {
+            LifecycleEvent::Sync(SyncEvent::Done(viewer)) => {
+                // A freshly-fetched identity implies authentication; absence
+                // means it wasn't requested, so `auth` is left unchanged.
+                if let Some(viewer) = viewer {
+                    self.auth = AuthStatus::Authenticated { viewer };
+                }
+                self.sync = SyncStatus::Synced {
+                    synced_at: self.synced_at_now(),
+                    next_sync_at: Instant::now() + Duration::from_secs(30),
+                };
+                // The unification happens at the function level: sync
+                // completion always implies the issues scope changed.
+                self.route_state_event(&StateEvent::Issues);
+            }
+            LifecycleEvent::Sync(SyncEvent::Error(message)) => {
+                self.sync = SyncStatus::Failed {
+                    message,
+                    next_sync_at: Instant::now() + Duration::from_secs(30),
+                };
+                self.repair_loading_list();
+            }
+            LifecycleEvent::Sync(SyncEvent::NotAuthenticated) => {
+                self.auth = AuthStatus::Unauthenticated;
+                self.sync = SyncStatus::Idle;
+                self.repair_loading_list();
+            }
+            LifecycleEvent::Login(LoginEvent::Success(viewer)) => {
+                self.auth = match viewer {
+                    Some(viewer) => AuthStatus::Authenticated { viewer },
+                    None => AuthStatus::Unknown,
+                };
+                if !matches!(self.sync, SyncStatus::Syncing) {
+                    let fetch_identity = !matches!(self.auth, AuthStatus::Authenticated { .. });
+                    self.start_sync(false, fetch_identity);
+                }
+            }
+            LifecycleEvent::Login(LoginEvent::Error(message)) => {
+                self.auth = AuthStatus::Failed {
+                    message: message.clone(),
+                };
+                // A transient direct write: deriving it from `Failed` would
+                // pin the message past the actions that clear it today.
+                self.footer_msg = Some(format!("Login failed: {message}"));
+            }
+        }
     }
 }
 
@@ -951,27 +1104,21 @@ pub fn run(args: IssueQuery, service: Arc<dyn SyncService>) -> Result<()> {
     let have_cache = !cached_issues.is_empty();
 
     // Determine whether to show "Syncing..." overlay (no cache yet).
-    let (issues, has_next_page, end_cursor, syncing, initial_status) = if have_cache {
+    let (issues, has_next_page, end_cursor, initial_status) = if have_cache {
         (
             cached_issues,
             initial_has_next_page,
             initial_end_cursor,
-            true,
             Status::Idle,
         )
     } else {
-        (Vec::new(), false, None, true, Status::Loading)
+        (Vec::new(), false, None, Status::Loading)
     };
 
-    let sync_status_label = build_sync_status_label(syncing, &Clock::System);
-
-    // Fetch viewer identity for header display.
+    // Fetch viewer identity for header display before `service` moves into
+    // `App::new` (a shared read through the `Arc`, so ownership is fine
+    // either way; the identity is needed to seed `auth` regardless).
     let viewer = service.fetch_viewer();
-
-    // Spawn background sync thread. When the identity fetch above failed
-    // (no token yet, or an expired one), ask the sync thread to deliver it
-    // once authentication succeeds so the header gets updated.
-    let sync_rx = service.spawn_sync(args.clone(), false, viewer.is_none());
 
     let mut app = App::new(
         issues,
@@ -982,19 +1129,18 @@ pub fn run(args: IssueQuery, service: Arc<dyn SyncService>) -> Result<()> {
             end_cursor,
         },
         args,
-        SyncState {
-            sync_rx: Some(sync_rx),
-            syncing,
-            sync_status_label,
-            next_sync_at: None,
-        },
         service,
     );
 
-    if let Some(viewer) = viewer {
-        app.viewer_name = Some(viewer.name);
-        app.org_name = Some(viewer.organization.name);
-    }
+    app.auth = match viewer {
+        Some(viewer) => AuthStatus::Authenticated { viewer },
+        None => AuthStatus::Unknown,
+    };
+    // Startup always enters `Syncing`; ask the sync thread to deliver the
+    // identity too when the fetch above failed (no token yet, or an expired
+    // one), so the header updates once authentication succeeds.
+    let fetch_identity = !matches!(app.auth, AuthStatus::Authenticated { .. });
+    app.start_sync(false, fetch_identity);
 
     let mut terminal = ratatui::init();
     // Without the kitty keyboard protocol, terminals encode Ctrl-Enter and
@@ -1030,36 +1176,21 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     loop {
-        // Poll background sync channel.
-        poll_sync_events(app);
-
-        // Periodic delta sync: fire every 30s when authenticated.
-        if !app.sync.syncing
-            && !app.session.not_authenticated
-            && let Some(t) = app.sync.next_sync_at
-            && Instant::now() >= t
-        {
-            app.sync.syncing = true;
-            app.sync.sync_status_label = build_sync_status_label(true, &app.clock);
-            app.sync.sync_rx = Some(app.service.spawn_sync(
-                app.args.clone(),
-                false,
-                app.viewer_name.is_none(),
-            ));
-            app.sync.next_sync_at = None;
+        // Periodic delta sync: fire every 30s per `periodic_sync_due`'s gate.
+        if app.periodic_sync_due() {
+            let fetch_identity = !matches!(app.auth, AuthStatus::Authenticated { .. });
+            app.start_sync(false, fetch_identity);
         }
 
-        // Drain the app event queue: state invalidations from background
-        // workers and same-thread writers land here.
+        // Drain the app event queue: state invalidations and lifecycle
+        // outcomes from background workers, plus same-thread writers, land
+        // here.
         while let Ok(event) = app.events_rx.try_recv() {
             app.apply(event);
         }
 
         // Poll FTS search debounce.
         poll_search_debounce(app);
-
-        // Poll background login channel.
-        poll_login_events(app);
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
@@ -1149,10 +1280,8 @@ fn handle_list_key(app: &mut App, _i: usize, key: KeyEvent) -> KeyFlow {
         // Help popup
         KeyCode::Char('?') => app.views.push(View::Help(HelpPopup::new())),
         // Re-authenticate: background OAuth login.
-        KeyCode::Char('L') if app.login_rx.is_none() => {
-            app.login_rx = Some(app.service.spawn_login());
-            app.sync.sync_status_label =
-                "logging in -- complete authorization in browser".to_string();
+        KeyCode::Char('L') if !matches!(app.auth, AuthStatus::Authenticating) => {
+            app.start_login();
         }
         _ => {}
     }

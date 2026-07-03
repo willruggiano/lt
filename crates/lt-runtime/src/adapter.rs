@@ -4,11 +4,8 @@
 //! `HttpTransport`/cynic. `lt-cli` injects it into `tui::run`, which lets the
 //! TUI drive sync/login and modal reads without depending on `lt-upstream`.
 
-use std::sync::mpsc;
-
 use anyhow::Result;
 use lt_storage::db;
-use lt_types::query::IssueQuery;
 use lt_types::viewer;
 use lt_types::viewer::ViewerQuery;
 use lt_upstream::auth::login_non_interactive;
@@ -16,7 +13,7 @@ use lt_upstream::auth::refresh::load_or_refresh_token;
 use lt_upstream::client::{HttpTransport, execute};
 use rusqlite::Connection;
 
-use crate::sync::service::{LoginEvent, SyncEvent, SyncService};
+use crate::sync::service::{LoginEvent, OnLogin, OnSync, SyncEvent, SyncService};
 
 pub struct LinearSyncService;
 
@@ -40,71 +37,70 @@ impl LinearSyncService {
         let conn = db::open_db(db::db_path()?)?;
         f(&conn, &Self::transport()?)
     }
+
+    /// The sync worker's body, run inside `spawn_sync`'s `catch_unwind`.
+    fn run_sync_body(full: bool, fetch_identity: bool) -> SyncEvent {
+        // Skip sync when no auth token is stored; notify the TUI.
+        match lt_config::load_token() {
+            Ok(None) | Err(_) => return SyncEvent::NotAuthenticated,
+            Ok(Some(_)) => {}
+        }
+
+        let result = if full {
+            crate::sync::full::run()
+        } else {
+            crate::sync::delta::run()
+        };
+        match result {
+            Ok(()) => {
+                // A successful sync implies a valid token, so the identity
+                // fetch is expected to succeed; failures leave the header
+                // unchanged and the next sync retries.
+                let viewer = if fetch_identity {
+                    Self::viewer_identity()
+                } else {
+                    None
+                };
+                SyncEvent::Done(viewer)
+            }
+            Err(e) => {
+                // Surface only the outermost error message to keep the
+                // statusbar readable (the anyhow chain can be very long).
+                let msg = e.to_string();
+                let brief = msg.lines().next().unwrap_or(&msg).to_string();
+                SyncEvent::Error(brief)
+            }
+        }
+    }
+
+    /// The login worker's body, run inside `spawn_login`'s `catch_unwind`.
+    fn run_login_body() -> LoginEvent {
+        match login_non_interactive() {
+            // Fetch viewer identity while the token is fresh.
+            Ok(()) => LoginEvent::Success(Self::viewer_identity()),
+            Err(e) => LoginEvent::Error(e.to_string()),
+        }
+    }
 }
 
 impl SyncService for LinearSyncService {
-    fn spawn_sync(
-        &self,
-        _query: IssueQuery,
-        full: bool,
-        fetch_identity: bool,
-    ) -> mpsc::Receiver<SyncEvent> {
-        let (tx, rx) = mpsc::channel();
+    fn spawn_sync(&self, full: bool, fetch_identity: bool, on_done: OnSync) {
         std::thread::spawn(move || {
-            // Skip sync when no auth token is stored; notify the TUI.
-            match lt_config::load_token() {
-                Ok(None) | Err(_) => {
-                    let _ = tx.send(SyncEvent::NotAuthenticated);
-                    return;
-                }
-                Ok(Some(_)) => {}
-            }
-
-            let result = if full {
-                crate::sync::full::run()
-            } else {
-                crate::sync::delta::run()
-            };
-            match result {
-                Ok(()) => {
-                    // A successful sync implies a valid token, so the identity
-                    // fetch is expected to succeed; failures leave the header
-                    // unchanged and the next sync retries.
-                    let viewer = if fetch_identity {
-                        Self::viewer_identity()
-                    } else {
-                        None
-                    };
-                    let _ = tx.send(SyncEvent::Done(viewer));
-                }
-                Err(e) => {
-                    // Surface only the outermost error message to keep the
-                    // statusbar readable (the anyhow chain can be very long).
-                    let msg = e.to_string();
-                    let brief = msg.lines().next().unwrap_or(&msg).to_string();
-                    let _ = tx.send(SyncEvent::Error(brief));
-                }
-            }
+            let event = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::run_sync_body(full, fetch_identity)
+            }))
+            .unwrap_or_else(|_| SyncEvent::Error("sync worker panicked".to_string()));
+            on_done(event);
         });
-        rx
     }
 
-    fn spawn_login(&self) -> mpsc::Receiver<LoginEvent> {
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || match login_non_interactive() {
-            Ok(()) => {
-                // Fetch viewer identity while the token is fresh.
-                let viewer = Self::viewer_identity();
-                let _ = tx.send(LoginEvent::Success {
-                    viewer_name: viewer.as_ref().map(|v| v.name.clone()),
-                    org_name: viewer.as_ref().map(|v| v.organization.name.clone()),
-                });
-            }
-            Err(e) => {
-                let _ = tx.send(LoginEvent::Error(e.to_string()));
-            }
+    fn spawn_login(&self, on_done: OnLogin) {
+        std::thread::spawn(move || {
+            let event =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(Self::run_login_body))
+                    .unwrap_or_else(|_| LoginEvent::Error("login worker panicked".to_string()));
+            on_done(event);
         });
-        rx
     }
 
     fn fetch_viewer(&self) -> Option<viewer::User> {

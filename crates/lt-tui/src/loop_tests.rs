@@ -3,12 +3,15 @@
 // These drive the DB- and event-coupled surface that the render tests skip:
 // `do_fetch` and pagination against a shared in-memory SQLite, `run_app`
 // driven by a scripted `EventSource` into a `TestBackend`, the double-esc
-// reset, and the background-channel pollers fed directly (no live threads).
-// Per the agreed scope, no network-spawning method is invoked.
+// reset, and the lifecycle typestate transitions (`consume_lifecycle`) fed
+// directly (no live threads). Per the agreed scope, no network-spawning
+// method is invoked.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lt_runtime::db::Database;
+use lt_runtime::sync::service::{OnLogin, OnSync};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -149,7 +152,7 @@ fn do_fetch_and_select_seeks_identifier() {
         db: &app.db,
         args: &app.args,
         filter: &app.active_filter,
-        viewer_name: app.viewer_name.as_deref(),
+        viewer_name: app.auth.viewer_name(),
     };
     if let Some(View::List(list)) = app.views.first_mut() {
         list.do_fetch_and_select(&ctx, Some("ENG-3".to_string()));
@@ -466,74 +469,251 @@ fn first_esc_records_timestamp() {
     assert!(app.last_esc_time.is_some());
 }
 
-// -- background-channel pollers (fed directly, no live threads) -----------
+// -- lifecycle typestates: consume_lifecycle, L/refresh/periodic gates ----
 
-#[test]
-fn poll_sync_events_handles_not_authenticated() {
-    let mut app = app_with_db(&[]).unwrap();
-    let (tx, rx) = mpsc::channel();
-    tx.send(SyncEvent::NotAuthenticated).unwrap();
-    app.sync.sync_rx = Some(rx);
-    poll_sync_events(&mut app);
-    assert!(app.session.not_authenticated);
-    assert!(!app.sync.syncing);
-    assert!(app.sync.next_sync_at.is_none());
+/// A counting `SyncService` for asserting the `Syncing`/`Authenticating`
+/// gates: it never sends a completion event (nothing waits on one in these
+/// tests), only records how many times each spawn site fired.
+struct CountingSyncService {
+    sync_calls: AtomicUsize,
+    login_calls: AtomicUsize,
 }
 
-#[test]
-fn poll_sync_events_handles_error() {
-    let mut app = app_with_db(&[]).unwrap();
-    app.sync.syncing = true;
-    let (tx, rx) = mpsc::channel();
-    tx.send(SyncEvent::Error("boom".to_string())).unwrap();
-    app.sync.sync_rx = Some(rx);
-    poll_sync_events(&mut app);
-    assert!(!app.sync.syncing);
-    assert!(app.sync.sync_status_label.contains("boom"));
+impl CountingSyncService {
+    fn new() -> Self {
+        Self {
+            sync_calls: AtomicUsize::new(0),
+            login_calls: AtomicUsize::new(0),
+        }
+    }
 }
 
-#[test]
-fn poll_sync_events_done_refreshes_and_sets_identity() {
-    let rows = [db_issue("1", "ENG-1", "Todo", 5)];
-    let mut app = app_with_db(&rows).unwrap();
-    app.sync.syncing = true;
-    let (tx, rx) = mpsc::channel();
-    tx.send(SyncEvent::Done(Some(lt_types::viewer::User {
+impl SyncService for CountingSyncService {
+    fn spawn_sync(&self, _full: bool, _fetch_identity: bool, _on_done: OnSync) {
+        self.sync_calls.fetch_add(1, Ordering::SeqCst);
+    }
+    fn spawn_login(&self, _on_done: OnLogin) {
+        self.login_calls.fetch_add(1, Ordering::SeqCst);
+    }
+    fn fetch_viewer(&self) -> Option<lt_types::viewer::User> {
+        None
+    }
+    fn sync_comments(&self, _issue_id: &str) -> Result<()> {
+        Ok(())
+    }
+    fn sync_teams(&self) -> Result<()> {
+        Ok(())
+    }
+    fn sync_team_data(&self, _team_id: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn ada() -> lt_types::viewer::User {
+    lt_types::viewer::User {
         id: "u1".into(),
         name: "Ada".to_string(),
         organization: lt_types::viewer::Organization {
             name: "Acme".to_string(),
             url_key: "acme".to_string(),
         },
-    })))
-    .unwrap();
-    app.sync.sync_rx = Some(rx);
-    poll_sync_events(&mut app);
-    assert_eq!(app.viewer_name.as_deref(), Some("Ada"));
-    assert!(!app.sync.syncing);
-    assert!(app.sync.next_sync_at.is_some());
+    }
+}
+
+#[test]
+fn consume_lifecycle_sync_done_sets_identity_and_refreshes_the_focused_base() {
+    let rows = [db_issue("1", "ENG-1", "Todo", 5)];
+    let mut app = app_with_db(&rows).unwrap();
+    app.sync = SyncStatus::Syncing;
+
+    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Done(Some(ada()))));
+
+    assert_eq!(app.auth.viewer_name(), Some("Ada"));
+    assert!(matches!(app.sync, SyncStatus::Synced { .. }));
     assert_eq!(app.list_mut().issues.len(), 1); // do_fetch ran against the cache
 }
 
 #[test]
-fn poll_login_events_error_sets_footer() {
+fn consume_lifecycle_sync_done_without_identity_leaves_auth_unchanged() {
     let mut app = app_with_db(&[]).unwrap();
-    let (tx, rx) = mpsc::channel();
-    tx.send(LoginEvent::Error("bad".to_string())).unwrap();
-    app.login_rx = Some(rx);
-    poll_login_events(&mut app);
-    assert!(app.login_rx.is_none());
+    app.auth = AuthStatus::Unauthenticated;
+
+    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Done(None)));
+
+    assert!(matches!(app.auth, AuthStatus::Unauthenticated));
+    assert!(matches!(app.sync, SyncStatus::Synced { .. }));
+}
+
+#[test]
+fn consume_lifecycle_sync_done_reads_synced_at_from_db_meta() {
+    let mut app = app_with_db(&[]).unwrap();
+    {
+        let conn = app.db.connect().unwrap();
+        lt_runtime::db::set_meta(&conn, "last_synced_at", "2026-01-10T12:00:00Z").unwrap();
+    }
+
+    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Done(None)));
+
+    match &app.sync {
+        SyncStatus::Synced { synced_at, .. } => {
+            assert_eq!(synced_at.to_rfc3339(), "2026-01-10T12:00:00+00:00");
+        }
+        _ => unreachable!("expected Synced"),
+    }
+}
+
+#[test]
+fn consume_lifecycle_sync_done_falls_back_to_the_clock_without_meta() {
+    let mut app = app_with_db(&[]).unwrap();
+    let now = chrono::DateTime::parse_from_rfc3339("2026-02-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    app.clock = Clock::Fixed(now);
+
+    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Done(None)));
+
+    match &app.sync {
+        SyncStatus::Synced { synced_at, .. } => assert_eq!(*synced_at, now),
+        _ => unreachable!("expected Synced"),
+    }
+}
+
+#[test]
+fn consume_lifecycle_sync_error_sets_failed_and_repairs_a_loading_base() {
+    let mut app = app_with_db(&[]).unwrap();
+    app.list_mut().status = Status::Loading;
+
+    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::Error("boom".to_string())));
+
+    match &app.sync {
+        SyncStatus::Failed { message, .. } => assert_eq!(message, "boom"),
+        _ => unreachable!("expected Failed"),
+    }
+    assert!(matches!(app.list_mut().status, Status::Idle));
+}
+
+#[test]
+fn consume_lifecycle_sync_not_authenticated_sets_auth_and_goes_idle() {
+    let mut app = app_with_db(&[]).unwrap();
+    app.list_mut().status = Status::Loading;
+
+    app.consume_lifecycle(LifecycleEvent::Sync(SyncEvent::NotAuthenticated));
+
+    assert!(matches!(app.auth, AuthStatus::Unauthenticated));
+    assert!(matches!(app.sync, SyncStatus::Idle));
+    assert!(matches!(app.list_mut().status, Status::Idle));
+}
+
+#[test]
+fn consume_lifecycle_login_success_spawns_delta_when_not_already_syncing() {
+    let mut app = app_with_db(&[]).unwrap();
+    let service = Arc::new(CountingSyncService::new());
+    app.service = service.clone();
+    app.sync = SyncStatus::Idle;
+
+    app.consume_lifecycle(LifecycleEvent::Login(LoginEvent::Success(Some(ada()))));
+
+    assert_eq!(app.auth.viewer_name(), Some("Ada"));
+    assert!(matches!(app.sync, SyncStatus::Syncing));
+    assert_eq!(service.sync_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn consume_lifecycle_login_success_does_not_spawn_when_already_syncing() {
+    let mut app = app_with_db(&[]).unwrap();
+    let service = Arc::new(CountingSyncService::new());
+    app.service = service.clone();
+    app.sync = SyncStatus::Syncing;
+
+    app.consume_lifecycle(LifecycleEvent::Login(LoginEvent::Success(None)));
+
+    assert!(matches!(app.auth, AuthStatus::Unknown));
+    assert!(matches!(app.sync, SyncStatus::Syncing));
+    assert_eq!(service.sync_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn consume_lifecycle_login_error_sets_failed_and_footer() {
+    let mut app = app_with_db(&[]).unwrap();
+
+    app.consume_lifecycle(LifecycleEvent::Login(LoginEvent::Error("bad".to_string())));
+
+    match &app.auth {
+        AuthStatus::Failed { message } => assert_eq!(message, "bad"),
+        _ => unreachable!("expected Failed"),
+    }
     assert!(app.footer_msg.unwrap().contains("bad"));
 }
 
 #[test]
-fn poll_login_events_disconnected_clears_receiver() {
+fn l_key_gates_on_authenticating() {
     let mut app = app_with_db(&[]).unwrap();
-    let (tx, rx) = mpsc::channel::<LoginEvent>();
-    drop(tx);
-    app.login_rx = Some(rx);
-    poll_login_events(&mut app);
-    assert!(app.login_rx.is_none());
+    let service = Arc::new(CountingSyncService::new());
+    app.service = service.clone();
+
+    app.dispatch_key(key('L'));
+    assert!(matches!(app.auth, AuthStatus::Authenticating));
+    assert_eq!(service.login_calls.load(Ordering::SeqCst), 1);
+
+    // A second press while already authenticating is a no-op.
+    app.dispatch_key(key('L'));
+    assert_eq!(service.login_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn refresh_gates_on_syncing() {
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    let service = Arc::new(CountingSyncService::new());
+    app.service = service.clone();
+
+    app.dispatch_key(key('r'));
+    assert!(matches!(app.sync, SyncStatus::Syncing));
+    assert_eq!(service.sync_calls.load(Ordering::SeqCst), 1);
+
+    // A second press while already syncing is a no-op.
+    app.dispatch_key(key('r'));
+    assert_eq!(service.sync_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn periodic_sync_due_gates_on_sync_and_auth_state() {
+    let mut app = app_with_db(&[]).unwrap();
+
+    // Never started: not due.
+    app.sync = SyncStatus::Idle;
+    app.auth = AuthStatus::Unknown;
+    assert!(!app.periodic_sync_due());
+
+    // Synced with an elapsed schedule and a non-terminal auth: due.
+    app.sync = SyncStatus::Synced {
+        synced_at: chrono::Utc::now(),
+        next_sync_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+    };
+    assert!(app.periodic_sync_due());
+
+    // Synced but the schedule has not elapsed yet: not due.
+    app.sync = SyncStatus::Synced {
+        synced_at: chrono::Utc::now(),
+        next_sync_at: Instant::now() + Duration::from_secs(30),
+    };
+    assert!(!app.periodic_sync_due());
+
+    // Elapsed schedule but unauthenticated/failed auth: gated off regardless.
+    app.sync = SyncStatus::Failed {
+        message: "boom".to_string(),
+        next_sync_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+    };
+    app.auth = AuthStatus::Unauthenticated;
+    assert!(!app.periodic_sync_due());
+    app.auth = AuthStatus::Failed {
+        message: "nope".to_string(),
+    };
+    assert!(!app.periodic_sync_due());
+
+    // Already syncing: never due.
+    app.sync = SyncStatus::Syncing;
+    app.auth = AuthStatus::Unknown;
+    assert!(!app.periodic_sync_due());
 }
 
 /// Seed team `team_id` with two ordered workflow states ("Todo" @1.0, "Done"

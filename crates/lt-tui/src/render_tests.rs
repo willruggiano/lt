@@ -7,6 +7,7 @@
 // so the module is gated on `feature = "sim"`.
 
 use lt_types::types::User;
+use lt_types::viewer;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -24,11 +25,24 @@ fn draw(app: &mut App, w: u16, h: u16) -> String {
     term.backend().to_string()
 }
 
+/// A stable `Authenticated` fixture for a deterministic header identity.
+fn authenticated(name: &str, org: &str) -> AuthStatus {
+    AuthStatus::Authenticated {
+        viewer: viewer::User {
+            id: "viewer-1".into(),
+            name: name.to_string(),
+            organization: viewer::Organization {
+                name: org.to_string(),
+                url_key: org.to_lowercase(),
+            },
+        },
+    }
+}
+
 /// An `App` seeded with sim issues and a fixed identity for a stable header.
 fn app_with_issues(seed: u64, size: usize) -> App {
     let mut app = App::for_test(sim_issues(seed, size));
-    app.viewer_name = Some("Ada Lovelace".to_string());
-    app.org_name = Some("Acme".to_string());
+    app.auth = authenticated("Ada Lovelace", "Acme");
     app
 }
 
@@ -252,8 +266,7 @@ fn list_view() {
 #[test]
 fn empty_list() {
     let mut app = App::for_test(Vec::new());
-    app.viewer_name = Some("Ada Lovelace".to_string());
-    app.org_name = Some("Acme".to_string());
+    app.auth = authenticated("Ada Lovelace", "Acme");
     insta::assert_snapshot!(draw(&mut app, 80, 10));
 }
 

@@ -19,7 +19,7 @@ use ratatui::widgets::Paragraph;
 use search::{SortOrder, render_search_overlay};
 use table::render_table;
 
-use crate::{App, View, search_query};
+use crate::{App, View, search_query, sync_status_label};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -39,8 +39,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Always render the header with user/org context. In search mode, append
     // the search query inline so the identity is always visible.
     let identity = Identity {
-        viewer_name: app.viewer_name.as_deref(),
-        org_name: app.org_name.as_deref(),
+        viewer_name: app.auth.viewer_name(),
+        org_name: app.auth.org_name(),
     };
     if let Some(View::Search(overlay)) = app.views.last() {
         render_header_with_search(frame, chunks[0], &identity, overlay);
@@ -61,7 +61,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let has_prev = base_list.is_some_and(|l| !l.pagination.cursor_stack.is_empty());
     let page = base_list.map_or(1, |l| l.pagination.cursor_stack.len() + 1);
 
-    let sync_label = app.sync.sync_status_label.clone();
+    let sync_label = sync_status_label(&app.sync, &app.auth, &app.clock);
     let footer = FooterState {
         has_next,
         has_prev,

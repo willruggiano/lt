@@ -293,7 +293,7 @@ impl super::App {
                     db: &self.db,
                     args: &self.args,
                     filter: &self.active_filter,
-                    viewer_name: self.viewer_name.as_deref(),
+                    viewer_name: self.auth.viewer_name(),
                 };
                 if let Some(View::List(list)) = self.views.first_mut() {
                     list.do_fetch_and_select(&ctx, Some(identifier));

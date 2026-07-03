@@ -5,10 +5,7 @@
 //! a compile-time dependency on `lt-upstream` or `cynic`. The concrete adapter
 //! ([`crate::LinearSyncService`]) is the only code that touches the API edge.
 
-use std::sync::mpsc::Receiver;
-
 use anyhow::Result;
-use lt_types::query::IssueQuery;
 use lt_types::viewer;
 
 /// Outcome of a background sync, delivered to the TUI event loop.
@@ -21,12 +18,15 @@ pub enum SyncEvent {
 
 /// Outcome of a background login, delivered to the TUI event loop.
 pub enum LoginEvent {
-    Success {
-        viewer_name: Option<String>,
-        org_name: Option<String>,
-    },
+    /// Login succeeded; carries a freshly-fetched identity when the fetch
+    /// itself succeeded.
+    Success(Option<viewer::User>),
     Error(String),
 }
+
+/// Invoked exactly once with the outcome of a spawned background job.
+pub type OnSync = Box<dyn FnOnce(SyncEvent) + Send + 'static>;
+pub type OnLogin = Box<dyn FnOnce(LoginEvent) + Send + 'static>;
 
 /// The sync/API operations the TUI drives, abstracted away from `lt-upstream`.
 ///
@@ -34,17 +34,12 @@ pub enum LoginEvent {
 /// touches `HttpTransport`/cynic; the TUI holds it behind this trait so an API
 /// call from the render/event path does not compile.
 pub trait SyncService: Send + Sync {
-    /// Spawn a background sync (full or delta); the receiver yields one
-    /// [`SyncEvent`] when it completes.
-    fn spawn_sync(
-        &self,
-        query: IssueQuery,
-        full: bool,
-        fetch_identity: bool,
-    ) -> Receiver<SyncEvent>;
+    /// Spawn a background sync (full or delta); `on_done` is invoked exactly
+    /// once with the outcome, even if the sync body panics.
+    fn spawn_sync(&self, full: bool, fetch_identity: bool, on_done: OnSync);
 
-    /// Spawn the background OAuth login flow.
-    fn spawn_login(&self) -> Receiver<LoginEvent>;
+    /// Spawn the background OAuth login flow; same completion contract.
+    fn spawn_login(&self, on_done: OnLogin);
 
     /// Fetch the viewer identity (best-effort; `None` when unauthenticated).
     fn fetch_viewer(&self) -> Option<viewer::User>;
