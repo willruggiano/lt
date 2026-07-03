@@ -72,10 +72,10 @@ same queue, making the loop a single blocking wait.
   [comment refresh] ─ State(..) ─┤              v
   [team refresh] ──── State(..) ─┘      App.events_rx ── App::apply
                                           |         |            |
-                              Key: top of the   State: base    Lifecycle:
-                              view stack        list + every   hooks (job
-                              (else the list)   live view      gates), then
-                                                consumes       State(Issues)
+                              Key: cascades    State: every   Lifecycle:
+                              down the stack   live view      sync/auth
+                              until consumed   consumes,      typestates,
+                                               top-down       then Issues
   optimistic writers (same thread) ──────────────┘
 ```
 
@@ -166,7 +166,7 @@ events_rx: mpsc::Receiver<AppEvent>,
 `NewIssueModal.modal_rx`, and the enums `CommentSyncEvent` and `ModalEvent` are
 deleted.
 
-## Decision 2: the view stack — a view exists iff it is displayed
+## Decision 2: the view stack — a view exists iff it is displayed, and the base is `views[0]`
 
 Today `App` holds a `Mode` tag plus a parallel `Option` field per view
 (`detail`, `new_issue_modal`, `help_popup`, `search_overlay`, the
@@ -181,28 +181,44 @@ The invariant becomes structure:
 ```rust
 // crates/lt-tui/src/lib.rs
 pub struct App {
-    // Base list: always rendered under everything (ui/mod.rs:58-59), never
-    // popped. issues, table_state, args, pagination, status, active_filter,
-    // the double-esc fields, footer_msg, viewport_height: unchanged.
-
-    /// Views stacked over the base list, bottom to top. Empty = the list has
-    /// focus. The top view receives keys; every view consumes StateEvents.
+    /// The live view stack, bottom to top. Never empty: views[0] is the base
+    /// view for this CLI invocation — today always the issue list; a future
+    /// `lt tui --inbox` or `--projects` seeds a different base (the keymap
+    /// design reserves `g i`/`g m`/`g t` for exactly those). The top view is
+    /// focused; keys cascade down, StateEvents walk down, everything renders.
     pub views: Vec<View>,
 
-    /// Background-job gates and scheduling (lifecycle consumers).
-    pub hooks: Hooks,
+    /// Background-job typestates (Decision 6): what is running, what is
+    /// scheduled, who we are.
+    pub sync: SyncStatus,
+    pub auth: AuthStatus,
 
-    // identity/session/db/clock/service/events_tx/events_rx: unchanged.
+    // args, active_filter, initial_args/initial_filter, last_esc_time,
+    // footer_msg, viewport_height, quit, session.keyboard_enhanced,
+    // db/clock/service/events_tx/events_rx: App-wide, unchanged in kind.
 }
 
-/// One overlay's complete state. A view exists iff it is displayed; there is
+/// One view's complete state. A view exists iff it is displayed; there is
 /// no separate mode flag to keep consistent.
 pub enum View {
+    List(ListView),
     Detail(DetailView),
     Popup(PopupView),
     NewIssue(NewIssueModal), // shape unchanged (new_issue.rs:62)
     Search(SearchOverlay),   // shape unchanged (popup.rs:101)
     Help(HelpPopup),         // shape unchanged (popup.rs:61)
+}
+
+/// The issue-list view: today's loose base-list fields on App
+/// (lib.rs:317-321), owned. `status` comes too: its only render site is the
+/// base table's Loading/Error overlay (ui/table.rs:12-25), and its writers
+/// are do_fetch (moving here) and the sync lifecycle's Loading->Idle repair
+/// (which reaches the base through `base_list_mut`).
+pub struct ListView {
+    pub issues: Vec<Issue>,
+    pub table_state: TableState,
+    pub pagination: Pagination,
+    pub status: Status,
 }
 
 /// Detail pane: today's IssueDetailView (detail.rs:11) plus the App fields
@@ -232,56 +248,100 @@ pub struct PopupView {
     /// table; None => render_popup centers.
     pub anchor: Option<Rect>,
 }
-
-/// Background-job gates: today's SyncState (lib.rs:258) plus the login gate
-/// that replaces `login_rx.is_some()` (lib.rs:929).
-pub struct Hooks {
-    pub syncing: bool,
-    pub sync_status_label: String,
-    pub next_sync_at: Option<Instant>,
-    pub login_in_flight: bool,
-}
 ```
 
 - **A stack, not a slot.** Today's topology is a star — every overlay opens from
-  and returns to List — so `Option<View>` would suffice today. But the second
-  layer is not speculative: the keymap design
+  and returns to the list — so `Option<View>` would suffice today. But the
+  second layer is not speculative: the keymap design
   ([PR #43](https://github.com/willruggiano/lt/pull/43)) names "popup
   return-mode" as its phase-4 blocker (`popup_confirm`/`popup_cancel` hardcode
   `Mode::List`, `popup.rs:341,346`, so s/p/a popups cannot open from Detail).
   `Option<View>` plus a return-view field would recreate exactly the
-  parallel-state smell this decision deletes. The stack also models what the
-  renderer already draws — base always, overlays on top — and pop restores
-  whatever is beneath with its state intact. Cost over a slot: a `for` loop in
-  two places. Depth is ≤1 today, ≤2 after keymap phase 4; open sites, not the
-  container, bound the depth.
-- **The base list stays out of the stack.** It is rendered every frame under
-  everything, never popped, and its state (`issues`, `table_state`,
-  `pagination`, `active_filter`) is read by overlays at open time. Putting it in
-  the stack would make "empty stack" an unreachable panic state. Empty stack =
-  the list has focus.
-- **Entry is push, exit is pop.** `Back`/Esc pops everywhere; the list's Esc
-  keeps the double-esc reset (`lib.rs:862-882`). `popup_confirm` becomes: pop
-  the `PopupView`, `enqueue_edit(&p.issue_id, ...)`, route `StateEvent::Issues`
-  (Decision 3).
+  parallel-state smell this decision deletes. Pop restores whatever is beneath
+  with its state intact.
+- **The base is a view like any other.** Keeping the list outside the stack as
+  loose `App` fields hardcodes _which_ view is the base; a future
+  `lt tui --inbox` makes the base a parameter of the invocation. And the
+  enforcement burden of "the loose fields are the base" (every renderer and
+  consumer special-cases them) is heavier than the burden of "the stack is never
+  empty" — one constructor and one pop helper:
+  - `App::new`/`App::for_test` seed
+    `views: vec![View::List(ListView::new(issues, pagination))]`.
+  - Exactly one removal path exists:
+
+  ```rust
+  impl App {
+      /// Pop the focused view. The stack is never empty: popping the base
+      /// resets it to the default base view for this CLI invocation instead
+      /// (today: the issue list rebuilt from initial_args/initial_filter —
+      /// the same reset double-esc performs). No Back path reaches this
+      /// branch today (the list's Esc is the double-esc reset,
+      /// lib.rs:862-882, and never pops); the branch defines the semantics
+      /// rather than defending against a bug.
+      fn pop_view(&mut self) {
+          if self.views.len() > 1 {
+              self.views.pop();
+          } else {
+              self.reset_base_view();
+          }
+      }
+  }
+  ```
+
+- **What stays on `App`, by ownership**: `args` (renderer reads the sort marker
+  for the base table and the search overlay, `ui/table.rs:27` and
+  `ui/mod.rs:146-149`; modal open reads the preset team, `new_issue.rs:98`),
+  `active_filter`/`initial_*` (written by Search confirm, read by the header and
+  both resets), `last_esc_time` (its reset mutates App-level filter state; cf.
+  the keymap's `pending_key`), `footer_msg` (rendered in every status-row
+  branch, written by lifecycle and submit paths), `viewport_height` (written by
+  the renderer, read by three views). Everything the list alone reads and writes
+  moves into `ListView`.
+- **`do_fetch` moves onto `ListView` and gains a context.** Its dependency set
+  is `db` + `args.limit` + `active_filter` + the viewer name for `resolve_me`
+  (`lib.rs:571-624`) — so the previously deferred ctx struct arrives now
+  (Decision 3). `cycle_sort`/`toggle_desc`/`refresh`/the double-esc reset stay
+  `App` methods (they mutate `args`/`active_filter` or spawn syncs) that end by
+  calling the base's `do_fetch`; `next_page`/`prev_page` and the selection
+  helpers move onto `ListView`. Non-list writers reach the base through
+  `fn base_list_mut(&mut self) -> Option<&mut ListView>`; `None` (a future
+  non-list base) degrades those writes to no-ops, which is correct.
+- **Entry is push, exit is `pop_view`.** `popup_confirm` becomes: pop the
+  `PopupView`, `enqueue_edit(&p.issue_id, ...)`, route `StateEvent::Issues`
+  (Decision 3). `confirm_search` pops the `Search` view first — taking ownership
+  of the overlay, so the flush and the writes into `active_filter` and the
+  base's issues/selection proceed with no overlapping borrows (strictly simpler
+  than today's `mem::take` dance, `popup.rs:559-579`).
 - **Latent smells die structurally**: `popup_items`/`popup_selected` are never
   cleared on close today (`popup.rs:341-348`) — now the whole `PopupView` drops;
   the dead `input_mode`/`input_buf` pair (`lib.rs:324-325`, unreachable render
   branch `ui/mod.rs:94-95`) is deleted; `submit_comment` stops reading the list
   selection (`detail.rs:140`) because `DetailView` owns its issue.
 - **Popup anchoring**: the base-table renderer computes the anchor from column
-  geometry (`table.rs:43-59`). It writes into the popup only when the popup is
-  the sole stack entry (`[View::Popup(p)]` slice pattern); for a future popup
-  over Detail the anchor stays `None` and `render_popup` already centers.
-- The renderer draws the base list, then the stack bottom-up — replacing the six
-  mode-checked blocks in `render_overlays` (`ui/mod.rs:104-152`).
+  geometry (`table.rs:43-59`). It writes into the popup only when the popup sits
+  directly on the base (`[View::List(_), View::Popup(p)]` slice pattern); for a
+  future popup over Detail the anchor stays `None` and `render_popup` already
+  centers.
+- The renderer draws the stack bottom-up — `views[0]` is the full-frame base
+  layer, replacing both the unconditional table render (`ui/mod.rs:59`) and the
+  six mode-checked blocks in `render_overlays` (`ui/mod.rs:104-152`).
   `render_status_row`'s Detail branch and the header's Search branch match on
   the stack top instead of `Mode`.
 
-## Decision 3: routing — each event kind has exactly one consumer path
+## Decision 3: routing — keys cascade, state walks the stack top-down
 
 ```rust
 // crates/lt-tui/src/lib.rs
+/// What a key handler did with a key. Pass hands it to the next view down; a
+/// handler that returns Pass must not have mutated anything (in particular
+/// the stack), so the walk's indices stay valid.
+pub enum KeyFlow {
+    Consumed,
+    Pass,
+}
+
+type KeyHandler = fn(&mut App, usize, KeyEvent) -> KeyFlow;
+
 impl App {
     pub fn apply(&mut self, event: AppEvent) {
         match event {
@@ -291,63 +351,86 @@ impl App {
         }
     }
 
-    /// Keys go to the top view; empty stack means the list has focus. This
-    /// is today's Mode router (lib.rs:844-851) keyed on the stack instead;
-    /// the keymap design's dispatch_key replaces it wholesale when it lands.
+    /// Keys go to the focused view and cascade toward the base: an unbound
+    /// key falls through to the view beneath, with views[0] as the floor.
+    /// This is what makes list-level bindings reachable from overlays with
+    /// no "global" layer. The handler is picked by discriminant and
+    /// re-fetches its view by index — it takes &mut App, so no view borrow
+    /// may be held across the call.
     fn dispatch_key(&mut self, key: KeyEvent) {
-        match self.views.last() {
-            Some(View::Detail(_)) => detail::handle_key(self, key),
-            Some(View::Popup(_)) => popup::handle_key(self, key),
-            Some(View::NewIssue(_)) => new_issue::handle_key(self, key),
-            Some(View::Search(_)) => popup::handle_search_key(self, key),
-            Some(View::Help(_)) => popup::handle_help_key(self, key),
-            None => handle_list_key(self, key),
+        for i in (0..self.views.len()).rev() {
+            let handler: KeyHandler = match &self.views[i] {
+                View::List(_) => handle_list_key,
+                View::Detail(_) => detail::handle_key,
+                View::Popup(_) => popup::handle_key,
+                View::NewIssue(_) => new_issue::handle_key,
+                View::Search(_) => popup::handle_search_key,
+                View::Help(_) => popup::handle_help_key,
+            };
+            if matches!(handler(self, i, key), KeyFlow::Consumed) {
+                return;
+            }
         }
     }
 
-    /// Route a state invalidation: the base list first (its consumer owns
-    /// the don't-clobber-under-overlays policy), then every live view. All
-    /// stacked views are visible, so all of them consume; a closed view no
-    /// longer exists, which is the entire display check.
+    /// Route a state invalidation down the stack, top first. Applies are
+    /// idempotent payload-free re-reads, so the order is semantically
+    /// irrelevant; top-down is chosen for coherence with the key cascade —
+    /// one direction to reason about. The base list is just views[0]'s
+    /// consumer.
     fn route_state_event(&mut self, ev: &StateEvent) {
-        self.list_consume(ev);
-        let db = &self.db;
-        for view in &mut self.views {
-            view.consume(db, ev);
-        }
-    }
-
-    /// The base list's subscription: Issues, only while no overlay is up
-    /// (preserving sync.rs:109's guard — search-confirm and popup opens read
-    /// `self.issues`, so a refresh must not swap it beneath them).
-    fn list_consume(&mut self, ev: &StateEvent) {
-        if matches!(ev, StateEvent::Issues) && self.views.is_empty() {
-            self.do_fetch(false); // offset- and selection-preserving
+        let ctx = StateCtx {
+            db: &self.db,
+            args: &self.args,
+            filter: &self.active_filter,
+            viewer_name: self.auth.viewer_name(),
+        };
+        let len = self.views.len();
+        for (i, view) in self.views.iter_mut().enumerate().rev() {
+            view.consume(&ctx, i + 1 == len, ev);
         }
     }
 }
 
-impl View {
-    fn consume(&mut self, db: &Database, ev: &StateEvent) {
-        match self {
-            View::Detail(v) => v.consume(db, ev),
-            View::Popup(v) => v.consume(db, ev),
-            View::NewIssue(v) => v.consume(db, ev),
-            View::Search(_) | View::Help(_) => {} // no DB-backed scopes
+/// Read-only context a view's consume/re-query needs. The base list's
+/// re-read has four dependencies, not one — the earlier "&Database until a
+/// second dependency appears" deferral ends here (deviation from the prior
+/// draft, disclosed): do_fetch reads db, args.limit, the active filter, and
+/// the viewer name for `assignee:me` resolution (lib.rs:571-624).
+pub struct StateCtx<'a> {
+    pub db: &'a lt_runtime::db::Database,
+    pub args: &'a IssueQuery,
+    pub filter: &'a search_query::QueryAst,
+    pub viewer_name: Option<&'a str>,
+}
+
+impl ListView {
+    /// The base list's subscription: Issues, only while focused — the
+    /// don't-clobber policy (sync.rs:109) expressed as `focused` instead of
+    /// a mode check: a refresh must not swap the rows a popup is anchored
+    /// to or a search overlay was opened over.
+    fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
+        if matches!(ev, StateEvent::Issues) && focused {
+            self.do_fetch(ctx, false); // offset- and selection-preserving
         }
     }
 }
 ```
+
+`StateCtx` is built inline from disjoint field borrows at the call site — an
+`App::state_ctx(&self)` accessor would borrow all of `self` and conflict with
+`&mut self.views`. Detail/NewIssue/Popup consumers take the same `&StateCtx` and
+use only `.db`.
 
 A representative consumer — the per-view `consume` match arms are the view's
 declared dependencies; irrelevant scopes fall through:
 
 ```rust
 impl DetailView {
-    fn consume(&mut self, db: &Database, ev: &StateEvent) {
+    fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
         match ev {
             StateEvent::Comments { issue_id } if issue_id == self.issue.id.inner() => {
-                if let Ok(conn) = db.connect()
+                if let Ok(conn) = ctx.db.connect()
                     && let Ok(comments) = lt_runtime::db::query_comments(&conn, issue_id)
                 {
                     self.comments = comments;
@@ -356,7 +439,7 @@ impl DetailView {
             StateEvent::Issues => {
                 // The displayed issue may be what changed (a popup edit
                 // confirmed above this pane, or a sync upsert).
-                if let Ok(conn) = db.connect()
+                if let Ok(conn) = ctx.db.connect()
                     && let Ok(Some(fresh)) =
                         lt_runtime::db::query_issue_by_id(&conn, self.issue.id.inner())
                 {
@@ -372,17 +455,32 @@ impl DetailView {
 - **Precision is structural.** A closed view does not exist, so no "am I
   displayed?" checks survive anywhere; the only remaining checks are
   id-relevance (`Comments{A}` vs the detail's own issue id, `Team{T}` vs the
-  popup's/modal's team) — data checks, not mode checks. On the list screen a
+  popup's/modal's team) and the base's `focused` policy. On the list screen a
   team update is a no-op because there is no consumer for it, not because a
   consumer said no.
-- **All live layers consume**, not just the top: every stacked view is visible
-  (rendered bottom-up), so a `Comments` event must reach a Detail even with a
-  popup on top of it, and an `Issues` from a popup confirm lets the Detail
-  beneath re-read its displayed issue. Applies are payload-free idempotent
-  re-reads, so multi-layer application cannot double-apply.
-- **The base list's policy lives in its consumer**, not the router: today's
-  sync-completion guard `matches!(app.mode, Mode::List)` (`sync.rs:109`) becomes
-  `views.is_empty()` inside `list_consume`.
+- **All live layers consume state**, not just the top: every stacked view is
+  visible (rendered bottom-up), so a `Comments` event must reach a Detail even
+  with a popup on top of it, and an `Issues` from a popup confirm lets the
+  Detail beneath re-read its displayed issue. Applies are payload-free
+  idempotent re-reads, so multi-layer application cannot double-apply.
+- **Text contexts terminate the key cascade by construction**: Search, Help, the
+  comment input, and the new-issue text fields forward every unbound key to
+  their editor and return `Consumed` — printable input can never fall through a
+  text field. The new-issue picker fields also consume unbound keys: the modal
+  is a form, and a stray letter acting on a view underneath it would be hostile.
+  The pass-through contexts are Detail (outside the comment input) and Popup.
+- **Disclosed: the q-leak.** With cascade, an unbound overlay key reaches the
+  base table — including `q` = Quit (`lib.rs:861`); today `handle_popup_key`
+  ignores unbound keys (`popup.rs:441-449`), and the keymap design rejected a
+  global `q` for exactly this hazard. The cascade re-creates it as a _table_
+  decision rather than a layering one: pass-through overlays bind `q` = Back
+  (Detail already does, `detail.rs:258`; Popup gains it). The tables own the
+  policy; this ADR owns only the mechanism.
+- **Disclosed: the motivating example is shadowed.** "Detail open, press `c` to
+  create" collides with the keymap design's Detail `c` = Comment binding. The
+  cascade makes list bindings _reachable_ from overlays; whether a specific key
+  reaches them is decided by the overlay's table (a key bound above never
+  cascades). Deferred to the keymap tables.
 - **Same-thread optimistic writers call `route_state_event` directly** — a
   function call, not a channel round-trip; same frame, zero latency, one code
   path with the async completions. `submit_comment` keeps the transactional
@@ -392,32 +490,31 @@ impl DetailView {
   `apply_optimistic_in_memory`/`build_optimistic_issue` — the bespoke second
   read model. `new_issue_submit` keeps `do_fetch_and_select` (a DB re-read plus
   a selection seek — view logic the writer owns).
-- **Lifecycle outcomes are consumed by an `App` method over `self.hooks`.** They
-  write identity, `session.not_authenticated`, `status`, and scheduling —
-  App-wide state — and the sync `Done` arm feeds
-  `route_state_event(&StateEvent::Issues)`. `Hooks` groups today's `SyncState`
-  with the `login_in_flight` gate.
-- **Borrow mechanics, verified against the consume bodies**: `&self.db` (shared)
-  and `for view in &mut self.views` are disjoint field borrows in one function
+- **Lifecycle outcomes transition the Decision 6 typestates** via one
+  `consume_lifecycle` App method; the sync `Done` arm feeds
+  `route_state_event(&StateEvent::Issues)`.
+- **Borrow mechanics, verified against the consume bodies**: the `StateCtx`
+  field borrows and `for view in &mut self.views` are disjoint in one function
   body. It holds because no `consume` body touches App-level state: Detail
   writes only its own comments/issue, the modal only its picker fields ("Me (…)"
   resolution uses the persisted `db::synced_viewer`, not a service call), the
-  popup only its items/selection. Nothing in the State path spawns work — spawns
-  happen in key handlers, which take `&mut App`. `&Database` is the entire
-  context a `consume` needs; a ctx struct waits until a second dependency
-  actually appears.
+  popup only its items/selection, the list only its own rows. Nothing in the
+  State path spawns work — spawns happen in key handlers, which take `&mut App`.
+  For the key cascade, the handler is bound as a fn pointer inside the
+  discriminant match and called after it — no view borrow crosses the `&mut App`
+  call; handlers re-fetch their view by index.
 
 Two deviations from the review sketch, disclosed:
 
-- **Key handlers stay `fn(&mut App, ...)`, routed by the top view's
-  discriminant**, rather than a disjoint `view.consume(key)`: confirms mutate
-  App-wide state (`popup_confirm` writes the DB and refreshes the list;
-  `confirm_search` moves results into `app.issues`), and handlers that consume
-  their view pop it first. The keymap design's `dispatch_key` is `app.keys` when
-  it lands; the routing seam is identical.
+- **Key handlers stay `fn(&mut App, usize, KeyEvent) -> KeyFlow`**, routed and
+  cascaded by discriminant, rather than a disjoint `view.consume(key)`: confirms
+  mutate App-wide state (`popup_confirm` writes the DB and refreshes the list;
+  `confirm_search` moves results into the base), and handlers that consume their
+  view pop it first. The keymap design's `dispatch_key` is `app.keys` when it
+  lands; the routing seam is identical.
 - **`hooks.consume` is honored as a grouping, not a signature**: lifecycle
-  outcomes touch identity and session, so the consumer is an `App` method over
-  the `Hooks` field.
+  outcomes touch identity and scheduling, so the consumer is an `App` method
+  over the `sync`/`auth` fields (Decision 6).
 
 Rejected forms:
 
@@ -609,7 +706,7 @@ network: open reads the cache for the target issue's team, captures it as
 matching `Team { team_id }` rebuilds `items` and re-anchors the selection. The
 priority popup is static (`team_id: None`) and untouched.
 
-## Decision 6: sender lifecycle and worker-panic recovery
+## Decision 6: lifecycle typestates and worker-panic recovery
 
 `App` holds `events_tx` forever, so the queue never disconnects and every
 `Disconnected` arm dies. What those arms did today:
@@ -646,10 +743,99 @@ keeps running, instead of a silent label repair. `spawn_state_refresh` workers
 need no guard — the invalidation-on-completion already covers the failure path,
 and a panic between the API call and the send costs only one refresh.
 
-In-flight gates live in `Hooks`: `syncing` (plus a `!syncing` guard added to the
-login-success sync spawn, which today replaces `sync_rx` unguarded at
-`sync.rs:68-74`) and `login_in_flight` replacing `login_rx.is_some()` at the `L`
-binding (`lib.rs:929`).
+### Sync and auth are typestates
+
+`SyncState` (lib.rs:258-267), `login_rx` (lib.rs:395),
+`session.not_authenticated` (lib.rs:276), and `viewer_name`/`org_name`
+(lib.rs:383-385) are replaced by two typestate enums — two direct `App` fields,
+not a wrapper struct: no invariant spans them, and the enums already do the
+grouping a `Hooks` struct would only sketch. One `consume_lifecycle` App method
+transitions both.
+
+```rust
+/// Background-sync typestate. The footer label is derived state and no
+/// longer stored: it is formatted at render time from (SyncStatus,
+/// AuthStatus, Clock). The pure format_sync_label (sync.rs:24) survives with
+/// a narrowed signature — the never-synced and parse-error branches are
+/// owned by other variants now.
+pub enum SyncStatus {
+    /// Nothing running, nothing scheduled. Entered only via NotAuthenticated
+    /// today (sync.rs:139 is the sole next_sync_at = None writer); also the
+    /// honest "not synced" pre-state.
+    Idle,
+    /// A sync worker is in flight; gates every spawn site.
+    Syncing,
+    Synced {
+        synced_at: chrono::DateTime<chrono::Utc>,
+        next_sync_at: Instant,
+    },
+    Failed {
+        message: String,
+        next_sync_at: Instant,
+    },
+}
+
+/// Authentication typestate. Deviation from the review sketch, disclosed:
+/// `Authenticated { token }` becomes `Authenticated { viewer }` — the TUI
+/// never holds tokens (they live in lt-config/lt-upstream behind the
+/// SyncService seam); its witness of authentication is the viewer identity,
+/// which absorbs viewer_name/org_name.
+pub enum AuthStatus {
+    /// The startup identity fetch failed but a token may exist; the
+    /// in-flight startup sync resolves this. Not Unauthenticated: the
+    /// periodic-retry gate must not block a token-holding user who is
+    /// merely offline (fetch_viewer None + first sync Error).
+    Unknown,
+    /// The OAuth login flow is in flight; gates 'L'.
+    Authenticating,
+    Authenticated { viewer: viewer::User },
+    /// The sync layer reported no stored token.
+    Unauthenticated,
+    /// The last login attempt failed.
+    Failed { message: String },
+}
+```
+
+- **`Idle` over the sketch's `Option<Instant>`**: the only producer of an absent
+  schedule is the unauthenticated path (`sync.rs:139`), where `synced_at` and
+  `message` are also absent — an `Option` would smear one state across two
+  variants' optional fields; `Idle` names it and makes `next_sync_at` total in
+  the variants that schedule.
+- **`synced_at` source**: read from the DB meta `last_synced_at` at the `Done`
+  transition (every successful sync writes it, `lt-runtime/src/sync/mod.rs:47`),
+  falling back to `clock.now()` — exact, since the sync finished at that
+  instant. Startup always enters `Syncing` (`lib.rs:729-738`), so `Synced` is
+  only ever displayed after a `Done` this session.
+- **The label is derived at render** from `(SyncStatus, AuthStatus, Clock)`:
+  `Authenticating` → "logging in…"; `Unauthenticated`/`Failed` auth → "not
+  authenticated -- press L to log in"; otherwise `Idle` → "not synced",
+  `Syncing` → "syncing...", `Synced` → the elapsed-minutes label, sync `Failed`
+  → "sync error: …". `sync_status_label` and `build_sync_status_label`'s
+  stored-string protocol die.
+
+Every transition, mapped against today's writers:
+
+| Trigger (today's site)                     | Transition                                                                                                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| startup `run()` (`lib.rs:744-772`)         | `fetch_viewer()` Some → `Authenticated { viewer }`, None → `Unknown`; spawn startup sync → `sync = Syncing`                                                                                |
+| `Sync(Done(viewer))` (`sync.rs:98-119`)    | Some(v) → `auth = Authenticated { v }` (None leaves auth unchanged — identity wasn't requested); `sync = Synced { synced_at, next_sync_at: now + 30s }`; then `route_state_event(&Issues)` |
+| `Sync(Error(msg))` (`sync.rs:121-129`)     | `sync = Failed { message, next_sync_at: now + 30s }`; base list Loading→Idle repair via `base_list_mut`                                                                                    |
+| `Sync(NotAuthenticated)` (`sync.rs:131`)   | `auth = Unauthenticated`; `sync = Idle`; same Loading repair                                                                                                                               |
+| `Login(Success { viewer })` (`sync.rs:56`) | Some → `Authenticated`, None → `Unknown`; if `!matches!(sync, Syncing)` spawn delta with `fetch_identity = !matches!(auth, Authenticated { .. })` → `sync = Syncing`                       |
+| `Login(Error(msg))` (`sync.rs:76-80`)      | `auth = Failed { message }`; `footer_msg` stays a direct transient write (deriving it from `Failed` would pin the message past the actions that clear it today)                            |
+| `L` key (`lib.rs:929-933`)                 | gate `!matches!(auth, Authenticating)` (replaces `login_rx.is_none()`); → `Authenticating`, spawn login                                                                                    |
+| `r` refresh (`lib.rs:653-665`)             | gate `!matches!(sync, Syncing)`; → `Syncing` (full)                                                                                                                                        |
+
+The periodic gate (`lib.rs:810-823`, today
+`!syncing && !not_authenticated && next_sync_at elapsed`) rewrites as: due iff
+`sync` is `Synced`/`Failed` with `next_sync_at` elapsed, and `auth` is not
+`Unauthenticated`/`Failed`;
+`fetch_identity = !matches!(auth, Authenticated { .. })` replaces
+`viewer_name.is_none()`.
+
+`LoginEvent::Success` changes to carry `Option<viewer::User>` — the adapter
+already has the full identity and discards its id (`adapter.rs:93-98`); the
+spawn signatures are rewritten in the same PR anyway.
 
 ## Decision 7: keys through the queue — input thread, single-wait loop, `EventPump`
 
@@ -740,24 +926,26 @@ deterministic.
 
 With payload-free events, stale data cannot be applied — events carry none. With
 the view stack, display checks cannot be forgotten — a closed view does not
-exist. Drops happen in exactly two ways: no consumer exists, or an id-relevance
-guard falls through inside a live consumer. Duplicate or late events are
-idempotent re-reads of current truth.
+exist. Drops happen in exactly three ways: no consumer exists, an id-relevance
+guard falls through inside a live consumer, or the base's `focused` policy
+declines. Duplicate or late events are idempotent re-reads of current truth.
 
-| #   | Event at apply time                            | Stack contents                            | Handling                                                                             |
-| --- | ---------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------ |
-| N1  | `State(Comments{A})`                           | `Detail(A)` anywhere in the stack         | consume re-reads `query_comments(A)` — even under a future popup                     |
-| N2  | `State(Comments{A})`                           | no `Detail` / `Detail(B)`                 | no consumer exists / id mismatch falls through                                       |
-| N3  | `State(Comments{A})` twice (fast close/reopen) | `Detail(A)`                               | both re-read; idempotent                                                             |
-| N4  | `State(Teams)`                                 | `NewIssue` in the stack                   | re-read teams; re-anchor selected team by id                                         |
-| N5  | `State(Teams)`                                 | no `NewIssue`                             | no consumer exists                                                                   |
-| N6  | `State(Team{T})`                               | `NewIssue`, team T selected               | re-read states+members; preserve picks by id; clear `loading`                        |
-| N7  | `State(Team{T})`                               | `NewIssue` on team U / no consumer        | id mismatch falls through / no consumer (U's own refresh is in flight)               |
-| N8  | `State(Team{T})`                               | `Popup { team_id: Some(T) }` in the stack | rebuild `items`; re-anchor selection                                                 |
-| N9  | `State(Issues)`                                | stack empty                               | base list `do_fetch(false)` (offset-preserving)                                      |
-| N10 | `State(Issues)`                                | stack non-empty                           | base list's guard drops it; a live `Detail` re-reads its issue (`query_issue_by_id`) |
-| N11 | `Lifecycle(Sync(_))`                           | any                                       | `hooks.syncing` gates spawns; `Done` feeds N9/N10 via `route_state_event`            |
-| N12 | `Lifecycle(Login(_))`                          | any                                       | `hooks.login_in_flight` gates `L`; cleared by `consume_lifecycle`                    |
+| #   | Event at apply time                            | Stack contents                            | Handling                                                                                                                        |
+| --- | ---------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| N1  | `State(Comments{A})`                           | `Detail(A)` anywhere in the stack         | consume re-reads `query_comments(A)` — even under a future popup                                                                |
+| N2  | `State(Comments{A})`                           | no `Detail` / `Detail(B)`                 | no consumer exists / id mismatch falls through                                                                                  |
+| N3  | `State(Comments{A})` twice (fast close/reopen) | `Detail(A)`                               | both re-read; idempotent                                                                                                        |
+| N4  | `State(Teams)`                                 | `NewIssue` in the stack                   | re-read teams; re-anchor selected team by id                                                                                    |
+| N5  | `State(Teams)`                                 | no `NewIssue`                             | no consumer exists                                                                                                              |
+| N6  | `State(Team{T})`                               | `NewIssue`, team T selected               | re-read states+members; preserve picks by id; clear `loading`                                                                   |
+| N7  | `State(Team{T})`                               | `NewIssue` on team U / no consumer        | id mismatch falls through / no consumer (U's own refresh is in flight)                                                          |
+| N8  | `State(Team{T})`                               | `Popup { team_id: Some(T) }` in the stack | rebuild `items`; re-anchor selection                                                                                            |
+| N9  | `State(Issues)`                                | `[List]` — base focused                   | `ListView::consume` runs `do_fetch(ctx, false)` (offset-preserving)                                                             |
+| N10 | `State(Issues)`                                | overlay(s) above the base                 | base's `focused` guard drops it; a live `Detail` re-reads its issue (`query_issue_by_id`)                                       |
+| N11 | `Lifecycle(Sync(_))`                           | any                                       | `matches!(sync, Syncing)` gates every spawn site; `Done` → `Synced { .. }` and feeds N9/N10                                     |
+| N12 | `Lifecycle(Login(_))`                          | any                                       | `matches!(auth, Authenticating)` gates `L`; `consume_lifecycle` transitions `auth`                                              |
+| N13 | `Key(k)`, unbound in the focused view          | pass-through overlay atop base            | `Pass` cascades toward `views[0]`; the base's handler is the floor. Overlays bind `q` = Back so `q` never falls through to Quit |
+| N14 | `Key(k)` in a text context                     | any                                       | forwarded to the editor widget and `Consumed` — printable input never cascades                                                  |
 
 ## Keymap design reconciliation
 
@@ -773,12 +961,20 @@ generation, no-timer chords — is entirely unaffected. What changes:
   `AppEvent::Key(ev) => dispatch_key(app, Key::from_event(ev))`. The queue's
   wire type is the raw crossterm `KeyEvent`, not `keymap::Key`: normalization
   still happens exactly once, at the boundary between transport and keymap.
-- `key_context` derives from the stack top instead of `Mode`, with sub-focus
-  read from view-local fields: `None => List`; `Detail(d)` => `CommentInput` if
-  `d.comment_input.is_some()` else `Detail`; `NewIssue(m)` => text vs picker by
-  `m.focused_field`; `Popup`/`Search`/ `Help` map directly.
-- `Action::Back` = `views.pop()` in every non-list context; the list's `Back`
-  keeps the double-esc reset.
+- `key_context` becomes a stack walk, not a single derivation: resolve against
+  the focused view's context first (sub-focus rules unchanged: `Detail(d)` =>
+  `CommentInput` iff `d.comment_input.is_some()`; `NewIssue(m)` by
+  `m.focused_field`); `Resolved::Unbound` in a pass-through context continues to
+  the next view down, ending at `views[0]`'s context. `resolve`'s signature is
+  unchanged; the cascade is dispatch-loop behavior above it.
+- **GLOBAL survives the cascade**: the cascade delivers _keys_ downward, but
+  GLOBAL delivers per-context _semantics_ for the same key (`j` scrolls in
+  Detail, moves the selection in List) — so it remains a resolution layer within
+  each view. Merging it into the tables is a keymap editorial choice with no
+  mechanical consequence.
+- `Action::Back` = `App::pop_view` in every non-base context; the base's `Back`
+  keeps the double-esc reset — the same reset `pop_view` performs at the floor,
+  so the two Back semantics converge on one helper.
 - **Its "popup return-mode" risk entry is resolved structurally** and should be
   deleted on rebase: confirm/cancel pop instead of writing `Mode::List`,
   restoring whatever is beneath. Phase 4's "s/p/a from Detail" pushes a
@@ -807,6 +1003,16 @@ generation, no-timer chords — is entirely unaffected. What changes:
 7. The optimistic comment author comes from the persisted viewer rather than the
    in-memory `viewer_name`; it is absent before the first successful sync.
 8. Worker panics surface as `sync error: ...` instead of a silent label repair.
+9. "full sync..." (`lib.rs:659`) folds into "syncing..." — the distinction was a
+   hardcoded string with no behavioral difference.
+10. Identity is state, not residue: on `NotAuthenticated` after a session had
+    identity (token revoked mid-session), the header shows "(not authenticated)"
+    instead of the stale names; `assignee:me` resolution likewise requires a
+    live `Authenticated`. Pressing `L` while authenticated blanks the header for
+    the duration of the login — re-auth is a deliberate act.
+11. After a failed login, periodic sync pauses until re-auth (today the
+    press-L-while-authenticated corner could keep syncing under a label that
+    claimed "not authenticated").
 
 The view-stack restructure itself (sprint PR 2) is behavior-neutral: render
 snapshots must be pixel-identical, which is that PR's acceptance gate.
@@ -815,21 +1021,28 @@ snapshots must be pixel-identical, which is that PR's acceptance gate.
 
 - **View-stack migration** (`render_tests.rs`, `loop_tests.rs`): every
   `app.mode = Mode::X; app.<field> = Some(...)` setup pair becomes one
-  `app.views.push(View::X(...))`. `popup_move`/`popup_cancel` tests construct a
-  `PopupView` and assert `views.is_empty()` after cancel;
-  `close_detail_clears_pane_state` collapses to the same assertion. During the
-  window between the restructure and the queue PR, the comment poller finds its
-  receiver via the stack (`views.iter_mut().find_map(...)`). `confirm_search`
-  pops the `Search` view before touching `app.issues` (the borrow requires it,
-  and it destroys the overlay anyway); `poll_search_debounce` copies
-  `viewport_height`/`args.limit` out before taking `views.last_mut()`.
+  `app.views.push(View::X(...))`; direct base-field setups (`app.issues`,
+  `app.table_state`, `app.pagination`, `app.status`) go through
+  `base_list_mut()` (or a test-only infallible `list_mut()`).
+  `popup_move`/`popup_cancel` tests construct a `PopupView` and assert
+  `views.len() == 1` after cancel; `close_detail_clears_pane_state` collapses to
+  the same assertion. During the window between the restructure and the queue
+  PR, the comment poller finds its receiver via the stack
+  (`views.iter_mut().find_map(...)`). `confirm_search` pops the `Search` view
+  before touching the base (the borrow requires it, and it destroys the overlay
+  anyway); `poll_search_debounce` copies `viewport_height`/`args.limit` out
+  before taking `views.last_mut()`.
 - **Loop tests** (`loop_tests.rs`): `drive()` builds `EventPump::Scripted` from
   `AppEvent::Key(...)` entries; the exhaustion-as-error test survives with a
   one-line change. The per-poller channel tests become direct calls:
   `route_state_event` unit tests covering N1–N10 (live and absent consumers,
-  matching and mismatched ids), `consume_lifecycle` tests, `login_in_flight` and
-  login-success-guard tests. The `Disconnected` tests die with the state they
-  exercised.
+  matching and mismatched ids), cascade tests for N13/N14 (an unbound key in a
+  popup reaches the base handler; a bound key stops at the popup; a printable
+  key in Search never cascades), `consume_lifecycle` tests for the transition
+  table, and the `L`/refresh/periodic gates against the typestates. The
+  `Disconnected` tests die with the state they exercised.
+  `app.viewer_name = Some(..)` fixtures become
+  `app.auth = AuthStatus::Authenticated { .. }`.
 - **Storage**: migration validity is already covered by `migrations_are_valid`;
   add ordering/scoping tests for `query_team_states`, replace-set semantics for
   memberships, and "issue upsert back-fills `team_id` without clobbering
@@ -843,38 +1056,50 @@ snapshots must be pixel-identical, which is that PR's acceptance gate.
 ## Delivery: stacked PRs (each green under `make test` + `make check`)
 
 1. **`docs(design)`** — this document.
-2. **`refactor(tui): view stack`** — `View` enum + per-variant structs,
-   `views: Vec<View>`, `Mode` deleted, key router on `views.last()`, push/pop
-   entry/exit, `submit_comment` reads the detail's own issue, the popup anchor
-   write moves behind the sole-entry guard, dead `input_mode`/`input_buf` and
-   their render branch deleted, `detail_comment_rx` moves into `DetailView` for
-   the interim. The `sync.rs:109` guard becomes `views.is_empty()` **keeping the
-   page-1 conditions** so this PR stays behavior-neutral (render snapshots
-   pixel-identical). Test literals migrate. Independent of PR 3.
+2. **`refactor(tui): view stack`** — `View` enum + per-variant structs including
+   `ListView` (issues/table*state/pagination/status move; `do_fetch` becomes
+   `ListView::do_fetch(&StateCtx, bool)` with the ctx built inline; the viewer
+   name is still read from the `App` field until PR 6), `views: Vec<View>`
+   seeded in `App::new`/`for_test`, `Mode` deleted, `pop_view` replaces every
+   `Mode::List` restoration write, `base_list_mut`/`selected_issue` accessors,
+   `submit_comment` reads the detail's own issue, the popup anchor write moves
+   behind the `[View::List(*),
+   View::Popup(p)]`guard, dead`input_mode`/`input_buf`and their render branch deleted,`detail_comment_rx`moves into`DetailView`for the interim.`KeyFlow`+ the index-walk`dispatch_key`land **mechanism-only**: every existing handler returns`Consumed`unconditionally, so no key cascades yet and behavior is provably unchanged — the pass-through policy (which keys`Pass`; Popup `q`= Back) is a binding-table decision that lands with the keymap phases. The`sync.rs:109`guard becomes`views.len()
+   == 1` **keeping the page-1 conditions** so this PR stays behavior-neutral
+   (render snapshots pixel-identical). Test literals migrate. Independent of
+   PR 3.
 3. **`feat(storage,runtime): team-scoped cache and team metadata sync`** —
    `MIGRATION_2`, new statements and query/upsert helpers, `upsert_issue_tx`
    scoping, the `lt-types` position fragment, `lt-runtime/src/teams.rs`, the
    trait gains `sync_teams`/`sync_team_data` (Linear + Noop impls), sim
    membership derivation. `fetch_*` still present; TUI untouched.
 4. **`refactor(tui): AppEvent queue and StateEvent routing`** —
-   `AppEvent`/`StateEvent`, `events_tx`/`events_rx`, `App::apply`,
-   `route_state_event` + `View::consume` (Detail's `Comments` and `Issues` arms,
-   `list_consume`); the comment worker goes payload-free; `CommentSyncEvent` and
-   `DetailView`'s interim receiver die; `submit_comment` and `popup_confirm`
-   unify on re-reads (`apply_optimistic_in_memory`, `build_optimistic_issue`,
-   and `selected_issue_mut` die). Coexists with the remaining pollers and
+   `AppEvent`/`StateEvent`, `events_tx`/`events_rx`, `App::apply`, the top-down
+   `route_state_event` + `View::consume` over `&StateCtx` (Detail's `Comments`
+   and `Issues` arms, `ListView::consume` with the `focused` guard); the comment
+   worker goes payload-free; `CommentSyncEvent` and `DetailView`'s interim
+   receiver die; `submit_comment` and `popup_confirm` unify on re-reads
+   (`apply_optimistic_in_memory`, `build_optimistic_issue`, and
+   `selected_issue_mut` die). Coexists with the remaining pollers and
    `EventSource` keys. **Requires PR 2.**
 5. **`refactor(tui,runtime): cache-first pickers`** — modal and popups read
    SQLite, `spawn_state_refresh`, `NewIssueModal::consume` and
    `PopupView::consume`; `ModalEvent`, `modal_rx`, and the three `fetch_*` trait
    methods die. Requires PRs 3 and 4.
-6. **`refactor(runtime,tui): sync/login completion callbacks`** —
-   `OnSync`/`OnLogin`, the dead `query` param dropped, the `catch_unwind` guard,
-   `LifecycleEvent` + `consume_lifecycle`, `SyncState` → `Hooks` with
-   `login_in_flight`, the login-success `!syncing` guard, and `App::start_sync`
-   deduplicating the four spawn sites (`lib.rs:657-665`, `lib.rs:749`,
-   `lib.rs:815-822`, `sync.rs:68-74`; `run()` reorders to construct `App` before
-   the startup spawn — behavior-neutral). Requires PR 4; independent of PR 5.
+6. **`refactor(runtime,tui): sync/login completion callbacks and lifecycle typestates`**
+   — `OnSync`/`OnLogin`, the dead `query` param dropped, the `catch_unwind`
+   guard, `LifecycleEvent` + `consume_lifecycle`;
+   `SyncState`/`login_rx`/`session.not_authenticated`/`viewer_name`/`org_name` →
+   `sync: SyncStatus` + `auth: AuthStatus`, the label derived at render
+   (`build_sync_status_label` dies, `format_sync_label` narrows),
+   `LoginEvent::Success` carries `Option<viewer::User>`, the login-success
+   `!Syncing` guard, and `App::start_sync` deduplicating the four spawn sites
+   (`lib.rs:657-665`, `lib.rs:749`, `lib.rs:815-822`, `sync.rs:68-74`; `run()`
+   reorders to construct `App` before the startup spawn). The typestates land
+   here, not in PR 2: the receivers _are_ the in-flight state until the
+   callbacks arrive — landing the enums earlier means parallel state (the
+   redundant-tag smell this ADR deletes) or rewriting the pollers twice.
+   Requires PR 4; independent of PR 5.
 7. **`refactor(tui): keys through the queue`** — input thread, `EventPump`, the
    `recv_timeout` loop; `EventSource`/`CrosstermEvents`/`ScriptedEvents` die;
    loop tests migrate. Requires PR 4; last, so the loop rewrite lands on a fully
@@ -886,6 +1111,15 @@ one-function rebase either way); its phase 4 requires PR 2.
 
 ## Open questions
 
-None blocking. Startup's synchronous `fetch_viewer` (`lib.rs:744`) still blocks
-briefly before the TUI starts; reading `synced_viewer` from the cache instead is
-a natural follow-up, deliberately out of scope here.
+None blocking.
+
+- Startup's synchronous `fetch_viewer` (`lib.rs:744`) still blocks briefly
+  before the TUI starts; reading `synced_viewer` from the cache instead is a
+  natural follow-up, deliberately out of scope here.
+- `SearchOverlay::run_search` opens the profile DB via `db_path()`
+  (`popup.rs:176-178`), bypassing `app.db` — the same wart class as the comment
+  worker fixed in PR 4; Search has no `consume`, so the fix is threading the ctx
+  into `run_search`. Rides PR 4.
+- Whether `AuthStatus::Failed { message }` earns its keep over `Unauthenticated`
+  plus the footer message (identical label and gates) — adopted per the review
+  sketch; collapse later if it stays inert.
