@@ -28,15 +28,13 @@ use lt_types::types::Issue;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use lt_types::types::priority_label_to_u8;
 #[cfg(all(test, feature = "sim"))]
-use lt_types::types::{Team, User, WorkflowState};
-#[cfg(all(test, feature = "sim"))]
-pub(crate) use new_issue::{ModalEvent, build_assignee_items};
+pub(crate) use new_issue::build_assignee_items;
 pub(crate) use new_issue::{NewIssueField, NewIssueModal};
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use popup::handle_key as handle_popup_key;
 pub(crate) use popup::{
     HelpPopup, PopupItem, PopupKind, PopupView, SearchOverlay, poll_search_debounce,
-    priority_popup_items,
+    priority_popup_items, state_items,
 };
 use ratatui::Terminal;
 use ratatui::backend::Backend;
@@ -141,14 +139,15 @@ pub enum View {
 
 impl View {
     /// Route a state invalidation to this view's consumer, if it has one.
-    /// `focused` is true iff this is the top of the stack. Popup/NewIssue/
-    /// Search/Help have no consumer yet -- their `StateEvent` dependencies
-    /// (`Team`/`Teams`) arrive in the cache-first pickers stage.
+    /// `focused` is true iff this is the top of the stack. Search/Help have
+    /// no `StateEvent` dependencies.
     fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
         match self {
             View::List(list) => list.consume(ctx, focused, ev),
             View::Detail(detail) => detail.consume(ctx, focused, ev),
-            View::Popup(_) | View::NewIssue(_) | View::Search(_) | View::Help(_) => {}
+            View::Popup(popup) => popup.consume(ctx, focused, ev),
+            View::NewIssue(modal) => modal.consume(ctx, focused, ev),
+            View::Search(_) | View::Help(_) => {}
         }
     }
 }
@@ -525,15 +524,6 @@ impl SyncService for NoopSyncService {
     }
     fn fetch_viewer(&self) -> Option<lt_types::viewer::User> {
         None
-    }
-    fn fetch_teams(&self) -> Result<Vec<Team>> {
-        Ok(Vec::new())
-    }
-    fn fetch_workflow_states(&self, _team_id: &str) -> Result<Vec<WorkflowState>> {
-        Ok(Vec::new())
-    }
-    fn fetch_team_members(&self, _team_id: &str) -> Result<Vec<User>> {
-        Ok(Vec::new())
     }
     fn sync_comments(&self, _issue_id: &str) -> Result<()> {
         Ok(())
@@ -915,6 +905,26 @@ impl App {
             view.consume(&ctx, i + 1 == len, ev);
         }
     }
+
+    /// Run `job` on a background thread, then always send `State(ev)` --
+    /// "the refresh attempt finished; re-read whatever is cached." Refresh
+    /// failures are expected offline: logged via `tracing`, cache kept as-is.
+    /// This is what clears a picker's `loading` flag deterministically, and
+    /// is why no error variant exists.
+    pub(crate) fn spawn_state_refresh(
+        &self,
+        ev: StateEvent,
+        job: impl FnOnce(&dyn SyncService) -> Result<()> + Send + 'static,
+    ) {
+        let service = Arc::clone(&self.service);
+        let tx = self.events_tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = job(service.as_ref()) {
+                tracing::warn!("background refresh failed: {e:#}");
+            }
+            let _ = tx.send(AppEvent::State(ev));
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,9 +1048,6 @@ where
             ));
             app.sync.next_sync_at = None;
         }
-
-        // Poll modal background loader channel.
-        app.poll_modal_events();
 
         // Drain the app event queue: state invalidations from background
         // workers and same-thread writers land here.

@@ -1,11 +1,12 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lt_runtime::db::Connection;
 use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{ALL_KEYBINDINGS, App, KeyFlow, StateEvent, TextInput, View};
+use super::{ALL_KEYBINDINGS, App, KeyFlow, StateCtx, StateEvent, TextInput, View};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -32,7 +33,7 @@ pub struct PopupView {
     /// Target issue id, captured at open; confirm no longer depends on the
     /// list selection being unchanged.
     pub issue_id: String,
-    /// The issue's team -- the scope key for a future team-scoped refresh
+    /// The issue's team -- the scope key for the `Team{team_id}` refresh
     /// (state and assignee popups; `None` for the static priority popup).
     pub team_id: Option<String>,
     pub items: Vec<PopupItem>,
@@ -247,6 +248,37 @@ impl SearchOverlay {
 // Popup open/move/confirm methods
 // ---------------------------------------------------------------------------
 
+/// A team's workflow states, from the local cache only. Shared by
+/// `open_state_popup`/`PopupView::consume`'s `State` arm and the new-issue
+/// modal's own state picker.
+pub(crate) fn state_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
+    lt_runtime::db::query_team_states(conn, team_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| PopupItem {
+            label: s.name,
+            id: Some(s.id.into_inner()),
+        })
+        .collect()
+}
+
+/// The assignee popup's items -- "Unassign" plus a team's members, from the
+/// local cache only. Shared by `open_assignee_popup` and `PopupView::consume`'s
+/// `Assignee` arm.
+fn assignee_popup_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
+    let mut items: Vec<PopupItem> = vec![PopupItem {
+        label: "Unassign".to_string(),
+        id: None,
+    }];
+    if let Ok(members) = lt_runtime::db::query_team_members(conn, team_id) {
+        items.extend(members.into_iter().map(|m| PopupItem {
+            label: m.name,
+            id: Some(m.id.into_inner()),
+        }));
+    }
+    items
+}
+
 impl super::App {
     pub(crate) fn open_state_popup(&mut self) {
         let Some(issue) = self.selected_issue() else {
@@ -255,33 +287,31 @@ impl super::App {
         let issue_id = issue.id.inner().to_string();
         let team_id = issue.team.id.inner().to_string();
         let current_state_name = issue.state.name.clone();
-        match self.service.fetch_workflow_states(&team_id) {
-            Ok(states) => {
-                let items: Vec<PopupItem> = states
-                    .into_iter()
-                    .map(|s| PopupItem {
-                        label: s.name,
-                        id: Some(s.id.into_inner()),
-                    })
-                    .collect();
-                let selected = items
-                    .iter()
-                    .position(|item| item.label == current_state_name)
-                    .unwrap_or(0);
-                self.views.push(View::Popup(PopupView {
-                    kind: PopupKind::State,
-                    issue_id,
-                    team_id: Some(team_id),
-                    items,
-                    selected,
-                    anchor: None,
-                }));
-                self.footer_msg = None;
-            }
-            Err(e) => {
-                self.footer_msg = Some(format!("Failed to fetch states: {e}"));
-            }
-        }
+
+        let items = self
+            .db
+            .connect()
+            .map(|conn| state_items(&conn, &team_id))
+            .unwrap_or_default();
+        let selected = items
+            .iter()
+            .position(|item| item.label == current_state_name)
+            .unwrap_or(0);
+        self.views.push(View::Popup(PopupView {
+            kind: PopupKind::State,
+            issue_id,
+            team_id: Some(team_id.clone()),
+            items,
+            selected,
+            anchor: None,
+        }));
+        self.footer_msg = None;
+        self.spawn_state_refresh(
+            StateEvent::Team {
+                team_id: team_id.clone(),
+            },
+            move |s| s.sync_team_data(&team_id),
+        );
     }
 
     pub(crate) fn open_priority_popup(&mut self) {
@@ -309,24 +339,12 @@ impl super::App {
         let issue_id = issue.id.inner().to_string();
         let team_id = issue.team.id.inner().to_string();
         let current_assignee = issue.assignee.as_ref().map(|a| a.id.inner().to_string());
-        let mut items: Vec<PopupItem> = vec![PopupItem {
-            label: "Unassign".to_string(),
-            id: None,
-        }];
-        match self.service.fetch_team_members(&team_id) {
-            Ok(members) => {
-                for m in members {
-                    items.push(PopupItem {
-                        label: m.name,
-                        id: Some(m.id.into_inner()),
-                    });
-                }
-            }
-            Err(e) => {
-                self.footer_msg = Some(format!("Failed to fetch members: {e}"));
-                return;
-            }
-        }
+
+        let items = self
+            .db
+            .connect()
+            .map(|conn| assignee_popup_items(&conn, &team_id))
+            .unwrap_or_default();
         let selected = current_assignee
             .and_then(|a| {
                 items
@@ -337,12 +355,48 @@ impl super::App {
         self.views.push(View::Popup(PopupView {
             kind: PopupKind::Assignee,
             issue_id,
-            team_id: Some(team_id),
+            team_id: Some(team_id.clone()),
             items,
             selected,
             anchor: None,
         }));
         self.footer_msg = None;
+        self.spawn_state_refresh(
+            StateEvent::Team {
+                team_id: team_id.clone(),
+            },
+            move |s| s.sync_team_data(&team_id),
+        );
+    }
+}
+
+impl PopupView {
+    /// The state and assignee popups' subscription: a matching
+    /// `Team{team_id}` rebuilds `items` from the cache and re-anchors the
+    /// selection by item id. The priority popup is static (`team_id: None`)
+    /// and never matches.
+    pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
+        let StateEvent::Team { team_id } = ev else {
+            return;
+        };
+        if self.team_id.as_deref() != Some(team_id.as_str()) {
+            return;
+        }
+        let Ok(conn) = ctx.db.connect() else {
+            return;
+        };
+        let items = match &self.kind {
+            PopupKind::State => state_items(&conn, team_id),
+            PopupKind::Assignee => assignee_popup_items(&conn, team_id),
+            PopupKind::Priority => return,
+        };
+        let current_id = self.items.get(self.selected).and_then(|i| i.id.clone());
+        self.items = items;
+        self.selected = self
+            .items
+            .iter()
+            .position(|i| i.id.as_deref() == current_id.as_deref())
+            .unwrap_or(0);
     }
 }
 

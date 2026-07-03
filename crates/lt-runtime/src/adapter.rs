@@ -8,11 +8,7 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 use lt_storage::db;
-use lt_types::members::TeamMembersQuery;
 use lt_types::query::IssueQuery;
-use lt_types::states::{TeamVariables, WorkflowStatesQuery};
-use lt_types::teams::TeamsQuery;
-use lt_types::types::{Team, User, WorkflowState};
 use lt_types::viewer;
 use lt_types::viewer::ViewerQuery;
 use lt_upstream::auth::login_non_interactive;
@@ -113,28 +109,6 @@ impl SyncService for LinearSyncService {
 
     fn fetch_viewer(&self) -> Option<viewer::User> {
         Self::viewer_identity()
-    }
-
-    fn fetch_teams(&self) -> Result<Vec<Team>> {
-        execute::<TeamsQuery>(&Self::transport()?, ())
-    }
-
-    fn fetch_workflow_states(&self, team_id: &str) -> Result<Vec<WorkflowState>> {
-        execute::<WorkflowStatesQuery>(
-            &Self::transport()?,
-            TeamVariables {
-                team_id: team_id.to_string(),
-            },
-        )
-    }
-
-    fn fetch_team_members(&self, team_id: &str) -> Result<Vec<User>> {
-        execute::<TeamMembersQuery>(
-            &Self::transport()?,
-            lt_types::members::TeamVariables {
-                team_id: team_id.to_string(),
-            },
-        )
     }
 
     fn sync_comments(&self, issue_id: &str) -> Result<()> {

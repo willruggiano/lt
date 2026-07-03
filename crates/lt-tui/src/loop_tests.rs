@@ -536,22 +536,35 @@ fn poll_login_events_disconnected_clears_receiver() {
     assert!(app.login_rx.is_none());
 }
 
-#[test]
-fn poll_modal_events_applies_loaded_data() {
-    let mut app = app_with_db(&[]).unwrap();
-    let (tx, rx) = mpsc::channel();
-    tx.send(ModalEvent::StatesLoaded(vec![PopupItem {
-        label: "Todo".to_string(),
-        id: Some("s1".to_string()),
-    }]))
-    .unwrap();
-    tx.send(ModalEvent::AssigneesLoaded(vec![PopupItem {
-        label: "Ada".to_string(),
-        id: Some("u1".to_string()),
-    }]))
-    .unwrap();
-    app.views.push(View::NewIssue(NewIssueModal {
-        focused_field: NewIssueField::Title,
+/// Seed team `team_id` with two ordered workflow states ("Todo" @1.0, "Done"
+/// @2.0), shared by the `Team{team_id}` picker-rebuild tests (N6, N8).
+fn seed_team_states(conn: &lt_runtime::db::Connection, team_id: &str) -> Result<()> {
+    lt_runtime::db::upsert_team_state(
+        conn,
+        lt_runtime::db::TeamState {
+            id: "s-todo",
+            name: "Todo",
+            team_id,
+            position: Some(1.0),
+        },
+    )?;
+    lt_runtime::db::upsert_team_state(
+        conn,
+        lt_runtime::db::TeamState {
+            id: "s-done",
+            name: "Done",
+            team_id,
+            position: Some(2.0),
+        },
+    )?;
+    Ok(())
+}
+
+/// A bare `NewIssueModal` for `route_state_event` tests -- only the fields
+/// under test vary between callers.
+fn bare_new_issue_modal() -> NewIssueModal {
+    NewIssueModal {
+        focused_field: NewIssueField::Team,
         title: TextInput::from(String::new()),
         description: String::new(),
         teams: Vec::new(),
@@ -564,15 +577,164 @@ fn poll_modal_events_applies_loaded_data() {
         assignee_selected: 0,
         loading: true,
         error: String::new(),
-        modal_rx: Some(rx),
-    }));
-    app.poll_modal_events();
+    }
+}
+
+#[test]
+fn new_issue_modal_teams_event_rereads_and_reanchors_by_id() {
+    // N4: `State(Teams)` with `NewIssue` in the stack -- re-read teams and
+    // re-anchor the selection by id (not index).
+    let mut app = app_with_db(&[]).unwrap();
+    {
+        let conn = app.db.connect().unwrap();
+        lt_runtime::db::upsert_teams(
+            &conn,
+            &[
+                lt_types::types::Team {
+                    id: "t1".into(),
+                    name: "Eng".to_string(),
+                },
+                lt_types::types::Team {
+                    id: "t2".into(),
+                    name: "Design".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+    }
+    let mut modal = bare_new_issue_modal();
+    modal.teams = vec![PopupItem {
+        label: "Eng".to_string(),
+        id: Some("t1".to_string()),
+    }];
+    modal.team_selected = 0;
+    app.views.push(View::NewIssue(modal));
+
+    app.route_state_event(&StateEvent::Teams);
+
     let Some(View::NewIssue(modal)) = app.views.last() else {
         unreachable!("new-issue view expected")
     };
-    assert_eq!(modal.states.len(), 1);
-    assert_eq!(modal.assignees.len(), 1);
+    assert_eq!(modal.teams.len(), 2);
+    // Alphabetical order puts "Design" first; the selection follows "t1" by
+    // id rather than resetting to index 0.
+    assert_eq!(modal.teams[modal.team_selected].id.as_deref(), Some("t1"));
+}
+
+#[test]
+fn route_state_event_teams_with_no_modal_is_a_noop() {
+    // N5: `State(Teams)` with no `NewIssue` in the stack -- no consumer.
+    let mut app = app_with_db(&[]).unwrap();
+    app.route_state_event(&StateEvent::Teams);
+    assert_eq!(app.views.len(), 1);
+}
+
+#[test]
+fn new_issue_modal_team_event_rereads_and_preserves_picks_by_id() {
+    // N6: `State(Team{T})` with `NewIssue` on team T -- re-read states/
+    // members, preserve the picks by id, clear `loading`.
+    let mut app = app_with_db(&[]).unwrap();
+    {
+        let conn = app.db.connect().unwrap();
+        seed_team_states(&conn, "t1").unwrap();
+        lt_runtime::db::upsert_users(
+            &conn,
+            &[lt_types::types::User {
+                id: "u1".into(),
+                name: "Ada".to_string(),
+            }],
+        )
+        .unwrap();
+        lt_runtime::db::replace_team_memberships(&conn, "t1", &["u1"]).unwrap();
+    }
+    let mut modal = bare_new_issue_modal();
+    modal.teams = vec![PopupItem {
+        label: "Eng".to_string(),
+        id: Some("t1".to_string()),
+    }];
+    modal.team_selected = 0;
+    modal.states = vec![PopupItem {
+        label: "Done".to_string(),
+        id: Some("s-done".to_string()),
+    }];
+    modal.state_selected = 0; // "Done" picked before the refresh landed
+    app.views.push(View::NewIssue(modal));
+
+    app.route_state_event(&StateEvent::Team {
+        team_id: "t1".to_string(),
+    });
+
+    let Some(View::NewIssue(modal)) = app.views.last() else {
+        unreachable!("new-issue view expected")
+    };
+    assert_eq!(modal.states.len(), 2);
+    // Position order puts "Todo" first; "Done" is preserved by id rather
+    // than resetting to index 0.
+    assert_eq!(
+        modal.states[modal.state_selected].id.as_deref(),
+        Some("s-done")
+    );
+    // "Unassigned" + the one seeded member (no synced viewer in this test).
+    assert_eq!(modal.assignees.len(), 2);
     assert!(!modal.loading);
+}
+
+#[test]
+fn new_issue_modal_team_event_for_a_different_team_falls_through() {
+    // N7: `State(Team{T})` with `NewIssue` on team U -- the id mismatch
+    // falls through, leaving `loading`/items untouched.
+    let mut app = app_with_db(&[]).unwrap();
+    let mut modal = bare_new_issue_modal();
+    modal.teams = vec![PopupItem {
+        label: "Design".to_string(),
+        id: Some("t2".to_string()),
+    }];
+    modal.team_selected = 0;
+    app.views.push(View::NewIssue(modal));
+
+    // A refresh for a team the user has since tabbed away from.
+    app.route_state_event(&StateEvent::Team {
+        team_id: "t1".to_string(),
+    });
+
+    let Some(View::NewIssue(modal)) = app.views.last() else {
+        unreachable!("new-issue view expected")
+    };
+    assert!(modal.states.is_empty());
+    assert!(modal.loading);
+}
+
+#[test]
+fn popup_team_event_rebuilds_items_and_reanchors_selection() {
+    // N8: `State(Team{T})` with `Popup { team_id: Some(T) }` -- rebuild
+    // `items` from the cache and re-anchor the selection by item id.
+    let mut app = app_with_db(&[]).unwrap();
+    {
+        let conn = app.db.connect().unwrap();
+        seed_team_states(&conn, "t1").unwrap();
+    }
+    app.views.push(View::Popup(PopupView {
+        kind: PopupKind::State,
+        issue_id: "issue-1".to_string(),
+        team_id: Some("t1".to_string()),
+        items: vec![PopupItem {
+            label: "Done".to_string(),
+            id: Some("s-done".to_string()),
+        }],
+        selected: 0,
+        anchor: None,
+    }));
+
+    app.route_state_event(&StateEvent::Team {
+        team_id: "t1".to_string(),
+    });
+
+    let Some(View::Popup(popup)) = app.views.last() else {
+        unreachable!("popup view expected")
+    };
+    assert_eq!(popup.items.len(), 2);
+    // Position order puts "Todo" first; the selection is preserved by id.
+    assert_eq!(popup.items[popup.selected].id.as_deref(), Some("s-done"));
 }
 
 #[test]

@@ -1,10 +1,11 @@
-use std::sync::{Arc, mpsc};
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lt_runtime::db::Connection;
 use lt_types::types::User;
-use lt_types::viewer;
 
-use super::{App, KeyFlow, PopupItem, StateCtx, TextInput, View, priority_popup_items};
+use super::{
+    App, KeyFlow, PopupItem, StateCtx, StateEvent, TextInput, View, priority_popup_items,
+    state_items,
+};
 
 // ---------------------------------------------------------------------------
 // New-issue modal state
@@ -44,20 +45,6 @@ impl NewIssueField {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Events for modal background loading
-// ---------------------------------------------------------------------------
-
-/// Events sent from background threads that load modal picker data.
-pub enum ModalEvent {
-    /// States loaded for the selected team.
-    StatesLoaded(Vec<PopupItem>),
-    /// Assignees loaded for the selected team, plus an optional viewer ID.
-    AssigneesLoaded(Vec<PopupItem>),
-    /// Loading error.
-    LoadError(String),
-}
-
 /// All mutable state for the new-issue modal form.
 pub struct NewIssueModal {
     pub focused_field: NewIssueField,
@@ -79,13 +66,106 @@ pub struct NewIssueModal {
     pub assignees: Vec<PopupItem>,
     pub assignee_selected: usize,
 
-    /// True while we are waiting for picker data to load.
+    /// True while a targeted team refresh is in flight.
     pub loading: bool,
-    /// Non-empty when a load or submit error occurred.
+    /// Non-empty on submit validation failure. Per-fetch errors are not
+    /// surfaced here (offline, every targeted refresh would fail, making the
+    /// field constant noise); those go to `tracing`.
     pub error: String,
+}
 
-    /// Receiver for background-loaded modal data.
-    pub modal_rx: Option<mpsc::Receiver<ModalEvent>>,
+impl NewIssueModal {
+    /// This modal's own team-id lookup, deduplicating the two call sites
+    /// that need it: submit validation and the `Team{team_id}` consume
+    /// guard.
+    fn selected_team_id(&self) -> Option<String> {
+        self.teams
+            .get(self.team_selected)
+            .and_then(|t| t.id.clone())
+    }
+
+    /// `Teams`: re-read the team list and re-anchor the selection by id
+    /// (fallback index 0). `Team{team_id}`, guarded by `selected_team_id()`
+    /// matching: re-read states/members, preserving the user's picks by item
+    /// id, and clear `loading`. A team-id mismatch (a stale refresh for a
+    /// team the user has since tabbed away from) falls through.
+    pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
+        match ev {
+            StateEvent::Teams => {
+                let Ok(conn) = ctx.db.connect() else {
+                    return;
+                };
+                let Ok(teams) = lt_runtime::db::query_teams(&conn) else {
+                    return;
+                };
+                let current_id = self.selected_team_id();
+                self.teams = teams.into_iter().map(team_item).collect();
+                self.team_selected = reanchor(&self.teams, current_id.as_deref());
+            }
+            StateEvent::Team { team_id }
+                if self.selected_team_id().as_deref() == Some(team_id.as_str()) =>
+            {
+                let Ok(conn) = ctx.db.connect() else {
+                    return;
+                };
+                let current_state = self
+                    .states
+                    .get(self.state_selected)
+                    .and_then(|s| s.id.clone());
+                self.states = state_items(&conn, team_id);
+                self.state_selected = reanchor(&self.states, current_state.as_deref());
+
+                let current_assignee = self
+                    .assignees
+                    .get(self.assignee_selected)
+                    .and_then(|a| a.id.clone());
+                self.assignees = assignee_items(&conn, team_id);
+                self.assignee_selected = reanchor(&self.assignees, current_assignee.as_deref());
+
+                self.loading = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The modal's assignee picker items for `team_id`, from the local cache
+/// only: `build_assignee_items` fed by the persisted `db::synced_viewer` and
+/// `query_team_members`. `state_items` (the states half) is shared with the
+/// state popup -- imported from `popup`, not redefined here.
+fn assignee_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
+    let viewer = lt_runtime::db::synced_viewer(conn).ok().flatten();
+    let members = lt_runtime::db::query_team_members(conn, team_id).unwrap_or_default();
+    build_assignee_items(viewer.as_ref(), members)
+}
+
+/// `state_items`/`assignee_items` for `team_id`, opening a fresh connection.
+/// Empty on a connection failure (offline-safe: the caller just sees an
+/// empty picker until the background refresh lands).
+fn team_scoped_items(
+    db: &lt_runtime::db::Database,
+    team_id: &str,
+) -> (Vec<PopupItem>, Vec<PopupItem>) {
+    match db.connect() {
+        Ok(conn) => (state_items(&conn, team_id), assignee_items(&conn, team_id)),
+        Err(_) => (Vec::new(), Vec::new()),
+    }
+}
+
+fn team_item(team: lt_types::types::Team) -> PopupItem {
+    PopupItem {
+        label: team.name,
+        id: Some(team.id.into_inner()),
+    }
+}
+
+/// Find `id`'s position in `items`, falling back to index 0 when it is gone
+/// (or `id` is `None`, e.g. nothing was selected yet).
+fn reanchor(items: &[PopupItem], id: Option<&str>) -> usize {
+    items
+        .iter()
+        .position(|item| item.id.as_deref() == id)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -97,110 +177,82 @@ impl super::App {
         // Pre-fill team from active filter if set.
         let preset_team = self.args.team.clone();
 
-        let mut modal = NewIssueModal {
+        let teams: Vec<PopupItem> = self
+            .db
+            .connect()
+            .and_then(|conn| lt_runtime::db::query_teams(&conn))
+            .unwrap_or_default()
+            .into_iter()
+            .map(team_item)
+            .collect();
+
+        let team_selected = preset_team
+            .as_ref()
+            .and_then(|preset| {
+                teams
+                    .iter()
+                    .position(|t| t.label.to_lowercase().contains(&preset.to_lowercase()))
+            })
+            .unwrap_or(0);
+        let team_id = teams.get(team_selected).and_then(|t| t.id.clone());
+        let (states, assignees) = match &team_id {
+            Some(id) => team_scoped_items(&self.db, id),
+            None => (Vec::new(), Vec::new()),
+        };
+
+        self.views.push(View::NewIssue(NewIssueModal {
             focused_field: NewIssueField::Title,
             title: TextInput::new(),
             description: String::new(),
-            teams: Vec::new(),
-            team_selected: 0,
+            teams,
+            team_selected,
             priorities: priority_popup_items(),
             priority_selected: 0,
-            states: Vec::new(),
+            states,
             state_selected: 0,
-            assignees: Vec::new(),
+            assignees,
             assignee_selected: 0,
             loading: true,
             error: String::new(),
-            modal_rx: None,
-        };
+        }));
 
-        // Fetch teams synchronously (fast -- just a list).
-        match self.service.fetch_teams() {
-            Ok(teams) => {
-                modal.teams = teams
-                    .into_iter()
-                    .map(|t| PopupItem {
-                        label: t.name.clone(),
-                        id: Some(t.id.into_inner()),
-                    })
-                    .collect();
-                // Pre-select team from filter.
-                if let Some(ref preset) = preset_team
-                    && let Some(idx) = modal
-                        .teams
-                        .iter()
-                        .position(|t| t.label.to_lowercase().contains(&preset.to_lowercase()))
-                {
-                    modal.team_selected = idx;
-                }
-                modal.loading = false;
-            }
-            Err(e) => {
-                modal.error = format!("Failed to fetch teams: {e}");
-                modal.loading = false;
-            }
+        self.spawn_state_refresh(StateEvent::Teams, |s| s.sync_teams());
+        if let Some(team_id) = team_id {
+            self.spawn_state_refresh(
+                StateEvent::Team {
+                    team_id: team_id.clone(),
+                },
+                move |s| s.sync_team_data(&team_id),
+            );
         }
-
-        self.views.push(View::NewIssue(modal));
     }
 
-    /// Kick off background loading of states and assignees for the selected team.
-    fn new_issue_load_states_and_assignees_bg(&mut self, i: usize) {
-        let service = Arc::clone(&self.service);
-        let Some(View::NewIssue(modal)) = self.views.get_mut(i) else {
-            return;
+    /// Leaving the Team field (Tab/Enter): instant cache read for the newly
+    /// selected team plus one background refresh.
+    fn new_issue_team_changed(&mut self, i: usize) {
+        let team_id = match self.views.get(i) {
+            Some(View::NewIssue(modal)) => modal.selected_team_id(),
+            _ => None,
         };
-        let Some(team_id) = modal
-            .teams
-            .get(modal.team_selected)
-            .and_then(|t| t.id.clone())
-        else {
+        let Some(team_id) = team_id else {
             return;
         };
 
-        modal.loading = true;
-        modal.error.clear();
+        let (states, assignees) = team_scoped_items(&self.db, &team_id);
+        if let Some(View::NewIssue(modal)) = self.views.get_mut(i) {
+            modal.states = states;
+            modal.state_selected = 0;
+            modal.assignees = assignees;
+            modal.assignee_selected = 0;
+            modal.loading = true;
+        }
 
-        let (tx, rx) = mpsc::channel::<ModalEvent>();
-        modal.modal_rx = Some(rx);
-
-        std::thread::spawn(move || {
-            // Fetch viewer for "me" shortcut.
-            let viewer = service.fetch_viewer();
-
-            // Fetch states.
-            match service.fetch_workflow_states(&team_id) {
-                Ok(states) => {
-                    let items: Vec<PopupItem> = states
-                        .into_iter()
-                        .map(|s| PopupItem {
-                            label: s.name,
-                            id: Some(s.id.into_inner()),
-                        })
-                        .collect();
-                    let _ = tx.send(ModalEvent::StatesLoaded(items));
-                }
-                Err(e) => {
-                    let _ = tx.send(ModalEvent::LoadError(format!(
-                        "Failed to fetch states: {e}"
-                    )));
-                    return;
-                }
-            }
-
-            // Fetch assignees.
-            match service.fetch_team_members(&team_id) {
-                Ok(members) => {
-                    let items = build_assignee_items(viewer.as_ref(), members);
-                    let _ = tx.send(ModalEvent::AssigneesLoaded(items));
-                }
-                Err(e) => {
-                    let _ = tx.send(ModalEvent::LoadError(format!(
-                        "Failed to fetch assignees: {e}"
-                    )));
-                }
-            }
-        });
+        self.spawn_state_refresh(
+            StateEvent::Team {
+                team_id: team_id.clone(),
+            },
+            move |s| s.sync_team_data(&team_id),
+        );
     }
 
     fn new_issue_submit(&mut self, i: usize) {
@@ -216,11 +268,7 @@ impl super::App {
             return;
         }
 
-        let Some(team_id) = modal
-            .teams
-            .get(modal.team_selected)
-            .and_then(|t| t.id.clone())
-        else {
+        let Some(team_id) = modal.selected_team_id() else {
             if let Some(View::NewIssue(m)) = self.views.get_mut(i) {
                 m.error = "Select a team".to_string();
             }
@@ -254,52 +302,6 @@ impl super::App {
             Err(e) => {
                 if let Some(View::NewIssue(m)) = self.views.get_mut(i) {
                     m.error = format!("Failed to queue issue: {e}");
-                }
-            }
-        }
-    }
-
-    /// Poll modal background channel and update modal state. The modal lives
-    /// on whichever `NewIssue` view is in the stack -- there is at most one.
-    pub(crate) fn poll_modal_events(&mut self) {
-        // Collect events before mutating -- avoids borrow issues.
-        let events: Vec<ModalEvent> = {
-            let Some(modal) = self.views.iter().find_map(|v| match v {
-                View::NewIssue(m) => Some(m),
-                _ => None,
-            }) else {
-                return;
-            };
-            let Some(rx) = modal.modal_rx.as_ref() else {
-                return;
-            };
-            let mut evts = Vec::new();
-            while let Ok(ev) = rx.try_recv() {
-                evts.push(ev);
-            }
-            evts
-        };
-
-        let Some(modal) = self.views.iter_mut().find_map(|v| match v {
-            View::NewIssue(m) => Some(m),
-            _ => None,
-        }) else {
-            return;
-        };
-        for ev in events {
-            match ev {
-                ModalEvent::StatesLoaded(items) => {
-                    modal.states = items;
-                    modal.state_selected = 0;
-                }
-                ModalEvent::AssigneesLoaded(items) => {
-                    modal.assignees = items;
-                    modal.assignee_selected = 0;
-                    modal.loading = false;
-                }
-                ModalEvent::LoadError(msg) => {
-                    modal.error = msg;
-                    modal.loading = false;
                 }
             }
         }
@@ -388,10 +390,9 @@ fn build_create_request(
 
 /// Build the assignee popup items: "Me (name)" at top if the viewer is known,
 /// then "Unassigned", then the remaining team members (excluding the viewer).
-pub(crate) fn build_assignee_items(
-    viewer: Option<&viewer::User>,
-    members: Vec<User>,
-) -> Vec<PopupItem> {
+/// `viewer` is the persisted `db::synced_viewer` -- offline-safe, absent
+/// before the first successful sync.
+pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = Vec::new();
     if let Some(v) = viewer {
         items.push(PopupItem {
@@ -463,13 +464,13 @@ pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
             let field = field.clone();
             match code {
                 KeyCode::Tab if !shift => {
-                    // When leaving Team field, pre-load states and assignees in background.
+                    // When leaving Team field, refresh states and assignees.
                     if field == NewIssueField::Team {
                         let next = modal.focused_field.next();
                         modal.focused_field = next;
                         // Release the mutable borrow before calling the method.
                         let _ = modal;
-                        app.new_issue_load_states_and_assignees_bg(i);
+                        app.new_issue_team_changed(i);
                     } else {
                         modal.focused_field = modal.focused_field.next();
                     }
@@ -503,7 +504,7 @@ pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
                         modal.focused_field = next;
                         // Release the mutable borrow before calling the method.
                         let _ = modal;
-                        app.new_issue_load_states_and_assignees_bg(i);
+                        app.new_issue_team_changed(i);
                     } else {
                         modal.focused_field = modal.focused_field.next();
                     }

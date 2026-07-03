@@ -215,13 +215,12 @@ fn priority_label_to_u8_maps_levels() {
 
 #[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
-    let viewer = lt_types::viewer::User {
+    // `viewer` is the persisted `db::synced_viewer` shape, not the live
+    // API `viewer::User` -- this is the "Me (...)" resolution the modal
+    // uses at consume time.
+    let viewer = User {
         id: "v".into(),
         name: "Vic".to_string(),
-        organization: lt_types::viewer::Organization {
-            name: "Acme".to_string(),
-            url_key: "acme".to_string(),
-        },
     };
     let members = || {
         vec![
@@ -328,7 +327,6 @@ fn new_issue_modal() {
         assignee_selected: 0,
         loading: false,
         error: String::new(),
-        modal_rx: None,
     }));
     insta::assert_snapshot!(draw(&mut app, 100, 30));
 }

@@ -9,7 +9,6 @@ use std::sync::mpsc::Receiver;
 
 use anyhow::Result;
 use lt_types::query::IssueQuery;
-use lt_types::types::{Team, User, WorkflowState};
 use lt_types::viewer;
 
 /// Outcome of a background sync, delivered to the TUI event loop.
@@ -49,15 +48,6 @@ pub trait SyncService: Send + Sync {
 
     /// Fetch the viewer identity (best-effort; `None` when unauthenticated).
     fn fetch_viewer(&self) -> Option<viewer::User>;
-
-    /// List the teams the viewer can file issues against.
-    fn fetch_teams(&self) -> Result<Vec<Team>>;
-
-    /// List a team's workflow states.
-    fn fetch_workflow_states(&self, team_id: &str) -> Result<Vec<WorkflowState>>;
-
-    /// List a team's members.
-    fn fetch_team_members(&self, team_id: &str) -> Result<Vec<User>>;
 
     /// Sync an issue's comments from the API into the local database.
     fn sync_comments(&self, issue_id: &str) -> Result<()>;

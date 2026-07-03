@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
 use lt_types::types::Issue;
 
-use super::{App, AppEvent, KeyFlow, StateCtx, StateEvent, Status, View};
+use super::{App, KeyFlow, StateCtx, StateEvent, Status, View};
 
 /// The detail pane's complete state: the shared `types`/`comments` fragments
 /// the TUI composes for display, plus the panel's scroll offset and comment
@@ -116,17 +114,15 @@ impl App {
         let mut detail = build_cached_detail(&issue, cached_comments);
         populate_relations(&self.db, &mut detail, &issue);
 
-        // Spawn background thread to refresh comments through the sync
-        // service; the re-read happens at consume time, not here.
+        // Refresh comments through the sync service in the background; the
+        // re-read happens at consume time, not here.
         let issue_id = issue.id.into_inner();
-        let service = Arc::clone(&self.service);
-        let events_tx = self.events_tx.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = service.sync_comments(&issue_id) {
-                tracing::warn!("comment sync failed: {e:#}");
-            }
-            let _ = events_tx.send(AppEvent::State(StateEvent::Comments { issue_id }));
-        });
+        self.spawn_state_refresh(
+            StateEvent::Comments {
+                issue_id: issue_id.clone(),
+            },
+            move |s| s.sync_comments(&issue_id),
+        );
 
         self.views.push(View::Detail(Box::new(detail)));
         if let Some(list) = self.base_list_mut() {
