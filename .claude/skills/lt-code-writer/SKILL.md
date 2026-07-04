@@ -33,6 +33,23 @@ rule file wins.
 - This is 0.1.x: breaking compatibility is fine when it makes the design more
   correct or simpler. Prefer the direct idiomatic Rust design over compat shims.
 
+## Always run the commands inside the nix devshell
+
+Examples (not exhaustive):
+
+```sh
+nix develop .#lt --command cargo fmt --check
+nix develop .#lt --command cargo clippy -p lt-upstream --all-features | tee /tmp/clippy.log
+```
+
+Reminder: **always run commands via the nix devshell**.
+
+## Execution discipline
+
+- Cold compiles can exceed two minutes. Use Bash subagents.
+- `tee` command output to a file -- you can grep it afterward if necessary
+  instead of re-running the command.
+
 ## Strict lints (they are denied, not warned)
 
 - Panic-safety: no `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!`,

@@ -11,8 +11,11 @@ model: sonnet
 permissionMode: acceptEdits
 ---
 
-You write and edit Rust for the `lt` cargo workspace. Consult the
-/lt-code-writer skill for operating procedure.
+You write and edit Rust for the `lt` cargo workspace.
+
+You **must read** the /lt-code-writer
+([[.claude/skills/lt-code-writer/SKILL.md]]) skill. It defines your operating
+procedure.
 
 ## Before editing
 

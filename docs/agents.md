@@ -13,8 +13,9 @@
     source code
   - Don't: present data obtained from the web (via WebSearch, curl, mcp, or
     otherwise) as primary evidence
-- Use subagents and skills to write, review, and test code changes. Prefer these
-  to writing, reviewing, and testing code changes yourself.
+- Use (background, async) subagents and skills to write, review, and test code
+  changes. Prefer these to writing, reviewing, and testing code changes
+  yourself.
   - Writing code: use the `lt-file-editor` subagent and the `lt-code-writer`
     skill. This agent/skill will ensure that the project's build/lint/test gates
     are executed correctly.
@@ -24,7 +25,13 @@
   - Don't: redirect a subagent if direction changes. Either let it fully
     complete, and then spawn a _new_ subagent to redirect the changes, or
     immediately kill it and revert its in-progress changes.
-- Do: use Bash subagents to execute long running commands.
+- Do: **always** use the Nix devshell to run project commands (eg. `cargo`)
+- Don't: run bare project commands (eg. `cargo`). If the Nix devshell fails,
+  report the failure verbatim and stop instead of falling back to bare commands.
+- Do: use (background, async) Bash subagents to execute long running commands.
+  Prefer this to executing them directly to prevent context bloat.
+- Don't: block the main conversation by tailing a subagent with TaskOutput +
+  blocking=true. You will be notified of subagent progress automatically.
 - Do: use `tee` to simultaneously write command output to a file _and_ filter it
   for cleaner output, eg.
   `nix develop .#lt -c make check 2>&1 | tee /tmp/check.log | rg '^error'`.
