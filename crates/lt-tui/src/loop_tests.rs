@@ -19,28 +19,35 @@ fn drain_events(app: &mut App) {
     }
 }
 
-/// Test-side re-fetch of the base list, driving the same `fetch_list` free
-/// function the app's own key handlers call.
+/// Test-side re-fetch of the base list, driving the same `refetch` the
+/// app's own key handlers call.
 fn fetch_base_list(app: &mut App, reset_selection: bool) {
-    let viewer_name = app.auth.viewer_name();
+    let ctx = StateCtx {
+        db: &app.db,
+        viewer_name: app.auth.viewer_name(),
+    };
     if let Some(View::List(list)) = app.views.first_mut() {
-        fetch_list(list, &app.db, viewer_name, reset_selection);
+        list.refetch(&ctx, reset_selection);
     }
 }
 
 /// Test-side page turn, driving the same query/refetch pair as the
 /// pagination arms of `apply_list`.
 fn turn_page(app: &mut App, forward: bool) {
-    app.with_base_list(|list, ctx| {
+    let ctx = StateCtx {
+        db: &app.db,
+        viewer_name: app.auth.viewer_name(),
+    };
+    if let Some(View::List(list)) = app.views.first_mut() {
         let turned = if forward {
             list.query.next_page()
         } else {
             list.query.prev_page()
         };
         if turned {
-            list.refetch(ctx, true);
+            list.refetch(&ctx, true);
         }
-    });
+    }
 }
 
 fn key(c: char) -> KeyEvent {
@@ -210,7 +217,7 @@ fn toggle_desc_refetches() {
     ];
     let mut app = app_with_db(&rows).unwrap();
     let desc_before = app.list_mut().query.args.desc;
-    app.toggle_desc();
+    app.dispatch_key(key('d'));
     assert_ne!(app.list_mut().query.args.desc, desc_before);
     assert_eq!(app.list_mut().issues.len(), 2);
 }
@@ -481,7 +488,7 @@ fn run_app_errs_when_events_exhausted_without_quit() {
 fn double_esc_resets_to_initial_filter() {
     let rows = [db_issue("1", "ENG-1", "Todo", 5)];
     let mut app = app_with_db(&rows).unwrap();
-    let initial_sort = app.initial_args.sort.clone();
+    let initial_sort = app.list_mut().query.args.sort.clone();
     let next_sort = app.list_mut().query.args.sort.next();
     app.list_mut().query.args.sort = next_sort;
     let replaced = app.list_mut().query.replace_sort_in_filter();

@@ -487,18 +487,6 @@ impl ListView {
     }
 }
 
-/// Re-fetch `list` from `db`. A free function, not an `App` method: the
-/// fetch is the list's own state, not app-level.
-fn fetch_list(
-    list: &mut ListView,
-    db: &lt_runtime::db::Database,
-    viewer_name: Option<&str>,
-    reset_selection: bool,
-) {
-    let ctx = StateCtx { db, viewer_name };
-    list.refetch(&ctx, reset_selection);
-}
-
 /// Read-only context a view's consume/re-query needs. Built inline from
 /// disjoint `App` field borrows: an accessor method would borrow all of
 /// `self` and conflict with a simultaneous `&mut self.views`.
@@ -693,11 +681,7 @@ pub struct App {
 
     pub session: Session,
 
-    // -- launch seeds / double-esc reset -------------------------------
-    /// Snapshot of the filter at startup, for the double-esc reset.
-    pub initial_filter: search_query::QueryAst,
-    /// Snapshot of the args at startup, for the double-esc reset.
-    pub initial_args: IssueQuery,
+    // -- double-esc reset -------------------------------------------------
     /// Timestamp of the last Esc keypress (used to detect double-esc).
     pub last_esc_time: Option<Instant>,
 
@@ -726,8 +710,6 @@ impl App {
         service: Arc<dyn SyncService>,
         events_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
-        let initial_args = list.query.args.clone();
-        let initial_filter = list.query.filter.clone();
         Self {
             views: vec![View::List(Box::new(list))],
             quit: false,
@@ -739,8 +721,6 @@ impl App {
             session: Session {
                 keyboard_enhanced: false,
             },
-            initial_filter,
-            initial_args,
             last_esc_time: None,
             db,
             clock: Clock::System,
@@ -846,10 +826,13 @@ impl App {
     /// Full reset to the state the TUI was launched with: sort, filters,
     /// and search query.
     fn reset_base_view(&mut self) {
-        let viewer_name = self.auth.viewer_name();
+        let ctx = StateCtx {
+            db: &self.db,
+            viewer_name: self.auth.viewer_name(),
+        };
         if let Some(View::List(list)) = self.views.first_mut() {
             list.query.reset();
-            fetch_list(list, &self.db, viewer_name, true);
+            list.refetch(&ctx, true);
         }
         self.last_esc_time = None;
     }
@@ -857,30 +840,15 @@ impl App {
     /// `r`: an immediate re-read plus a sync request. Pressed mid-cycle,
     /// this coalesces into a follow-up sync rather than being ignored.
     fn refresh(&mut self) {
-        let viewer_name = self.auth.viewer_name();
-        // immediate re-read for responsiveness
-        if let Some(View::List(list)) = self.views.first_mut() {
-            fetch_list(list, &self.db, viewer_name, false);
-        }
-        self.service.request_sync();
-    }
-
-    fn toggle_desc(&mut self) {
-        self.with_base_list(|list, ctx| {
-            list.query.toggle_desc();
-            list.refetch(ctx, true);
-        });
-    }
-
-    /// Build a `StateCtx` and drive `op` against the base list.
-    fn with_base_list(&mut self, op: impl FnOnce(&mut ListView, &StateCtx)) {
         let ctx = StateCtx {
             db: &self.db,
             viewer_name: self.auth.viewer_name(),
         };
+        // immediate re-read for responsiveness
         if let Some(View::List(list)) = self.views.first_mut() {
-            op(list, &ctx);
+            list.refetch(&ctx, false);
         }
+        self.service.request_sync();
     }
 
     /// Downcast the view at `i` via `extract`.
@@ -904,9 +872,12 @@ impl App {
         } else {
             // First esc: standard refresh.
             self.last_esc_time = Some(now);
-            let viewer_name = self.auth.viewer_name();
+            let ctx = StateCtx {
+                db: &self.db,
+                viewer_name: self.auth.viewer_name(),
+            };
             if let Some(View::List(list)) = self.views.first_mut() {
-                fetch_list(list, &self.db, viewer_name, true);
+                list.refetch(&ctx, true);
             }
         }
     }
@@ -1313,9 +1284,8 @@ static LIST_KEYMAP: Keymap = Keymap {
     unbound: Unbound::Cascade,
 };
 
-/// The list view's non-navigation actions. The list is always the base
-/// view, so it reaches its own state through `base_mut` rather than `_i`.
-fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
+/// The list view's non-navigation actions.
+fn apply_list(app: &mut App, i: usize, action: keymap::Action) {
     use keymap::Action;
     match action {
         Action::OpenDetail => app.open_detail(),
@@ -1326,17 +1296,25 @@ fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
         Action::SetPriority => app.open_priority_popup(),
         Action::SetAssignee => app.open_assignee_popup(),
         Action::Refresh => app.refresh(),
-        Action::ToggleSortDirection => app.toggle_desc(),
-        Action::NextPage => app.with_base_list(|list, ctx| {
-            if list.query.next_page() {
-                list.refetch(ctx, true);
+        Action::ToggleSortDirection | Action::NextPage | Action::PrevPage => {
+            let ctx = StateCtx {
+                db: &app.db,
+                viewer_name: app.auth.viewer_name(),
+            };
+            if let Some(View::List(list)) = app.views.get_mut(i) {
+                let refetch = if action == Action::ToggleSortDirection {
+                    list.query.toggle_desc();
+                    true
+                } else if action == Action::NextPage {
+                    list.query.next_page()
+                } else {
+                    list.query.prev_page()
+                };
+                if refetch {
+                    list.refetch(&ctx, true);
+                }
             }
-        }),
-        Action::PrevPage => app.with_base_list(|list, ctx| {
-            if list.query.prev_page() {
-                list.refetch(ctx, true);
-            }
-        }),
+        }
         // Re-authenticate: background OAuth login.
         Action::Login if !matches!(app.auth, AuthStatus::Authenticating) => {
             app.auth = AuthStatus::Authenticating;
