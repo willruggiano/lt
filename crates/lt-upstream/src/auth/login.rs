@@ -38,7 +38,7 @@ fn login_with(client_id: &str, client_secret: &str) -> Result<()> {
 struct OauthFlow<'a> {
     browser: &'a dyn Browser,
     listener: &'a dyn CallbackListener,
-    exchanger: &'a dyn TokenExchanger,
+    exchanger: TokenExchanger,
 }
 
 /// Production wiring: real browser, TCP callback listener, ureq HTTP.
@@ -46,7 +46,7 @@ fn production_flow() -> OauthFlow<'static> {
     OauthFlow {
         browser: &RealBrowser,
         listener: &TcpCallbackListener,
-        exchanger: &UreqTokenExchanger,
+        exchanger: TokenExchanger::Ureq,
     }
 }
 
@@ -78,7 +78,7 @@ fn run_with_credentials(
     info!("Authorization received. Exchanging for token...");
 
     exchange_code(
-        flow.exchanger,
+        &flow.exchanger,
         &TokenExchange {
             client_id,
             client_secret,
@@ -389,37 +389,62 @@ pub(super) fn parse_token_response(status: u16, body: &str) -> Result<AuthToken>
     serde_json::from_str::<AuthToken>(body).context("parsing token response")
 }
 
-/// POSTs the token-exchange form and returns the HTTP status and raw body.
-pub(super) trait TokenExchanger {
-    fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<(u16, String)>;
+/// POSTs a token-grant form and returns the HTTP status and raw body. The
+/// set of exchangers is closed -- ureq in production, a scripted fake in
+/// tests -- so it is an enum rather than a trait with two impls.
+pub(super) enum TokenExchanger {
+    /// Send the form via ureq.
+    Ureq,
+    /// Return a scripted response and record each form it was sent.
+    #[cfg(test)]
+    Fake {
+        status: u16,
+        body: String,
+        calls: std::cell::RefCell<Vec<Vec<(String, String)>>>,
+    },
 }
 
-/// Production exchanger: send the form via ureq.
-pub(super) struct UreqTokenExchanger;
+impl TokenExchanger {
+    pub(super) fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<(u16, String)> {
+        match self {
+            Self::Ureq => {
+                let result = ureq::post(url)
+                    .config()
+                    .http_status_as_error(false)
+                    .build()
+                    .send_form(params.iter().copied());
 
-impl TokenExchanger for UreqTokenExchanger {
-    fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<(u16, String)> {
-        let result = ureq::post(url)
-            .config()
-            .http_status_as_error(false)
-            .build()
-            .send_form(params.iter().copied());
-
-        match result {
-            Ok(mut resp) => {
-                let status = resp.status().as_u16();
-                let body = resp
-                    .body_mut()
-                    .read_to_string()
-                    .context("reading token exchange response body")?;
-                Ok((status, body))
+                match result {
+                    Ok(mut resp) => {
+                        let status = resp.status().as_u16();
+                        let body = resp
+                            .body_mut()
+                            .read_to_string()
+                            .context("reading token exchange response body")?;
+                        Ok((status, body))
+                    }
+                    Err(e) => Err(anyhow::Error::from(e)),
+                }
             }
-            Err(e) => Err(anyhow::Error::from(e)),
+            #[cfg(test)]
+            Self::Fake {
+                status,
+                body,
+                calls,
+            } => {
+                calls.borrow_mut().push(
+                    params
+                        .iter()
+                        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                        .collect(),
+                );
+                Ok((*status, body.clone()))
+            }
         }
     }
 }
 
-fn exchange_code(exchanger: &dyn TokenExchanger, exchange: &TokenExchange) -> Result<AuthToken> {
+fn exchange_code(exchanger: &TokenExchanger, exchange: &TokenExchange) -> Result<AuthToken> {
     let params = build_token_params(exchange);
     let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
     parse_token_response(status, &body)
@@ -608,23 +633,6 @@ mod tests {
         }
     }
 
-    struct FakeTokenExchanger {
-        status: u16,
-        body: String,
-        calls: std::cell::RefCell<Vec<Vec<(String, String)>>>,
-    }
-    impl TokenExchanger for FakeTokenExchanger {
-        fn post_form(&self, _url: &str, params: &[(&str, &str)]) -> Result<(u16, String)> {
-            self.calls.borrow_mut().push(
-                params
-                    .iter()
-                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-                    .collect(),
-            );
-            Ok((self.status, self.body.clone()))
-        }
-    }
-
     #[test]
     fn run_with_credentials_drives_the_full_flow() {
         let browser = FakeBrowser {
@@ -633,7 +641,7 @@ mod tests {
         let listener = ScriptedCallbackListener {
             code: "auth-code".to_string(),
         };
-        let exchanger = FakeTokenExchanger {
+        let exchanger = TokenExchanger::Fake {
             status: 200,
             body: r#"{"access_token":"final-token","token_type":"Bearer"}"#.to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
@@ -641,7 +649,7 @@ mod tests {
         let flow = OauthFlow {
             browser: &browser,
             listener: &listener,
-            exchanger: &exchanger,
+            exchanger,
         };
 
         let token = run_with_credentials(&flow, "cid", "csecret").unwrap();
@@ -653,7 +661,10 @@ mod tests {
         assert!(opened[0].contains("linear.app"));
 
         // The exchange POSTed the code from the listener and our credentials.
-        let calls = exchanger.calls.borrow();
+        let TokenExchanger::Fake { calls, .. } = &flow.exchanger else {
+            panic!("expected fake")
+        };
+        let calls = calls.borrow();
         let sent: std::collections::HashMap<_, _> = calls[0].iter().cloned().collect();
         assert_eq!(sent.get("code").map(String::as_str), Some("auth-code"));
         assert_eq!(sent.get("client_id").map(String::as_str), Some("cid"));
@@ -667,7 +678,7 @@ mod tests {
         let listener = ScriptedCallbackListener {
             code: "auth-code".to_string(),
         };
-        let exchanger = FakeTokenExchanger {
+        let exchanger = TokenExchanger::Fake {
             status: 401,
             body: "unauthorized".to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
@@ -675,7 +686,7 @@ mod tests {
         let flow = OauthFlow {
             browser: &browser,
             listener: &listener,
-            exchanger: &exchanger,
+            exchanger,
         };
         assert!(run_with_credentials(&flow, "cid", "csecret").is_err());
     }
