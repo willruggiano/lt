@@ -428,6 +428,14 @@ impl ListView {
         }
     }
 
+    /// Construct the view and populate it from `query`'s own fetch -- the
+    /// query defines the view's initial data, same as every later refetch.
+    fn open(query: ListQuery, ctx: &StateCtx) -> Self {
+        let mut view = Self::new(Vec::new(), query);
+        view.refetch(ctx, true); // reset_selection: select row 0 when non-empty
+        view
+    }
+
     fn selected_issue(&self) -> Option<&Issue> {
         self.table_state.selected().and_then(|i| self.issues.get(i))
     }
@@ -714,6 +722,7 @@ impl App {
     // the loop's own events arrive.
     fn new(
         list: ListView,
+        db: lt_runtime::db::Database,
         service: Arc<dyn SyncService>,
         events_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
@@ -733,7 +742,7 @@ impl App {
             initial_filter,
             initial_args,
             last_esc_time: None,
-            db: lt_runtime::db::Database::File,
+            db,
             clock: Clock::System,
             service,
             events_rx,
@@ -741,8 +750,9 @@ impl App {
     }
 
     /// An `App` for rendering tests: a throwaway in-memory database and
-    /// event channel, backed by a [`RecordingSyncService`]. Fallible
-    /// (in-memory SQLite setup).
+    /// event channel, backed by a [`RecordingSyncService`]. Seeds `issues`
+    /// directly rather than through `ListView::open`, since the memory db is
+    /// still empty at this point. Fallible (in-memory SQLite setup).
     #[cfg(all(test, feature = "sim"))]
     fn for_test(issues: Vec<Issue>) -> Result<Self> {
         let db = lt_runtime::db::Database::memory()?;
@@ -750,9 +760,7 @@ impl App {
         let service = RecordingSyncService::new(&db, tx)?;
         let query = ListQuery::from(IssueQuery::default());
         let list = ListView::new(issues, query);
-        let mut app = Self::new(list, Arc::new(service), rx);
-        app.db = db;
-        Ok(app)
+        Ok(Self::new(list, db, Arc::new(service), rx))
     }
 
     /// Swap in a fresh database, shared with a fresh [`RecordingSyncService`]
@@ -1094,37 +1102,21 @@ pub fn run(
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
-    // Try to load issues already synced locally first (local-first UX). Use
-    // query_issues_page so we can capture the correct has_next_page flag.
-    let (issues, has_next_page, end_cursor) = (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
-        let conn = lt_runtime::db::open_db(lt_runtime::db::db_path()?)?;
-        let limit = i64::from(args.limit.min(250));
-        let (issues, has_next) = lt_runtime::db::query_issues_page(&conn, &args, 0)?;
-        let end_cursor = if has_next {
-            Some(limit.to_string())
-        } else {
-            None
-        };
-        Ok((issues, has_next, end_cursor))
-    })()
-    .unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "startup: failed to load cached issues");
-        (Vec::new(), false, None)
-    });
+    let db = lt_runtime::db::Database::File;
 
     // Fetch viewer identity before `service` moves into `App::new` (a
     // shared read through the `Arc`, so ownership either order is fine).
     let viewer = service.fetch_viewer();
 
-    let mut query = ListQuery::from(args);
-    query.pagination = Pagination {
-        has_next_page,
-        current_cursor: None,
-        cursor_stack: Vec::new(),
-        end_cursor,
+    // The query defines the view's initial data (local-first UX): `open`
+    // warns and starts empty on a failed/missing db read, same as every
+    // later refetch.
+    let ctx = StateCtx {
+        db: &db,
+        viewer_name: viewer.as_ref().map(|v| v.name.as_str()),
     };
-    let list = ListView::new(issues, query);
-    let mut app = App::new(list, service, events_rx);
+    let list = ListView::open(ListQuery::from(args), &ctx);
+    let mut app = App::new(list, db, service, events_rx);
 
     app.auth = match viewer {
         Some(viewer) => AuthStatus::Authenticated { viewer },

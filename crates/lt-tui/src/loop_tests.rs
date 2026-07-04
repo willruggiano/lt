@@ -28,6 +28,21 @@ fn fetch_base_list(app: &mut App, reset_selection: bool) {
     }
 }
 
+/// Test-side page turn, driving the same query/refetch pair as the
+/// pagination arms of `apply_list`.
+fn turn_page(app: &mut App, forward: bool) {
+    app.with_base_list(|list, ctx| {
+        let turned = if forward {
+            list.query.next_page()
+        } else {
+            list.query.prev_page()
+        };
+        if turned {
+            list.refetch(ctx, true);
+        }
+    });
+}
+
 fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
@@ -167,14 +182,14 @@ fn next_and_prev_page_walk_offsets() {
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
     assert!(app.list_mut().query.pagination.has_next_page);
 
-    app.next_page();
+    turn_page(&mut app, true);
     assert_eq!(
         app.list_mut().query.pagination.current_cursor.as_deref(),
         Some("2")
     );
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-3");
 
-    app.prev_page();
+    turn_page(&mut app, false);
     assert!(app.list_mut().query.pagination.current_cursor.is_none());
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
 }
@@ -183,7 +198,7 @@ fn next_and_prev_page_walk_offsets() {
 fn prev_page_at_start_is_noop() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     fetch_base_list(&mut app, true);
-    app.prev_page(); // empty cursor stack -> no-op
+    turn_page(&mut app, false); // empty cursor stack -> no-op
     assert_eq!(app.list_mut().issues.len(), 1);
 }
 
@@ -198,6 +213,38 @@ fn toggle_desc_refetches() {
     app.toggle_desc();
     assert_ne!(app.list_mut().query.args.desc, desc_before);
     assert_eq!(app.list_mut().issues.len(), 2);
+}
+
+// -- ListView::open ---------------------------------------------------------
+
+#[test]
+fn open_with_filterful_query_matches_post_sync_refetch() {
+    let rows = [
+        db_issue("1", "ENG-1", "Todo", 5),
+        db_issue("2", "ENG-2", "Done", 4),
+        db_issue("3", "ENG-3", "Todo", 3),
+    ];
+    let db = Database::memory().unwrap();
+    {
+        let conn = db.connect().unwrap();
+        lt_runtime::db::upsert_issues(&conn, &rows).unwrap();
+    }
+    let ctx = StateCtx {
+        db: &db,
+        viewer_name: None,
+    };
+    let mut query = ListQuery::from(IssueQuery::default());
+    query.filter = search_query::parse_query_ast("state:todo");
+
+    // Startup: the query defines the view's initial data.
+    let mut list = ListView::open(query, &ctx);
+    let startup: Vec<String> = list.issues.iter().map(|i| i.identifier.clone()).collect();
+    assert_eq!(startup, vec!["ENG-1".to_string(), "ENG-3".to_string()]);
+
+    // Steady-state: the same engine, driven by the first sync's `Issues` event.
+    list.consume(&ctx, true, &StateEvent::Issues);
+    let post_sync: Vec<String> = list.issues.iter().map(|i| i.identifier.clone()).collect();
+    assert_eq!(startup, post_sync);
 }
 
 // -- populate_relations ---------------------------------------------------
