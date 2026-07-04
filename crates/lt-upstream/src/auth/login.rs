@@ -417,7 +417,7 @@ fn parse_token_response(status: u16, body: &str, clock: &Clock) -> Result<AuthTo
         token_type: response.token_type,
         expires_in: response.expires_in,
         scope: response.scope,
-        issued_at: clock.now_unix_secs(),
+        issued_at: clock.now().timestamp().cast_unsigned(),
         refresh_token: response.refresh_token,
     })
 }
