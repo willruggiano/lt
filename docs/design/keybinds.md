@@ -246,11 +246,17 @@ tables + no-timer pending prefix + help generated from the tables**.
 
 ```text
 crates/lt-tui/src/keymap/
-  mod.rs      KeyContext, Binding, Resolved, resolve(), static binding
-              tables, help_rows(), invariant + snapshot tests
+  mod.rs      Binding, Resolved, resolve(), the shared GLOBAL table,
+              help_rows(), invariant + snapshot tests
   key.rs      Key: From<KeyEvent> normalization, Display, FromStr, const ctors
   action.rs   Action enum + label()
 ```
+
+The keymap module is vocabulary and resolution machinery only. Each view
+declares its own binding tables and a `Keymap` — resolution layers, apply
+function, unbound policy — next to its state and handlers (lib.rs for the list,
+detail.rs, popup.rs, new_issue.rs), and `View::keymap()` selects the declaration
+from the view's own state (ENG-46).
 
 Deleted: `ALL_KEYBINDINGS`/`HelpEntry` (lib.rs:527-634),
 `ScrollMotion::from_key` (lib.rs:179-192, subsumed by the `GLOBAL` table), and
@@ -272,18 +278,20 @@ crossterm KeyEvent (input thread, Press-filtered)
         |            esc while a chord is pending? -> cancel, done
         v
   walk the view stack, top down; per view:
-    key_context(view)      List | Detail | Popup | NewIssuePicker
-        |                  | Search | Help | NewIssueText | CommentInput
+    view.keymap()          the view's declared Keymap; sub-focus selects
+        |                  (Detail's open comment input, NewIssue's field)
         v
-    resolve(ctx, pending, key)
+    resolve(keymap.layers, pending, key)
         |
-        +-- Act(action)  -> apply_<context>(app, action); consumed
+        +-- Act(action)  -> navigation via View::scroll; anything else
+        |                   via the keymap's apply fn; consumed
         +-- Pending(key) -> app.pending_key = Some(key); status row
         |                   shows it; consumed
-        +-- Unbound(key) -> text contexts: forward to editor (never esc);
-        |                   consumed
-        |                   NewIssuePicker: consumed (a form swallows strays)
-        |                   Detail / Popup: pass to the view beneath
+        +-- Unbound(key) -> esc: pass to the floor (never forwarded);
+        |                   else per the keymap's unbound policy:
+        |                   Forward -> the view's editor widget; consumed
+        |                   Swallow -> consumed (a form swallows strays)
+        |                   Cascade -> pass to the view beneath
         v (no view consumed the key)
   the Esc/q floor           delivered (lib.rs:1137-1143): esc/q pop above
                             the base; at the base, esc = double-esc reset,
@@ -369,25 +377,35 @@ There is no `Quit` variant: quit is the floor's, not a binding's. A reserved
 Linear binding becomes one new variant + one table row + one apply arm when its
 feature lands; that is the entire extensibility story.
 
-### Contexts and layering
+### View-declared keymaps and layering
 
 ```rust
-pub enum KeyContext {
-    List, Detail, Popup, NewIssuePicker,           // full keymap contexts
-    Search, Help, NewIssueText, CommentInput,      // text contexts
+/// Declared once per view context, next to the view's state and handlers.
+pub struct Keymap {
+    pub layers: Layers,                             // own table, shared layers, GLOBAL
+    pub apply: Option<fn(&mut App, usize, Action)>, // non-navigation actions
+    pub unbound: Unbound,
+}
+
+pub enum Unbound {
+    Cascade,                                // pass to the view beneath
+    Swallow,                                // consumed; a form swallows strays
+    Forward(fn(&mut App, usize, KeyEvent)), // to the view's editor widget
 }
 ```
 
-`key_context` derives the context from a view variant plus its sub-focus:
-`View::List` → `List`; `View::Detail(d)` → `CommentInput` iff
-`d.comment_input.is_some()`, else `Detail`; `View::NewIssue(m)` by
-`m.focused_field` (Title/Description → `NewIssueText`, pickers →
-`NewIssuePicker`) — absorbing the inline gates at detail.rs:189 and
-new_issue.rs:423.
+There is no context enum: a parallel context type would have to be kept in sync
+with the view variants and their sub-focus (ENG-46). Instead each view declares
+its `Keymap`(s) and `View::keymap()` reads the view's own state: `View::List` →
+the list keymap; `View::Detail(d)` → the comment-input keymap iff
+`d.comment_input.is_some()`, else the detail keymap; `View::NewIssue(m)` by
+`m.focused_field` (Title/Description → the text keymap, pickers → the picker
+keymap) — the sub-focus decisions live on `DetailView::keymap` and
+`NewIssueModal::keymap`, absorbing the old inline gates.
 
-Two layers, resolved context-first:
+Two layers, resolved own-table-first:
 
-- The context's own table.
+- The view's own table.
 - `GLOBAL` — the navigation vocabulary (`j`/`k`/arrows, `g g`, `G`,
   `ctrl+d`/`ctrl+u`, page keys). This is the merge the ADR's reconciliation
   section calls for: GLOBAL and the delivered scroll-default layer deliver
@@ -410,9 +428,10 @@ something narrower than pop (the comment input's cancel); no table binds `q`
 ADR disclosed is resolved structurally, as delivered: the floor consumes `q` as
 Back before it could ever mean Quit from an overlay.
 
-Contexts split by what `Unbound` means:
+Keymaps split by their declared `Unbound` policy:
 
-- **Text contexts** (a) skip the `GLOBAL` layer — a `j` binding must not steal
+- **`Forward` — the text contexts** (Search, Help, the new-issue text fields,
+  the comment input): (a) skip the `GLOBAL` layer — a `j` binding must not steal
   the letter from the query bar, (b) never start chords, (c) forward unbound
   keys to their editor widget (`TextInput::handle_key`, the description editor,
   the comment buffer), preserving the widgets' existing behavior including the
@@ -422,25 +441,26 @@ Contexts split by what `Unbound` means:
   passes to the floor instead, keeping overlay-close floor-owned — the keymap
   form of the explicit `Esc => Pass` arms the delivered handlers carry
   (popup.rs:527, popup.rs:564, new_issue.rs:412-419).
-- **`NewIssuePicker`** consumes unbound keys without forwarding: the modal is a
-  form, and a stray letter acting on a view underneath it would be hostile.
-  `esc` passes to the floor here too, which pops the modal (and unwatches its
-  scopes, `pop_view` lib.rs:979).
-- **Pass-through contexts** (`Detail`, `Popup`) let an unbound key cascade to
-  the view beneath, ending at `views[0]` and then the floor. This is what makes
-  list bindings reachable from overlays.
+- **`Swallow` — the new-issue picker fields** consume unbound keys without
+  forwarding: the modal is a form, and a stray letter acting on a view
+  underneath it would be hostile. `esc` passes to the floor here too, which pops
+  the modal (and unwatches its scopes, `pop_view` lib.rs:979).
+- **`Cascade`** (`List`, `Detail`, `Popup`) lets an unbound key cascade to the
+  view beneath, ending at `views[0]` and then the floor. This is what makes list
+  bindings reachable from overlays.
 
 ### Resolution and chords
 
 ```rust
 pub enum Resolved { Act(Action), Pending(Key), Unbound(Key) }
 
-pub fn resolve(ctx: KeyContext, pending: Option<Key>, key: Key) -> Resolved {
-    // layers: context table, then GLOBAL unless ctx.is_text()
+pub fn resolve(layers: Layers, pending: Option<Key>, key: Key) -> Resolved {
+    // layers: the view's declared layer list -- its own table, then any
+    // shared layers, then GLOBAL (text contexts declare a single layer,
+    // their own table, so GLOBAL never steals a typeable letter)
     // 1. pending chord? try Chord(pending, key) in each layer; on miss,
     //    drop the prefix and resolve `key` fresh (atuin behavior)
-    // 2. key is a chord prefix in a layer (and !ctx.is_text())?
-    //    -> Pending(key)
+    // 2. key is a chord prefix in a layer? -> Pending(key)
     // 3. Single(key) in a layer? -> Act
     // 4. -> Unbound
 }
@@ -484,26 +504,28 @@ match event {
 `dispatch_key` keeps its delivered four-layer shape with the first two layers
 folded into keymap resolution: the per-view handler call and the separate
 `ScrollMotion::from_key` check become one `resolve` against the focused view's
-context (GLOBAL now carries the scroll keys); on `Act` apply and stop; on
-`Unbound` in a pass-through context repeat against the view beneath
-(`KeyFlow::Pass`, lib.rs:515-518); the Esc/q floor stays the terminal arm,
-verbatim. `resolve` itself is stack-unaware; the cascade and floor are
-dispatch-loop behavior above it.
+declared layers (GLOBAL now carries the scroll keys); on `Act` apply through the
+keymap's apply fn and stop; on `Unbound` under a `Cascade` policy repeat against
+the view beneath (`KeyFlow::Pass`, lib.rs:515-518); the Esc/q floor stays the
+terminal arm, verbatim. `resolve` itself is stack-unaware; the cascade and floor
+are dispatch-loop behavior above it.
 
-The six handlers become per-context
+The six handlers become per-view
 `apply_*(app: &mut App, idx: usize, action: Action)` functions in their current
-files, bodies unchanged, arms keyed on `Action` instead of `KeyCode` + modifier
-booleans (the `idx` re-fetches the view, per the ADR's borrow rule: no view
-borrow crosses a `&mut App` call):
+files, referenced from each view's `Keymap` declaration, bodies unchanged, arms
+keyed on `Action` instead of `KeyCode` + modifier booleans (the `idx` re-fetches
+the view, per the ADR's borrow rule: no view borrow crosses a `&mut App` call).
+Help declares no apply fn (`apply: None`): its table is navigation-only, and
+everything else forwards to its filter bar.
 
-| Today                                    | Becomes                          |
-| ---------------------------------------- | -------------------------------- |
-| `handle_list_key` lib.rs:1454            | `apply_list`                     |
-| `detail::handle_key` detail.rs:184       | `apply_detail`                   |
-| `popup::handle_key` popup.rs:507         | `apply_popup`                    |
-| `handle_help_key` popup.rs:519           | `apply_help` + forward to filter |
-| `handle_search_key` popup.rs:556         | `apply_search` + forward to bar  |
-| `new_issue::handle_key` new_issue.rs:398 | `apply_new_issue` + forward      |
+| Today                                    | Becomes                     |
+| ---------------------------------------- | --------------------------- |
+| `handle_list_key` lib.rs:1454            | `apply_list`                |
+| `detail::handle_key` detail.rs:184       | `apply_detail`              |
+| `popup::handle_key` popup.rs:507         | `apply_popup`               |
+| `handle_help_key` popup.rs:519           | forward to filter           |
+| `handle_search_key` popup.rs:556         | `apply_search` + forward    |
+| `new_issue::handle_key` new_issue.rs:398 | `apply_new_issue` + forward |
 
 Behavior that moves intact: the team watch swap (`new_issue_team_changed`,
 new_issue.rs:254-268, called from the Tab/Enter arms) into the
@@ -624,12 +646,18 @@ pub struct HelpRow {
     pub context: &'static str,  // "global", "list", "detail", ...
 }
 
-/// Iterate GLOBAL then each context table in declaration order; group
-/// consecutive rows by (context, action). Appends static rows for the
-/// floor (esc/q: back; at the list, reset/quit) -- the floor is dispatch
-/// behavior, not a binding, but the panel must still show it.
-pub fn help_rows() -> Vec<HelpRow>;
+/// Iterate the passed contexts in order; group consecutive rows by
+/// (context, action). Appends static rows for the floor (esc/q: back; at
+/// the list, reset/quit) -- the floor is dispatch behavior, not a binding,
+/// but the panel must still show it.
+pub fn help_rows(contexts: &[(&str, &[Table])]) -> Vec<HelpRow>;
 ```
+
+The displayed-context registry (`HELP_CONTEXTS`) lives with the view stack: it
+enumerates each view's declared tables under a user-facing display name, GLOBAL
+first, and collapses the two new-issue contexts into one "new issue" entry (the
+text context's table _is_ the shared form-nav layer, so form-nav plus the
+picker's own rows is their union, with no duplicates).
 
 `HelpPopup` (popup.rs:107-131) stores `rows: Vec<HelpRow>` built once; the
 renderer joins the bindings' `Display` forms with `" / "` ("j / down",
@@ -670,10 +698,10 @@ Inline `#[cfg(test)]` modules per [[testing.md]].
    in Search never cascades; `esc` in Search reaches the floor, not the query
    bar. (The delivered cascade/floor tests cover the floor itself; these pin the
    keymap's pass policies.)
-3. **Invariants** (mod.rs), over every context's effective layers: no duplicate
+3. **Invariants** (mod.rs), over every declared keymap's layers: no duplicate
    `Binding`; no key both `Single`-bound and a chord prefix; every table binding
    round-trips through Display/FromStr; no table binds `q`, and none binds `esc`
-   except CommentInput (Back/quit are the floor's).
+   except the comment input's (Back/quit are the floor's).
 4. **Binding snapshot** (insta): render every context's `binding → label` lines
    and snapshot them. Any binding change becomes a reviewed snapshot diff — the
    drift guard, mirroring this document's tables. A second snapshot pins
@@ -700,17 +728,18 @@ Each phase lands gate-green (`make check` / `make test`).
    `handle_list_key`/`detail::handle_key`/`popup::handle_key` to `apply_*` (the
    comment-input gate temporarily keeps forwarding to
    `handle_comment_input_key`, detail.rs:252). The pass-through policy (which
-   contexts `Pass` on `Unbound`) becomes per-context data — the delivered
-   handlers already return `Pass` for unbound keys; the keymap encodes the same
-   policy in `KeyContext`. Binding changes land here: `g g`/`G`,
+   keymaps `Pass` on `Unbound`) becomes per-view data — the delivered handlers
+   already return `Pass` for unbound keys; the keymap encodes the same policy in
+   each view's declared `Unbound`. Binding changes land here: `g g`/`G`,
    `enter`+`space`, `c` create, `o b` browser (the first `o` chord), `ctrl+r`
    refresh, `ctrl+/`+`ctrl+7` help. Cycle-sort is removed outright
    (`ListView::cycle_sort` lib.rs:364, `App::cycle_sort` lib.rs:1022, the `S`
    arm lib.rs:1478, and its help entry). Pending indicator in the status row.
    Patch `ALL_KEYBINDINGS` strings minimally so help doesn't lie in the interim.
    Extend loop tests.
-2. **Text contexts.** `key_context` grows the comment-input and `NewIssueField`
-   derivations (the inline gates at detail.rs:189 and new_issue.rs:423);
+2. **Text contexts.** `View::keymap` absorbs the comment-input and
+   `NewIssueField` sub-focus gates (detail.rs:189 and new_issue.rs:423) via
+   `DetailView::keymap`/`NewIssueModal::keymap`;
    Search/Help/NewIssue/CommentInput move onto the keymap with
    forward-to-editor, their explicit `Esc => Pass` arms replaced by the
    esc-is-never-forwarded rule; delete the dispatch layers of their old handlers
