@@ -1,8 +1,8 @@
 /// A key resolves to an `Action`, interpreted by the context that resolved
 /// it -- e.g. `MoveDown` is list-selection movement in `List`, offset
-/// scrolling in `Detail` (`docs/design/keybinds.md`, Architecture). Phase 1
-/// carries only the variants the List/Detail/Popup contexts use; later
-/// phases add their own (forms, search, help) as each context lands.
+/// scrolling in `Detail` (`docs/design/keybinds.md`, Architecture). Phase 2
+/// adds the text/form contexts' variants (`Back`, `Submit`, the form/search
+/// actions) alongside phase 1's List/Detail/Popup set.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Action {
     // Navigation -- mapped onto `ScrollMotion` and applied through
@@ -19,6 +19,7 @@ pub(crate) enum Action {
     NextPage,
     PrevPage,
     // App-level.
+    Back,
     OpenHelp,
     OpenSearch,
     OpenDetail,
@@ -33,7 +34,18 @@ pub(crate) enum Action {
     ToggleSortDirection,
     Comment,
     // Forms/popups.
+    Submit,
     Confirm,
+    NextField,
+    PrevField,
+    PickMe,
+    // Search overlay.
+    ClearQuery,
+    CompleteNext,
+    CompletePrev,
+    CompleteAccept,
+    CompleteForward,
+    CompleteBackward,
 }
 
 impl Action {
@@ -53,6 +65,7 @@ impl Action {
             Action::PageDown => "page down",
             Action::NextPage => "next page",
             Action::PrevPage => "previous page",
+            Action::Back => "cancel",
             Action::OpenHelp => "open keyboard shortcuts",
             Action::OpenSearch => "search",
             Action::OpenDetail => "open detail pane",
@@ -65,7 +78,17 @@ impl Action {
             Action::SetAssignee => "set assignee",
             Action::ToggleSortDirection => "toggle sort direction",
             Action::Comment => "comment on issue",
+            Action::Submit => "submit",
             Action::Confirm => "confirm",
+            Action::NextField => "next field",
+            Action::PrevField => "previous field",
+            Action::PickMe => "assign to me",
+            Action::ClearQuery => "clear query",
+            Action::CompleteNext => "next completion",
+            Action::CompletePrev => "previous completion",
+            Action::CompleteAccept => "accept completion",
+            Action::CompleteForward => "complete forward",
+            Action::CompleteBackward => "complete backward",
         }
     }
 }

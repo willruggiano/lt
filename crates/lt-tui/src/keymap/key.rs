@@ -74,15 +74,30 @@ impl Key {
         }
     }
 
-    // Unused outside tests until a later phase binds an alt+ key (e.g. the
-    // submit chord's alt+enter fallback, `docs/design/keybinds.md`, "New
-    // issue"); `#[cfg(test)]` so the plain (non-test) build doesn't flag it
-    // dead in the meantime.
-    #[cfg(test)]
     pub(crate) const fn alt(code: KeyCode) -> Self {
         Self {
             code,
             mods: KeyModifiers::ALT,
+        }
+    }
+
+    /// ctrl + a non-char key, e.g. `ctrl+enter`'s submit chord. The `ctrl`
+    /// ctor above only takes a `char` since ctrl+letter needs `normalize`'s
+    /// lowercasing; a non-char code has no such folding.
+    pub(crate) const fn ctrl_code(code: KeyCode) -> Self {
+        Self {
+            code,
+            mods: KeyModifiers::CONTROL,
+        }
+    }
+
+    /// `shift+tab`, the canonical post-normalization form `BackTab` folds
+    /// into (see `normalize`); table rows want it directly rather than
+    /// through a `KeyCode::BackTab` roundabout.
+    pub(crate) const fn shift_tab() -> Self {
+        Self {
+            code: KeyCode::Tab,
+            mods: KeyModifiers::SHIFT,
         }
     }
 }
@@ -273,6 +288,20 @@ mod tests {
     fn alt_ctor_round_trips() {
         let key = Key::alt(KeyCode::Enter);
         assert_eq!(key.to_string(), "alt+enter");
+        assert_eq!(key.to_string().parse::<Key>().unwrap(), key);
+    }
+
+    #[test]
+    fn ctrl_code_ctor_round_trips() {
+        let key = Key::ctrl_code(KeyCode::Enter);
+        assert_eq!(key.to_string(), "ctrl+enter");
+        assert_eq!(key.to_string().parse::<Key>().unwrap(), key);
+    }
+
+    #[test]
+    fn shift_tab_ctor_round_trips() {
+        let key = Key::shift_tab();
+        assert_eq!(key.to_string(), "shift+tab");
         assert_eq!(key.to_string().parse::<Key>().unwrap(), key);
     }
 

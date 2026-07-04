@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
 use lt_types::types::Issue;
 
-use super::{App, FetchStatus, KeyFlow, Scroll, StateCtx, StateEvent, View, keymap};
+use super::{App, FetchStatus, Scroll, StateCtx, StateEvent, View, keymap};
 
 /// The detail pane's complete state: the shared `types`/`comments` fragments
 /// the TUI composes for display, plus the panel's scroll offset and comment
@@ -199,14 +199,22 @@ pub(crate) fn apply_detail(app: &mut App, i: usize, action: keymap::Action) {
     }
 }
 
-/// Forward to the comment input's own editing handler while it is open --
-/// temporary until phase 2 moves `CommentInput` onto the keymap
-/// (`docs/design/keybinds.md`, Implementation plan item 2). Always
-/// consumes, matching today's gate (`dispatch_key`'s per-view branch checks
-/// `comment_input.is_some()` before calling this).
-pub(crate) fn handle_comment_input(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
-    handle_comment_input_key(app, i, key.code, key.modifiers);
-    KeyFlow::Consumed
+/// The `CommentInput` context's actions: `Submit`/`Back` -- `Back` is the
+/// keymap's one `esc` row, cancelling the draft without popping the `Detail`
+/// view beneath it (narrower than the floor's pop).
+pub(crate) fn apply_comment_input(app: &mut App, i: usize, action: keymap::Action) {
+    match action {
+        keymap::Action::Submit => submit_comment(app, i),
+        keymap::Action::Back => {
+            if let Some(d) = detail_view_mut(app, i) {
+                d.comment_input = None;
+            }
+        }
+        // Navigation and other contexts' actions never resolve to
+        // `CommentInput`'s table; the match stays exhaustive over `Action`
+        // regardless.
+        _ => {}
+    }
 }
 
 fn detail_view_mut(app: &mut App, i: usize) -> Option<&mut DetailView> {
@@ -241,33 +249,20 @@ fn submit_comment(app: &mut App, i: usize) {
     }
 }
 
-/// Key handling for the comment input box (same editing model as the
-/// new-issue description field: cursor always at the end).
-fn handle_comment_input_key(app: &mut App, i: usize, code: KeyCode, modifiers: KeyModifiers) {
-    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-    let alt = modifiers.contains(KeyModifiers::ALT);
-
-    // Ctrl-Enter submits (Alt-Enter on terminals that cannot distinguish
-    // Ctrl-Enter from Enter).
-    if (ctrl || alt) && code == KeyCode::Enter {
-        submit_comment(app, i);
-        return;
-    }
-    // Esc cancels.
-    if code == KeyCode::Esc {
-        if let Some(d) = detail_view_mut(app, i) {
-            d.comment_input = None;
-        }
-        return;
-    }
-
+/// Forward an unbound key to the comment buffer (same editing model as the
+/// new-issue description field: cursor always at the end). `Submit`/`Back`
+/// are the keymap's (`apply_comment_input`); everything else lands here
+/// verbatim, using the original crossterm event so the widget sees its exact
+/// `KeyCode`/`KeyModifiers`.
+pub(crate) fn forward_comment_input(app: &mut App, i: usize, ev: KeyEvent) {
+    let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
     let Some(detail) = detail_view_mut(app, i) else {
         return;
     };
     let Some(buf) = detail.comment_input.as_mut() else {
         return;
     };
-    match code {
+    match ev.code {
         KeyCode::Enter => buf.push('\n'),
         KeyCode::Backspace => {
             buf.pop();
