@@ -72,12 +72,6 @@ impl Clock {
     }
 }
 
-pub enum Status {
-    Idle,
-    Loading,
-    Error(String),
-}
-
 // ---------------------------------------------------------------------------
 // The app event queue
 // ---------------------------------------------------------------------------
@@ -198,6 +192,15 @@ impl ScrollMotion {
     }
 }
 
+/// The base list's fetch status. Its only render site is the base table's
+/// Loading/Error overlay (`ui/table.rs`); its writers are `ListView::do_fetch`
+/// and the sync lifecycle's Loading->Idle repair.
+pub enum FetchStatus {
+    Idle,
+    Loading,
+    Error(String),
+}
+
 /// The issue-list view: the base-list fields, owned. `status`'s only render
 /// site is the base table's Loading/Error overlay (`ui/table.rs`); its
 /// writers are `do_fetch` and the sync lifecycle's Loading->Idle repair
@@ -206,7 +209,7 @@ pub struct ListView {
     pub issues: Vec<Issue>,
     pub table_state: TableState,
     pub pagination: Pagination,
-    pub status: Status,
+    pub status: FetchStatus,
     /// An identifier to seek to on the next `Issues` re-read, set by
     /// `new_issue_submit` after `create_issue` returns the optimistic
     /// identifier. Consumed (and cleared) by that re-read.
@@ -235,7 +238,7 @@ impl ListView {
             issues,
             table_state,
             pagination,
-            status: Status::Idle,
+            status: FetchStatus::Idle,
             pending_select: None,
             args,
             filter,
@@ -261,31 +264,6 @@ impl ListView {
         self.table_state.select(Some(new_i));
     }
 
-    fn move_down(&mut self) {
-        self.move_by(1);
-    }
-    fn move_up(&mut self) {
-        self.move_by(-1);
-    }
-    fn move_top(&mut self) {
-        self.move_by(i32::MIN / 2);
-    }
-    fn move_bottom(&mut self) {
-        self.move_by(i32::MAX / 2);
-    }
-    fn page_down(&mut self, viewport_height: u16) {
-        self.move_by(i32::from(viewport_height));
-    }
-    fn page_up(&mut self, viewport_height: u16) {
-        self.move_by(-i32::from(viewport_height));
-    }
-    fn half_page_down(&mut self, viewport_height: u16) {
-        self.move_by(i32::from(viewport_height) / 2);
-    }
-    fn half_page_up(&mut self, viewport_height: u16) {
-        self.move_by(-(i32::from(viewport_height) / 2));
-    }
-
     /// The base list's subscription: `Issues`, only while focused -- the
     /// don't-clobber policy expressed as `focused` instead of a mode check: a
     /// refresh must not swap the rows a popup is anchored to or a search
@@ -300,7 +278,7 @@ impl ListView {
     /// The base list's re-read: `self.args`/`self.filter` plus `ctx.db` and
     /// the viewer name for `assignee:me` resolution.
     fn do_fetch(&mut self, ctx: &StateCtx, reset_selection: bool) {
-        self.status = Status::Loading;
+        self.status = FetchStatus::Loading;
         let mut parsed = search_query::ParsedQuery::from(&self.filter);
         search_query::resolve_me(&mut parsed, ctx.viewer_name);
 
@@ -320,7 +298,7 @@ impl ListView {
                     self.apply_fetched_selection(reset_selection);
                 }
                 Err(e) => {
-                    self.status = Status::Error(e.to_string());
+                    self.status = FetchStatus::Error(e.to_string());
                 }
             }
         } else {
@@ -348,7 +326,7 @@ impl ListView {
                     self.apply_fetched_selection(reset_selection);
                 }
                 Err(e) => {
-                    self.status = Status::Error(e.to_string());
+                    self.status = FetchStatus::Error(e.to_string());
                 }
             }
         }
@@ -414,7 +392,7 @@ impl ListView {
         };
         self.table_state
             .select(if n > 0 { Some(sel) } else { None });
-        self.status = Status::Idle;
+        self.status = FetchStatus::Idle;
     }
 
     /// Consume `pending_select`, if set: seek to the identifier and clear it.
@@ -450,60 +428,73 @@ impl ListView {
     }
 }
 
+/// Re-fetch `list` from `db`: builds the `StateCtx` from disjoint fields and
+/// drives `ListView::do_fetch`. A free function next to `ListView`, not an
+/// `App` method -- the fetch is the list's own, not app-level state.
+fn fetch_list(
+    list: &mut ListView,
+    db: &lt_runtime::db::Database,
+    viewer_name: Option<&str>,
+    reset_selection: bool,
+) {
+    let ctx = StateCtx { db, viewer_name };
+    list.do_fetch(&ctx, reset_selection);
+}
+
 /// The eight scroll-motion primitives a stepped/offset view (`List`,
 /// `Detail`) is built from. The provided `scroll` method maps a
 /// [`ScrollMotion`] onto them once, so the same eight-arm dispatch isn't
-/// duplicated per view (`cpd`/`cargo dupes`); implementors just name their
-/// own movement primitives.
+/// duplicated per view (`cpd`/`cargo dupes`); implementors just define their
+/// own movement primitives directly.
 trait Scroll {
-    fn motion_down(&mut self);
-    fn motion_up(&mut self);
-    fn motion_top(&mut self);
-    fn motion_bottom(&mut self);
-    fn motion_half_page_down(&mut self, viewport_height: u16);
-    fn motion_half_page_up(&mut self, viewport_height: u16);
-    fn motion_page_down(&mut self, viewport_height: u16);
-    fn motion_page_up(&mut self, viewport_height: u16);
+    fn move_down(&mut self);
+    fn move_up(&mut self);
+    fn move_top(&mut self);
+    fn move_bottom(&mut self);
+    fn half_page_down(&mut self, viewport_height: u16);
+    fn half_page_up(&mut self, viewport_height: u16);
+    fn page_down(&mut self, viewport_height: u16);
+    fn page_up(&mut self, viewport_height: u16);
 
     fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
         match motion {
-            ScrollMotion::Down => self.motion_down(),
-            ScrollMotion::Up => self.motion_up(),
-            ScrollMotion::Top => self.motion_top(),
-            ScrollMotion::Bottom => self.motion_bottom(),
-            ScrollMotion::HalfPageDown => self.motion_half_page_down(viewport_height),
-            ScrollMotion::HalfPageUp => self.motion_half_page_up(viewport_height),
-            ScrollMotion::PageDown => self.motion_page_down(viewport_height),
-            ScrollMotion::PageUp => self.motion_page_up(viewport_height),
+            ScrollMotion::Down => self.move_down(),
+            ScrollMotion::Up => self.move_up(),
+            ScrollMotion::Top => self.move_top(),
+            ScrollMotion::Bottom => self.move_bottom(),
+            ScrollMotion::HalfPageDown => self.half_page_down(viewport_height),
+            ScrollMotion::HalfPageUp => self.half_page_up(viewport_height),
+            ScrollMotion::PageDown => self.page_down(viewport_height),
+            ScrollMotion::PageUp => self.page_up(viewport_height),
         }
     }
 }
 
 /// This view's scroll override: selection movement (Decision 6).
 impl Scroll for ListView {
-    fn motion_down(&mut self) {
-        self.move_down();
+    fn move_down(&mut self) {
+        self.move_by(1);
     }
-    fn motion_up(&mut self) {
-        self.move_up();
+    fn move_up(&mut self) {
+        self.move_by(-1);
     }
-    fn motion_top(&mut self) {
-        self.move_top();
+    fn move_top(&mut self) {
+        self.move_by(i32::MIN / 2);
     }
-    fn motion_bottom(&mut self) {
-        self.move_bottom();
+    fn move_bottom(&mut self) {
+        self.move_by(i32::MAX / 2);
     }
-    fn motion_half_page_down(&mut self, viewport_height: u16) {
-        self.half_page_down(viewport_height);
+    fn half_page_down(&mut self, viewport_height: u16) {
+        self.move_by(i32::from(viewport_height) / 2);
     }
-    fn motion_half_page_up(&mut self, viewport_height: u16) {
-        self.half_page_up(viewport_height);
+    fn half_page_up(&mut self, viewport_height: u16) {
+        self.move_by(-(i32::from(viewport_height) / 2));
     }
-    fn motion_page_down(&mut self, viewport_height: u16) {
-        self.page_down(viewport_height);
+    fn page_down(&mut self, viewport_height: u16) {
+        self.move_by(i32::from(viewport_height));
     }
-    fn motion_page_up(&mut self, viewport_height: u16) {
-        self.page_up(viewport_height);
+    fn page_up(&mut self, viewport_height: u16) {
+        self.move_by(-i32::from(viewport_height));
     }
 }
 
@@ -951,16 +942,6 @@ impl App {
         &mut self.views[0]
     }
 
-    /// The base list's query limit, degrading to `IssueQuery::default()`'s
-    /// when the base is not a list (a future non-list base has none). Used
-    /// by the search overlay, which caps its results at the same limit.
-    fn list_limit(&self) -> u32 {
-        match self.base() {
-            View::List(list) => list.args.limit,
-            _ => IssueQuery::default().limit,
-        }
-    }
-
     /// Test-only infallible accessor: render/loop tests always seed a list
     /// base, so a panic here signals a broken fixture, not a runtime state to
     /// handle.
@@ -1013,25 +994,15 @@ impl App {
     fn reset_base_view(&mut self) {
         let args = self.initial_args.clone();
         let filter = self.initial_filter.clone();
-        if let View::List(list) = self.base_mut() {
+        let viewer_name = self.auth.viewer_name();
+        if let Some(View::List(list)) = self.views.first_mut() {
             list.args = args;
             list.filter = filter;
             list.pagination.cursor_stack.clear();
             list.pagination.current_cursor = None;
+            fetch_list(list, &self.db, viewer_name, true);
         }
         self.last_esc_time = None;
-        self.fetch_base_list(true);
-    }
-
-    /// Build a `StateCtx` from disjoint fields and re-fetch the base list.
-    fn fetch_base_list(&mut self, reset_selection: bool) {
-        let ctx = StateCtx {
-            db: &self.db,
-            viewer_name: self.auth.viewer_name(),
-        };
-        if let Some(View::List(list)) = self.views.first_mut() {
-            list.do_fetch(&ctx, reset_selection);
-        }
     }
 
     /// `r`: an immediate re-read plus a request to the loop for a full
@@ -1040,7 +1011,11 @@ impl App {
     /// sync instead of being ignored (the loop processes commands one at a
     /// time; this one just queues behind the in-flight cycle).
     fn refresh(&mut self) {
-        self.fetch_base_list(false); // immediate re-read for responsiveness
+        let viewer_name = self.auth.viewer_name();
+        // immediate re-read for responsiveness
+        if let Some(View::List(list)) = self.views.first_mut() {
+            fetch_list(list, &self.db, viewer_name, false);
+        }
         self.service.request_sync();
     }
 
@@ -1095,12 +1070,22 @@ impl App {
         } else {
             // First esc: standard refresh.
             self.last_esc_time = Some(now);
-            self.fetch_base_list(true);
+            let viewer_name = self.auth.viewer_name();
+            if let Some(View::List(list)) = self.views.first_mut() {
+                fetch_list(list, &self.db, viewer_name, true);
+            }
         }
     }
 
     fn open_search_overlay(&mut self) {
         let mut overlay = SearchOverlay::new();
+        // Capture the base list's query limit once at open time: it cannot
+        // change while Search has focus (it consumes every key), so this
+        // snapshot is faithful for the overlay's whole lifetime. A non-list
+        // base keeps `SearchOverlay::new()`'s default.
+        if let View::List(list) = self.base() {
+            overlay.limit = list.args.limit;
+        }
         // Restore the base list's filter when re-opening, unless it is just
         // the default sort stem. A non-list base degrades to the
         // freshly-created default overlay (Decision 5).
@@ -1192,9 +1177,9 @@ impl App {
     /// must not leave the list's own status stuck at `Loading` forever.
     fn repair_loading_list(&mut self) {
         if let View::List(list) = self.base_mut()
-            && matches!(list.status, Status::Loading)
+            && matches!(list.status, FetchStatus::Loading)
         {
-            list.status = Status::Idle;
+            list.status = FetchStatus::Idle;
         }
     }
 
@@ -1308,10 +1293,10 @@ pub fn run(
             cached_issues,
             initial_has_next_page,
             initial_end_cursor,
-            Status::Idle,
+            FetchStatus::Idle,
         )
     } else {
-        (Vec::new(), false, None, Status::Loading)
+        (Vec::new(), false, None, FetchStatus::Loading)
     };
 
     // Fetch viewer identity for header display before `service` moves into

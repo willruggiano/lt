@@ -109,18 +109,18 @@ fn apply_fetched_selection_resets_or_clamps() {
 fn detail_scroll_saturates() {
     let issue = sim_issues(0, 1)[0].clone();
     let mut detail = build_cached_detail(&issue, Vec::new());
-    detail.scroll_down();
+    detail.move_down();
     assert_eq!(detail.scroll, 1);
-    detail.scroll_up();
-    detail.scroll_up(); // saturate at 0
+    detail.move_up();
+    detail.move_up(); // saturate at 0
     assert_eq!(detail.scroll, 0);
-    detail.scroll_to_bottom();
+    detail.move_bottom();
     assert_eq!(detail.scroll, u16::MAX);
-    detail.scroll_to_top();
+    detail.move_top();
     assert_eq!(detail.scroll, 0);
-    detail.scroll_half_page_down(10); // +5
+    detail.half_page_down(10); // +5
     assert_eq!(detail.scroll, 5);
-    detail.scroll_page_up(10); // -10, saturating
+    detail.page_up(10); // -10, saturating
     assert_eq!(detail.scroll, 0);
 }
 

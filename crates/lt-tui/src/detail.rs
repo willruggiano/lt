@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
 use lt_types::types::Issue;
 
-use super::{App, KeyFlow, Scroll, StateCtx, StateEvent, Status, View};
+use super::{App, FetchStatus, KeyFlow, Scroll, StateCtx, StateEvent, View};
 
 /// The detail pane's complete state: the shared `types`/`comments` fragments
 /// the TUI composes for display, plus the panel's scroll offset and comment
@@ -54,39 +54,6 @@ impl DetailView {
         }
     }
 
-    pub(crate) fn scroll_down(&mut self) {
-        self.scroll = self.scroll.saturating_add(1);
-    }
-
-    pub(crate) fn scroll_up(&mut self) {
-        self.scroll = self.scroll.saturating_sub(1);
-    }
-
-    pub(crate) fn scroll_to_top(&mut self) {
-        self.scroll = 0;
-    }
-
-    pub(crate) fn scroll_to_bottom(&mut self) {
-        // Ratatui clamps scroll to content length; use a large sentinel.
-        self.scroll = u16::MAX;
-    }
-
-    pub(crate) fn scroll_half_page_down(&mut self, viewport_height: u16) {
-        self.scroll_by((viewport_height / 2).max(1), true);
-    }
-
-    pub(crate) fn scroll_half_page_up(&mut self, viewport_height: u16) {
-        self.scroll_by((viewport_height / 2).max(1), false);
-    }
-
-    pub(crate) fn scroll_page_down(&mut self, viewport_height: u16) {
-        self.scroll_by(viewport_height.max(1), true);
-    }
-
-    pub(crate) fn scroll_page_up(&mut self, viewport_height: u16) {
-        self.scroll_by(viewport_height.max(1), false);
-    }
-
     /// Scroll the detail pane by `step` rows, `down` toward the bottom.
     fn scroll_by(&mut self, step: u16, down: bool) {
         self.scroll = if down {
@@ -99,29 +66,30 @@ impl DetailView {
 
 /// This view's scroll override: offset scrolling (Decision 6).
 impl Scroll for DetailView {
-    fn motion_down(&mut self) {
-        self.scroll_down();
+    fn move_down(&mut self) {
+        self.scroll = self.scroll.saturating_add(1);
     }
-    fn motion_up(&mut self) {
-        self.scroll_up();
+    fn move_up(&mut self) {
+        self.scroll = self.scroll.saturating_sub(1);
     }
-    fn motion_top(&mut self) {
-        self.scroll_to_top();
+    fn move_top(&mut self) {
+        self.scroll = 0;
     }
-    fn motion_bottom(&mut self) {
-        self.scroll_to_bottom();
+    fn move_bottom(&mut self) {
+        // Ratatui clamps scroll to content length; use a large sentinel.
+        self.scroll = u16::MAX;
     }
-    fn motion_half_page_down(&mut self, viewport_height: u16) {
-        self.scroll_half_page_down(viewport_height);
+    fn half_page_down(&mut self, viewport_height: u16) {
+        self.scroll_by((viewport_height / 2).max(1), true);
     }
-    fn motion_half_page_up(&mut self, viewport_height: u16) {
-        self.scroll_half_page_up(viewport_height);
+    fn half_page_up(&mut self, viewport_height: u16) {
+        self.scroll_by((viewport_height / 2).max(1), false);
     }
-    fn motion_page_down(&mut self, viewport_height: u16) {
-        self.scroll_page_down(viewport_height);
+    fn page_down(&mut self, viewport_height: u16) {
+        self.scroll_by(viewport_height.max(1), true);
     }
-    fn motion_page_up(&mut self, viewport_height: u16) {
-        self.scroll_page_up(viewport_height);
+    fn page_up(&mut self, viewport_height: u16) {
+        self.scroll_by(viewport_height.max(1), false);
     }
 }
 
@@ -152,7 +120,7 @@ impl App {
 
         self.push_view(View::Detail(Box::new(detail)));
         if let View::List(list) = self.base_mut() {
-            list.status = Status::Idle;
+            list.status = FetchStatus::Idle;
         }
     }
 }

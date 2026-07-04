@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Connection;
+use lt_runtime::query::IssueQuery;
 use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
@@ -161,6 +162,11 @@ pub struct SearchOverlay {
     pub ast: search_query::QueryAst,
     /// Tab-completion state.
     pub completer: Completer,
+    /// The base list's query limit, captured once at open time
+    /// (`open_search_overlay`) so both views show the same number of
+    /// results. Faithful for the overlay's whole lifetime: the base list's
+    /// limit cannot change while Search has focus (it consumes every key).
+    pub limit: u32,
 }
 
 impl SearchOverlay {
@@ -181,6 +187,7 @@ impl SearchOverlay {
             has_searched: false,
             ast,
             completer,
+            limit: IssueQuery::default().limit,
         }
     }
 
@@ -195,12 +202,7 @@ impl SearchOverlay {
     /// so that the search overlay never grows taller than the normal list
     ///. Reads through `db` rather than resolving `db_path()` directly, so
     /// tests that install an in-memory database are honored.
-    pub fn run_search(
-        &mut self,
-        db: &lt_runtime::db::Database,
-        viewport_rows: u16,
-        list_limit: usize,
-    ) {
+    pub fn run_search(&mut self, db: &lt_runtime::db::Database, viewport_rows: u16) {
         self.fts_unavailable = false;
         self.has_searched = true;
         let raw = self.query.value.trim().to_string();
@@ -219,6 +221,7 @@ impl SearchOverlay {
         // Use the same limit as the normal issue list so both views show the
         // same number of results.  Cap to viewport height so we never render
         // more rows than fit on screen.
+        let list_limit = self.limit as usize;
         let limit = if viewport_rows > 0 {
             list_limit.min(viewport_rows as usize)
         } else {
@@ -633,8 +636,7 @@ fn confirm_search(app: &mut App) {
     // character the user typed before hitting Enter.
     if overlay.last_changed.is_some() {
         overlay.last_changed = None;
-        let limit = app.list_limit() as usize;
-        overlay.run_search(&app.db, app.viewport_height, limit);
+        overlay.run_search(&app.db, app.viewport_height);
     }
     let results = std::mem::take(&mut overlay.results);
     let selected = overlay.table_state.selected();
@@ -667,12 +669,10 @@ fn apply_completion_tab(app: &mut App, i: usize, forward: bool) {
 
 /// Fire the FTS search when the debounce interval (150ms) has elapsed. The
 /// search overlay is only ever the top of the stack, so `views.last` is the
-/// live check; `viewport_height`/`args.limit` are copied out and `&app.db`
-/// borrowed before the `views.last_mut()` borrow since `run_search` needs
-/// all three simultaneously.
+/// live check; `viewport_height` and `&app.db` are copied/borrowed before the
+/// `views.last_mut()` borrow since `run_search` needs both simultaneously.
 pub(crate) fn poll_search_debounce(app: &mut App) {
     let viewport_height = app.viewport_height;
-    let limit = app.list_limit() as usize;
     let db = &app.db;
     let should_search = matches!(
         app.views.last(),
@@ -681,6 +681,6 @@ pub(crate) fn poll_search_debounce(app: &mut App) {
     );
     if should_search && let Some(View::Search(overlay)) = app.views.last_mut() {
         overlay.last_changed = None;
-        overlay.run_search(db, viewport_height, limit);
+        overlay.run_search(db, viewport_height);
     }
 }

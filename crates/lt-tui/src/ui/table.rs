@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
 
 use super::util::{TableSpec, render_issue_table, to_u16};
-use crate::{ListView, PopupKind, Status};
+use crate::{FetchStatus, ListView, PopupKind};
 
 /// Render the base issue table into `area`. Returns the rendered column
 /// widths, or `None` when a loading/error overlay or the empty-list message
@@ -17,9 +17,9 @@ pub(super) fn render_table(
     list: &mut ListView,
 ) -> Option<[usize; 7]> {
     let overlay: Option<String> = match &list.status {
-        Status::Error(msg) => Some(format!("Error: {msg}")),
-        Status::Loading => Some("Loading...".to_string()),
-        Status::Idle => None,
+        FetchStatus::Error(msg) => Some(format!("Error: {msg}")),
+        FetchStatus::Loading => Some("Loading...".to_string()),
+        FetchStatus::Idle => None,
     };
     if let Some(msg) = overlay {
         frame.render_widget(Paragraph::new(msg), area);

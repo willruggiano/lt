@@ -26,6 +26,15 @@ fn drain_events(app: &mut App) {
     }
 }
 
+/// Test-side re-fetch of the base list, driving the same `fetch_list` free
+/// function the app's own key handlers call.
+fn fetch_base_list(app: &mut App, reset_selection: bool) {
+    let viewer_name = app.auth.viewer_name();
+    if let Some(View::List(list)) = app.views.first_mut() {
+        fetch_list(list, &app.db, viewer_name, reset_selection);
+    }
+}
+
 fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
@@ -109,7 +118,7 @@ fn do_fetch_paginated_loads_from_db() {
         db_issue("3", "ENG-3", "Todo", 3),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues.len(), 3);
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1"); // updated DESC
     assert_eq!(app.list_mut().table_state.selected(), Some(0));
@@ -125,7 +134,7 @@ fn do_fetch_filtered_uses_run_query() {
     ];
     let mut app = app_with_db(&rows).unwrap();
     app.list_mut().filter = search_query::parse_query_ast("state:todo");
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues.len(), 2);
     assert!(app.list_mut().issues.iter().all(|i| i.state.name == "Todo"));
     // run_query has no pagination.
@@ -141,7 +150,7 @@ fn pending_select_seeks_identifier_on_next_issues_event() {
         db_issue("3", "ENG-3", "Todo", 3),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     app.list_mut().pending_select = Some("ENG-3".to_string());
 
     app.route_state_event(&StateEvent::Issues);
@@ -161,7 +170,7 @@ fn next_and_prev_page_walk_offsets() {
     ];
     let mut app = app_with_db(&rows).unwrap();
     app.list_mut().args.limit = 2;
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
     assert!(app.list_mut().pagination.has_next_page);
 
@@ -180,7 +189,7 @@ fn next_and_prev_page_walk_offsets() {
 #[test]
 fn prev_page_at_start_is_noop() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     app.prev_page(); // empty cursor stack -> no-op
     assert_eq!(app.list_mut().issues.len(), 1);
 }
@@ -314,7 +323,7 @@ fn route_state_event_comments_applied_twice_is_idempotent() {
 fn route_state_event_issues_refreshes_the_focused_base() {
     // N9: `[List]` -- the base is focused, so `Issues` re-fetches.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues.len(), 1);
 
     {
@@ -331,7 +340,7 @@ fn route_state_event_issues_under_an_overlay_skips_the_base_but_refreshes_detail
     // refresh, but a live `Detail` still re-reads its own issue.
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     app.views.push(View::Detail(Box::new(build_cached_detail(
         &issue,
         Vec::new(),
@@ -361,7 +370,7 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let issue_id = issue.id.inner().to_string();
     let mut app = app_with_db(&[issue]).unwrap();
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues[0].state.name, "Todo");
 
     app.views.push(View::Popup(PopupView {
@@ -426,7 +435,7 @@ fn run_app_dispatches_keys_and_quits() {
         db_issue("3", "ENG-3", "Todo", 3),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.fetch_base_list(true); // populate the list the loop renders
+    fetch_base_list(&mut app, true); // populate the list the loop renders
     drive(&mut app, &[key('j'), key('j'), key('q')]).unwrap();
     assert!(app.quit);
     assert_eq!(app.list_mut().table_state.selected(), Some(2));
@@ -435,7 +444,7 @@ fn run_app_dispatches_keys_and_quits() {
 #[test]
 fn run_app_errs_when_events_exhausted_without_quit() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     // No quit key: the scripted source errors once drained, ending the loop.
     assert!(drive(&mut app, &[key('j')]).is_err());
 }
@@ -581,7 +590,7 @@ fn scroll_key_moves_the_focused_view_and_never_a_view_beneath() {
         db_issue("2", "ENG-2", "Todo", 4),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.fetch_base_list(true);
+    fetch_base_list(&mut app, true);
     let base_selected_before = app.list_mut().table_state.selected();
 
     let issue = app.list_mut().issues[0].clone();
@@ -737,7 +746,7 @@ fn consume_sync_event_done_falls_back_to_the_clock_without_meta() {
 #[test]
 fn consume_sync_event_error_sets_failed_and_repairs_a_loading_base() {
     let mut app = app_with_db(&[]).unwrap();
-    app.list_mut().status = Status::Loading;
+    app.list_mut().status = FetchStatus::Loading;
 
     app.consume_sync_event(SyncEvent::Error("boom".to_string()));
 
@@ -747,19 +756,19 @@ fn consume_sync_event_error_sets_failed_and_repairs_a_loading_base() {
             unreachable!("expected Failed")
         }
     }
-    assert!(matches!(app.list_mut().status, Status::Idle));
+    assert!(matches!(app.list_mut().status, FetchStatus::Idle));
 }
 
 #[test]
 fn consume_sync_event_not_authenticated_sets_auth_and_goes_idle() {
     let mut app = app_with_db(&[]).unwrap();
-    app.list_mut().status = Status::Loading;
+    app.list_mut().status = FetchStatus::Loading;
 
     app.consume_sync_event(SyncEvent::NotAuthenticated);
 
     assert!(matches!(app.auth, AuthStatus::Unauthenticated));
     assert!(matches!(app.sync, SyncStatus::Idle));
-    assert!(matches!(app.list_mut().status, Status::Idle));
+    assert!(matches!(app.list_mut().status, FetchStatus::Idle));
 }
 
 #[test]
