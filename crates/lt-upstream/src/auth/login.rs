@@ -1,5 +1,6 @@
 use std::io::{Read, Write as _};
 use std::net::TcpListener;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
@@ -415,9 +416,9 @@ fn parse_token_response(status: u16, body: &str, clock: &Clock) -> Result<AuthTo
     Ok(AuthToken {
         access_token: response.access_token,
         token_type: response.token_type,
-        expires_in: response.expires_in,
+        expires_in: Duration::from_secs(response.expires_in),
         scope: response.scope,
-        issued_at: clock.now().timestamp().cast_unsigned(),
+        issued_at: clock.now(),
         refresh_token: response.refresh_token,
     })
 }
@@ -645,7 +646,7 @@ mod tests {
         assert_eq!(token.access_token, "tok");
         assert_eq!(token.token_type, "Bearer");
         assert_eq!(token.refresh_token, "r".to_string());
-        assert_eq!(token.issued_at, 1_000_000);
+        assert_eq!(token.issued_at, fixed_clock().now());
     }
 
     #[test]
@@ -778,9 +779,9 @@ mod tests {
         let token = run_with_credentials(&flow, "cid", "csecret").unwrap();
         assert_eq!(token.access_token, "final-token");
         assert_eq!(token.refresh_token, "final-refresh");
-        assert_eq!(token.expires_in, 3600);
+        assert_eq!(token.expires_in, Duration::from_secs(3600));
         assert_eq!(token.scope, "read,write");
-        assert_eq!(token.issued_at, 1_000_000);
+        assert_eq!(token.issued_at, fixed_clock().now());
 
         // The browser was sent the authorization URL.
         let opened = browser.opened.borrow();
@@ -829,7 +830,7 @@ mod tests {
             .unwrap();
         assert_eq!(token.access_token, "new-tok");
         assert_eq!(token.refresh_token, "new-refresh".to_string());
-        assert_eq!(token.issued_at, 1_000_000);
+        assert_eq!(token.issued_at, fixed_clock().now());
 
         let forms = exchanger.sent_forms();
         let sent: std::collections::HashMap<_, _> = forms[0].iter().cloned().collect();

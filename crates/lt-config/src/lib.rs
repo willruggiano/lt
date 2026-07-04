@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -46,19 +48,16 @@ pub struct Config {
 pub struct AuthToken {
     pub access_token: String,
     pub token_type: String,
-    pub expires_in: u64,
+    pub expires_in: Duration,
     pub scope: String,
-    /// Unix timestamp (seconds) at which this token was issued.
-    pub issued_at: u64,
+    /// Time at which this token was issued.
+    pub issued_at: DateTime<Utc>,
     pub refresh_token: String,
 }
 
 impl AuthToken {
     pub fn is_expired(&self) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        now >= self.issued_at + self.expires_in
+        Utc::now() >= self.issued_at + self.expires_in
     }
 }
 
@@ -156,11 +155,11 @@ fn write_private_file(path: &PathBuf, content: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn token(expires_in: u64, issued_at: u64) -> AuthToken {
+    fn token(expires_in_secs: u64, issued_at: DateTime<Utc>) -> AuthToken {
         AuthToken {
             access_token: "tok".to_string(),
             token_type: "Bearer".to_string(),
-            expires_in,
+            expires_in: Duration::from_secs(expires_in_secs),
             scope: "read".to_string(),
             issued_at,
             refresh_token: "refresh-tok".to_string(),
@@ -170,16 +169,12 @@ mod tests {
     #[test]
     fn is_expired_true_when_lifetime_elapsed() {
         // Issued at the epoch with a 1s lifetime is unambiguously expired by now.
-        assert!(token(1, 0).is_expired());
+        assert!(token(1, DateTime::from_timestamp(0, 0).unwrap()).is_expired());
     }
 
     #[test]
     fn is_expired_false_for_token_far_in_future() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        assert!(!token(3600, now).is_expired());
+        assert!(!token(3600, Utc::now()).is_expired());
     }
 
     #[test]
@@ -198,12 +193,13 @@ mod tests {
 
     #[test]
     fn auth_token_json_roundtrips() {
-        let original = token(3600, 1_000_000);
+        let issued_at = DateTime::from_timestamp(1_000_000, 0).unwrap();
+        let original = token(3600, issued_at);
         let json = serde_json::to_string(&original).unwrap();
         let parsed: AuthToken = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.access_token, "tok");
-        assert_eq!(parsed.expires_in, 3600);
-        assert_eq!(parsed.issued_at, 1_000_000);
+        assert_eq!(parsed.expires_in, Duration::from_secs(3600));
+        assert_eq!(parsed.issued_at, issued_at);
         assert_eq!(parsed.refresh_token, "refresh-tok".to_string());
     }
 

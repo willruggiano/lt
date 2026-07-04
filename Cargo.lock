@@ -1440,6 +1440,7 @@ name = "lt-config"
 version = "0.6.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs",
  "serde",
  "serde_json",
