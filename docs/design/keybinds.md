@@ -6,16 +6,17 @@ The TUI should use the same (or as similar as possible) keybinds as the
 linear.app web client (ENG-26). Linear's core interaction patterns — two-key
 chord navigation (`g` then `i`, `o` then `w`) and single-letter contextual
 actions on the focused issue — cannot be expressed by the current input
-machinery, which is a per-mode `match KeyCode` with no key→action indirection,
+machinery, which is a per-view `match KeyCode` with no key→action indirection,
 no chord support, and a hand-maintained help table that has already drifted from
 the real handlers.
 
 This document inventories Linear's shortcuts, assesses the current machinery,
 specifies its replacement, and lays out the implementation plan. It supersedes
 the binding tables in [[tui-modal.md]]; the mode taxonomy described there is
-replaced by the view stack of [[tui-app-event-queue-adr.md]], which this design
-targets: key presses arrive on the unified event queue as `AppEvent::Key` and
-resolve against the stack of live views.
+replaced by the delivered view stack of [[tui-app-event-queue-adr.md]], which
+this design targets: key presses arrive on the unified event queue as
+`AppEvent::Key`, cascade down the stack of live views, and land on the Esc/q
+floor (Decision 6).
 
 ## Goals
 
@@ -142,7 +143,7 @@ Sources: [inbox](https://linear.app/docs/inbox),
 
 Linear's rich-text editor shortcuts ([editor](https://linear.app/docs/editor))
 are out of scope: `lt`'s text fields are line editors, not a rich-text surface.
-`TextInput`'s emacs-style bindings (`crates/lt-tui/src/text_input.rs:3-17`) are
+`TextInput`'s line-editing bindings (`crates/lt-tui/src/text_input.rs:3-17`) are
 the editing vocabulary.
 
 ### Platform note
@@ -152,45 +153,57 @@ no Cmd; everything collapses to `ctrl`/`alt`.
 
 ## Current machinery assessment
 
-Everything funnels through one router:
+[[tui-app-event-queue-adr.md]] (delivered) already fixed the routing shell.
+`App::apply` hands `AppEvent::Key` to `dispatch_key`
+(`crates/lt-tui/src/lib.rs:1120`), which checks four layers in order (Decision
+6): the focused view's own handler; the shared scroll defaults
+(`ScrollMotion::from_key`, lib.rs:179, resolved at the focused view only); the
+cascade toward the base for anything still unconsumed; and the Esc/q floor —
+Back (pop) above the base, double-esc reset and quit at it. What remains inside
+each layer-one handler is a hand-written `match KeyCode`:
 
 ```rust
-// crates/lt-tui/src/lib.rs:844
-match app.mode {
-    Mode::Popup(_) => handle_popup_key(app, key.code),
-    Mode::Detail => handle_detail_key(app, key.code, key.modifiers),
-    Mode::NewIssue => handle_new_issue_key(app, key.code, key.modifiers),
-    Mode::Help => handle_help_key(app, key.code, key.modifiers),
-    Mode::Search => handle_search_key(app, key.code, key.modifiers),
-    Mode::List => handle_normal_key(app, key.code, key.modifiers),
+// crates/lt-tui/src/lib.rs:1147
+fn handle_view_key(&mut self, i: usize, key: KeyEvent) -> KeyFlow {
+    let handler: KeyHandler = match &self.views[i] {
+        View::List(_) => handle_list_key,
+        View::Detail(_) => detail::handle_key,
+        View::Popup(_) => popup::handle_key,
+        View::NewIssue(_) => new_issue::handle_key,
+        View::Search(_) => popup::handle_search_key,
+        View::Help(_) => popup::handle_help_key,
+    };
+    handler(self, i, key)
 }
 ```
 
-Each arm is a hand-written `match KeyCode` (`handle_normal_key` lib.rs:858,
-`handle_popup_key` popup.rs:441, `handle_help_key` popup.rs:453,
-`handle_search_key` popup.rs:487, `handle_detail_key` detail.rs:248,
-`handle_new_issue_key` new_issue.rs:410), with sub-focus handled by inline gates
-(`app.comment_input.is_some()` detail.rs:250, `modal.focused_field`
-new_issue.rs:433). Deficiencies:
+(`handle_list_key` lib.rs:1454, `detail::handle_key` detail.rs:184,
+`popup::handle_key` popup.rs:507, `popup::handle_help_key` popup.rs:519,
+`popup::handle_search_key` popup.rs:556, `new_issue::handle_key`
+new_issue.rs:398), with sub-focus handled by inline gates
+(`d.comment_input.is_some()` detail.rs:189, `modal.focused_field`
+new_issue.rs:423). Deficiencies:
 
 - **No indirection.** Keys map straight to `App` method calls; there is nothing
   to enumerate, rebind, or reuse.
 - **No chords.** `g i`-style sequences are inexpressible.
-- **Help drifts.** `ALL_KEYBINDINGS` (lib.rs:146-247) is a parallel static table
-  with no link to the handlers. It already lies: `ui/help.rs:23` says "Esc/q to
-  close" but `handle_help_key` closes only on `esc` (`q` is typed into the
-  filter), and the `c` entry describes a detail-only binding with no context
-  marker.
-- **Order-dependent matching.** `Char('d') if ctrl` (lib.rs:889) works only
-  because it precedes `Char('d')` (lib.rs:904). Modifier handling is re-derived
-  per handler.
-- **Duplication.** `o` (open in browser) is implemented twice (lib.rs:895,
-  detail.rs:272); `esc` semantics are re-implemented per mode.
+- **Help drifts.** `ALL_KEYBINDINGS` (lib.rs:533-634) is a parallel static table
+  with no link to the handlers. It already lies twice about `q` alone: its `q`
+  entry says "quit", but since the floor landed, `q` above the base is Back
+  (lib.rs:1137-1141); the help popup's own title says "Esc/q to close"
+  (`ui/help.rs:23`) but `q` is typed into the filter (popup.rs:543-548).
+- **Cross-layer shadowing by hand.** List's `d` (toggle sort direction) needs a
+  `!ctrl` guard (lib.rs:1481) so it does not swallow the Ctrl-d scroll default
+  that resolves one layer later; nothing enforces such guards, and modifier
+  decoding is re-derived per handler.
+- **Duplication.** `o` (open in browser) is implemented twice (lib.rs:1468-1475,
+  detail.rs:205-211).
 
-Verdict: replace. The router is the seam — after the view-stack restructure
-([[tui-app-event-queue-adr.md]] Decision 2 deletes `Mode`), the seam is the
-per-view discriminant match inside `dispatch_key` (Decision 3). The view
-variants and `NewIssueField` carry the context information a keymap needs.
+Verdict: replace the handler bodies, keep the shell. The dispatch walk, the
+scroll seam, the cascade, and the floor stand as delivered; the keymap replaces
+what each view does with a key — the per-view `match KeyCode` — with table
+resolution. The view variants and `NewIssueField` carry the context information
+a keymap needs.
 
 ## Prior art
 
@@ -239,8 +252,9 @@ crates/lt-tui/src/keymap/
   action.rs   Action enum + label()
 ```
 
-Deleted: `ALL_KEYBINDINGS`/`HelpEntry` (lib.rs:139-247) and the dispatch layers
-of the six handlers. No new dependencies.
+Deleted: `ALL_KEYBINDINGS`/`HelpEntry` (lib.rs:527-634),
+`ScrollMotion::from_key` (lib.rs:179-192, subsumed by the `GLOBAL` table), and
+the `match KeyCode` bodies of the six handlers. No new dependencies.
 
 ### Key flow
 
@@ -249,7 +263,7 @@ crossterm KeyEvent (input thread, Press-filtered)
         |
         v
   AppEvent::Key(KeyEvent) on the app event queue
-        |                  ([[tui-app-event-queue-adr.md]] Decision 7)
+        |                  ([[tui-app-event-queue-adr.md]] Decision 10)
         v
   Key::from(KeyEvent)      normalize: strip kitty state bits;
         |                  BackTab -> tab+shift; ctrl+char lowercased;
@@ -266,10 +280,14 @@ crossterm KeyEvent (input thread, Press-filtered)
         +-- Act(action)  -> apply_<context>(app, action); consumed
         +-- Pending(key) -> app.pending_key = Some(key); status row
         |                   shows it; consumed
-        +-- Unbound(key) -> text contexts: forward to editor; consumed
-                            NewIssuePicker: consumed (a form swallows strays)
-                            Detail / Popup: pass to the view beneath;
-                            views[0] is the floor
+        +-- Unbound(key) -> text contexts: forward to editor (never esc);
+        |                   consumed
+        |                   NewIssuePicker: consumed (a form swallows strays)
+        |                   Detail / Popup: pass to the view beneath
+        v (no view consumed the key)
+  the Esc/q floor           delivered (lib.rs:1137-1143): esc/q pop above
+                            the base; at the base, esc = double-esc reset,
+                            q = quit
 ```
 
 ### Types
@@ -319,7 +337,7 @@ pub enum Action {
     MoveUp, MoveDown, MoveTop, MoveBottom,
     HalfPageUp, HalfPageDown, PageUp, PageDown, NextPage, PrevPage,
     // app-level
-    Quit, Back, OpenHelp, OpenSearch, OpenDetail, CreateIssue,
+    Back, OpenHelp, OpenSearch, OpenDetail, CreateIssue,
     Refresh, Login, OpenInBrowser,
     // issue fields
     SetStatus, SetPriority, SetAssignee, ToggleSortDirection, Comment,
@@ -337,7 +355,11 @@ impl Action {
 ```
 
 Navigation actions are semantic — `MoveDown` is list-selection in List, scroll
-in Detail, item-selection in Popup — which keeps the enum small. A reserved
+in Detail, item-selection in Popup — which keeps the enum small. The scroll
+family (`MoveUp` through `PageUp`) maps 1:1 onto the delivered `ScrollMotion`
+(lib.rs:165-177) and applies through the delivered `View::scroll` overrides
+(lib.rs:144-157), which already implement exactly those per-view semantics.
+There is no `Quit` variant: quit is the floor's, not a binding's. A reserved
 Linear binding becomes one new variant + one table row + one apply arm when its
 feature lands; that is the entire extensibility story.
 
@@ -354,22 +376,33 @@ pub enum KeyContext {
 `View::List` → `List`; `View::Detail(d)` → `CommentInput` iff
 `d.comment_input.is_some()`, else `Detail`; `View::NewIssue(m)` by
 `m.focused_field` (Title/Description → `NewIssueText`, pickers →
-`NewIssuePicker`) — absorbing the inline gates at detail.rs:250 and
-new_issue.rs:433.
+`NewIssuePicker`) — absorbing the inline gates at detail.rs:189 and
+new_issue.rs:423.
 
 Two layers, resolved context-first:
 
 - The context's own table.
-- `GLOBAL` — navigation vocabulary (`j`/`k`/arrows, `g g`, `G`,
-  `ctrl+d`/`ctrl+u`, page keys) plus `q` → Back, which maps to `App::pop_view`:
-  closing the focused view is the same act everywhere, so no view's table
-  concerns itself with `q`. List shadows it with Quit at the base (context table
-  wins), and text contexts skip GLOBAL, so `q` stays typeable. All other action
-  keys (`c`, `ctrl+/`, `/`) are per-context, at the cost of repeating
-  `esc → Back` in each table. The stack cascade delivers _keys_ downward; GLOBAL
-  delivers per-context _semantics_ for the same key (`j` scrolls in Detail,
-  moves the selection in List) — so it remains a resolution layer within each
-  view, not a layer at the bottom of the stack.
+- `GLOBAL` — the navigation vocabulary (`j`/`k`/arrows, `g g`, `G`,
+  `ctrl+d`/`ctrl+u`, page keys). This is the merge the ADR's reconciliation
+  section calls for: GLOBAL and the delivered scroll-default layer deliver
+  per-view semantics for the same keys, and GLOBAL wins as the resolution layer.
+  The key set of `ScrollMotion::from_key` (lib.rs:179-192) becomes GLOBAL's rows
+  (`g` → `g g` is the one change) and the function is deleted; the navigation
+  actions apply through the delivered `View::scroll` seam, whose per-view
+  overrides (selection movement in List/Popup, offset scrolling in Detail, no-op
+  elsewhere) are untouched. Like the scroll defaults it replaces, GLOBAL
+  resolves at the focused view only: the stack cascade delivers _keys_ downward;
+  GLOBAL delivers per-context _semantics_ for the same key (`j` scrolls in
+  Detail, moves the selection in List) — a resolution layer within each view,
+  not a layer at the bottom of the stack.
+
+`esc` and `q` are not bindings. The delivered floor — `dispatch_key`'s terminal
+arm (lib.rs:1137-1143) — owns them: Back (`pop_view`) above the base; at the
+base, the double-esc reset and quit. A table binds `esc` only where it means
+something narrower than pop (the comment input's cancel); no table binds `q`
+(text contexts forward it to their editor, so it stays typeable). The q-leak the
+ADR disclosed is resolved structurally, as delivered: the floor consumes `q` as
+Back before it could ever mean Quit from an overlay.
 
 Contexts split by what `Unbound` means:
 
@@ -377,16 +410,19 @@ Contexts split by what `Unbound` means:
   the letter from the query bar, (b) never start chords, (c) forward unbound
   keys to their editor widget (`TextInput::handle_key`, the description editor,
   the comment buffer), preserving the widgets' existing behavior including the
-  search debounce touch (popup.rs:548-553) and `enter`-as-newline in multiline
-  fields (detail.rs:304, new_issue.rs:513). Forwarding consumes: printable input
-  never cascades.
+  search debounce touch (popup.rs:618-622) and `enter`-as-newline in multiline
+  fields (detail.rs:277, new_issue.rs:500-502). Forwarding consumes: printable
+  input never cascades. `esc` is the one key never forwarded: unbound `esc`
+  passes to the floor instead, keeping overlay-close floor-owned — the keymap
+  form of the explicit `Esc => Pass` arms the delivered handlers carry
+  (popup.rs:527, popup.rs:564, new_issue.rs:412-419).
 - **`NewIssuePicker`** consumes unbound keys without forwarding: the modal is a
   form, and a stray letter acting on a view underneath it would be hostile.
+  `esc` passes to the floor here too, which pops the modal (and unwatches its
+  scopes, `pop_view` lib.rs:979).
 - **Pass-through contexts** (`Detail`, `Popup`) let an unbound key cascade to
-  the view beneath, ending at `views[0]`. This is what makes list bindings
-  reachable from overlays. The q-leak [[tui-app-event-queue-adr.md]] discloses
-  (an unbound `q` falling through to List's Quit) cannot occur: GLOBAL's `q` →
-  Back resolves in the focused view, before the cascade.
+  the view beneath, ending at `views[0]` and then the floor. This is what makes
+  list bindings reachable from overlays.
 
 ### Resolution and chords
 
@@ -406,19 +442,19 @@ pub fn resolve(ctx: KeyContext, pending: Option<Key>, key: Key) -> Resolved {
 
 - **No timers.** A pending prefix waits indefinitely, like vim's `g`. The prefix
   is `App` state and survives any number of idle ticks of the event loop's
-  `recv_timeout` wait ([[tui-app-event-queue-adr.md]] Decision 7); no event-loop
-  cooperation is needed.
+  `recv_timeout` wait ([[tui-app-event-queue-adr.md]] Decision 10); no
+  event-loop cooperation is needed.
 - **`pending` is `App`-level, not per-view.** `dispatch_key` takes the prefix
   once at entry and clears it; every view in the walk resolves against the same
   taken prefix. A chord miss drops the prefix and resolves the key fresh within
   that same context before the cascade continues.
 - `esc` during a pending chord cancels it and does nothing else (handled in
-  `dispatch_key` before `resolve`, so it never triggers the context's `Back`).
+  `dispatch_key` before `resolve`, so it never reaches the floor's Back).
 - Invariant, enforced by test: within any context's effective layers, no key is
   both `Single`-bound and a chord prefix — so prefix-vs-action ambiguity (the
   reason other systems need timeouts) is structurally impossible.
 - Pending state is one field, `App.pending_key: Option<Key>`, rendered in
-  `render_status_row` (ui/mod.rs:79-101) as e.g. `g …`, taking priority over the
+  `render_status_row` (ui/mod.rs:78-99) as e.g. `g …`, taking priority over the
   plain footer.
 
 Tables are `static` slices of `(Binding, Action)` built with the `const`
@@ -427,22 +463,25 @@ linear scan per keypress is irrelevant.
 
 ### Dispatch
 
-The dispatch site is the `AppEvent::Key` arm of `App::apply`
-([[tui-app-event-queue-adr.md]] Decision 3):
+The dispatch site is delivered: the `AppEvent::Key` arm of `App::apply`
+(lib.rs:1106-1113) feeding `dispatch_key` (lib.rs:1120-1145). The queue's wire
+type is the raw crossterm `KeyEvent`, not `keymap::Key`: normalization happens
+exactly once, at the boundary between transport and keymap:
 
 ```rust
 match event {
     AppEvent::Key(ev) => dispatch_key(self, Key::from(ev)),
-    // State(_) and Lifecycle(_) arms: not keymap concerns
+    // the Runtime(_) arms: not keymap concerns
 }
 ```
 
-The queue's wire type is the raw crossterm `KeyEvent`, not `keymap::Key`:
-normalization happens exactly once, at the boundary between transport and
-keymap. `dispatch_key` walks the stack top-down — resolve against the focused
-view's context; on `Act` apply and stop; on `Unbound` in a pass-through context
-repeat against the view beneath (`KeyFlow::Pass` in the ADR's vocabulary), with
-`views[0]` as the floor. `resolve` itself is stack-unaware; the cascade is
+`dispatch_key` keeps its delivered four-layer shape with the first two layers
+folded into keymap resolution: the per-view handler call and the separate
+`ScrollMotion::from_key` check become one `resolve` against the focused view's
+context (GLOBAL now carries the scroll keys); on `Act` apply and stop; on
+`Unbound` in a pass-through context repeat against the view beneath
+(`KeyFlow::Pass`, lib.rs:515-518); the Esc/q floor stays the terminal arm,
+verbatim. `resolve` itself is stack-unaware; the cascade and floor are
 dispatch-loop behavior above it.
 
 The six handlers become per-context
@@ -451,21 +490,23 @@ files, bodies unchanged, arms keyed on `Action` instead of `KeyCode` + modifier
 booleans (the `idx` re-fetches the view, per the ADR's borrow rule: no view
 borrow crosses a `&mut App` call):
 
-| Today                                   | Becomes                          |
-| --------------------------------------- | -------------------------------- |
-| `handle_normal_key` lib.rs:858          | `apply_list`                     |
-| `handle_detail_key` detail.rs:248       | `apply_detail`                   |
-| `handle_popup_key` popup.rs:441         | `apply_popup`                    |
-| `handle_help_key` popup.rs:453          | `apply_help` + forward to filter |
-| `handle_search_key` popup.rs:487        | `apply_search` + forward to bar  |
-| `handle_new_issue_key` new_issue.rs:410 | `apply_new_issue` + forward      |
+| Today                                    | Becomes                          |
+| ---------------------------------------- | -------------------------------- |
+| `handle_list_key` lib.rs:1454            | `apply_list`                     |
+| `detail::handle_key` detail.rs:184       | `apply_detail`                   |
+| `popup::handle_key` popup.rs:507         | `apply_popup`                    |
+| `handle_help_key` popup.rs:519           | `apply_help` + forward to filter |
+| `handle_search_key` popup.rs:556         | `apply_search` + forward to bar  |
+| `new_issue::handle_key` new_issue.rs:398 | `apply_new_issue` + forward      |
 
-Behavior that moves intact: the team-field background load
-(new_issue.rs:453-495) into the `Confirm`/`NextField` arms. `Action::Back` is
-`App::pop_view` in every non-base context — confirm/cancel pop the view and
-restore whatever is beneath. The base's `Back` keeps the double-esc reset
-(lib.rs:862-882) in `apply_list`'s `Back` arm — the same reset `pop_view`
-performs at the stack floor, so the two `Back` semantics converge on one helper.
+Behavior that moves intact: the team watch swap (`new_issue_team_changed`,
+new_issue.rs:254-268, called from the Tab/Enter arms) into the
+`Confirm`/`NextField` arms. `Action::Back` survives in exactly one table — the
+comment input's `esc`, which cancels the input without popping the Detail view
+beneath it (detail.rs:262-267), narrower than the floor's pop. Every other
+close/cancel path is the floor's: confirm/cancel pop the view and restore
+whatever is beneath, and the base's double-esc reset stays `handle_list_esc`
+(lib.rs:1061-1077), invoked by the floor, outside the keymap.
 
 ## Default binding tables
 
@@ -481,7 +522,14 @@ performs at the stack floor, so the two `Back` semantics converge on one helper.
 | `lt` `?` = keybind help vs Linear `?`     | Linear's `?` opens the help panel, which `lt` lacks; the keybinds panel mirrors Linear's `ctrl+/`. `?` reserved for a future help panel.                       |
 | Non-conflicts after normalization         | `d` (sort dir) vs `D` (due date), `L` (login) vs `l` (labels), pagination `ctrl+n`/`ctrl+p` vs completion `ctrl+n`/`ctrl+p` (layering).                        |
 
+`esc` and `q` appear in no table below (the comment input's `esc` excepted): the
+delivered floor handles them — Back above the base; double-esc reset and quit at
+it.
+
 ### GLOBAL (skipped by text contexts)
+
+The delivered scroll-default key set (`ScrollMotion::from_key`), with `g`
+becoming the `g g` chord:
 
 | Binding         | Action       |
 | --------------- | ------------ |
@@ -492,70 +540,72 @@ performs at the stack floor, so the two `Back` semantics converge on one helper.
 | `ctrl+d`        | HalfPageDown |
 | `ctrl+u`        | HalfPageUp   |
 | `pgdn` / `pgup` | PageDown/Up  |
-| `q`             | Back         |
 
 ### List
 
-| Binding             | Action            | Binding  | Action              |
-| ------------------- | ----------------- | -------- | ------------------- |
-| `enter` / `space`   | OpenDetail        | `ctrl+r` | Refresh             |
-| `esc`               | Back (double-esc) | `d`      | ToggleSortDirection |
-| `/`                 | OpenSearch        | `o b`    | OpenInBrowser       |
-| `ctrl+/` / `ctrl+7` | OpenHelp          | `ctrl+n` | NextPage            |
-| `c`                 | CreateIssue       | `ctrl+p` | PrevPage            |
-| `s`                 | SetStatus         | `L`      | Login               |
-| `p`                 | SetPriority       | `q`      | Quit                |
-| `a`                 | SetAssignee       |          |                     |
+| Binding             | Action      | Binding  | Action              |
+| ------------------- | ----------- | -------- | ------------------- |
+| `enter` / `space`   | OpenDetail  | `ctrl+r` | Refresh             |
+| `/`                 | OpenSearch  | `d`      | ToggleSortDirection |
+| `ctrl+/` / `ctrl+7` | OpenHelp    | `o b`    | OpenInBrowser       |
+| `c`                 | CreateIssue | `ctrl+n` | NextPage            |
+| `s`                 | SetStatus   | `ctrl+p` | PrevPage            |
+| `p`                 | SetPriority | `L`      | Login               |
+| `a`                 | SetAssignee |          |                     |
 
 `ctrl+7` is the legacy alias for `ctrl+/`: without the kitty protocol, terminals
 send Ctrl+/ as 0x1F, which crossterm decodes as ctrl+`'7'` (crossterm 0.29,
 `src/event/sys/unix/parse.rs:110-113`); kitty-enhanced terminals deliver a true
-`ctrl+/`. Both are bound, like the submit chords. Cycle-sort (`S` today) is
-removed outright — `S` is reserved for subscribe — and its functionality remains
-reachable via `/` `sort:` stems.
+`ctrl+/`. Both are bound, like the submit chords. Cycle-sort (`S` today,
+lib.rs:1478 / `App::cycle_sort` lib.rs:1022) is removed outright — `S` is
+reserved for subscribe — and its functionality remains reachable via `/` `sort:`
+stems. The hand-written `!ctrl` guard on `d` (lib.rs:1481) disappears
+structurally: after normalization, `d` and `ctrl+d` are distinct `Key` values
+resolved in distinct layers.
 
 ### Detail
 
-`esc` → Back, `c` → Comment, `o b` → OpenInBrowser, plus GLOBAL (navigation =
-scrolling; `g g` replaces today's `g` for scroll-to-top; `q` → Back preserves
-today's close-on-`q`, detail.rs:258). Pass-through: unbound keys cascade to the
-base list (e.g. `/` opens Search, `s`/`p`/`a` act on the list selection until
-phase 4 binds them here).
+`c` → Comment, `o b` → OpenInBrowser, plus GLOBAL (navigation = the delivered
+offset-scrolling override; `g g` replaces today's `g` for scroll-to-top).
+`esc`/`q` close via the floor, as today. Pass-through: unbound keys cascade to
+the base list (e.g. `/` opens Search, `s`/`p`/`a` act on the list selection
+until phase 4 binds them here).
 
 ### Popup
 
-`enter` → Confirm, `esc` → Back, plus GLOBAL (MoveTop/MoveBottom clamp to
-first/last item; `q` → Back closes — today's handler ignores it,
-popup.rs:441-449). Pass-through.
+`enter` → Confirm, plus GLOBAL (the delivered selection-movement override;
+MoveTop/MoveBottom clamp to first/last item). `esc`/`q` close via the floor, as
+today ([[tui-app-event-queue-adr.md]] behavior change 14). Pass-through.
 
 ### New issue — picker fields
 
-`ctrl+enter` / `alt+enter` → Submit, `esc` → Back, `tab` → NextField,
-`shift+tab` → PrevField, `enter` → Confirm (advance; Team triggers the
-background load), `m` → PickMe, plus GLOBAL for `j`/`k`.
+`ctrl+enter` / `alt+enter` → Submit, `tab` → NextField, `shift+tab` → PrevField,
+`enter` → Confirm (advance; leaving Team triggers the watch swap), `m` → PickMe,
+plus GLOBAL for `j`/`k`. `esc` passes to the floor, which pops the modal.
 
 ### New issue — text fields (text context)
 
-`ctrl+enter` / `alt+enter` → Submit, `esc` → Back, `tab` → NextField,
-`shift+tab` → PrevField. Everything else forwards to the editor (`enter` inserts
-a newline in the description).
+`ctrl+enter` / `alt+enter` → Submit, `tab` → NextField, `shift+tab` → PrevField.
+Everything else forwards to the editor (`enter` inserts a newline in the
+description); `esc` passes to the floor.
 
 ### Comment input (text context)
 
-`ctrl+enter` / `alt+enter` → Submit, `esc` → Back. Everything else forwards.
+`ctrl+enter` / `alt+enter` → Submit, `esc` → Back (cancel the input, keeping the
+Detail view — the one `esc` table row in the keymap). Everything else forwards.
 
 ### Search (text context)
 
-`esc` → Back, `enter` → Confirm, `ctrl+c` → ClearQuery, `down`/`up` →
-MoveDown/MoveUp, `ctrl+n`/`ctrl+p` → CompleteNext/Prev, `ctrl+y` →
-CompleteAccept, `tab`/`shift+tab` → CompleteForward/Backward. Everything else
-forwards to the query bar.
+`enter` → Confirm, `ctrl+c` → ClearQuery, `down`/`up` → MoveDown/MoveUp,
+`ctrl+n`/`ctrl+p` → CompleteNext/Prev, `ctrl+y` → CompleteAccept,
+`tab`/`shift+tab` → CompleteForward/Backward. Everything else forwards to the
+query bar; `esc` passes to the floor.
 
 ### Help (text context)
 
-`esc` → Back, `down`/`j` → MoveDown, `up`/`k` → MoveUp. Everything else forwards
-to the filter bar. (`j`/`k` remain untypeable in the filter — an existing
-limitation, carried forward deliberately.)
+`down`/`j` → MoveDown, `up`/`k` → MoveUp. Everything else forwards to the filter
+bar; `esc` passes to the floor. (`j`/`k` remain untypeable in the filter — an
+existing limitation, carried forward deliberately.)
 
 ## Help overlay from the keymap
 
@@ -569,25 +619,28 @@ pub struct HelpRow {
 }
 
 /// Iterate GLOBAL then each context table in declaration order; group
-/// consecutive rows by (context, action).
+/// consecutive rows by (context, action). Appends static rows for the
+/// floor (esc/q: back; at the list, reset/quit) -- the floor is dispatch
+/// behavior, not a binding, but the panel must still show it.
 pub fn help_rows() -> Vec<HelpRow>;
 ```
 
-`HelpPopup` (popup.rs:61-94) stores `rows: Vec<HelpRow>` built once; the
+`HelpPopup` (popup.rs:107-131) stores `rows: Vec<HelpRow>` built once; the
 renderer joins the bindings' `Display` forms with `" / "` ("j / down",
 "ctrl+enter / alt+enter"), and `update_filter` matches against that rendered
 form, the label, and the context. `ui/help.rs` reads the rows and gains a
 context column. Help can no longer drift because it _is_ the keymap; the
-existing inaccuracies (the "Esc/q" title, the context-less `c` entry) disappear
-as a class.
+existing inaccuracies (the "Esc/q to close" title while `q` filters, the `q` =
+"quit" entry that is wrong everywhere above the base) disappear as a class.
 
 ## Kitty keyboard protocol and the submit chord
 
-The loop enables the kitty protocol when supported (lib.rs:778-787);
-`Session.keyboard_enhanced` (lib.rs:270-277) exists because plain terminals
+The loop enables the kitty protocol when supported (lib.rs:1330-1356);
+`Session.keyboard_enhanced` (lib.rs:703-710) exists because plain terminals
 cannot encode `ctrl+enter`. Today's handlers accept ctrl **or** alt
-unconditionally (new_issue.rs:417, detail.rs:290) and `keyboard_enhanced` only
-selects the hint string. The keymap replicates this exactly: both `ctrl+enter`
+unconditionally (new_issue.rs:405-410, detail.rs:256-260) and
+`keyboard_enhanced` only selects the hint string (`submit_key_label`,
+ui/new_issue.rs:13-18). The keymap replicates this exactly: both `ctrl+enter`
 and `alt+enter` are statically bound to `Submit` — no runtime capability
 switching. Without kitty, `ctrl+enter` arrives as plain `enter` (newline in
 multiline fields, today's behavior) and `alt+enter` is the escape hatch. The
@@ -605,25 +658,27 @@ Inline `#[cfg(test)]` modules per [[testing.md]].
    leniency (`"shift+p"` == `"P"`); `Binding` round-trip (`"g g"`).
 2. **Resolution units** (mod.rs): chord hit (`g`,`g` → MoveTop); chord miss
    falls through (`g`,`j` → MoveDown); text context ignores GLOBAL (`c` in
-   Search → Unbound); layer precedence (`q` → Back in Detail via GLOBAL, Quit in
-   List whose context table shadows GLOBAL). Cascade units (dispatch level): an
-   unbound key in a Popup resolves in the List beneath; `q` in a Popup is Back,
-   never Quit; a printable key in Search never cascades.
+   Search → Unbound); layer precedence (a context row wins over a GLOBAL row for
+   the same key). Dispatch units: an unbound key in a Popup resolves in the List
+   beneath; `q` above the base pops via the floor, never Quit; a printable key
+   in Search never cascades; `esc` in Search reaches the floor, not the query
+   bar. (The delivered cascade/floor tests cover the floor itself; these pin the
+   keymap's pass policies.)
 3. **Invariants** (mod.rs), over every context's effective layers: no duplicate
    `Binding`; no key both `Single`-bound and a chord prefix; every table binding
-   round-trips through Display/FromStr; no context table besides List binds `q`
-   (Back is GLOBAL's; only the base may shadow it).
+   round-trips through Display/FromStr; no table binds `q`, and none binds `esc`
+   except CommentInput (Back/quit are the floor's).
 4. **Binding snapshot** (insta): render every context's `binding → label` lines
    and snapshot them. Any binding change becomes a reviewed snapshot diff — the
    drift guard, mirroring this document's tables. A second snapshot pins
    `help_rows()`.
 5. **Loop tests** (the `EventPump::Scripted` harness of
-   [[tui-app-event-queue-adr.md]] Decision 7, loop_tests.rs, scripting
+   [[tui-app-event-queue-adr.md]] Decision 10, loop_tests.rs, scripting
    `AppEvent::Key(...)` entries): `g`,`g` selects top; `g`,`j` moves down;
    `enter` opens detail; `c` opens the create modal; `esc` cancels a pending `g`
    without touching `last_esc_time`. The existing
-   `run_app_dispatches_keys_and_quits` assertions survive with their events
-   wrapped in `AppEvent::Key`.
+   `run_app_dispatches_keys_and_quits` assertions (loop_tests.rs:431) survive
+   unchanged.
 6. **Render test**: footer shows the pending-prefix indicator (render-test
    pattern with `pending_key = Some(...)`).
 
@@ -633,39 +688,39 @@ Each phase lands gate-green (`make check` / `make test`).
 
 1. **Keymap core + non-text contexts.** Add `keymap/{mod,key,action}.rs` with
    tables and tests 1-4; add `App.pending_key`; wire keymap resolution into the
-   dispatch seam. Before the ADR's view-stack PR lands, that seam is the
-   `match app.mode` router (lib.rs:844-851); after it, the per-view handler
-   match inside `dispatch_key` — a one-function rebase in either order, per the
-   ADR's delivery plan. Convert
-   `handle_normal_key`/`handle_detail_key`/`handle_popup_key` to `apply_*` (the
-   comment-input gate temporarily keeps forwarding to the old comment handler).
-   The pass-through policy (which contexts `Pass` on `Unbound`) lands here with
-   the tables — the ADR ships the cascade mechanism with every handler returning
-   `Consumed`. Binding changes land here: `g g`/`G`, `enter`+`space`, `c`
-   create, `o b` browser (the first `o` chord), `ctrl+r` refresh,
-   `ctrl+/`+`ctrl+7` help. Cycle-sort is removed outright (`App::cycle_sort`,
-   its `S` binding, and its help entry). The dead `App.input_mode`/`input_buf`
-   filter state (lib.rs:323-325) and the unreachable footer branch
-   (ui/mod.rs:94-95) are deleted (approved in review; the ADR's view-stack PR
-   also claims this deletion — whichever lands second drops it). Pending
-   indicator in the status row. Patch `ALL_KEYBINDINGS` strings minimally so
-   help doesn't lie in the interim. Extend loop tests.
+   delivered dispatch seam: `dispatch_key`'s per-view handler call and
+   `ScrollMotion::from_key` layer (lib.rs:1120-1145) become one `resolve` per
+   view, the cascade and floor arms unchanged. Convert
+   `handle_list_key`/`detail::handle_key`/`popup::handle_key` to `apply_*` (the
+   comment-input gate temporarily keeps forwarding to
+   `handle_comment_input_key`, detail.rs:252). The pass-through policy (which
+   contexts `Pass` on `Unbound`) becomes per-context data — the delivered
+   handlers already return `Pass` for unbound keys; the keymap encodes the same
+   policy in `KeyContext`. Binding changes land here: `g g`/`G`,
+   `enter`+`space`, `c` create, `o b` browser (the first `o` chord), `ctrl+r`
+   refresh, `ctrl+/`+`ctrl+7` help. Cycle-sort is removed outright
+   (`ListView::cycle_sort` lib.rs:364, `App::cycle_sort` lib.rs:1022, the `S`
+   arm lib.rs:1478, and its help entry). Pending indicator in the status row.
+   Patch `ALL_KEYBINDINGS` strings minimally so help doesn't lie in the interim.
+   Extend loop tests.
 2. **Text contexts.** `key_context` grows the comment-input and `NewIssueField`
-   derivations; Search/Help/NewIssue/CommentInput move onto the keymap with
-   forward-to-editor; delete the dispatch layers of their old handlers (the
-   editing widgets remain). Behavior-neutral; existing render tests are the
+   derivations (the inline gates at detail.rs:189 and new_issue.rs:423);
+   Search/Help/NewIssue/CommentInput move onto the keymap with
+   forward-to-editor, their explicit `Esc => Pass` arms replaced by the
+   esc-is-never-forwarded rule; delete the dispatch layers of their old handlers
+   (the editing widgets remain). Behavior-neutral; existing render tests are the
    guard.
-3. **Help from the keymap.** `help_rows()`, `HelpPopup.rows`, rewrite
-   `ui/help.rs`, delete `ALL_KEYBINDINGS`/`HelpEntry`, add the help snapshot,
-   update the footer hints (ui/chrome.rs:92-99) and replace [[tui-modal.md]]'s
-   binding tables with a link here.
+3. **Help from the keymap.** `help_rows()` (tables + the static floor rows),
+   `HelpPopup.rows`, rewrite `ui/help.rs`, delete `ALL_KEYBINDINGS`/`HelpEntry`,
+   add the help snapshot, update the footer hints (ui/chrome.rs:83-90) and
+   replace [[tui-modal.md]]'s binding tables with a link here.
 4. **Parity follow-ups** (separate issues; each is one table row + one variant +
    one apply arm): `i` assign-to-me (viewer id is already fetched; action is one
-   `enqueue_assignee_change`), `s`/`p`/`a` from Detail (requires the view stack
-   of [[tui-app-event-queue-adr.md]]: the binding pushes a `PopupView` built
-   from the detail's own issue, and confirm/cancel pop back to the Detail
-   beneath), first `g` chords and further `o` chords as inbox/my-issues/
-   workspaces land (ENG-41 = `o w`).
+   `IssueEdit::Assignee` through the service), `s`/`p`/`a` from Detail (the view
+   stack is delivered, so this is structural: the binding pushes a `PopupView`
+   built from the detail's own issue, and confirm/cancel pop back to the Detail
+   beneath), first `g` chords and further `o` chords as
+   inbox/my-issues/workspaces land (ENG-41 = `o w`).
 
 ## Risks and flagged issues
 
