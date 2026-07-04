@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
 use lt_types::types::Issue;
 
-use super::{App, FetchStatus, KeyFlow, Scroll, StateCtx, StateEvent, View};
+use super::{App, FetchStatus, KeyFlow, Scroll, StateCtx, StateEvent, View, keymap};
 
 /// The detail pane's complete state: the shared `types`/`comments` fragments
 /// the TUI composes for display, plus the panel's scroll offset and comment
@@ -169,40 +169,23 @@ pub(crate) fn populate_relations(db: &Database, detail: &mut DetailView, issue: 
     }
 }
 
-// -- Detail pane keybindings --------------------------------
+// -- Detail pane keybindings (docs/design/keybinds.md, "Detail") ------------
 //
-// Vim-like scrolling bindings:
-//   j / Down        -- scroll down one line
-//   k / Up          -- scroll up one line
-//   g               -- scroll to top
-//   G               -- scroll to bottom
-//   Ctrl+d          -- scroll down half page
-//   Ctrl+u          -- scroll up half page
-//   PageDown        -- scroll down one page
-//   PageUp          -- scroll up one page
+// Navigation (j/k/g g/G/Ctrl-d/Ctrl-u/PageDown/PageUp) resolves through the
+// keymap's GLOBAL table and applies via `Scroll`, not here.
 
-pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
-    let code = key.code;
-    let modifiers = key.modifiers;
-
-    // When the comment input is open, all keys go to it.
-    let comment_open = detail_view_mut(app, i).is_some_and(|d| d.comment_input.is_some());
-    if comment_open {
-        handle_comment_input_key(app, i, code, modifiers);
-        return KeyFlow::Consumed;
-    }
-
-    // Esc/q (Back) and the scroll motions are not bound here: they resolve
-    // at the floor and scroll-default layers of `dispatch_key` (Decision 6).
-    match code {
-        // Open the comment input.
-        KeyCode::Char('c') => {
+/// The `Detail` context's non-navigation actions. Navigation actions never
+/// reach here: `resolve_and_apply` maps them to `ScrollMotion` and applies
+/// them through `View::scroll` instead.
+pub(crate) fn apply_detail(app: &mut App, i: usize, action: keymap::Action) {
+    match action {
+        keymap::Action::Comment => {
             if let Some(d) = detail_view_mut(app, i) {
                 d.comment_input = Some(String::new());
             }
             app.footer_msg = None;
         }
-        KeyCode::Char('o') => {
+        keymap::Action::OpenInBrowser => {
             if let Some(d) = detail_view_mut(app, i) {
                 let url = format!("https://linear.app/issue/{}", d.issue.identifier);
                 if let Err(e) = open::that(url) {
@@ -210,8 +193,19 @@ pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
                 }
             }
         }
-        _ => return KeyFlow::Pass,
+        // Navigation and other contexts' actions never resolve to `Detail`'s
+        // table; the match stays exhaustive over `Action` regardless.
+        _ => {}
     }
+}
+
+/// Forward to the comment input's own editing handler while it is open --
+/// temporary until phase 2 moves `CommentInput` onto the keymap
+/// (`docs/design/keybinds.md`, Implementation plan item 2). Always
+/// consumes, matching today's gate (`dispatch_key`'s per-view branch checks
+/// `comment_input.is_some()` before calling this).
+pub(crate) fn handle_comment_input(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    handle_comment_input_key(app, i, key.code, key.modifiers);
     KeyFlow::Consumed
 }
 

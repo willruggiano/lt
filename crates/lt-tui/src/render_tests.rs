@@ -6,6 +6,7 @@
 // profile global is touched. Data comes from the deterministic `sim` generator,
 // so the module is gated on `feature = "sim"`.
 
+use crossterm::event::KeyModifiers;
 use lt_types::types::User;
 use lt_types::viewer;
 use ratatui::Terminal;
@@ -127,9 +128,9 @@ fn detail_scroll_saturates() {
 #[test]
 fn popup_move_clamps_and_cancel_resets_stack() {
     // j/Down and Esc are no longer bound in the popup's own handler -- they
-    // resolve at the scroll-default and floor layers of `dispatch_key`
-    // (Decision 6), so this test drives them through it rather than
-    // `handle_popup_key` directly.
+    // resolve through the keymap's GLOBAL table and the floor layer of
+    // `dispatch_key` (Decision 6), so this test drives them through it
+    // rather than `popup::apply_popup` directly.
     let mut app = app_with_issues(0, 1).unwrap();
     let issue_id = app.list_mut().issues[0].id.inner().to_string();
     app.views.push(View::Popup(PopupView {

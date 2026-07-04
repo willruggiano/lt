@@ -84,10 +84,10 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, state: &FooterState) 
     let mut parts: Vec<&str> = vec![
         "q quit",
         "/ filter",
-        "? help",
+        "ctrl+/ help",
         "j/k nav",
         "<space> detail",
-        "n new",
+        "c new",
     ];
     if state.has_prev {
         parts.push("ctrl+p prev");

@@ -1,4 +1,5 @@
 mod detail;
+mod keymap;
 mod markdown;
 mod new_issue;
 mod popup;
@@ -19,7 +20,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 pub use detail::DetailView;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
@@ -37,8 +38,6 @@ use lt_types::viewer;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use new_issue::build_assignee_items;
 pub(crate) use new_issue::{NewIssueField, NewIssueModal};
-#[cfg(all(test, feature = "sim"))]
-pub(crate) use popup::handle_key as handle_popup_key;
 pub(crate) use popup::{
     HelpPopup, PopupItem, PopupKind, PopupView, SearchOverlay, poll_search_debounce,
     priority_popup_items, state_items,
@@ -156,11 +155,12 @@ impl View {
     }
 }
 
-/// A scroll/selection motion, resolved at the focused view's [`View::scroll`]
-/// when no handler in the key cascade binds the key (Decision 6). One method
-/// over the shared `j`/`k`/`g`/`G`/Ctrl-d/Ctrl-u/PageDown/PageUp family,
-/// rather than one method per motion: avoids eight near-identical trait
-/// methods for the same dispatch seam.
+/// A scroll/selection motion, applied through the focused view's
+/// [`View::scroll`] when the keymap resolves a key to a navigation
+/// `Action` (the `GLOBAL` table, `keymap::mod`). One method over the shared
+/// `j`/`k`/`g g`/`G`/Ctrl-d/Ctrl-u/PageDown/PageUp family, rather than one
+/// method per motion: avoids eight near-identical trait methods for the same
+/// dispatch seam.
 #[derive(Clone, Copy)]
 pub(crate) enum ScrollMotion {
     Down,
@@ -173,23 +173,21 @@ pub(crate) enum ScrollMotion {
     PageUp,
 }
 
-impl ScrollMotion {
-    /// The shared scroll-key set, checked once per key after the focused
-    /// view's own bindings pass on it.
-    fn from_key(key: KeyEvent) -> Option<Self> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => Some(Self::Down),
-            KeyCode::Char('k') | KeyCode::Up => Some(Self::Up),
-            KeyCode::Char('g') => Some(Self::Top),
-            KeyCode::Char('G') => Some(Self::Bottom),
-            KeyCode::Char('d') if ctrl => Some(Self::HalfPageDown),
-            KeyCode::Char('u') if ctrl => Some(Self::HalfPageUp),
-            KeyCode::PageDown => Some(Self::PageDown),
-            KeyCode::PageUp => Some(Self::PageUp),
-            _ => None,
-        }
-    }
+/// Map a navigation `Action` onto its `ScrollMotion`, or `None` for the
+/// non-navigation actions `apply_*` handles instead.
+fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
+    use keymap::Action;
+    Some(match action {
+        Action::MoveDown => ScrollMotion::Down,
+        Action::MoveUp => ScrollMotion::Up,
+        Action::MoveTop => ScrollMotion::Top,
+        Action::MoveBottom => ScrollMotion::Bottom,
+        Action::HalfPageDown => ScrollMotion::HalfPageDown,
+        Action::HalfPageUp => ScrollMotion::HalfPageUp,
+        Action::PageDown => ScrollMotion::PageDown,
+        Action::PageUp => ScrollMotion::PageUp,
+        _ => return None,
+    })
 }
 
 /// The base list's fetch status. Its only render site is the base table's
@@ -344,7 +342,7 @@ impl ListView {
     }
 
     /// Produce a new `QueryAst` with the sort: token replaced to match
-    /// `args.sort`/`args.desc`. Used by `cycle_sort` and `toggle_desc`.
+    /// `args.sort`/`args.desc`. Used by `toggle_desc`.
     fn replace_sort_in_filter(&self) -> search_query::QueryAst {
         let dir = if self.args.desc { "-" } else { "+" };
         let new_sort = format!("sort:{}{}", self.args.sort.label(), dir);
@@ -357,16 +355,6 @@ impl ListView {
             .collect();
         parts.push(new_sort);
         search_query::parse_query_ast(&parts.join(" "))
-    }
-
-    /// `S`: cycle the sort field, rewrite `filter`'s `sort:` token to match,
-    /// reset pagination, and re-fetch from the top.
-    fn cycle_sort(&mut self, ctx: &StateCtx) {
-        self.args.sort = self.args.sort.next();
-        self.filter = self.replace_sort_in_filter();
-        self.pagination.cursor_stack.clear();
-        self.pagination.current_cursor = None;
-        self.do_fetch(ctx, true);
     }
 
     /// `d`: toggle sort direction, rewrite `filter`'s `sort:` token to match,
@@ -507,17 +495,14 @@ pub struct StateCtx<'a> {
     pub viewer_name: Option<&'a str>,
 }
 
-/// What a key handler did with a key. `Pass` hands it to the next layer:
-/// the shared scroll defaults, then the cascade toward the base, then the
-/// Esc/q floor (Decision 6). A handler that returns `Pass` must not have
-/// mutated anything (in particular the stack), so the walk's indices stay
-/// valid.
+/// What a key handler did with a key. `Pass` hands it to the next layer: the
+/// cascade toward the base, then the Esc/q floor (Decision 6). A handler
+/// that returns `Pass` must not have mutated anything (in particular the
+/// stack), so the walk's indices stay valid.
 pub enum KeyFlow {
     Consumed,
     Pass,
 }
-
-type KeyHandler = fn(&mut App, usize, KeyEvent) -> KeyFlow;
 
 // ---------------------------------------------------------------------------
 // Help popup state
@@ -533,7 +518,7 @@ pub struct HelpEntry {
 pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
     HelpEntry {
         key: "q",
-        description: "quit",
+        description: "back (above base) / quit (at base)",
     },
     HelpEntry {
         key: "<esc>",
@@ -548,7 +533,7 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
         description: "move up",
     },
     HelpEntry {
-        key: "g",
+        key: "g g",
         description: "go to top",
     },
     HelpEntry {
@@ -572,7 +557,7 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
         description: "page up",
     },
     HelpEntry {
-        key: "<space>",
+        key: "<enter> / <space>",
         description: "open detail pane",
     },
     HelpEntry {
@@ -580,11 +565,11 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
         description: "filter by title",
     },
     HelpEntry {
-        key: "?",
+        key: "ctrl+/",
         description: "open this help popup",
     },
     HelpEntry {
-        key: "n",
+        key: "c",
         description: "new issue",
     },
     HelpEntry {
@@ -600,7 +585,7 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
         description: "set assignee",
     },
     HelpEntry {
-        key: "o",
+        key: "o b",
         description: "open in browser",
     },
     HelpEntry {
@@ -608,12 +593,8 @@ pub const ALL_KEYBINDINGS: &[HelpEntry] = &[
         description: "comment on issue (in detail pane)",
     },
     HelpEntry {
-        key: "r",
+        key: "ctrl+r",
         description: "refresh",
-    },
-    HelpEntry {
-        key: "S",
-        description: "cycle sort field",
     },
     HelpEntry {
         key: "d",
@@ -802,6 +783,14 @@ pub struct App {
     // Set by ui::render each frame so key handlers know page size.
     pub viewport_height: u16,
 
+    /// A chord's first key, waiting for its second
+    /// (`docs/design/keybinds.md`, "Resolution and chords"). No timer: it
+    /// survives idle frames of the event loop's `recv_timeout` wait until
+    /// the next key resolves or drops it. Rendered in the status row
+    /// (`ui::render`). Not `pub`: `keymap::Key` is crate-private, and only
+    /// `dispatch_key`/`ui::render` touch this field.
+    pending_key: Option<keymap::Key>,
+
     // -- footer message ----------------------------------------------
     pub footer_msg: Option<String>,
 
@@ -858,6 +847,7 @@ impl App {
             views: vec![View::List(list)],
             quit: false,
             viewport_height: 0,
+            pending_key: None,
             footer_msg: None,
             sync: SyncStatus::Idle,
             auth: AuthStatus::Unknown,
@@ -1019,10 +1009,6 @@ impl App {
         self.service.request_sync();
     }
 
-    fn cycle_sort(&mut self) {
-        self.with_base_list(ListView::cycle_sort);
-    }
-
     fn toggle_desc(&mut self) {
         self.with_base_list(ListView::toggle_desc);
     }
@@ -1112,25 +1098,29 @@ impl App {
         }
     }
 
-    /// Four layers, checked in order (Decision 6): the focused view's own
-    /// bindings; the shared scroll defaults, resolved at the focused view
-    /// only (they never cascade); the cascade toward the base for anything
-    /// else unbound; and the Esc/q floor -- Back above the base, reset/quit
-    /// at it.
-    fn dispatch_key(&mut self, key: KeyEvent) {
+    /// Normalize once, then walk the view stack top-down (Decision 6): a
+    /// phase-1 view (`List`/`Detail` without an open comment input/`Popup`)
+    /// resolves the key against its keymap context, applying navigation
+    /// through `View::scroll` and everything else through `apply_*`; a
+    /// legacy view (`Detail` with the comment input open, `NewIssue`,
+    /// `Search`, `Help`) keeps its own handler, called with the original
+    /// crossterm event exactly as before. The Esc/q floor is the terminal
+    /// arm, unchanged. `pending`, the chord prefix, is taken once here and
+    /// resolved against every view in the walk (`docs/design/keybinds.md`,
+    /// "Resolution and chords").
+    fn dispatch_key(&mut self, ev: KeyEvent) {
+        let key = keymap::Key::from(ev);
+        // A chord in progress: Esc cancels it and does nothing else --
+        // checked before anything else so it never reaches the floor's Back
+        // or touches `last_esc_time`.
+        if self.pending_key.is_some() && key.code == KeyCode::Esc {
+            self.pending_key = None;
+            return;
+        }
+        let pending = self.pending_key.take();
         let top = self.views.len() - 1;
-        if matches!(self.handle_view_key(top, key), KeyFlow::Consumed) {
-            return;
-        }
-        if let Some(motion) = ScrollMotion::from_key(key) {
-            let viewport = self.viewport_height;
-            if let Some(view) = self.views.last_mut() {
-                view.scroll(motion, viewport);
-            }
-            return;
-        }
-        for i in (0..top).rev() {
-            if matches!(self.handle_view_key(i, key), KeyFlow::Consumed) {
+        for i in (0..=top).rev() {
+            if matches!(self.handle_view_key(i, pending, ev), KeyFlow::Consumed) {
                 return;
             }
         }
@@ -1143,17 +1133,59 @@ impl App {
         }
     }
 
-    /// Dispatch `key` to the view at stack index `i`'s own key handler.
-    fn handle_view_key(&mut self, i: usize, key: KeyEvent) -> KeyFlow {
-        let handler: KeyHandler = match &self.views[i] {
-            View::List(_) => handle_list_key,
-            View::Detail(_) => detail::handle_key,
-            View::Popup(_) => popup::handle_key,
-            View::NewIssue(_) => new_issue::handle_key,
-            View::Search(_) => popup::handle_search_key,
-            View::Help(_) => popup::handle_help_key,
-        };
-        handler(self, i, key)
+    /// Dispatch to the view at stack index `i`. Phase-1 contexts resolve
+    /// through the keymap (re-normalizing `ev` for the resolve call); the
+    /// remaining views keep their own handler, called with the original
+    /// crossterm event.
+    fn handle_view_key(&mut self, i: usize, pending: Option<keymap::Key>, ev: KeyEvent) -> KeyFlow {
+        let key = keymap::Key::from(ev);
+        match &self.views[i] {
+            View::List(_) => self.resolve_and_apply(i, keymap::KeyContext::List, (pending, key)),
+            View::Detail(d) if d.comment_input.is_none() => {
+                self.resolve_and_apply(i, keymap::KeyContext::Detail, (pending, key))
+            }
+            View::Detail(_) => detail::handle_comment_input(self, i, ev),
+            View::Popup(_) => self.resolve_and_apply(i, keymap::KeyContext::Popup, (pending, key)),
+            View::NewIssue(_) => new_issue::handle_key(self, i, ev),
+            View::Search(_) => popup::handle_search_key(self, i, ev),
+            View::Help(_) => popup::handle_help_key(self, i, ev),
+        }
+    }
+
+    /// Resolve `keys` (the chord prefix and this keypress) against `ctx` and
+    /// act on the result: `Act` applies (navigation through `View::scroll`,
+    /// everything else through the context's `apply_*`); `Pending` records
+    /// the chord prefix; `Unbound` passes so the walk continues to the view
+    /// beneath.
+    fn resolve_and_apply(
+        &mut self,
+        i: usize,
+        ctx: keymap::KeyContext,
+        keys: (Option<keymap::Key>, keymap::Key),
+    ) -> KeyFlow {
+        let (pending, key) = keys;
+        match keymap::resolve(ctx, pending, key) {
+            keymap::Resolved::Act(action) => {
+                if let Some(motion) = scroll_motion(action) {
+                    let viewport = self.viewport_height;
+                    if let Some(view) = self.views.get_mut(i) {
+                        view.scroll(motion, viewport);
+                    }
+                } else {
+                    match ctx {
+                        keymap::KeyContext::List => apply_list(self, i, action),
+                        keymap::KeyContext::Detail => detail::apply_detail(self, i, action),
+                        keymap::KeyContext::Popup => popup::apply_popup(self, i, action),
+                    }
+                }
+                KeyFlow::Consumed
+            }
+            keymap::Resolved::Pending(k) => {
+                self.pending_key = Some(k);
+                KeyFlow::Consumed
+            }
+            keymap::Resolved::Unbound(_) => KeyFlow::Pass,
+        }
     }
 
     /// Route a state invalidation down the stack, top first. Applies are
@@ -1451,21 +1483,31 @@ where
 
 // -- Normal list keybindings -------------------------------------------------
 
-fn handle_list_key(app: &mut App, _i: usize, key: KeyEvent) -> KeyFlow {
-    // The list is always the base view in this stage, so it reaches its own
-    // state through `base_mut` rather than the index. Movement
-    // (j/k/g/G/Ctrl-d/Ctrl-u/PageDown/PageUp) and Esc/q are not bound here:
-    // they resolve at the scroll-default and floor layers of `dispatch_key`
-    // (Decision 6).
-    let code = key.code;
-    let modifiers = key.modifiers;
-    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-    match code {
-        // Open detail pane (space opens detail)
-        KeyCode::Char(' ') => app.open_detail(),
-        KeyCode::Char('n') if ctrl => app.next_page(),
-        KeyCode::Char('p') if ctrl => app.prev_page(),
-        KeyCode::Char('o') => {
+/// The `List` context's non-navigation actions (`docs/design/keybinds.md`,
+/// "List"). Navigation actions never reach here: `resolve_and_apply` maps
+/// them to `ScrollMotion` and applies them through `View::scroll` instead.
+/// The list is always the base view in this stage, so it reaches its own
+/// state through `base_mut` rather than the index (`_i`).
+fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
+    use keymap::Action;
+    match action {
+        Action::OpenDetail => app.open_detail(),
+        Action::OpenSearch => app.open_search_overlay(),
+        Action::OpenHelp => app.push_view(View::Help(HelpPopup::new())),
+        Action::CreateIssue => app.open_new_issue_modal(),
+        Action::SetStatus => app.open_state_popup(),
+        Action::SetPriority => app.open_priority_popup(),
+        Action::SetAssignee => app.open_assignee_popup(),
+        Action::Refresh => app.refresh(),
+        Action::ToggleSortDirection => app.toggle_desc(),
+        Action::NextPage => app.next_page(),
+        Action::PrevPage => app.prev_page(),
+        // Re-authenticate: background OAuth login.
+        Action::Login if !matches!(app.auth, AuthStatus::Authenticating) => {
+            app.auth = AuthStatus::Authenticating;
+            app.service.login();
+        }
+        Action::OpenInBrowser => {
             if let Some(issue) = app.selected_issue() {
                 let url = format!("https://linear.app/issue/{}", issue.identifier);
                 if let Err(e) = open::that(url) {
@@ -1473,27 +1515,10 @@ fn handle_list_key(app: &mut App, _i: usize, key: KeyEvent) -> KeyFlow {
                 }
             }
         }
-        KeyCode::Char('r') => app.refresh(),
-        // 'S' (capital) cycles sort field to avoid collision with 's' (state popup)
-        KeyCode::Char('S') => app.cycle_sort(),
-        // 'd' toggles sort direction; guarded so Ctrl-d (half-page-down, a
-        // scroll default) doesn't also match this bare pattern.
-        KeyCode::Char('d') if !ctrl => app.toggle_desc(),
-        KeyCode::Char('/') => app.open_search_overlay(),
-        // Write op keybindings
-        KeyCode::Char('s') => app.open_state_popup(),
-        KeyCode::Char('p') => app.open_priority_popup(),
-        KeyCode::Char('a') => app.open_assignee_popup(),
-        // New issue modal
-        KeyCode::Char('n') => app.open_new_issue_modal(),
-        // Help popup
-        KeyCode::Char('?') => app.push_view(View::Help(HelpPopup::new())),
-        // Re-authenticate: background OAuth login.
-        KeyCode::Char('L') if !matches!(app.auth, AuthStatus::Authenticating) => {
-            app.auth = AuthStatus::Authenticating;
-            app.service.login();
-        }
-        _ => return KeyFlow::Pass,
+        // Navigation, `Comment`, and `Confirm` never resolve to `List`'s
+        // `apply_list`: navigation is intercepted by `scroll_motion` before
+        // this is called, and `Comment`/`Confirm` belong to other contexts'
+        // tables. The match stays exhaustive over `Action` regardless.
+        _ => {}
     }
-    KeyFlow::Consumed
 }

@@ -7,7 +7,9 @@ use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{ALL_KEYBINDINGS, App, KeyFlow, ScrollMotion, StateCtx, StateEvent, TextInput, View};
+use super::{
+    ALL_KEYBINDINGS, App, KeyFlow, ScrollMotion, StateCtx, StateEvent, TextInput, View, keymap,
+};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -502,16 +504,15 @@ fn popup_edit(kind: &PopupKind, item: &PopupItem) -> Option<lt_runtime::sync::se
 // Key handlers
 // ---------------------------------------------------------------------------
 
-// -- Popup key handler ----------------------------------------------
+// -- Popup actions ----------------------------------------------------
 
-pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
-    // Esc (Back) and the scroll motions are not bound here: they resolve at
-    // the floor and scroll-default layers of `dispatch_key` (Decision 6).
-    match key.code {
-        KeyCode::Enter => popup_confirm(app, i),
-        _ => return KeyFlow::Pass,
+/// The `Popup` context's non-navigation action. Navigation actions never
+/// reach here: `resolve_and_apply` maps them to `ScrollMotion` and applies
+/// them through `View::scroll` instead.
+pub(crate) fn apply_popup(app: &mut App, i: usize, action: keymap::Action) {
+    if let keymap::Action::Confirm = action {
+        popup_confirm(app, i);
     }
-    KeyFlow::Consumed
 }
 
 // -- Help popup key handler -----------------------------------------
