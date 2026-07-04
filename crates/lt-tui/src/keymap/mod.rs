@@ -253,12 +253,16 @@ mod tests {
 
     #[test]
     fn chord_hit_g_g_selects_top() {
-        let pending = match resolve(crate::LIST_KEYMAP.layers, None, Key::char('g')) {
+        let pending = match resolve(crate::list::LIST_KEYMAP.layers, None, Key::char('g')) {
             Resolved::Pending(k) => k,
             other => unreachable!("expected Pending, got {other:?}"),
         };
         assert_eq!(
-            resolve(crate::LIST_KEYMAP.layers, Some(pending), Key::char('g')),
+            resolve(
+                crate::list::LIST_KEYMAP.layers,
+                Some(pending),
+                Key::char('g')
+            ),
             Resolved::Act(Action::MoveTop)
         );
     }
@@ -267,7 +271,7 @@ mod tests {
     fn chord_miss_g_j_falls_through_to_move_down() {
         assert_eq!(
             resolve(
-                crate::LIST_KEYMAP.layers,
+                crate::list::LIST_KEYMAP.layers,
                 Some(Key::char('g')),
                 Key::char('j')
             ),

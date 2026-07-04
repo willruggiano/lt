@@ -7,9 +7,7 @@ use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{
-    App, Keymap, Scroll, ScrollMotion, StateCtx, StateEvent, TextInput, Unbound, View, keymap,
-};
+use super::{App, Keymap, ScrollMotion, StateCtx, StateEvent, TextInput, Unbound, View, keymap};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -157,17 +155,10 @@ impl HelpPopup {
     }
 }
 
-/// `Down`/`Up` move the filtered-list selection; other motions no-op via
-/// `Scroll`'s defaults.
-impl Scroll for HelpPopup {
-    fn move_down(&mut self) {
-        let max = self.filtered.len().saturating_sub(1);
-        if self.selected < max {
-            self.selected += 1;
-        }
-    }
-    fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+impl HelpPopup {
+    /// Selection movement over the shared motion set.
+    pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        motion.apply_selection(&mut self.selected, self.filtered.len(), viewport_height);
     }
 }
 
@@ -274,20 +265,10 @@ impl SearchOverlay {
     }
 }
 
-/// `Down`/`Up` move the result-list selection; other motions no-op via
-/// `Scroll`'s defaults.
-impl Scroll for SearchOverlay {
-    fn move_down(&mut self) {
-        let n = self.results.len();
-        if n == 0 {
-            return;
-        }
-        let i = self.table_state.selected().unwrap_or(0);
-        self.table_state.select(Some((i + 1).min(n - 1)));
-    }
-    fn move_up(&mut self) {
-        let i = self.table_state.selected().unwrap_or(0);
-        self.table_state.select(Some(i.saturating_sub(1)));
+impl SearchOverlay {
+    /// Selection movement over the shared motion set.
+    pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        motion.apply_table(&mut self.table_state, self.results.len(), viewport_height);
     }
 }
 
@@ -434,31 +415,9 @@ impl PopupView {
             .unwrap_or(0);
     }
 
-    fn move_by(&mut self, delta: i32) {
-        let n = self.items.len();
-        if n == 0 {
-            return;
-        }
-        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
-        self.selected = if delta >= 0 {
-            self.selected.saturating_add(step).min(n - 1)
-        } else {
-            self.selected.saturating_sub(step)
-        };
-    }
-
     /// Selection movement over the shared motion set.
     pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
-        match motion {
-            ScrollMotion::Down => self.move_by(1),
-            ScrollMotion::Up => self.move_by(-1),
-            ScrollMotion::Top => self.move_by(i32::MIN / 2),
-            ScrollMotion::Bottom => self.move_by(i32::MAX / 2),
-            ScrollMotion::HalfPageDown => self.move_by(i32::from(viewport_height) / 2),
-            ScrollMotion::HalfPageUp => self.move_by(-(i32::from(viewport_height) / 2)),
-            ScrollMotion::PageDown => self.move_by(i32::from(viewport_height)),
-            ScrollMotion::PageUp => self.move_by(-i32::from(viewport_height)),
-        }
+        motion.apply_selection(&mut self.selected, self.items.len(), viewport_height);
     }
 }
 
@@ -675,29 +634,38 @@ pub(crate) fn forward_search(app: &mut App, i: usize, ev: KeyEvent) {
 }
 
 /// Confirm the search: pop the overlay (the borrow requires it, and it
-/// destroys the overlay anyway) and transfer its results into the base list
-/// so normal keybindings work.
+/// destroys the overlay anyway), flush any pending debounce, then hand the
+/// *query* -- not the overlay's viewport-capped `results` -- to the base
+/// list. The overlay's selected row is captured by identifier and set as
+/// `pending_select` so the refetch re-anchors the selection instead of
+/// reusing its (possibly stale) index.
 fn confirm_search(app: &mut App) {
     let Some(View::Search(mut overlay)) = app.views.pop() else {
         return;
     };
-    // Flush any pending debounce so the AST and results reflect every
+    // Flush any pending debounce so the AST and selection reflect every
     // character the user typed before hitting Enter.
     if overlay.last_changed.is_some() {
         overlay.last_changed = None;
         overlay.run_search(&app.db, app.viewport_height);
     }
-    let results = std::mem::take(&mut overlay.results);
-    let selected = overlay.table_state.selected();
-    if let View::List(list) = app.base_mut() {
+    let anchor = overlay
+        .table_state
+        .selected()
+        .and_then(|i| overlay.results.get(i))
+        .map(|issue| issue.identifier.clone());
+    let ctx = StateCtx {
+        db: &app.db,
+        viewer_name: app.auth.viewer_name(),
+    };
+    if let Some(View::List(list)) = app.views.first_mut() {
         // AST is the single source of truth.
-        list.filter = overlay.ast.clone();
-        list.sync_args_from_filter();
-        list.issues = results;
-        let n = list.issues.len();
-        let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
-        list.table_state
-            .select(if n > 0 { Some(sel) } else { None });
+        list.query.filter = overlay.ast;
+        list.query.sync_args_from_filter();
+        list.query.pagination.cursor_stack.clear();
+        list.query.pagination.current_cursor = None;
+        list.pending_select = anchor;
+        list.refetch(&ctx, true);
     }
 }
 

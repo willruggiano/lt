@@ -19,12 +19,34 @@ fn drain_events(app: &mut App) {
     }
 }
 
-/// Test-side re-fetch of the base list, driving the same `fetch_list` free
-/// function the app's own key handlers call.
+/// Test-side re-fetch of the base list, driving the same `refetch` the
+/// app's own key handlers call.
 fn fetch_base_list(app: &mut App, reset_selection: bool) {
-    let viewer_name = app.auth.viewer_name();
+    let ctx = StateCtx {
+        db: &app.db,
+        viewer_name: app.auth.viewer_name(),
+    };
     if let Some(View::List(list)) = app.views.first_mut() {
-        fetch_list(list, &app.db, viewer_name, reset_selection);
+        list.refetch(&ctx, reset_selection);
+    }
+}
+
+/// Test-side page turn, driving the same query/refetch pair as the
+/// pagination arms of `apply_list`.
+fn turn_page(app: &mut App, forward: bool) {
+    let ctx = StateCtx {
+        db: &app.db,
+        viewer_name: app.auth.viewer_name(),
+    };
+    if let Some(View::List(list)) = app.views.first_mut() {
+        let turned = if forward {
+            list.query.next_page()
+        } else {
+            list.query.prev_page()
+        };
+        if turned {
+            list.refetch(&ctx, true);
+        }
     }
 }
 
@@ -115,7 +137,7 @@ fn do_fetch_paginated_loads_from_db() {
     assert_eq!(app.list_mut().issues.len(), 3);
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1"); // updated DESC
     assert_eq!(app.list_mut().table_state.selected(), Some(0));
-    assert!(!app.list_mut().pagination.has_next_page);
+    assert!(!app.list_mut().query.pagination.has_next_page);
 }
 
 #[test]
@@ -126,13 +148,13 @@ fn do_fetch_filtered_uses_run_query() {
         db_issue("3", "ENG-3", "Todo", 3),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.list_mut().filter = search_query::parse_query_ast("state:todo");
+    app.list_mut().query.filter = search_query::parse_query_ast("state:todo");
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues.len(), 2);
     assert!(app.list_mut().issues.iter().all(|i| i.state.name == "Todo"));
     // run_query has no pagination.
-    assert!(!app.list_mut().pagination.has_next_page);
-    assert!(app.list_mut().pagination.end_cursor.is_none());
+    assert!(!app.list_mut().query.pagination.has_next_page);
+    assert!(app.list_mut().query.pagination.end_cursor.is_none());
 }
 
 #[test]
@@ -162,20 +184,20 @@ fn next_and_prev_page_walk_offsets() {
         db_issue("5", "ENG-5", "Todo", 1),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.list_mut().args.limit = 2;
+    app.list_mut().query.args.limit = 2;
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
-    assert!(app.list_mut().pagination.has_next_page);
+    assert!(app.list_mut().query.pagination.has_next_page);
 
-    app.next_page();
+    turn_page(&mut app, true);
     assert_eq!(
-        app.list_mut().pagination.current_cursor.as_deref(),
+        app.list_mut().query.pagination.current_cursor.as_deref(),
         Some("2")
     );
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-3");
 
-    app.prev_page();
-    assert!(app.list_mut().pagination.current_cursor.is_none());
+    turn_page(&mut app, false);
+    assert!(app.list_mut().query.pagination.current_cursor.is_none());
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
 }
 
@@ -183,7 +205,7 @@ fn next_and_prev_page_walk_offsets() {
 fn prev_page_at_start_is_noop() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     fetch_base_list(&mut app, true);
-    app.prev_page(); // empty cursor stack -> no-op
+    turn_page(&mut app, false); // empty cursor stack -> no-op
     assert_eq!(app.list_mut().issues.len(), 1);
 }
 
@@ -194,10 +216,81 @@ fn toggle_desc_refetches() {
         db_issue("2", "ENG-2", "Todo", 4),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    let desc_before = app.list_mut().args.desc;
-    app.toggle_desc();
-    assert_ne!(app.list_mut().args.desc, desc_before);
+    let desc_before = app.list_mut().query.args.desc;
+    app.dispatch_key(key('d'));
+    assert_ne!(app.list_mut().query.args.desc, desc_before);
     assert_eq!(app.list_mut().issues.len(), 2);
+}
+
+// -- ListView::open ---------------------------------------------------------
+
+#[test]
+fn open_with_filterful_query_matches_post_sync_refetch() {
+    let rows = [
+        db_issue("1", "ENG-1", "Todo", 5),
+        db_issue("2", "ENG-2", "Done", 4),
+        db_issue("3", "ENG-3", "Todo", 3),
+    ];
+    let db = Database::memory().unwrap();
+    {
+        let conn = db.connect().unwrap();
+        lt_runtime::db::upsert_issues(&conn, &rows).unwrap();
+    }
+    let ctx = StateCtx {
+        db: &db,
+        viewer_name: None,
+    };
+    let mut query = ListQuery::from(IssueQuery::default());
+    query.filter = search_query::parse_query_ast("state:todo");
+
+    // Startup: the query defines the view's initial data.
+    let mut list = ListView::open(query, &ctx);
+    let startup: Vec<String> = list.issues.iter().map(|i| i.identifier.clone()).collect();
+    assert_eq!(startup, vec!["ENG-1".to_string(), "ENG-3".to_string()]);
+
+    // Steady-state: the same engine, driven by the first sync's `Issues` event.
+    list.consume(&ctx, true, &StateEvent::Issues);
+    let post_sync: Vec<String> = list.issues.iter().map(|i| i.identifier.clone()).collect();
+    assert_eq!(startup, post_sync);
+}
+
+// -- confirm_search: query handoff, not viewport-capped row transfer -------
+
+#[test]
+fn confirm_search_hands_off_the_query_not_the_viewport_capped_rows() {
+    // 6 rows match state:todo; the overlay caps `results` to the 3-row
+    // viewport, but the base list's query limit (the `IssueQuery` default,
+    // 50) is far larger -- confirm must hand off the query so the base list
+    // refetches the full match set, not the overlay's capped rows.
+    let mut rows: Vec<lt_types::types::Issue> = (1..=6)
+        .map(|i| db_issue(&i.to_string(), &format!("ENG-{i}"), "Todo", i))
+        .collect();
+    rows.push(db_issue("7", "ENG-7", "Done", 7));
+    let mut app = app_with_db(&rows).unwrap();
+    app.viewport_height = 3;
+
+    let mut overlay = SearchOverlay::new();
+    overlay.query = TextInput::from("state:todo".to_string());
+    overlay.run_search(&app.db, app.viewport_height);
+    assert_eq!(overlay.results.len(), 3); // viewport-capped
+    app.views.push(View::Search(overlay));
+
+    // Move the overlay's selection off row 0 before confirming.
+    app.dispatch_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.dispatch_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let Some(View::Search(overlay)) = app.views.last() else {
+        unreachable!("search view expected")
+    };
+    let anchor = overlay.results[overlay.table_state.selected().unwrap()]
+        .identifier
+        .clone();
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(app.views.len(), 1); // overlay popped
+    assert_eq!(app.list_mut().issues.len(), 6); // full match set, not capped to 3
+    let selected = app.list_mut().table_state.selected().unwrap();
+    assert_eq!(app.list_mut().issues[selected].identifier, anchor);
 }
 
 // -- populate_relations ---------------------------------------------------
@@ -434,15 +527,15 @@ fn run_app_errs_when_events_exhausted_without_quit() {
 fn double_esc_resets_to_initial_filter() {
     let rows = [db_issue("1", "ENG-1", "Todo", 5)];
     let mut app = app_with_db(&rows).unwrap();
-    let initial_sort = app.initial_args.sort.clone();
-    let next_sort = app.list_mut().args.sort.next();
-    app.list_mut().args.sort = next_sort;
-    let replaced = app.list_mut().replace_sort_in_filter();
-    app.list_mut().filter = replaced;
+    let initial_sort = app.list_mut().query.args.sort.clone();
+    let next_sort = app.list_mut().query.args.sort.next();
+    app.list_mut().query.args.sort = next_sort;
+    let replaced = app.list_mut().query.replace_sort_in_filter();
+    app.list_mut().query.filter = replaced;
     app.last_esc_time = Some(Instant::now()); // within the 500ms window
 
     app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.list_mut().args.sort, initial_sort);
+    assert_eq!(app.list_mut().query.args.sort, initial_sort);
     assert!(app.last_esc_time.is_none());
 }
 
@@ -608,12 +701,12 @@ fn cascade_unbound_key_in_an_overlay_reaches_the_base() {
     // 'd' (toggle sort direction) is unbound in the popup's own context; it
     // should fall through the cascade to the list's binding underneath.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let before = app.list_mut().args.desc;
+    let before = app.list_mut().query.args.desc;
     push_priority_popup(&mut app, priority_popup_items());
 
     app.dispatch_key(key('d'));
 
-    assert_ne!(app.list_mut().args.desc, before);
+    assert_ne!(app.list_mut().query.args.desc, before);
 }
 
 #[test]
@@ -679,12 +772,12 @@ fn printable_key_in_search_never_reaches_the_list_beneath() {
     // direction) must stay text in the Search overlay: text contexts skip
     // GLOBAL, and forwarding always consumes, so the cascade never resumes.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let before = app.list_mut().args.desc;
+    let before = app.list_mut().query.args.desc;
     app.views.push(View::Search(SearchOverlay::new()));
 
     app.dispatch_key(key('d'));
 
-    assert_eq!(app.list_mut().args.desc, before);
+    assert_eq!(app.list_mut().query.args.desc, before);
     let Some(View::Search(overlay)) = app.views.last() else {
         unreachable!("search view expected")
     };
@@ -1093,6 +1186,30 @@ fn new_issue_modal_team_event_for_a_different_team_falls_through() {
     };
     assert!(modal.states.is_empty());
     assert!(modal.loading);
+}
+
+#[test]
+fn new_issue_team_picker_g_selects_the_last_team() {
+    // `G` in the new-issue Team picker moves to the last item -- previously
+    // a no-op via `Scroll`'s trait defaults.
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    let mut modal = bare_new_issue_modal();
+    modal.focused_field = NewIssueField::Title;
+    modal.teams = (0..5)
+        .map(|i| PopupItem {
+            label: format!("team-{i}"),
+            id: Some(i.to_string()),
+        })
+        .collect();
+    app.views.push(View::NewIssue(modal));
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+
+    let Some(View::NewIssue(modal)) = app.views.last() else {
+        unreachable!("new-issue view expected")
+    };
+    assert_eq!(modal.team_selected, modal.teams.len() - 1);
 }
 
 #[test]

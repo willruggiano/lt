@@ -1,5 +1,6 @@
 mod detail;
 mod keymap;
+mod list;
 mod markdown;
 mod new_issue;
 mod popup;
@@ -24,6 +25,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 pub use detail::DetailView;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
+pub use list::{ListQuery, ListView};
 use lt_runtime::query::IssueQuery;
 #[cfg(all(test, feature = "sim"))]
 use lt_runtime::sync::service::IssueEdit;
@@ -68,7 +70,10 @@ pub enum AppEvent {
 /// One view's complete state. A view exists iff it is displayed; there is no
 /// separate mode flag to keep consistent.
 pub enum View {
-    List(ListView),
+    // Boxed: `ListQuery`'s launch-snapshot fields make `ListView` one of the
+    // larger variants, so boxing it keeps every other `View` push/pop from
+    // paying for its size.
+    List(Box<ListView>),
     // Boxed: `DetailView` is by far the largest variant, so boxing it keeps
     // every other `View` push/pop from paying for its size.
     Detail(Box<DetailView>),
@@ -147,7 +152,7 @@ impl View {
     /// the view type itself.
     fn keymap(&self) -> &'static Keymap {
         match self {
-            View::List(_) => &LIST_KEYMAP,
+            View::List(_) => &list::LIST_KEYMAP,
             View::Detail(d) => d.keymap(),
             View::Popup(_) => &popup::POPUP_KEYMAP,
             View::NewIssue(m) => m.keymap(),
@@ -172,6 +177,61 @@ pub(crate) enum ScrollMotion {
     PageUp,
 }
 
+impl ScrollMotion {
+    /// Selection movement; caller guards `len == 0`.
+    fn apply_index(self, selected: usize, len: usize, viewport_height: u16) -> usize {
+        let delta: i32 = match self {
+            ScrollMotion::Down => 1,
+            ScrollMotion::Up => -1,
+            ScrollMotion::Top => i32::MIN / 2,
+            ScrollMotion::Bottom => i32::MAX / 2,
+            ScrollMotion::HalfPageDown => i32::from(viewport_height) / 2,
+            ScrollMotion::HalfPageUp => -(i32::from(viewport_height) / 2),
+            ScrollMotion::PageDown => i32::from(viewport_height),
+            ScrollMotion::PageUp => -i32::from(viewport_height),
+        };
+        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+        if delta >= 0 {
+            selected.saturating_add(step).min(len - 1)
+        } else {
+            selected.saturating_sub(step)
+        }
+    }
+
+    /// Selection movement over a plain `usize` field; no-ops on an empty
+    /// collection.
+    fn apply_selection(self, selected: &mut usize, len: usize, viewport_height: u16) {
+        if len == 0 {
+            return;
+        }
+        *selected = self.apply_index(*selected, len, viewport_height);
+    }
+
+    /// Selection movement over a `TableState`; no-ops on an empty collection.
+    fn apply_table(self, table: &mut TableState, len: usize, viewport_height: u16) {
+        if len == 0 {
+            return;
+        }
+        let cur = table.selected().unwrap_or(0);
+        table.select(Some(self.apply_index(cur, len, viewport_height)));
+    }
+
+    /// Offset scrolling; `Bottom` saturates to `u16::MAX` -- ratatui clamps
+    /// scroll to content length.
+    fn apply_offset(self, offset: u16, viewport_height: u16) -> u16 {
+        match self {
+            ScrollMotion::Down => offset.saturating_add(1),
+            ScrollMotion::Up => offset.saturating_sub(1),
+            ScrollMotion::Top => 0,
+            ScrollMotion::Bottom => u16::MAX,
+            ScrollMotion::HalfPageDown => offset.saturating_add((viewport_height / 2).max(1)),
+            ScrollMotion::HalfPageUp => offset.saturating_sub((viewport_height / 2).max(1)),
+            ScrollMotion::PageDown => offset.saturating_add(viewport_height.max(1)),
+            ScrollMotion::PageUp => offset.saturating_sub(viewport_height.max(1)),
+        }
+    }
+}
+
 /// Map a navigation `Action` onto its `ScrollMotion`, or `None` if it isn't
 /// one.
 fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
@@ -187,271 +247,6 @@ fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
         Action::PageUp => ScrollMotion::PageUp,
         _ => return None,
     })
-}
-
-/// The issue-list view: the base-list fields, owned.
-pub struct ListView {
-    pub issues: Vec<Issue>,
-    pub table_state: TableState,
-    pub pagination: Pagination,
-    /// An identifier to seek on the next `Issues` re-read; one-shot,
-    /// cleared whether or not that re-read finds a match.
-    pub pending_select: Option<String>,
-    /// The issue-list query, kept in sync with `filter`'s `sort:` token.
-    pub args: IssueQuery,
-    /// Single source of truth for the active filter/search state. Updated on
-    /// Enter (confirm search), double-esc (reset), and sort shortcuts.
-    pub filter: search_query::QueryAst,
-}
-
-impl ListView {
-    fn new(
-        issues: Vec<Issue>,
-        pagination: Pagination,
-        args: IssueQuery,
-        filter: search_query::QueryAst,
-    ) -> Self {
-        let mut table_state = TableState::default();
-        if !issues.is_empty() {
-            table_state.select(Some(0));
-        }
-        Self {
-            issues,
-            table_state,
-            pagination,
-            pending_select: None,
-            args,
-            filter,
-        }
-    }
-
-    fn selected_issue(&self) -> Option<&Issue> {
-        self.table_state.selected().and_then(|i| self.issues.get(i))
-    }
-
-    fn move_by(&mut self, delta: i32) {
-        let n = self.issues.len();
-        if n == 0 {
-            return;
-        }
-        let cur = self.table_state.selected().unwrap_or(0);
-        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
-        let new_i = if delta >= 0 {
-            cur.saturating_add(step).min(n - 1)
-        } else {
-            cur.saturating_sub(step)
-        };
-        self.table_state.select(Some(new_i));
-    }
-
-    /// Only refetch while focused: a refresh must not swap the rows a popup
-    /// is anchored to or a search overlay covers.
-    fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
-        if matches!(ev, StateEvent::Issues) && focused {
-            self.do_fetch(ctx, false); // offset- and selection-preserving
-            self.seek_pending_select();
-        }
-    }
-
-    fn do_fetch(&mut self, ctx: &StateCtx, reset_selection: bool) {
-        let mut parsed = search_query::ParsedQuery::from(&self.filter);
-        search_query::resolve_me(&mut parsed, ctx.viewer_name);
-
-        if parsed.has_filters() {
-            // Active filter has constraints beyond sort -- use run_query to
-            // preserve them.
-            let limit = self.args.limit.min(250) as usize;
-            match ctx
-                .db
-                .connect()
-                .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
-            {
-                Ok(issues) => {
-                    self.issues = issues;
-                    self.pagination.has_next_page = false; // run_query has no pagination
-                    self.pagination.end_cursor = None;
-                    self.apply_fetched_selection(reset_selection);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "issue list fetch failed");
-                }
-            }
-        } else {
-            // No active filters: use the paginated query.
-            let offset: i64 = self
-                .pagination
-                .current_cursor
-                .as_deref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            match ctx
-                .db
-                .connect()
-                .and_then(|conn| lt_runtime::db::query_issues_page(&conn, &self.args, offset))
-            {
-                Ok((issues, has_next_page)) => {
-                    self.issues = issues;
-                    self.pagination.has_next_page = has_next_page;
-                    let limit = i64::from(self.args.limit.min(250));
-                    self.pagination.end_cursor = if has_next_page {
-                        Some((offset + limit).to_string())
-                    } else {
-                        None
-                    };
-                    self.apply_fetched_selection(reset_selection);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "issue list fetch failed");
-                }
-            }
-        }
-    }
-
-    /// Keep `args.sort`/`args.desc` in sync with `filter`.
-    fn sync_args_from_filter(&mut self) {
-        let parsed = search_query::ParsedQuery::from(&self.filter);
-        if let Some((field, dir)) = parsed.sort {
-            self.args.sort = field;
-            self.args.desc = dir == search_query::SortDir::Desc;
-        }
-    }
-
-    /// Produce a new `QueryAst` with the `sort:` token replaced to match
-    /// `args.sort`/`args.desc`.
-    fn replace_sort_in_filter(&self) -> search_query::QueryAst {
-        let dir = if self.args.desc { "-" } else { "+" };
-        let new_sort = format!("sort:{}{}", self.args.sort.label(), dir);
-        let mut parts: Vec<String> = self
-            .filter
-            .raw
-            .split_whitespace()
-            .filter(|t| !t.to_lowercase().starts_with("sort:"))
-            .map(std::string::ToString::to_string)
-            .collect();
-        parts.push(new_sort);
-        search_query::parse_query_ast(&parts.join(" "))
-    }
-
-    /// `d`: toggle sort direction, rewrite `filter`'s `sort:` token to
-    /// match, and re-fetch from the top.
-    fn toggle_desc(&mut self, ctx: &StateCtx) {
-        self.args.desc = !self.args.desc;
-        self.filter = self.replace_sort_in_filter();
-        self.pagination.cursor_stack.clear();
-        self.pagination.current_cursor = None;
-        self.do_fetch(ctx, true);
-    }
-
-    /// After replacing `self.issues`, clamp/reset the selection and mark idle.
-    fn apply_fetched_selection(&mut self, reset_selection: bool) {
-        let n = self.issues.len();
-        let sel = if reset_selection {
-            0
-        } else {
-            self.table_state
-                .selected()
-                .unwrap_or(0)
-                .min(n.saturating_sub(1))
-        };
-        self.table_state
-            .select(if n > 0 { Some(sel) } else { None });
-    }
-
-    /// Seek to `pending_select`'s identifier and clear it; a miss also
-    /// clears it, since this is a one-shot seek, not a retried one.
-    fn seek_pending_select(&mut self) {
-        if let Some(id) = self.pending_select.take()
-            && let Some(idx) = self.issues.iter().position(|i| i.identifier == id)
-        {
-            self.table_state.select(Some(idx));
-        }
-    }
-
-    fn next_page(&mut self, ctx: &StateCtx) {
-        if !self.pagination.has_next_page {
-            return;
-        }
-        let end = self.pagination.end_cursor.clone();
-        self.pagination
-            .cursor_stack
-            .push(self.pagination.current_cursor.clone());
-        self.pagination.current_cursor = end;
-        self.do_fetch(ctx, true);
-    }
-
-    fn prev_page(&mut self, ctx: &StateCtx) {
-        let Some(cursor) = self.pagination.cursor_stack.pop() else {
-            return;
-        };
-        self.pagination.current_cursor = cursor;
-        self.do_fetch(ctx, true);
-    }
-}
-
-/// Re-fetch `list` from `db`. A free function, not an `App` method: the
-/// fetch is the list's own state, not app-level.
-fn fetch_list(
-    list: &mut ListView,
-    db: &lt_runtime::db::Database,
-    viewer_name: Option<&str>,
-    reset_selection: bool,
-) {
-    let ctx = StateCtx { db, viewer_name };
-    list.do_fetch(&ctx, reset_selection);
-}
-
-/// The eight scroll-motion primitives a stepped/offset view is built from.
-/// `move_down`/`move_up` are the only two every implementor must define; the
-/// rest default to no-ops for views with no half-page/top/bottom concept.
-trait Scroll {
-    fn move_down(&mut self);
-    fn move_up(&mut self);
-    fn move_top(&mut self) {}
-    fn move_bottom(&mut self) {}
-    fn half_page_down(&mut self, _viewport_height: u16) {}
-    fn half_page_up(&mut self, _viewport_height: u16) {}
-    fn page_down(&mut self, _viewport_height: u16) {}
-    fn page_up(&mut self, _viewport_height: u16) {}
-
-    fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
-        match motion {
-            ScrollMotion::Down => self.move_down(),
-            ScrollMotion::Up => self.move_up(),
-            ScrollMotion::Top => self.move_top(),
-            ScrollMotion::Bottom => self.move_bottom(),
-            ScrollMotion::HalfPageDown => self.half_page_down(viewport_height),
-            ScrollMotion::HalfPageUp => self.half_page_up(viewport_height),
-            ScrollMotion::PageDown => self.page_down(viewport_height),
-            ScrollMotion::PageUp => self.page_up(viewport_height),
-        }
-    }
-}
-
-impl Scroll for ListView {
-    fn move_down(&mut self) {
-        self.move_by(1);
-    }
-    fn move_up(&mut self) {
-        self.move_by(-1);
-    }
-    fn move_top(&mut self) {
-        self.move_by(i32::MIN / 2);
-    }
-    fn move_bottom(&mut self) {
-        self.move_by(i32::MAX / 2);
-    }
-    fn half_page_down(&mut self, viewport_height: u16) {
-        self.move_by(i32::from(viewport_height) / 2);
-    }
-    fn half_page_up(&mut self, viewport_height: u16) {
-        self.move_by(-(i32::from(viewport_height) / 2));
-    }
-    fn page_down(&mut self, viewport_height: u16) {
-        self.move_by(i32::from(viewport_height));
-    }
-    fn page_up(&mut self, viewport_height: u16) {
-        self.move_by(-i32::from(viewport_height));
-    }
 }
 
 /// Read-only context a view's consume/re-query needs. Built inline from
@@ -477,14 +272,6 @@ struct DispatchKey {
     pending: Option<keymap::Key>,
     key: keymap::Key,
     ev: KeyEvent,
-}
-
-/// Forward/backward pagination state.
-pub struct Pagination {
-    pub has_next_page: bool,
-    pub current_cursor: Option<String>,
-    pub cursor_stack: Vec<Option<String>>,
-    pub end_cursor: Option<String>,
 }
 
 /// Background-sync typestate: a pure consumer of the events the sync loop
@@ -648,11 +435,7 @@ pub struct App {
 
     pub session: Session,
 
-    // -- launch seeds / double-esc reset -------------------------------
-    /// Snapshot of the filter at startup, for the double-esc reset.
-    pub initial_filter: search_query::QueryAst,
-    /// Snapshot of the args at startup, for the double-esc reset.
-    pub initial_args: IssueQuery,
+    // -- double-esc reset -------------------------------------------------
     /// Timestamp of the last Esc keypress (used to detect double-esc).
     pub last_esc_time: Option<Instant>,
 
@@ -677,13 +460,12 @@ impl App {
     // the loop's own events arrive.
     fn new(
         list: ListView,
+        db: lt_runtime::db::Database,
         service: Arc<dyn SyncService>,
         events_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
-        let initial_args = list.args.clone();
-        let initial_filter = list.filter.clone();
         Self {
-            views: vec![View::List(list)],
+            views: vec![View::List(Box::new(list))],
             quit: false,
             viewport_height: 0,
             pending_key: None,
@@ -693,10 +475,8 @@ impl App {
             session: Session {
                 keyboard_enhanced: false,
             },
-            initial_filter,
-            initial_args,
             last_esc_time: None,
-            db: lt_runtime::db::Database::File,
+            db,
             clock: Clock::System,
             service,
             events_rx,
@@ -704,29 +484,17 @@ impl App {
     }
 
     /// An `App` for rendering tests: a throwaway in-memory database and
-    /// event channel, backed by a [`RecordingSyncService`]. Fallible
-    /// (in-memory SQLite setup).
+    /// event channel, backed by a [`RecordingSyncService`]. Seeds `issues`
+    /// directly rather than through `ListView::open`, since the memory db is
+    /// still empty at this point. Fallible (in-memory SQLite setup).
     #[cfg(all(test, feature = "sim"))]
     fn for_test(issues: Vec<Issue>) -> Result<Self> {
         let db = lt_runtime::db::Database::memory()?;
         let (tx, rx) = mpsc::channel();
         let service = RecordingSyncService::new(&db, tx)?;
-        let args = IssueQuery::default();
-        let filter = search_query::args_to_ast(&args);
-        let list = ListView::new(
-            issues,
-            Pagination {
-                has_next_page: false,
-                current_cursor: None,
-                cursor_stack: Vec::new(),
-                end_cursor: None,
-            },
-            args,
-            filter,
-        );
-        let mut app = Self::new(list, Arc::new(service), rx);
-        app.db = db;
-        Ok(app)
+        let query = ListQuery::from(IssueQuery::default());
+        let list = ListView::new(issues, query);
+        Ok(Self::new(list, db, Arc::new(service), rx))
     }
 
     /// Swap in a fresh database, shared with a fresh [`RecordingSyncService`]
@@ -812,15 +580,13 @@ impl App {
     /// Full reset to the state the TUI was launched with: sort, filters,
     /// and search query.
     fn reset_base_view(&mut self) {
-        let args = self.initial_args.clone();
-        let filter = self.initial_filter.clone();
-        let viewer_name = self.auth.viewer_name();
+        let ctx = StateCtx {
+            db: &self.db,
+            viewer_name: self.auth.viewer_name(),
+        };
         if let Some(View::List(list)) = self.views.first_mut() {
-            list.args = args;
-            list.filter = filter;
-            list.pagination.cursor_stack.clear();
-            list.pagination.current_cursor = None;
-            fetch_list(list, &self.db, viewer_name, true);
+            list.query.reset();
+            list.refetch(&ctx, true);
         }
         self.last_esc_time = None;
     }
@@ -828,35 +594,15 @@ impl App {
     /// `r`: an immediate re-read plus a sync request. Pressed mid-cycle,
     /// this coalesces into a follow-up sync rather than being ignored.
     fn refresh(&mut self) {
-        let viewer_name = self.auth.viewer_name();
-        // immediate re-read for responsiveness
-        if let Some(View::List(list)) = self.views.first_mut() {
-            fetch_list(list, &self.db, viewer_name, false);
-        }
-        self.service.request_sync();
-    }
-
-    fn toggle_desc(&mut self) {
-        self.with_base_list(ListView::toggle_desc);
-    }
-
-    fn next_page(&mut self) {
-        self.with_base_list(ListView::next_page);
-    }
-
-    fn prev_page(&mut self) {
-        self.with_base_list(ListView::prev_page);
-    }
-
-    /// Build a `StateCtx` and drive `op` against the base list.
-    fn with_base_list(&mut self, op: fn(&mut ListView, &StateCtx)) {
         let ctx = StateCtx {
             db: &self.db,
             viewer_name: self.auth.viewer_name(),
         };
+        // immediate re-read for responsiveness
         if let Some(View::List(list)) = self.views.first_mut() {
-            op(list, &ctx);
+            list.refetch(&ctx, false);
         }
+        self.service.request_sync();
     }
 
     /// Downcast the view at `i` via `extract`.
@@ -880,9 +626,12 @@ impl App {
         } else {
             // First esc: standard refresh.
             self.last_esc_time = Some(now);
-            let viewer_name = self.auth.viewer_name();
+            let ctx = StateCtx {
+                db: &self.db,
+                viewer_name: self.auth.viewer_name(),
+            };
             if let Some(View::List(list)) = self.views.first_mut() {
-                fetch_list(list, &self.db, viewer_name, true);
+                list.refetch(&ctx, true);
             }
         }
     }
@@ -892,14 +641,14 @@ impl App {
         // Capture the query limit once: it can't change while Search has
         // focus, so the snapshot stays faithful for the overlay's lifetime.
         if let View::List(list) = self.base() {
-            overlay.limit = list.args.limit;
+            overlay.limit = list.query.args.limit;
         }
         // Restore the base list's filter when reopening, unless it's just
         // the default sort stem.
         if let View::List(list) = self.base()
-            && list.filter.raw != search_query::DEFAULT_QUERY
+            && list.query.filter.raw != search_query::DEFAULT_QUERY
         {
-            let filter = list.filter.clone();
+            let filter = list.query.filter.clone();
             overlay.query = TextInput::from(filter.raw.clone());
             overlay.ast = filter;
             overlay.last_changed = Some(Instant::now());
@@ -1078,41 +827,21 @@ pub fn run(
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
-    // Try to load issues already synced locally first (local-first UX). Use
-    // query_issues_page so we can capture the correct has_next_page flag.
-    let (issues, has_next_page, end_cursor) = (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
-        let conn = lt_runtime::db::open_db(lt_runtime::db::db_path()?)?;
-        let limit = i64::from(args.limit.min(250));
-        let (issues, has_next) = lt_runtime::db::query_issues_page(&conn, &args, 0)?;
-        let end_cursor = if has_next {
-            Some(limit.to_string())
-        } else {
-            None
-        };
-        Ok((issues, has_next, end_cursor))
-    })()
-    .unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "startup: failed to load cached issues");
-        (Vec::new(), false, None)
-    });
+    let db = lt_runtime::db::Database::File;
 
     // Fetch viewer identity before `service` moves into `App::new` (a
     // shared read through the `Arc`, so ownership either order is fine).
     let viewer = service.fetch_viewer();
 
-    let filter = search_query::args_to_ast(&args);
-    let list = ListView::new(
-        issues,
-        Pagination {
-            has_next_page,
-            current_cursor: None,
-            cursor_stack: Vec::new(),
-            end_cursor,
-        },
-        args,
-        filter,
-    );
-    let mut app = App::new(list, service, events_rx);
+    // The query defines the view's initial data (local-first UX): `open`
+    // warns and starts empty on a failed/missing db read, same as every
+    // later refetch.
+    let ctx = StateCtx {
+        db: &db,
+        viewer_name: viewer.as_ref().map(|v| v.name.as_str()),
+    };
+    let list = ListView::open(ListQuery::from(args), &ctx);
+    let mut app = App::new(list, db, service, events_rx);
 
     app.auth = match viewer {
         Some(viewer) => AuthStatus::Authenticated { viewer },
@@ -1236,112 +965,6 @@ where
     }
 }
 
-// -- Normal list keybindings -------------------------------------------------
-
-static LIST_BINDINGS: keymap::Table = &[
-    (
-        keymap::Binding::Single(keymap::Key::plain(KeyCode::Enter)),
-        keymap::Action::OpenDetail,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::char(' ')),
-        keymap::Action::OpenDetail,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::char('/')),
-        keymap::Action::OpenSearch,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::ctrl('/')),
-        keymap::Action::OpenHelp,
-    ),
-    // Legacy terminals send Ctrl+/ as 0x1F, which crossterm decodes as
-    // ctrl+'7'; kitty-enhanced terminals deliver a true ctrl+/. Both bound.
-    (
-        keymap::Binding::Single(keymap::Key::ctrl('7')),
-        keymap::Action::OpenHelp,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::char('c')),
-        keymap::Action::CreateIssue,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::char('s')),
-        keymap::Action::SetStatus,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::char('p')),
-        keymap::Action::SetPriority,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::char('a')),
-        keymap::Action::SetAssignee,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::ctrl('r')),
-        keymap::Action::Refresh,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::char('d')),
-        keymap::Action::ToggleSortDirection,
-    ),
-    (
-        keymap::Binding::Chord(keymap::Key::char('o'), keymap::Key::char('b')),
-        keymap::Action::OpenInBrowser,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::ctrl('n')),
-        keymap::Action::NextPage,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::ctrl('p')),
-        keymap::Action::PrevPage,
-    ),
-    (
-        keymap::Binding::Single(keymap::Key::char('L')),
-        keymap::Action::Login,
-    ),
-];
-
-static LIST_KEYMAP: Keymap = Keymap {
-    layers: &[LIST_BINDINGS, keymap::GLOBAL],
-    apply: Some(apply_list),
-    unbound: Unbound::Cascade,
-};
-
-/// The list view's non-navigation actions. The list is always the base
-/// view, so it reaches its own state through `base_mut` rather than `_i`.
-fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
-    use keymap::Action;
-    match action {
-        Action::OpenDetail => app.open_detail(),
-        Action::OpenSearch => app.open_search_overlay(),
-        Action::OpenHelp => app.push_view(View::Help(HelpPopup::new())),
-        Action::CreateIssue => app.open_new_issue_modal(),
-        Action::SetStatus => app.open_state_popup(),
-        Action::SetPriority => app.open_priority_popup(),
-        Action::SetAssignee => app.open_assignee_popup(),
-        Action::Refresh => app.refresh(),
-        Action::ToggleSortDirection => app.toggle_desc(),
-        Action::NextPage => app.next_page(),
-        Action::PrevPage => app.prev_page(),
-        // Re-authenticate: background OAuth login.
-        Action::Login if !matches!(app.auth, AuthStatus::Authenticating) => {
-            app.auth = AuthStatus::Authenticating;
-            app.service.login();
-        }
-        Action::OpenInBrowser => {
-            if let Some(issue) = app.selected_issue() {
-                open_in_browser(&issue.identifier);
-            }
-        }
-        // Navigation is intercepted by `scroll_motion` before this runs;
-        // `Comment`/`Confirm` belong to other contexts. Kept exhaustive
-        // over `Action` regardless.
-        _ => {}
-    }
-}
-
 /// Open `identifier`'s issue in the browser.
 pub(crate) fn open_in_browser(identifier: &str) {
     let url = format!("https://linear.app/issue/{identifier}");
@@ -1357,7 +980,7 @@ pub(crate) fn open_in_browser(identifier: &str) {
 /// duplicates.
 pub(crate) static HELP_CONTEXTS: &[(&str, &[keymap::Table])] = &[
     ("global", &[keymap::GLOBAL]),
-    ("list", &[LIST_BINDINGS]),
+    ("list", &[list::LIST_BINDINGS]),
     ("detail", &[detail::DETAIL_BINDINGS]),
     ("popup", &[popup::POPUP_BINDINGS]),
     (
@@ -1372,7 +995,7 @@ pub(crate) static HELP_CONTEXTS: &[(&str, &[keymap::Table])] = &[
 /// Every declared keymap, named for test diagnostics.
 #[cfg(test)]
 pub(crate) static ALL_KEYMAPS: &[(&str, &Keymap)] = &[
-    ("list", &LIST_KEYMAP),
+    ("list", &list::LIST_KEYMAP),
     ("detail", &detail::DETAIL_KEYMAP),
     ("comment_input", &detail::COMMENT_INPUT_KEYMAP),
     ("popup", &popup::POPUP_KEYMAP),
@@ -1381,3 +1004,67 @@ pub(crate) static ALL_KEYMAPS: &[(&str, &Keymap)] = &[
     ("search", &popup::SEARCH_KEYMAP),
     ("help", &popup::HELP_KEYMAP),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::ScrollMotion;
+
+    #[test]
+    fn apply_index_steps_down_and_up() {
+        assert_eq!(ScrollMotion::Down.apply_index(2, 5, 10), 3);
+        assert_eq!(ScrollMotion::Up.apply_index(2, 5, 10), 1);
+    }
+
+    #[test]
+    fn apply_index_top_and_bottom_saturate() {
+        assert_eq!(ScrollMotion::Top.apply_index(3, 5, 10), 0);
+        assert_eq!(ScrollMotion::Bottom.apply_index(0, 5, 10), 4);
+    }
+
+    #[test]
+    fn apply_index_saturates_at_both_ends() {
+        assert_eq!(ScrollMotion::Up.apply_index(0, 5, 10), 0);
+        assert_eq!(ScrollMotion::Down.apply_index(4, 5, 10), 4);
+    }
+
+    #[test]
+    fn apply_index_half_page_and_page_steps() {
+        assert_eq!(ScrollMotion::HalfPageDown.apply_index(0, 100, 10), 5);
+        assert_eq!(ScrollMotion::HalfPageUp.apply_index(20, 100, 10), 15);
+        assert_eq!(ScrollMotion::PageDown.apply_index(0, 100, 10), 10);
+        assert_eq!(ScrollMotion::PageUp.apply_index(20, 100, 10), 10);
+    }
+
+    #[test]
+    fn apply_offset_steps_down_and_up() {
+        assert_eq!(ScrollMotion::Down.apply_offset(2, 10), 3);
+        assert_eq!(ScrollMotion::Up.apply_offset(2, 10), 1);
+    }
+
+    #[test]
+    fn apply_offset_top_and_bottom() {
+        assert_eq!(ScrollMotion::Top.apply_offset(42, 10), 0);
+        assert_eq!(ScrollMotion::Bottom.apply_offset(0, 10), u16::MAX);
+    }
+
+    #[test]
+    fn apply_offset_saturates_at_both_ends() {
+        assert_eq!(ScrollMotion::Up.apply_offset(0, 10), 0);
+        assert_eq!(ScrollMotion::Down.apply_offset(u16::MAX, 10), u16::MAX);
+    }
+
+    #[test]
+    fn apply_offset_half_page_and_page_steps() {
+        assert_eq!(ScrollMotion::HalfPageDown.apply_offset(0, 10), 5);
+        assert_eq!(ScrollMotion::HalfPageUp.apply_offset(20, 10), 15);
+        assert_eq!(ScrollMotion::PageDown.apply_offset(0, 10), 10);
+        assert_eq!(ScrollMotion::PageUp.apply_offset(20, 10), 10);
+    }
+
+    #[test]
+    fn apply_offset_half_page_and_page_floor_at_one_step() {
+        // A viewport under 2 rows still steps by at least one line.
+        assert_eq!(ScrollMotion::HalfPageDown.apply_offset(0, 1), 1);
+        assert_eq!(ScrollMotion::PageDown.apply_offset(5, 0), 6);
+    }
+}

@@ -4,7 +4,7 @@ use lt_runtime::sync::service::Scope;
 use lt_types::types::User;
 
 use super::{
-    App, Keymap, PopupItem, Scroll, StateCtx, StateEvent, TextInput, Unbound, View, keymap,
+    App, Keymap, PopupItem, ScrollMotion, StateCtx, StateEvent, TextInput, Unbound, View, keymap,
     priority_popup_items, state_items,
 };
 
@@ -203,7 +203,7 @@ impl super::App {
     pub(crate) fn open_new_issue_modal(&mut self) {
         // Pre-fill team from the base list's active filter if set.
         let preset_team = match self.base() {
-            View::List(list) => list.args.team.clone(),
+            View::List(list) => list.query.args.team.clone(),
             _ => None,
         };
 
@@ -534,20 +534,13 @@ fn handle_description_key(modal: &mut NewIssueModal, code: KeyCode, ctrl: bool) 
     }
 }
 
-/// `Down`/`Up` move the focused picker's selection; other motions no-op via
-/// `Scroll`'s defaults.
-impl Scroll for NewIssueModal {
-    fn move_down(&mut self) {
+impl NewIssueModal {
+    /// Selection movement over the focused picker field's shared motion set;
+    /// a text-focused field has no picker state, so this no-ops.
+    pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
         let field = self.focused_field.clone();
-        let (items_len, selected) = new_issue_picker_state(self, &field);
-        if items_len > 0 {
-            *selected = (*selected + 1).min(items_len - 1);
-        }
-    }
-    fn move_up(&mut self) {
-        let field = self.focused_field.clone();
-        let (_items_len, selected) = new_issue_picker_state(self, &field);
-        *selected = selected.saturating_sub(1);
+        let (len, selected) = new_issue_picker_state(self, &field);
+        motion.apply_selection(selected, len, viewport_height);
     }
 }
 

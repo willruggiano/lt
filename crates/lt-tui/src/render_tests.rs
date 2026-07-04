@@ -57,31 +57,31 @@ fn list_navigation_clamps_within_bounds() {
     let mut app = app_with_issues(0, 10).unwrap();
     app.viewport_height = 4;
     app.list_mut().table_state.select(Some(0));
-
-    app.list_mut().move_down();
-    assert_eq!(app.list_mut().table_state.selected(), Some(1));
-    app.list_mut().move_up();
-    assert_eq!(app.list_mut().table_state.selected(), Some(0));
-    app.list_mut().move_up(); // clamp at top
-    assert_eq!(app.list_mut().table_state.selected(), Some(0));
-    app.list_mut().move_bottom();
-    assert_eq!(app.list_mut().table_state.selected(), Some(9));
-    app.list_mut().move_top();
-    assert_eq!(app.list_mut().table_state.selected(), Some(0));
     let vh = app.viewport_height;
-    app.list_mut().page_down(vh); // +viewport (4)
+
+    app.list_mut().scroll(ScrollMotion::Down, vh);
+    assert_eq!(app.list_mut().table_state.selected(), Some(1));
+    app.list_mut().scroll(ScrollMotion::Up, vh);
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
+    app.list_mut().scroll(ScrollMotion::Up, vh); // clamp at top
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
+    app.list_mut().scroll(ScrollMotion::Bottom, vh);
+    assert_eq!(app.list_mut().table_state.selected(), Some(9));
+    app.list_mut().scroll(ScrollMotion::Top, vh);
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
+    app.list_mut().scroll(ScrollMotion::PageDown, vh); // +viewport (4)
     assert_eq!(app.list_mut().table_state.selected(), Some(4));
-    app.list_mut().half_page_up(vh); // -2
+    app.list_mut().scroll(ScrollMotion::HalfPageUp, vh); // -2
     assert_eq!(app.list_mut().table_state.selected(), Some(2));
-    app.list_mut().page_up(vh); // clamp at top
+    app.list_mut().scroll(ScrollMotion::PageUp, vh); // clamp at top
     assert_eq!(app.list_mut().table_state.selected(), Some(0));
 }
 
 #[test]
 fn navigation_on_empty_list_is_noop() {
     let mut app = App::for_test(Vec::new()).unwrap();
-    app.list_mut().move_down();
-    app.list_mut().move_bottom();
+    app.list_mut().scroll(ScrollMotion::Down, 0);
+    app.list_mut().scroll(ScrollMotion::Bottom, 0);
     assert_eq!(app.list_mut().table_state.selected(), None);
 }
 
@@ -106,18 +106,18 @@ fn apply_fetched_selection_resets_or_clamps() {
 fn detail_scroll_saturates() {
     let issue = sim_issues(0, 1)[0].clone();
     let mut detail = build_cached_detail(&issue, Vec::new());
-    detail.move_down();
+    detail.scroll(ScrollMotion::Down, 10);
     assert_eq!(detail.scroll, 1);
-    detail.move_up();
-    detail.move_up(); // saturate at 0
+    detail.scroll(ScrollMotion::Up, 10);
+    detail.scroll(ScrollMotion::Up, 10); // saturate at 0
     assert_eq!(detail.scroll, 0);
-    detail.move_bottom();
+    detail.scroll(ScrollMotion::Bottom, 10);
     assert_eq!(detail.scroll, u16::MAX);
-    detail.move_top();
+    detail.scroll(ScrollMotion::Top, 10);
     assert_eq!(detail.scroll, 0);
-    detail.half_page_down(10); // +5
+    detail.scroll(ScrollMotion::HalfPageDown, 10); // +5
     assert_eq!(detail.scroll, 5);
-    detail.page_up(10); // -10, saturating
+    detail.scroll(ScrollMotion::PageUp, 10); // -10, saturating
     assert_eq!(detail.scroll, 0);
 }
 
@@ -180,19 +180,19 @@ fn close_detail_clears_pane_state() {
 #[test]
 fn filter_sort_sync_and_replacement() {
     let mut app = app_with_issues(0, 1).unwrap();
-    app.list_mut().filter = search_query::parse_query_ast("sort:title+");
-    app.list_mut().sync_args_from_filter();
+    app.list_mut().query.filter = search_query::parse_query_ast("sort:title+");
+    app.list_mut().query.sync_args_from_filter();
     assert!(matches!(
-        app.list_mut().args.sort,
+        app.list_mut().query.args.sort,
         lt_runtime::query::SortField::Title
     ));
-    assert!(!app.list_mut().args.desc);
+    assert!(!app.list_mut().query.args.desc);
 
     // replace_sort_in_filter rewrites the sort token, preserving other stems.
-    app.list_mut().args.sort = lt_runtime::query::SortField::Updated;
-    app.list_mut().args.desc = true;
-    app.list_mut().filter = search_query::parse_query_ast("state:todo sort:title+");
-    let replaced = app.list_mut().replace_sort_in_filter();
+    app.list_mut().query.args.sort = lt_runtime::query::SortField::Updated;
+    app.list_mut().query.args.desc = true;
+    app.list_mut().query.filter = search_query::parse_query_ast("state:todo sort:title+");
+    let replaced = app.list_mut().query.replace_sort_in_filter();
     let parsed = search_query::ParsedQuery::from(&replaced);
     assert_eq!(
         parsed.sort.map(|(_, d)| d),
