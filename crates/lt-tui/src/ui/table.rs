@@ -18,7 +18,6 @@ pub(super) fn render_table(
 ) -> Option<[usize; 7]> {
     let overlay: Option<String> = match &list.status {
         FetchStatus::Error(msg) => Some(format!("Error: {msg}")),
-        FetchStatus::Loading => Some("Loading...".to_string()),
         FetchStatus::Idle => None,
     };
     if let Some(msg) = overlay {
