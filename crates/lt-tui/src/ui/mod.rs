@@ -41,7 +41,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_header_with_search(frame, chunks[0], &app.auth, overlay);
     } else {
         let context = match app.base() {
-            View::List(list) => search_query::render_filter_context(&list.filter),
+            View::List(list) => search_query::render_filter_context(&list.query.filter),
             _ => String::new(),
         };
         render_header(frame, chunks[0], &context, &app.auth);
@@ -53,9 +53,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let (has_next, has_prev, page) = match app.base() {
         View::List(list) => (
-            list.pagination.has_next_page,
-            !list.pagination.cursor_stack.is_empty(),
-            list.pagination.cursor_stack.len() + 1,
+            list.query.pagination.has_next_page,
+            !list.query.pagination.cursor_stack.is_empty(),
+            list.query.pagination.cursor_stack.len() + 1,
         ),
         _ => (false, false, 1),
     };
@@ -115,8 +115,8 @@ fn render_views(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
         match &mut app.views[i] {
             View::List(list) => {
                 list_selected = list.table_state.selected().unwrap_or(0);
-                list_sort_field = list.args.sort.clone();
-                list_sort_desc = list.args.desc;
+                list_sort_field = list.query.args.sort.clone();
+                list_sort_desc = list.query.args.desc;
                 list_widths = render_table(frame, chunks[2], list);
             }
             View::Detail(detail) => render_detail_overlay(frame, chunks[2], detail),

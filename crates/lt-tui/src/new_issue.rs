@@ -203,7 +203,7 @@ impl super::App {
     pub(crate) fn open_new_issue_modal(&mut self) {
         // Pre-fill team from the base list's active filter if set.
         let preset_team = match self.base() {
-            View::List(list) => list.args.team.clone(),
+            View::List(list) => list.query.args.team.clone(),
             _ => None,
         };
 

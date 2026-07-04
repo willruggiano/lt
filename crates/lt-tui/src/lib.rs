@@ -68,7 +68,10 @@ pub enum AppEvent {
 /// One view's complete state. A view exists iff it is displayed; there is no
 /// separate mode flag to keep consistent.
 pub enum View {
-    List(ListView),
+    // Boxed: `ListQuery`'s launch-snapshot fields make `ListView` one of the
+    // larger variants, so boxing it keeps every other `View` push/pop from
+    // paying for its size.
+    List(Box<ListView>),
     // Boxed: `DetailView` is by far the largest variant, so boxing it keeps
     // every other `View` push/pop from paying for its size.
     Detail(Box<DetailView>),
@@ -226,69 +229,43 @@ fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
     })
 }
 
-/// The issue-list view: the base-list fields, owned.
-pub struct ListView {
-    pub issues: Vec<Issue>,
-    pub table_state: TableState,
-    pub pagination: Pagination,
-    /// An identifier to seek on the next `Issues` re-read; one-shot,
-    /// cleared whether or not that re-read finds a match.
-    pub pending_select: Option<String>,
+/// The issue-list query: inputs, the active filter, pagination cursor
+/// state, and the launch snapshot the double-esc reset restores.
+pub struct ListQuery {
     /// The issue-list query, kept in sync with `filter`'s `sort:` token.
     pub args: IssueQuery,
     /// Single source of truth for the active filter/search state. Updated on
     /// Enter (confirm search), double-esc (reset), and sort shortcuts.
     pub filter: search_query::QueryAst,
+    pub pagination: Pagination,
+    initial_args: IssueQuery,
+    initial_filter: search_query::QueryAst,
 }
 
-impl ListView {
-    fn new(
-        issues: Vec<Issue>,
-        pagination: Pagination,
-        args: IssueQuery,
-        filter: search_query::QueryAst,
-    ) -> Self {
-        let mut table_state = TableState::default();
-        if !issues.is_empty() {
-            table_state.select(Some(0));
-        }
+impl From<IssueQuery> for ListQuery {
+    fn from(args: IssueQuery) -> Self {
+        let filter = search_query::args_to_ast(&args);
         Self {
-            issues,
-            table_state,
-            pagination,
-            pending_select: None,
+            initial_args: args.clone(),
+            initial_filter: filter.clone(),
             args,
             filter,
+            pagination: Pagination {
+                has_next_page: false,
+                current_cursor: None,
+                cursor_stack: Vec::new(),
+                end_cursor: None,
+            },
         }
     }
+}
 
-    fn selected_issue(&self) -> Option<&Issue> {
-        self.table_state.selected().and_then(|i| self.issues.get(i))
-    }
-
-    /// Selection movement over the shared motion set.
-    fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
-        if self.issues.is_empty() {
-            return;
-        }
-        let cur = self.table_state.selected().unwrap_or(0);
-        self.table_state.select(Some(motion.apply_index(
-            cur,
-            self.issues.len(),
-            viewport_height,
-        )));
-    }
-
-    /// Only refetch while focused: a refresh must not swap the rows a popup
-    /// is anchored to or a search overlay covers.
-    fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
-        if matches!(ev, StateEvent::Issues) && focused {
-            self.do_fetch(ctx, false); // offset- and selection-preserving
-            self.seek_pending_select();
-        }
-    }
-
-    fn do_fetch(&mut self, ctx: &StateCtx, reset_selection: bool) {
+impl ListQuery {
+    /// Both branches of the issue-list fetch -- `run_query` when the parsed
+    /// filter has constraints beyond sort, else the paginated
+    /// `query_issues_page` -- updating `pagination`. Returns the fetched
+    /// rows, or an empty `Vec` (warning via `tracing`) on a query failure.
+    fn fetch(&mut self, ctx: &StateCtx) -> Vec<Issue> {
         let mut parsed = search_query::ParsedQuery::from(&self.filter);
         search_query::resolve_me(&mut parsed, ctx.viewer_name);
 
@@ -302,13 +279,13 @@ impl ListView {
                 .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
             {
                 Ok(issues) => {
-                    self.issues = issues;
                     self.pagination.has_next_page = false; // run_query has no pagination
                     self.pagination.end_cursor = None;
-                    self.apply_fetched_selection(reset_selection);
+                    issues
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "issue list fetch failed");
+                    Vec::new()
                 }
             }
         } else {
@@ -325,7 +302,6 @@ impl ListView {
                 .and_then(|conn| lt_runtime::db::query_issues_page(&conn, &self.args, offset))
             {
                 Ok((issues, has_next_page)) => {
-                    self.issues = issues;
                     self.pagination.has_next_page = has_next_page;
                     let limit = i64::from(self.args.limit.min(250));
                     self.pagination.end_cursor = if has_next_page {
@@ -333,13 +309,47 @@ impl ListView {
                     } else {
                         None
                     };
-                    self.apply_fetched_selection(reset_selection);
+                    issues
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "issue list fetch failed");
+                    Vec::new()
                 }
             }
         }
+    }
+
+    /// Advance the cursor stack to the next page. Returns whether a re-fetch
+    /// is needed (`false` when there is no next page).
+    fn next_page(&mut self) -> bool {
+        if !self.pagination.has_next_page {
+            return false;
+        }
+        let end = self.pagination.end_cursor.clone();
+        self.pagination
+            .cursor_stack
+            .push(self.pagination.current_cursor.clone());
+        self.pagination.current_cursor = end;
+        true
+    }
+
+    /// Pop the cursor stack back to the previous page. Returns whether a
+    /// re-fetch is needed (`false` when already at the first page).
+    fn prev_page(&mut self) -> bool {
+        let Some(cursor) = self.pagination.cursor_stack.pop() else {
+            return false;
+        };
+        self.pagination.current_cursor = cursor;
+        true
+    }
+
+    /// `d`: toggle sort direction and rewrite `filter`'s `sort:` token to
+    /// match, resetting pagination cursors; the caller re-fetches.
+    fn toggle_desc(&mut self) {
+        self.args.desc = !self.args.desc;
+        self.filter = self.replace_sort_in_filter();
+        self.pagination.cursor_stack.clear();
+        self.pagination.current_cursor = None;
     }
 
     /// Keep `args.sort`/`args.desc` in sync with `filter`.
@@ -367,14 +377,70 @@ impl ListView {
         search_query::parse_query_ast(&parts.join(" "))
     }
 
-    /// `d`: toggle sort direction, rewrite `filter`'s `sort:` token to
-    /// match, and re-fetch from the top.
-    fn toggle_desc(&mut self, ctx: &StateCtx) {
-        self.args.desc = !self.args.desc;
-        self.filter = self.replace_sort_in_filter();
+    /// Restore the launch snapshot and clear pagination cursors.
+    fn reset(&mut self) {
+        self.args = self.initial_args.clone();
+        self.filter = self.initial_filter.clone();
         self.pagination.cursor_stack.clear();
         self.pagination.current_cursor = None;
-        self.do_fetch(ctx, true);
+    }
+}
+
+/// The issue-list view: the base-list fields, owned.
+pub struct ListView {
+    pub issues: Vec<Issue>,
+    pub table_state: TableState,
+    /// An identifier to seek on the next `Issues` re-read; one-shot,
+    /// cleared whether or not that re-read finds a match.
+    pub pending_select: Option<String>,
+    pub query: ListQuery,
+}
+
+impl ListView {
+    fn new(issues: Vec<Issue>, query: ListQuery) -> Self {
+        let mut table_state = TableState::default();
+        if !issues.is_empty() {
+            table_state.select(Some(0));
+        }
+        Self {
+            issues,
+            table_state,
+            pending_select: None,
+            query,
+        }
+    }
+
+    fn selected_issue(&self) -> Option<&Issue> {
+        self.table_state.selected().and_then(|i| self.issues.get(i))
+    }
+
+    /// Selection movement over the shared motion set.
+    fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        if self.issues.is_empty() {
+            return;
+        }
+        let cur = self.table_state.selected().unwrap_or(0);
+        self.table_state.select(Some(motion.apply_index(
+            cur,
+            self.issues.len(),
+            viewport_height,
+        )));
+    }
+
+    /// Only refetch while focused: a refresh must not swap the rows a popup
+    /// is anchored to or a search overlay covers.
+    fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
+        if matches!(ev, StateEvent::Issues) && focused {
+            self.refetch(ctx, false); // offset- and selection-preserving
+        }
+    }
+
+    /// Re-fetch through `query`, apply the fetched-selection policy, and
+    /// seek `pending_select` if set.
+    fn refetch(&mut self, ctx: &StateCtx, reset_selection: bool) {
+        self.issues = self.query.fetch(ctx);
+        self.apply_fetched_selection(reset_selection);
+        self.seek_pending_select();
     }
 
     /// After replacing `self.issues`, clamp/reset the selection and mark idle.
@@ -401,26 +467,6 @@ impl ListView {
             self.table_state.select(Some(idx));
         }
     }
-
-    fn next_page(&mut self, ctx: &StateCtx) {
-        if !self.pagination.has_next_page {
-            return;
-        }
-        let end = self.pagination.end_cursor.clone();
-        self.pagination
-            .cursor_stack
-            .push(self.pagination.current_cursor.clone());
-        self.pagination.current_cursor = end;
-        self.do_fetch(ctx, true);
-    }
-
-    fn prev_page(&mut self, ctx: &StateCtx) {
-        let Some(cursor) = self.pagination.cursor_stack.pop() else {
-            return;
-        };
-        self.pagination.current_cursor = cursor;
-        self.do_fetch(ctx, true);
-    }
 }
 
 /// Re-fetch `list` from `db`. A free function, not an `App` method: the
@@ -432,7 +478,7 @@ fn fetch_list(
     reset_selection: bool,
 ) {
     let ctx = StateCtx { db, viewer_name };
-    list.do_fetch(&ctx, reset_selection);
+    list.refetch(&ctx, reset_selection);
 }
 
 /// Read-only context a view's consume/re-query needs. Built inline from
@@ -661,10 +707,10 @@ impl App {
         service: Arc<dyn SyncService>,
         events_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
-        let initial_args = list.args.clone();
-        let initial_filter = list.filter.clone();
+        let initial_args = list.query.args.clone();
+        let initial_filter = list.query.filter.clone();
         Self {
-            views: vec![View::List(list)],
+            views: vec![View::List(Box::new(list))],
             quit: false,
             viewport_height: 0,
             pending_key: None,
@@ -692,19 +738,8 @@ impl App {
         let db = lt_runtime::db::Database::memory()?;
         let (tx, rx) = mpsc::channel();
         let service = RecordingSyncService::new(&db, tx)?;
-        let args = IssueQuery::default();
-        let filter = search_query::args_to_ast(&args);
-        let list = ListView::new(
-            issues,
-            Pagination {
-                has_next_page: false,
-                current_cursor: None,
-                cursor_stack: Vec::new(),
-                end_cursor: None,
-            },
-            args,
-            filter,
-        );
+        let query = ListQuery::from(IssueQuery::default());
+        let list = ListView::new(issues, query);
         let mut app = Self::new(list, Arc::new(service), rx);
         app.db = db;
         Ok(app)
@@ -793,14 +828,9 @@ impl App {
     /// Full reset to the state the TUI was launched with: sort, filters,
     /// and search query.
     fn reset_base_view(&mut self) {
-        let args = self.initial_args.clone();
-        let filter = self.initial_filter.clone();
         let viewer_name = self.auth.viewer_name();
         if let Some(View::List(list)) = self.views.first_mut() {
-            list.args = args;
-            list.filter = filter;
-            list.pagination.cursor_stack.clear();
-            list.pagination.current_cursor = None;
+            list.query.reset();
             fetch_list(list, &self.db, viewer_name, true);
         }
         self.last_esc_time = None;
@@ -818,19 +848,30 @@ impl App {
     }
 
     fn toggle_desc(&mut self) {
-        self.with_base_list(ListView::toggle_desc);
+        self.with_base_list(|list, ctx| {
+            list.query.toggle_desc();
+            list.refetch(ctx, true);
+        });
     }
 
     fn next_page(&mut self) {
-        self.with_base_list(ListView::next_page);
+        self.with_base_list(|list, ctx| {
+            if list.query.next_page() {
+                list.refetch(ctx, true);
+            }
+        });
     }
 
     fn prev_page(&mut self) {
-        self.with_base_list(ListView::prev_page);
+        self.with_base_list(|list, ctx| {
+            if list.query.prev_page() {
+                list.refetch(ctx, true);
+            }
+        });
     }
 
     /// Build a `StateCtx` and drive `op` against the base list.
-    fn with_base_list(&mut self, op: fn(&mut ListView, &StateCtx)) {
+    fn with_base_list(&mut self, op: impl FnOnce(&mut ListView, &StateCtx)) {
         let ctx = StateCtx {
             db: &self.db,
             viewer_name: self.auth.viewer_name(),
@@ -873,14 +914,14 @@ impl App {
         // Capture the query limit once: it can't change while Search has
         // focus, so the snapshot stays faithful for the overlay's lifetime.
         if let View::List(list) = self.base() {
-            overlay.limit = list.args.limit;
+            overlay.limit = list.query.args.limit;
         }
         // Restore the base list's filter when reopening, unless it's just
         // the default sort stem.
         if let View::List(list) = self.base()
-            && list.filter.raw != search_query::DEFAULT_QUERY
+            && list.query.filter.raw != search_query::DEFAULT_QUERY
         {
-            let filter = list.filter.clone();
+            let filter = list.query.filter.clone();
             overlay.query = TextInput::from(filter.raw.clone());
             overlay.ast = filter;
             overlay.last_changed = Some(Instant::now());
@@ -1081,18 +1122,14 @@ pub fn run(
     // shared read through the `Arc`, so ownership either order is fine).
     let viewer = service.fetch_viewer();
 
-    let filter = search_query::args_to_ast(&args);
-    let list = ListView::new(
-        issues,
-        Pagination {
-            has_next_page,
-            current_cursor: None,
-            cursor_stack: Vec::new(),
-            end_cursor,
-        },
-        args,
-        filter,
-    );
+    let mut query = ListQuery::from(args);
+    query.pagination = Pagination {
+        has_next_page,
+        current_cursor: None,
+        cursor_stack: Vec::new(),
+        end_cursor,
+    };
+    let list = ListView::new(issues, query);
     let mut app = App::new(list, service, events_rx);
 
     app.auth = match viewer {

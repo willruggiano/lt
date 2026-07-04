@@ -664,8 +664,8 @@ fn confirm_search(app: &mut App) {
     let selected = overlay.table_state.selected();
     if let View::List(list) = app.base_mut() {
         // AST is the single source of truth.
-        list.filter = overlay.ast.clone();
-        list.sync_args_from_filter();
+        list.query.filter = overlay.ast.clone();
+        list.query.sync_args_from_filter();
         list.issues = results;
         let n = list.issues.len();
         let sel = selected.unwrap_or(0).min(n.saturating_sub(1));

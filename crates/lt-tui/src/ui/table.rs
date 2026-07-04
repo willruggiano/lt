@@ -20,8 +20,8 @@ pub(super) fn render_table(
         return None;
     }
 
-    let sort_col = sort_col_index(&list.args.sort);
-    let desc = list.args.desc;
+    let sort_col = sort_col_index(&list.query.args.sort);
+    let desc = list.query.args.desc;
     let widths = render_issue_table(
         frame,
         area,
