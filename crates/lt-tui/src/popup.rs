@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 use lt_runtime::db::Connection;
 use lt_runtime::query::IssueQuery;
 use lt_runtime::search_query;
@@ -8,7 +8,7 @@ use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
 use super::{
-    ALL_KEYBINDINGS, App, KeyFlow, ScrollMotion, StateCtx, StateEvent, TextInput, View, keymap,
+    ALL_KEYBINDINGS, App, Scroll, ScrollMotion, StateCtx, StateEvent, TextInput, View, keymap,
 };
 
 /// Identifies which field a popup is editing.
@@ -138,6 +138,29 @@ impl HelpPopup {
             .map(|(i, _)| i)
             .collect();
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+    }
+
+    fn move_down(&mut self) {
+        let max = self.filtered.len().saturating_sub(1);
+        if self.selected < max {
+            self.selected += 1;
+        }
+    }
+
+    fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+}
+
+/// This view's scroll override: `Down`/`Up` move the filtered-list
+/// selection; every other motion no-ops via `Scroll`'s defaults (the help
+/// popup has no "half page" concept, `docs/design/keybinds.md`, "Help").
+impl Scroll for HelpPopup {
+    fn move_down(&mut self) {
+        self.move_down();
+    }
+    fn move_up(&mut self) {
+        self.move_up();
     }
 }
 
@@ -273,6 +296,18 @@ impl SearchOverlay {
     pub fn move_up(&mut self) {
         let i = self.table_state.selected().unwrap_or(0);
         self.table_state.select(Some(i.saturating_sub(1)));
+    }
+}
+
+/// This view's scroll override: `Down`/`Up` move the result-list selection;
+/// every other motion no-ops via `Scroll`'s defaults (the search overlay has
+/// no "half page" concept, `docs/design/keybinds.md`, "Search").
+impl Scroll for SearchOverlay {
+    fn move_down(&mut self) {
+        self.move_down();
+    }
+    fn move_up(&mut self) {
+        self.move_up();
     }
 }
 
@@ -515,88 +550,51 @@ pub(crate) fn apply_popup(app: &mut App, i: usize, action: keymap::Action) {
     }
 }
 
-// -- Help popup key handler -----------------------------------------
+// -- Help popup ------------------------------------------------------
 
-pub(crate) fn handle_help_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
-    let code = key.code;
-    let modifiers = key.modifiers;
-    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-    match code {
-        // Esc (Back) is not bound here: it resolves at the floor (Decision
-        // 6). The catch-all below forwards it to the search bar, so this arm
-        // must return `Pass` explicitly rather than fall out of the match.
-        KeyCode::Esc => return KeyFlow::Pass,
-        // Navigation: j/k/<down>/<up> move the filtered list.
-        KeyCode::Down | KeyCode::Char('j') if !ctrl => {
-            if let Some(View::Help(popup)) = app.views.get_mut(i) {
-                let max = popup.filtered.len().saturating_sub(1);
-                if popup.selected < max {
-                    popup.selected += 1;
-                }
-            }
-        }
-        KeyCode::Up | KeyCode::Char('k') if !ctrl => {
-            if let Some(View::Help(popup)) = app.views.get_mut(i) {
-                popup.selected = popup.selected.saturating_sub(1);
-            }
-        }
-        // Everything else goes to the TextInput search bar.
-        _ => {
-            if let Some(View::Help(popup)) = app.views.get_mut(i)
-                && popup.search.handle_key(code, modifiers)
-            {
-                popup.update_filter();
-            }
-        }
+/// The `Help` context's non-navigation actions: none today -- `HELP` binds
+/// only `MoveDown`/`MoveUp`, both navigation, intercepted by `scroll_motion`
+/// before this is reached. Kept as a named arm for symmetry with the other
+/// contexts, and so a future non-navigation `Help` binding has an obvious
+/// home.
+pub(crate) fn apply_help(_app: &mut App, _i: usize, _action: keymap::Action) {}
+
+/// Forward an unbound key to the help popup's filter bar. `j`/`k` stay
+/// untypeable here (an existing limitation, carried forward deliberately):
+/// they resolve to `MoveDown`/`MoveUp` in `HELP` and never reach `Unbound`.
+pub(crate) fn forward_help(app: &mut App, i: usize, ev: KeyEvent) {
+    if let Some(View::Help(popup)) = app.views.get_mut(i)
+        && popup.search.handle_key(ev.code, ev.modifiers)
+    {
+        popup.update_filter();
     }
-    KeyFlow::Consumed
 }
 
-// -- FTS search overlay key handler --------------------------------
+// -- FTS search overlay ------------------------------------------------
 
-pub(crate) fn handle_search_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
-    let code = key.code;
-    let modifiers = key.modifiers;
-    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-    match code {
-        // Esc (Back) is not bound here: it resolves at the floor (Decision
-        // 6). The catch-all below forwards it to the query bar, so this arm
-        // must return `Pass` explicitly rather than fall out of the match.
-        KeyCode::Esc => return KeyFlow::Pass,
-        KeyCode::Char('c') if ctrl => {
-            // Ctrl+C resets the search query back to the default.
+/// The `Search` context's non-navigation actions. Navigation (`MoveDown`/
+/// `MoveUp`) never reaches here: `resolve_and_apply` maps it to
+/// `ScrollMotion` and applies it through `View::scroll` instead.
+pub(crate) fn apply_search(app: &mut App, i: usize, action: keymap::Action) {
+    match action {
+        keymap::Action::Confirm => confirm_search(app),
+        keymap::Action::ClearQuery => {
             if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.query = TextInput::from(search_query::DEFAULT_QUERY.to_string());
                 overlay.last_changed = Some(Instant::now());
             }
         }
-        KeyCode::Enter => confirm_search(app),
-        // Result-list navigation: <down>/<up> only. Plain j/k must fall
-        // through to the query bar so they can be typed as filter text.
-        KeyCode::Down => {
-            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
-                overlay.move_down();
-            }
-        }
-        KeyCode::Up => {
-            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
-                overlay.move_up();
-            }
-        }
-        // Ctrl+N -- cycle completion forward.
-        KeyCode::Char('n') if ctrl => {
+        keymap::Action::CompleteNext => {
             if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.completer.cycle_next();
             }
         }
-        // Ctrl+P -- cycle completion backward.
-        KeyCode::Char('p') if ctrl => {
+        keymap::Action::CompletePrev => {
             if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.completer.cycle_prev();
             }
         }
-        // Ctrl+Y -- accept the highlighted completion candidate.
-        KeyCode::Char('y') if ctrl => {
+        keymap::Action::CompleteAccept => {
             if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
                 if overlay
@@ -610,20 +608,24 @@ pub(crate) fn handle_search_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFl
                 }
             }
         }
-        // Tab / Shift-Tab: apply stem-key completion.
-        // These must NOT be forwarded to TextInput::handle_key.
-        KeyCode::Tab => apply_completion_tab(app, i, true),
-        KeyCode::BackTab => apply_completion_tab(app, i, false),
-        // Everything else goes to the TextInput query bar.
-        _ => {
-            if let Some(View::Search(overlay)) = app.views.get_mut(i)
-                && overlay.query.handle_key(code, modifiers)
-            {
-                overlay.last_changed = Some(Instant::now());
-            }
-        }
+        keymap::Action::CompleteForward => apply_completion_tab(app, i, true),
+        keymap::Action::CompleteBackward => apply_completion_tab(app, i, false),
+        // Navigation and other contexts' actions never resolve to
+        // `Search`'s table; the match stays exhaustive over `Action`
+        // regardless.
+        _ => {}
     }
-    KeyFlow::Consumed
+}
+
+/// Forward an unbound key to the query bar. `tab`/`shift+tab` never reach
+/// here (`SEARCH` binds them to completion); plain `j`/`k` are deliberately
+/// unbound so they land here as typeable filter text.
+pub(crate) fn forward_search(app: &mut App, i: usize, ev: KeyEvent) {
+    if let Some(View::Search(overlay)) = app.views.get_mut(i)
+        && overlay.query.handle_key(ev.code, ev.modifiers)
+    {
+        overlay.last_changed = Some(Instant::now());
+    }
 }
 
 /// Confirm the search: pop the overlay (the borrow requires it, and it

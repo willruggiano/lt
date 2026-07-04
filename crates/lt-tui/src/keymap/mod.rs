@@ -1,8 +1,9 @@
 //! The keymap: a normalized [`Key`], an [`Action`] enum, and static
 //! `(Binding, Action)` tables resolved through layered [`KeyContext`]s.
-//! Phase 1 of `docs/design/keybinds.md` -- the List/Detail/Popup contexts and
-//! the shared GLOBAL navigation layer. Search/Help/`NewIssue*`/`CommentInput`
-//! stay on their existing handlers until phase 2.
+//! Phase 2 of `docs/design/keybinds.md` adds the text/form contexts
+//! (`Search`, `Help`, `NewIssuePicker`, `NewIssueText`, `CommentInput`)
+//! alongside phase 1's List/Detail/Popup set and the shared GLOBAL
+//! navigation layer.
 
 mod action;
 mod key;
@@ -11,14 +12,38 @@ pub(crate) use action::Action;
 use crossterm::event::KeyCode;
 pub(crate) use key::Key;
 
-/// Where a key is resolved: the focused view's own context, then GLOBAL.
-/// Later phases add the text contexts (`Search`, `Help`, `NewIssuePicker`,
-/// `NewIssueText`, `CommentInput`).
+/// Where a key is resolved: the focused view's own context, then GLOBAL --
+/// skipped by the text contexts (`is_text`), which forward instead of
+/// cascading (`docs/design/keybinds.md`, "Contexts and layering").
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum KeyContext {
+    // Full keymap contexts: their own table, then GLOBAL.
     List,
     Detail,
     Popup,
+    NewIssuePicker,
+    // Text contexts: their own table only; an unbound key forwards to the
+    // context's editor widget instead of cascading.
+    Search,
+    Help,
+    NewIssueText,
+    CommentInput,
+}
+
+impl KeyContext {
+    /// Text contexts skip GLOBAL, never start chords, and forward an
+    /// unbound key to their editor widget instead of cascading (except
+    /// `esc`, which always passes to the floor -- handled by the dispatch
+    /// seam, not here).
+    pub(crate) fn is_text(self) -> bool {
+        matches!(
+            self,
+            KeyContext::Search
+                | KeyContext::Help
+                | KeyContext::NewIssueText
+                | KeyContext::CommentInput
+        )
+    }
 }
 
 /// A single- or two-key binding. Linear's chords are exactly two keys;
@@ -99,20 +124,103 @@ static DETAIL: &[(Binding, Action)] = &[
 static POPUP: &[(Binding, Action)] =
     &[(Binding::Single(Key::plain(KeyCode::Enter)), Action::Confirm)];
 
+/// Shared by `NewIssuePicker`/`NewIssueText`: the submit chord plus
+/// Tab/Shift+Tab field navigation (`docs/design/keybinds.md`, "New issue --
+/// picker fields"/"-- text fields"). `NewIssueText`'s own table *is* this
+/// layer (everything else forwards to the focused field's editor);
+/// `NewIssuePicker` layers it alongside its own Confirm/PickMe rows.
+static FORM_NAV: &[(Binding, Action)] = &[
+    (
+        Binding::Single(Key::ctrl_code(KeyCode::Enter)),
+        Action::Submit,
+    ),
+    (Binding::Single(Key::alt(KeyCode::Enter)), Action::Submit),
+    (Binding::Single(Key::plain(KeyCode::Tab)), Action::NextField),
+    (Binding::Single(Key::shift_tab()), Action::PrevField),
+];
+
+/// New-issue modal, picker fields (Team/Priority/State/Assignee): `FORM_NAV`
+/// (layered on in `KeyContext::layers`) plus GLOBAL's `j`/`k`/`down`/`up`,
+/// which move the focused picker's selection (`View::scroll`'s `NewIssue`
+/// override); `enter` advances like `Tab` (leaving Team swaps the watched
+/// scope).
+static NEW_ISSUE_PICKER: &[(Binding, Action)] = &[
+    (Binding::Single(Key::plain(KeyCode::Enter)), Action::Confirm),
+    (Binding::Single(Key::char('m')), Action::PickMe),
+];
+
+/// New-issue modal, text fields (Title/Description): everything but
+/// `FORM_NAV`'s rows forwards to the focused field's editor (`enter` inserts
+/// a newline in Description).
+static NEW_ISSUE_TEXT: &[(Binding, Action)] = FORM_NAV;
+
+/// The detail pane's comment box: the one context that binds `esc` --
+/// narrower than the floor's pop (cancels the draft, keeps the pane open).
+static COMMENT_INPUT: &[(Binding, Action)] = &[
+    (
+        Binding::Single(Key::ctrl_code(KeyCode::Enter)),
+        Action::Submit,
+    ),
+    (Binding::Single(Key::alt(KeyCode::Enter)), Action::Submit),
+    (Binding::Single(Key::plain(KeyCode::Esc)), Action::Back),
+];
+
+/// The FTS search overlay. Plain `j`/`k` are deliberately unbound (typeable
+/// filter text); `tab`/`shift+tab` drive stem-key completion and must not
+/// reach the query bar.
+static SEARCH: &[(Binding, Action)] = &[
+    (Binding::Single(Key::plain(KeyCode::Enter)), Action::Confirm),
+    (Binding::Single(Key::ctrl('c')), Action::ClearQuery),
+    (Binding::Single(Key::plain(KeyCode::Down)), Action::MoveDown),
+    (Binding::Single(Key::plain(KeyCode::Up)), Action::MoveUp),
+    (Binding::Single(Key::ctrl('n')), Action::CompleteNext),
+    (Binding::Single(Key::ctrl('p')), Action::CompletePrev),
+    (Binding::Single(Key::ctrl('y')), Action::CompleteAccept),
+    (
+        Binding::Single(Key::plain(KeyCode::Tab)),
+        Action::CompleteForward,
+    ),
+    (Binding::Single(Key::shift_tab()), Action::CompleteBackward),
+];
+
+/// The keyboard-shortcuts help popup. `j`/`k` stay untypeable in the filter
+/// bar -- an existing limitation, carried forward deliberately.
+static HELP: &[(Binding, Action)] = &[
+    (Binding::Single(Key::plain(KeyCode::Down)), Action::MoveDown),
+    (Binding::Single(Key::char('j')), Action::MoveDown),
+    (Binding::Single(Key::plain(KeyCode::Up)), Action::MoveUp),
+    (Binding::Single(Key::char('k')), Action::MoveUp),
+];
+
 impl KeyContext {
     fn table(self) -> &'static [(Binding, Action)] {
         match self {
             KeyContext::List => LIST,
             KeyContext::Detail => DETAIL,
             KeyContext::Popup => POPUP,
+            KeyContext::NewIssuePicker => NEW_ISSUE_PICKER,
+            KeyContext::Search => SEARCH,
+            KeyContext::Help => HELP,
+            KeyContext::NewIssueText => NEW_ISSUE_TEXT,
+            KeyContext::CommentInput => COMMENT_INPUT,
         }
     }
 
-    /// This context's effective resolution layers: its own table, then
-    /// GLOBAL. Every phase-1 context is non-text, so all pick up GLOBAL;
-    /// text contexts (phase 2) will skip it.
-    fn layers(self) -> [&'static [(Binding, Action)]; 2] {
-        [self.table(), GLOBAL]
+    /// This context's effective resolution layers: its own table, then any
+    /// shared layers, in precedence order. `NewIssuePicker` additionally
+    /// layers `FORM_NAV` (`NewIssueText`'s own table already *is* `FORM_NAV`,
+    /// so it needs no second copy). Every non-text context also picks up
+    /// GLOBAL; a text context skips it so a navigation letter (`j`, `g`,
+    /// ...) never steals a character from the editor it forwards to.
+    fn layers(self) -> Vec<&'static [(Binding, Action)]> {
+        let mut layers = vec![self.table()];
+        if matches!(self, KeyContext::NewIssuePicker) {
+            layers.push(FORM_NAV);
+        }
+        if !self.is_text() {
+            layers.push(GLOBAL);
+        }
+        layers
     }
 }
 
@@ -142,8 +250,10 @@ fn lookup_single(table: &[(Binding, Action)], key: Key) -> Option<Action> {
 
 /// The resolution algorithm, parameterized over the layer set so tests can
 /// exercise layer precedence directly with synthetic layers; [`resolve`] is
-/// the `KeyContext`-facing entry point.
-fn resolve_layers(layers: [&[(Binding, Action)]; 2], pending: Option<Key>, key: Key) -> Resolved {
+/// the `KeyContext`-facing entry point. A slice rather than a fixed array:
+/// text contexts have one layer (their own table), non-text contexts two
+/// (table, then GLOBAL).
+fn resolve_layers(layers: &[&[(Binding, Action)]], pending: Option<Key>, key: Key) -> Resolved {
     if let Some(prefix) = pending {
         for layer in layers {
             if let Some(action) = lookup_chord(layer, prefix, key) {
@@ -168,17 +278,26 @@ fn resolve_layers(layers: [&[(Binding, Action)]; 2], pending: Option<Key>, key: 
 }
 
 /// Resolve `key` against `ctx`'s effective layers (its own table, then
-/// GLOBAL), given the pending chord prefix `App::dispatch_key` took once at
-/// entry.
+/// GLOBAL unless `ctx` is a text context), given the pending chord prefix
+/// `App::dispatch_key` took once at entry.
 pub(crate) fn resolve(ctx: KeyContext, pending: Option<Key>, key: Key) -> Resolved {
-    resolve_layers(ctx.layers(), pending, key)
+    resolve_layers(&ctx.layers(), pending, key)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL_CONTEXTS: [KeyContext; 3] = [KeyContext::List, KeyContext::Detail, KeyContext::Popup];
+    const ALL_CONTEXTS: [KeyContext; 8] = [
+        KeyContext::List,
+        KeyContext::Detail,
+        KeyContext::Popup,
+        KeyContext::NewIssuePicker,
+        KeyContext::Search,
+        KeyContext::Help,
+        KeyContext::NewIssueText,
+        KeyContext::CommentInput,
+    ];
 
     fn binding_keys(binding: &Binding) -> Vec<Key> {
         match binding {
@@ -236,7 +355,7 @@ mod tests {
             &[(Binding::Single(Key::char('d')), Action::MoveDown)];
 
         assert_eq!(
-            resolve_layers([CONTEXT_LAYER, GLOBAL_STAND_IN], None, Key::char('d')),
+            resolve_layers(&[CONTEXT_LAYER, GLOBAL_STAND_IN], None, Key::char('d')),
             Resolved::Act(Action::ToggleSortDirection)
         );
     }
@@ -289,13 +408,20 @@ mod tests {
     }
 
     #[test]
-    fn no_table_binds_q_or_esc() {
+    fn no_table_binds_q_and_only_comment_input_binds_esc() {
         for ctx in ALL_CONTEXTS {
             for key in context_keys(ctx) {
                 assert!(
-                    !matches!(key.code, KeyCode::Char('q') | KeyCode::Esc),
+                    !matches!(key.code, KeyCode::Char('q')),
                     "{ctx:?}: table binds {key}"
                 );
+                if key.code == KeyCode::Esc {
+                    assert_eq!(
+                        ctx,
+                        KeyContext::CommentInput,
+                        "{ctx:?}: table binds esc (Back/quit are the floor's, except CommentInput's cancel)"
+                    );
+                }
             }
         }
     }
@@ -310,6 +436,12 @@ mod tests {
             ("list", LIST),
             ("detail", DETAIL),
             ("popup", POPUP),
+            ("form_nav", FORM_NAV),
+            ("new_issue_picker", NEW_ISSUE_PICKER),
+            ("new_issue_text", NEW_ISSUE_TEXT),
+            ("comment_input", COMMENT_INPUT),
+            ("search", SEARCH),
+            ("help", HELP),
         ] {
             for (binding, action) in layer {
                 let binding_str = match binding {

@@ -4,7 +4,7 @@ use lt_runtime::sync::service::Scope;
 use lt_types::types::User;
 
 use super::{
-    App, KeyFlow, PopupItem, StateCtx, StateEvent, TextInput, View, priority_popup_items,
+    App, PopupItem, Scroll, StateCtx, StateEvent, TextInput, View, keymap, priority_popup_items,
     state_items,
 };
 
@@ -395,108 +395,77 @@ pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) ->
 // Key handlers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
-    let code = key.code;
-    let modifiers = key.modifiers;
-    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-    let shift = modifiers.contains(KeyModifiers::SHIFT);
-    let alt = modifiers.contains(KeyModifiers::ALT);
-
-    // Ctrl-Enter submits the form (Alt-Enter on terminals that cannot
-    // distinguish Ctrl-Enter from Enter).
-    if (ctrl || alt) && code == KeyCode::Enter {
-        app.new_issue_submit(i);
-        return KeyFlow::Consumed;
-    }
-
-    // Esc is not bound here: it resolves at the floor (Decision 6). Checked
-    // before the per-field dispatch below so it isn't swallowed as literal
-    // text by the Title/Description fields.
-    if code == KeyCode::Esc {
-        return KeyFlow::Pass;
-    }
-
-    let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
-        return KeyFlow::Consumed;
-    };
-
-    match &modal.focused_field.clone() {
-        // ---- Text fields ----
-        NewIssueField::Title => match code {
-            KeyCode::Tab => {
-                modal.focused_field = modal.focused_field.next();
-            }
-            KeyCode::BackTab => {
+/// The `NewIssuePicker`/`NewIssueText` contexts' actions
+/// (`docs/design/keybinds.md`, "New issue -- picker fields"/"-- text
+/// fields"): `Submit`/`NextField`/`PrevField` are shared by both; `Confirm`/
+/// `PickMe` only ever resolve from `NewIssuePicker` (`NewIssueText`'s table
+/// has no such rows).
+pub(crate) fn apply_new_issue(app: &mut App, i: usize, action: keymap::Action) {
+    match action {
+        keymap::Action::Submit => app.new_issue_submit(i),
+        keymap::Action::NextField | keymap::Action::Confirm => new_issue_advance(app, i),
+        keymap::Action::PrevField => {
+            if let Some(View::NewIssue(modal)) = app.views.get_mut(i) {
                 modal.focused_field = modal.focused_field.prev();
             }
-            _ => {
-                modal.title.handle_key(code, modifiers);
-            }
-        },
-        NewIssueField::Description => handle_description_key(modal, code, ctrl),
-        // ---- Picker fields ----
-        field => {
-            let field = field.clone();
-            match code {
-                KeyCode::Tab if !shift => {
-                    // When leaving Team field, refresh states and assignees.
-                    if field == NewIssueField::Team {
-                        let next = modal.focused_field.next();
-                        modal.focused_field = next;
-                        app.new_issue_team_changed(i);
-                    } else {
-                        modal.focused_field = modal.focused_field.next();
-                    }
-                }
-                KeyCode::BackTab => {
-                    modal.focused_field = modal.focused_field.prev();
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    let (items_len, selected) = new_issue_picker_state(modal, &field);
-                    if items_len > 0 {
-                        *selected = (*selected + 1).min(items_len - 1);
-                    }
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    let (_items_len, selected) = new_issue_picker_state(modal, &field);
-                    *selected = selected.saturating_sub(1);
-                }
-                // "m" shortcut: select "Me (...)" entry in Assignee picker.
-                KeyCode::Char('m') if field == NewIssueField::Assignee => {
-                    // The "Me (name)" entry is always at index 0 when present.
-                    if let Some(first) = modal.assignees.first()
-                        && first.label.starts_with("Me (")
-                    {
-                        modal.assignee_selected = 0;
-                    }
-                }
-                KeyCode::Enter => {
-                    // Enter on a picker field advances to the next field.
-                    if field == NewIssueField::Team {
-                        let next = modal.focused_field.next();
-                        modal.focused_field = next;
-                        app.new_issue_team_changed(i);
-                    } else {
-                        modal.focused_field = modal.focused_field.next();
-                    }
-                }
-                _ => {}
+        }
+        // "m" shortcut: select the "Me (...)" entry in the Assignee picker.
+        keymap::Action::PickMe => {
+            if let Some(View::NewIssue(modal)) = app.views.get_mut(i)
+                && modal.focused_field == NewIssueField::Assignee
+                && let Some(first) = modal.assignees.first()
+                && first.label.starts_with("Me (")
+            {
+                modal.assignee_selected = 0;
             }
         }
+        // Navigation and other contexts' actions never resolve to
+        // `NewIssuePicker`/`NewIssueText`'s tables; the match stays
+        // exhaustive over `Action` regardless.
+        _ => {}
     }
-    KeyFlow::Consumed
+}
+
+/// Advance to the next field (`Tab`/`NextField` and `Enter`/`Confirm` on a
+/// picker field share this exact body): leaving Team swaps the watched team
+/// scope (`new_issue_team_changed`); any other field just advances.
+fn new_issue_advance(app: &mut App, i: usize) {
+    let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
+        return;
+    };
+    if modal.focused_field == NewIssueField::Team {
+        let next = modal.focused_field.next();
+        modal.focused_field = next;
+        app.new_issue_team_changed(i);
+    } else {
+        modal.focused_field = modal.focused_field.next();
+    }
+}
+
+/// Forward an unbound key in the `NewIssueText` context to the focused text
+/// field's own editor: `TextInput::handle_key` for Title, the description's
+/// line-buffer logic (`enter`-as-newline, cursor always at the end) for
+/// Description. Uses the original crossterm event, not the normalized `Key`.
+pub(crate) fn forward_text(app: &mut App, i: usize, ev: KeyEvent) {
+    let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
+    let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
+        return;
+    };
+    match modal.focused_field {
+        NewIssueField::Title => {
+            modal.title.handle_key(ev.code, ev.modifiers);
+        }
+        NewIssueField::Description => handle_description_key(modal, ev.code, ctrl),
+        NewIssueField::Team
+        | NewIssueField::Priority
+        | NewIssueField::State
+        | NewIssueField::Assignee => {}
+    }
 }
 
 /// Handle a key press while the new-issue Description field is focused.
 fn handle_description_key(modal: &mut NewIssueModal, code: KeyCode, ctrl: bool) {
     match code {
-        KeyCode::Tab => {
-            // Description is last field; Tab wraps to Title.
-            modal.focused_field = modal.focused_field.next();
-        }
-        KeyCode::BackTab => {
-            modal.focused_field = modal.focused_field.prev();
-        }
         KeyCode::Enter => {
             modal.description.push('\n');
         }
@@ -524,6 +493,26 @@ fn handle_description_key(modal: &mut NewIssueModal, code: KeyCode, ctrl: bool) 
             modal.description.push(c);
         }
         _ => {}
+    }
+}
+
+/// This view's scroll override, `NewIssuePicker` only (`NewIssueText` is a
+/// text context and never reaches `View::scroll`): `Down`/`Up` move the
+/// focused picker's selection; every other motion no-ops via `Scroll`'s
+/// defaults -- a form has no "half page" concept (`docs/design/keybinds.md`,
+/// "New issue -- picker fields").
+impl Scroll for NewIssueModal {
+    fn move_down(&mut self) {
+        let field = self.focused_field.clone();
+        let (items_len, selected) = new_issue_picker_state(self, &field);
+        if items_len > 0 {
+            *selected = (*selected + 1).min(items_len - 1);
+        }
+    }
+    fn move_up(&mut self) {
+        let field = self.focused_field.clone();
+        let (_items_len, selected) = new_issue_picker_state(self, &field);
+        *selected = selected.saturating_sub(1);
     }
 }
 

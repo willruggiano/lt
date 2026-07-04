@@ -405,11 +405,7 @@ fn submit_comment_writes_through_the_db_and_refreshes_the_open_detail() {
     detail.comment_input = Some("a new comment".to_string());
     app.views.push(View::Detail(Box::new(detail)));
 
-    detail::handle_comment_input(
-        &mut app,
-        1,
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
-    );
+    app.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
     drain_events(&mut app);
 
     let Some(View::Detail(detail)) = app.views.last() else {
@@ -690,6 +686,61 @@ fn printable_key_in_a_text_context_never_cascades() {
         unreachable!("search view expected")
     };
     assert!(overlay.query.value.ends_with('q'));
+}
+
+#[test]
+fn printable_key_in_search_never_reaches_the_list_beneath() {
+    // A printable key that means something in List ('d' toggles sort
+    // direction) must stay text in the Search overlay: text contexts skip
+    // GLOBAL, and forwarding always consumes, so the cascade never resumes.
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    let before = app.list_mut().args.desc;
+    app.views.push(View::Search(SearchOverlay::new()));
+
+    app.dispatch_key(key('d'));
+
+    assert_eq!(app.list_mut().args.desc, before);
+    let Some(View::Search(overlay)) = app.views.last() else {
+        unreachable!("search view expected")
+    };
+    assert!(overlay.query.value.ends_with('d'));
+}
+
+#[test]
+fn q_typed_in_the_help_filter_is_text() {
+    // `q` above the base is normally Back at the floor; the help popup's own
+    // filter bar must still get to type it (`docs/design/keybinds.md`,
+    // "Help").
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.views.push(View::Help(HelpPopup::new()));
+
+    app.dispatch_key(key('q'));
+
+    assert_eq!(app.views.len(), 2);
+    assert!(!app.quit);
+    let Some(View::Help(popup)) = app.views.last() else {
+        unreachable!("help view expected")
+    };
+    assert!(popup.search.value.ends_with('q'));
+}
+
+#[test]
+fn esc_with_comment_input_open_cancels_input_and_keeps_detail_view() {
+    // `CommentInput`'s one `esc` row: Back cancels the draft without popping
+    // the Detail view beneath it -- narrower than the floor's pop.
+    let issue = db_issue("1", "ENG-1", "Todo", 5);
+    let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
+    let mut detail = build_cached_detail(&issue, Vec::new());
+    detail.comment_input = Some("draft".to_string());
+    app.views.push(View::Detail(Box::new(detail)));
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert_eq!(app.views.len(), 2); // Detail stays open
+    let Some(View::Detail(detail)) = app.views.last() else {
+        unreachable!("detail view expected")
+    };
+    assert!(detail.comment_input.is_none());
 }
 
 #[test]
