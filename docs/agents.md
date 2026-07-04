@@ -24,3 +24,11 @@
   - Don't: redirect a subagent if direction changes. Either let it fully
     complete, and then spawn a _new_ subagent to redirect the changes, or
     immediately kill it and revert its in-progress changes.
+- Do: use Bash subagents to execute long running commands.
+- Do: use `tee` to simultaneously write command output to a file _and_ filter it
+  for cleaner output, eg.
+  `nix develop .#lt -c make check 2>&1 | tee /tmp/check.log | rg '^error'`.
+- Don't: `tail` or `grep`/`rg` long running commands (`make check`, `cargo`)
+  without `tee` capturing the full output to a file. If your `tail` or
+  `grep`/`rg` commands don't capture sufficient command output, you can fall
+  back to the tee'd file instead of being forced to re-run the command.
