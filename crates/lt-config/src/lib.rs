@@ -52,6 +52,9 @@ pub struct AuthToken {
     /// Absent in tokens saved before this field was introduced.
     #[serde(default)]
     pub issued_at: Option<u64>,
+    /// Absent in tokens saved before this field was introduced.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 impl AuthToken {
@@ -129,6 +132,7 @@ pub fn save_token(token: &AuthToken) -> Result<()> {
         expires_in: token.expires_in,
         scope: token.scope.clone(),
         issued_at: Some(token.issued_at.unwrap_or(now_secs)),
+        refresh_token: token.refresh_token.clone(),
     };
     let data = serde_json::to_string_pretty(&stamped)?;
     write_private_file(&path, &data).with_context(|| format!("writing {}", path.display()))
@@ -184,6 +188,7 @@ mod tests {
             expires_in,
             scope: None,
             issued_at,
+            refresh_token: None,
         }
     }
 
@@ -226,12 +231,21 @@ mod tests {
 
     #[test]
     fn auth_token_json_roundtrips() {
-        let original = token(Some(3600), Some(1_000_000));
+        let mut original = token(Some(3600), Some(1_000_000));
+        original.refresh_token = Some("refresh-tok".to_string());
         let json = serde_json::to_string(&original).unwrap();
         let parsed: AuthToken = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.access_token, "tok");
         assert_eq!(parsed.expires_in, Some(3600));
         assert_eq!(parsed.issued_at, Some(1_000_000));
+        assert_eq!(parsed.refresh_token, Some("refresh-tok".to_string()));
+    }
+
+    #[test]
+    fn auth_token_refresh_token_defaults_when_absent() {
+        let parsed: AuthToken =
+            serde_json::from_str(r#"{"access_token":"a","token_type":"Bearer"}"#).unwrap();
+        assert_eq!(parsed.refresh_token, None);
     }
 
     #[test]
