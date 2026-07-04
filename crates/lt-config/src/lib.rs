@@ -54,7 +54,6 @@ pub struct AuthToken {
 }
 
 impl AuthToken {
-    /// Return true if the token is known to have expired.
     pub fn is_expired(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
