@@ -38,32 +38,7 @@ a clearly labelled filter mode entered via `/`.
 ### Normal Mode
 
 The only mode in which no text input is accepted from printable keys (except
-single-key commands). Bindings:
-
-| Key      | Action                               |
-| -------- | ------------------------------------ |
-| j / Down | move selection down                  |
-| k / Up   | move selection up                    |
-| g        | go to top                            |
-| G        | go to bottom                         |
-| Ctrl+d   | half page down                       |
-| Ctrl+u   | half page up                         |
-| PgDn     | page down                            |
-| PgUp     | page up                              |
-| Ctrl+n   | next page (pagination)               |
-| Ctrl+p   | previous page (pagination)           |
-| Space    | open detail pane                     |
-| /        | enter filter mode                    |
-| s        | set state (inline popup)             |
-| p        | set priority (inline popup)          |
-| a        | set assignee (inline popup)          |
-| n        | new issue form                       |
-| o        | open issue in browser                |
-| r        | refresh from cache                   |
-| S        | cycle sort field                     |
-| d        | toggle sort direction                |
-| ?        | help popup                           |
-| q / Esc  | quit (Esc: reset list to first page) |
+single-key commands). Bindings: [[keybinds.md]].
 
 ### Filter Mode
 
@@ -71,19 +46,7 @@ Entered by pressing `/` from Normal mode. The status bar changes to show the
 current query with a block cursor (already implemented via `SearchOverlay` and
 `Mode::Search`).
 
-Bindings while in Filter mode:
-
-| Key        | Action                                 |
-| ---------- | -------------------------------------- |
-| (text)     | append to query; debounced FTS search  |
-| Backspace  | delete char before cursor              |
-| Ctrl+w     | delete word before cursor              |
-| Ctrl+u     | clear query                            |
-| Left/Right | move cursor in query                   |
-| j / Down   | move selection in result list          |
-| k / Up     | move selection in result list          |
-| Enter      | confirm: results become the issue list |
-| Esc        | cancel: return to full list            |
+Bindings while in Filter mode: [[keybinds.md]].
 
 This is already implemented as `Mode::Search`. The rename from "Search" to
 "Filter" is a UX label change only -- the underlying type can stay
@@ -91,39 +54,19 @@ This is already implemented as `Mode::Search`. The rename from "Search" to
 
 ### Detail Mode
 
-A read-only overlay split showing issue body and comments.
-
-| Key      | Action                         |
-| -------- | ------------------------------ |
-| j / Down | scroll down                    |
-| k / Up   | scroll up                      |
-| o        | open in browser                |
-| Esc / q  | close detail, return to Normal |
+A read-only overlay split showing issue body and comments. Bindings:
+[[keybinds.md]].
 
 ### Popup Mode
 
 Inline field picker (state / priority / assignee). Already implemented. No text
-input -- pure navigation.
-
-| Key      | Action                   |
-| -------- | ------------------------ |
-| j / Down | move selection down      |
-| k / Up   | move selection up        |
-| Enter    | confirm selection        |
-| Esc      | cancel, return to Normal |
+input -- pure navigation. Bindings: [[keybinds.md]].
 
 ### Form Mode (New Issue)
 
 Full-screen modal form. Tab / Shift-Tab navigate fields. Each text field uses
-the `TextInput` widget with vim line-editing bindings.
-
-| Key        | Action                    |
-| ---------- | ------------------------- |
-| Tab        | next field                |
-| Shift-Tab  | previous field            |
-| Ctrl+Enter | submit form               |
-| j / k      | move within picker fields |
-| Esc        | cancel, return to Normal  |
+the `TextInput` widget with vim line-editing bindings. Bindings:
+[[keybinds.md]].
 
 ### Help Mode
 

@@ -83,7 +83,7 @@ pub(super) struct FooterState<'a> {
 pub(super) fn render_footer(frame: &mut Frame, area: Rect, state: &FooterState) {
     let mut parts: Vec<&str> = vec![
         "q quit",
-        "/ filter",
+        "/ search",
         "ctrl+/ help",
         "j/k nav",
         "<space> detail",

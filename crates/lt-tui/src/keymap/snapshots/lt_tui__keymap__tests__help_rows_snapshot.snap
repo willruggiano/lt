@@ -1,0 +1,49 @@
+---
+source: crates/lt-tui/src/keymap/mod.rs
+expression: "lines.join(\"\\n\")"
+---
+global   j / down                 -> move down
+global   k / up                   -> move up
+global   g g                      -> go to top
+global   G                        -> go to bottom
+global   ctrl+d                   -> half page down
+global   ctrl+u                   -> half page up
+global   pgdn                     -> page down
+global   pgup                     -> page up
+list     enter / space            -> open detail pane
+list     /                        -> search
+list     ctrl+/ / ctrl+7          -> open keyboard shortcuts
+list     c                        -> create issue
+list     s                        -> set status
+list     p                        -> set priority
+list     a                        -> set assignee
+list     ctrl+r                   -> refresh
+list     d                        -> toggle sort direction
+list     o b                      -> open in browser
+list     ctrl+n                   -> next page
+list     ctrl+p                   -> previous page
+list     L                        -> log in / re-authenticate
+detail   c                        -> comment on issue
+detail   o b                      -> open in browser
+popup    enter                    -> confirm
+new issue ctrl+enter / alt+enter   -> submit
+new issue tab                      -> next field
+new issue shift+tab                -> previous field
+new issue enter                    -> confirm
+new issue m                        -> assign to me
+comment  ctrl+enter / alt+enter   -> submit
+comment  esc                      -> cancel
+search   enter                    -> confirm
+search   ctrl+c                   -> clear query
+search   down                     -> move down
+search   up                       -> move up
+search   ctrl+n                   -> next completion
+search   ctrl+p                   -> previous completion
+search   ctrl+y                   -> accept completion
+search   tab                      -> complete forward
+search   shift+tab                -> complete backward
+help     down / j                 -> move down
+help     up / k                   -> move up
+overlay  esc / q                  -> close, back to the view beneath
+list     esc                      -> refresh (press twice to reset sort/filter/search)
+list     q                        -> quit

@@ -8,6 +8,8 @@
 mod action;
 mod key;
 
+use std::fmt;
+
 pub(crate) use action::Action;
 use crossterm::event::KeyCode;
 pub(crate) use key::Key;
@@ -53,6 +55,15 @@ impl KeyContext {
 pub(crate) enum Binding {
     Single(Key),
     Chord(Key, Key),
+}
+
+impl fmt::Display for Binding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Binding::Single(k) => write!(f, "{k}"),
+            Binding::Chord(a, b) => write!(f, "{a} {b}"),
+        }
+    }
 }
 
 /// The outcome of resolving a key against a context.
@@ -192,6 +203,24 @@ static HELP: &[(Binding, Action)] = &[
     (Binding::Single(Key::char('k')), Action::MoveUp),
 ];
 
+/// Every table, named, in source declaration order: GLOBAL first, then each
+/// context table. Pins the internal tables (including the shared `form_nav`
+/// layer) for `binding_snapshot`; the help overlay reads `HELP_CONTEXTS`
+/// instead, which names real, user-facing contexts.
+#[cfg(test)]
+static TABLES: &[(&str, &[(Binding, Action)])] = &[
+    ("global", GLOBAL),
+    ("list", LIST),
+    ("detail", DETAIL),
+    ("popup", POPUP),
+    ("form_nav", FORM_NAV),
+    ("new_issue_picker", NEW_ISSUE_PICKER),
+    ("new_issue_text", NEW_ISSUE_TEXT),
+    ("comment_input", COMMENT_INPUT),
+    ("search", SEARCH),
+    ("help", HELP),
+];
+
 impl KeyContext {
     fn table(self) -> &'static [(Binding, Action)] {
         match self {
@@ -282,6 +311,118 @@ fn resolve_layers(layers: &[&[(Binding, Action)]], pending: Option<Key>, key: Ke
 /// `App::dispatch_key` took once at entry.
 pub(crate) fn resolve(ctx: KeyContext, pending: Option<Key>, key: Key) -> Resolved {
     resolve_layers(&ctx.layers(), pending, key)
+}
+
+// ---------------------------------------------------------------------------
+// Help overlay (docs/design/keybinds.md, "Help overlay from the keymap")
+// ---------------------------------------------------------------------------
+
+/// One help-panel row: one or more equivalent bindings for the same
+/// (context, action) -- e.g. `j`/`down`, both `MoveDown` in `global` -- grouped
+/// so the panel shows them on one line.
+pub(crate) struct HelpRow {
+    pub(crate) bindings: Vec<Binding>,
+    pub(crate) label: &'static str,
+    pub(crate) context: &'static str,
+}
+
+impl HelpRow {
+    /// The bindings' `Display` forms joined with `" / "`, e.g. `"j / down"`,
+    /// `"ctrl+enter / alt+enter"` -- the rendered and filterable key column.
+    pub(crate) fn binding_form(&self) -> String {
+        self.bindings
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+}
+
+/// The Esc/q floor's dispatch behavior (`docs/design/keybinds.md`, "Contexts
+/// and layering"): not table bindings, so `help_rows` appends them by hand.
+/// `esc`/`q` close an overlay; at the base list, `esc` refreshes (twice within
+/// 500ms resets sort/filter/search, `handle_list_esc`) and `q` quits.
+fn floor_rows() -> Vec<HelpRow> {
+    vec![
+        HelpRow {
+            bindings: vec![
+                Binding::Single(Key::plain(KeyCode::Esc)),
+                Binding::Single(Key::char('q')),
+            ],
+            label: "close, back to the view beneath",
+            context: "overlay",
+        },
+        HelpRow {
+            bindings: vec![Binding::Single(Key::plain(KeyCode::Esc))],
+            label: "refresh (press twice to reset sort/filter/search)",
+            context: "list",
+        },
+        HelpRow {
+            bindings: vec![Binding::Single(Key::char('q'))],
+            label: "quit",
+            context: "list",
+        },
+    ]
+}
+
+/// A `(Binding, Action)` table, aliased so `HELP_CONTEXTS`'s type stays
+/// simple (`clippy::type_complexity`).
+type Table = &'static [(Binding, Action)];
+
+/// The help overlay's real, user-facing contexts -- distinct from `TABLES`,
+/// which names the internal tables (including the shared `form_nav` layer)
+/// for `binding_snapshot`. The two new-issue contexts (`NewIssuePicker`/
+/// `NewIssueText`) collapse into one displayed context, "new issue":
+/// `NewIssueText`'s own table *is* `FORM_NAV`, so `FORM_NAV` plus
+/// `NEW_ISSUE_PICKER`'s own rows is their union, with no duplicates.
+static HELP_CONTEXTS: &[(&str, &[Table])] = &[
+    ("global", &[GLOBAL]),
+    ("list", &[LIST]),
+    ("detail", &[DETAIL]),
+    ("popup", &[POPUP]),
+    ("new issue", &[FORM_NAV, NEW_ISSUE_PICKER]),
+    ("comment", &[COMMENT_INPUT]),
+    ("search", &[SEARCH]),
+    ("help", &[HELP]),
+];
+
+/// Accumulates `help_rows()`'s output, grouping consecutive rows for the
+/// same `(context, action)` into one [`HelpRow`] as they're pushed.
+#[derive(Default)]
+struct HelpRowBuilder {
+    rows: Vec<HelpRow>,
+    last: Option<(&'static str, Action)>,
+}
+
+impl HelpRowBuilder {
+    fn push(&mut self, context: &'static str, binding: Binding, action: Action) {
+        if self.last == Some((context, action)) {
+            if let Some(row) = self.rows.last_mut() {
+                row.bindings.push(binding);
+            }
+            return;
+        }
+        self.rows.push(HelpRow {
+            bindings: vec![binding],
+            label: action.label(),
+            context,
+        });
+        self.last = Some((context, action));
+    }
+}
+
+/// `HELP_CONTEXTS` in declaration order, grouping consecutive rows for the
+/// same `(context, action)` into one [`HelpRow`], plus the floor's static
+/// rows.
+pub(crate) fn help_rows() -> Vec<HelpRow> {
+    let mut builder = HelpRowBuilder::default();
+    for &(context, tables) in HELP_CONTEXTS {
+        for &(binding, action) in tables.iter().flat_map(|table| table.iter()) {
+            builder.push(context, binding, action);
+        }
+    }
+    builder.rows.extend(floor_rows());
+    builder.rows
 }
 
 #[cfg(test)]
@@ -431,29 +572,33 @@ mod tests {
     #[test]
     fn binding_snapshot() {
         let mut lines = Vec::new();
-        for (context, layer) in [
-            ("global", GLOBAL),
-            ("list", LIST),
-            ("detail", DETAIL),
-            ("popup", POPUP),
-            ("form_nav", FORM_NAV),
-            ("new_issue_picker", NEW_ISSUE_PICKER),
-            ("new_issue_text", NEW_ISSUE_TEXT),
-            ("comment_input", COMMENT_INPUT),
-            ("search", SEARCH),
-            ("help", HELP),
-        ] {
-            for (binding, action) in layer {
-                let binding_str = match binding {
-                    Binding::Single(k) => k.to_string(),
-                    Binding::Chord(a, b) => format!("{a} {b}"),
-                };
+        for &(context, table) in TABLES {
+            for (binding, action) in table {
+                let binding_str = binding.to_string();
                 lines.push(format!(
                     "{context:<6} {binding_str:<10} -> {}",
                     action.label()
                 ));
             }
         }
+        insta::assert_snapshot!(lines.join("\n"));
+    }
+
+    /// The second snapshot (Testing strategy, item 4): `help_rows()`'s
+    /// grouped, filterable output -- the exact data the help popup renders.
+    #[test]
+    fn help_rows_snapshot() {
+        let lines: Vec<String> = help_rows()
+            .iter()
+            .map(|row| {
+                format!(
+                    "{:<8} {:<24} -> {}",
+                    row.context,
+                    row.binding_form(),
+                    row.label
+                )
+            })
+            .collect();
         insta::assert_snapshot!(lines.join("\n"));
     }
 }

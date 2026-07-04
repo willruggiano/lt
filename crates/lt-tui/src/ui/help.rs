@@ -6,21 +6,84 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragr
 
 use super::text_span::append_text_input_spans;
 use super::util::{pct, to_u16};
-use crate::{ALL_KEYBINDINGS, HelpPopup};
+use crate::HelpPopup;
 
-pub(super) fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
-    // Size: 60% wide, up to 80% tall, centred.
-    let width = pct(area.width, 60).max(50).min(area.width);
-    let max_rows = to_u16(ALL_KEYBINDINGS.len() + 4); // header + search + border
+/// The popup's frame and column sizing: computed once so every row's
+/// key/context/label columns render untruncated (`docs/design/keybinds.md`
+/// phase 3).
+struct HelpLayout {
+    popup_area: Rect,
+    binding_forms: Vec<String>,
+    key_col_width: usize,
+    context_col_width: usize,
+    gap_str: String,
+}
+
+/// Size the popup wide enough for every row's key/context/label columns --
+/// one leading and one trailing space plus a gap between each column,
+/// capped to `area`. If `area` is too narrow even for that, shrink the
+/// inter-column gap from 2 spaces to 1 rather than truncate a label. Height
+/// is up to 80% of `area`, centred.
+fn help_layout(area: Rect, popup: &HelpPopup) -> HelpLayout {
+    let binding_forms: Vec<String> = popup
+        .rows
+        .iter()
+        .map(crate::keymap::HelpRow::binding_form)
+        .collect();
+    let key_col_width = binding_forms.iter().map(String::len).max().unwrap_or(10);
+    let context_col_width = popup
+        .rows
+        .iter()
+        .map(|row| row.context.len())
+        .max()
+        .unwrap_or(6);
+    let label_col_width = popup
+        .rows
+        .iter()
+        .map(|row| row.label.len())
+        .max()
+        .unwrap_or(10);
+
+    let borders = 2;
+    let inner_max = area.width.saturating_sub(borders);
+    let row_width = |gap: u16| {
+        1 + to_u16(key_col_width)
+            + gap
+            + to_u16(context_col_width)
+            + gap
+            + to_u16(label_col_width)
+            + 1
+    };
+    let (inner_width, gap): (u16, u16) = if row_width(2) <= inner_max {
+        (row_width(2), 2)
+    } else {
+        (row_width(1).min(inner_max), 1)
+    };
+    let gap_str = " ".repeat(usize::from(gap));
+    let width = (inner_width + borders).max(50).min(area.width);
+
+    let max_rows = to_u16(popup.rows.len() + 4); // header + search + border
     let height = max_rows.min(pct(area.height, 80)).max(6);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
-    let popup_area = Rect::new(x, y, width, height);
+
+    HelpLayout {
+        popup_area: Rect::new(x, y, width, height),
+        binding_forms,
+        key_col_width,
+        context_col_width,
+        gap_str,
+    }
+}
+
+pub(super) fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
+    let layout = help_layout(area, popup);
+    let popup_area = layout.popup_area;
 
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
-        .title(" Help  (type to search, Esc/q to close) ")
+        .title(" Help  (type to search, Esc to close) ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
     let inner = block.inner(popup_area);
@@ -34,7 +97,7 @@ pub(super) fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup
     append_text_input_spans(&mut search_line, &popup.search, &[]);
     frame.render_widget(Paragraph::new(search_line), chunks[0]);
 
-    // Keybinding list.
+    // Keybinding list: keys / context / label columns.
     let list_height = chunks[1].height as usize;
     let total = popup.filtered.len();
 
@@ -45,12 +108,6 @@ pub(super) fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup
         0
     };
 
-    let key_col_width = ALL_KEYBINDINGS
-        .iter()
-        .map(|e| e.key.len())
-        .max()
-        .unwrap_or(10);
-
     let items: Vec<ListItem> = popup
         .filtered
         .iter()
@@ -58,13 +115,16 @@ pub(super) fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup
         .take(list_height)
         .enumerate()
         .map(|(vis_idx, &real_idx)| {
-            let entry = &ALL_KEYBINDINGS[real_idx];
+            let row = &popup.rows[real_idx];
             let abs_idx = vis_idx + scroll_offset;
             let line = format!(
-                " {:<kw$}  {} ",
-                entry.key,
-                entry.description,
-                kw = key_col_width
+                " {binding:<kw$}{gap_str}{context:<cw$}{gap_str}{label} ",
+                binding = layout.binding_forms[real_idx],
+                context = row.context,
+                label = row.label,
+                kw = layout.key_col_width,
+                cw = layout.context_col_width,
+                gap_str = layout.gap_str,
             );
             let style = if abs_idx == popup.selected {
                 Style::new().add_modifier(Modifier::REVERSED)
