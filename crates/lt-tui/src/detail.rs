@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
 use lt_types::types::Issue;
 
-use super::{App, FetchStatus, Keymap, Scroll, StateCtx, StateEvent, Unbound, View, keymap};
+use super::{App, Keymap, Scroll, StateCtx, StateEvent, Unbound, View, keymap};
 
 /// The detail pane's complete state, owned here rather than on `App`.
 pub struct DetailView {
@@ -119,9 +119,6 @@ impl App {
         populate_relations(&self.db, &mut detail, &issue);
 
         self.push_view(View::Detail(Box::new(detail)));
-        if let View::List(list) = self.base_mut() {
-            list.status = FetchStatus::Idle;
-        }
     }
 }
 

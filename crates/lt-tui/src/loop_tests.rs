@@ -848,9 +848,8 @@ fn consume_sync_event_done_falls_back_to_the_clock_without_meta() {
 }
 
 #[test]
-fn consume_sync_event_error_sets_failed_and_repairs_a_loading_base() {
+fn consume_sync_event_error_sets_failed() {
     let mut app = app_with_db(&[]).unwrap();
-    app.list_mut().status = FetchStatus::Loading;
 
     app.consume_sync_event(SyncEvent::Error("boom".to_string()));
 
@@ -860,19 +859,16 @@ fn consume_sync_event_error_sets_failed_and_repairs_a_loading_base() {
             unreachable!("expected Failed")
         }
     }
-    assert!(matches!(app.list_mut().status, FetchStatus::Idle));
 }
 
 #[test]
 fn consume_sync_event_not_authenticated_sets_auth_and_goes_idle() {
     let mut app = app_with_db(&[]).unwrap();
-    app.list_mut().status = FetchStatus::Loading;
 
     app.consume_sync_event(SyncEvent::NotAuthenticated);
 
     assert!(matches!(app.auth, AuthStatus::Unauthenticated));
     assert!(matches!(app.sync, SyncStatus::Idle));
-    assert!(matches!(app.list_mut().status, FetchStatus::Idle));
 }
 
 #[test]

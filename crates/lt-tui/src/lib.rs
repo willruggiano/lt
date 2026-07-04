@@ -210,7 +210,6 @@ fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
 /// The base list's fetch status.
 pub enum FetchStatus {
     Idle,
-    Loading,
     Error(String),
 }
 
@@ -281,7 +280,6 @@ impl ListView {
     }
 
     fn do_fetch(&mut self, ctx: &StateCtx, reset_selection: bool) {
-        self.status = FetchStatus::Loading;
         let mut parsed = search_query::ParsedQuery::from(&self.filter);
         search_query::resolve_me(&mut parsed, ctx.viewer_name);
 
@@ -1032,17 +1030,6 @@ impl App {
         }
     }
 
-    /// The base list's Loading->Idle repair: a sync outcome that will not
-    /// itself route an `Issues` invalidation (`Error`/`NotAuthenticated`)
-    /// must not leave the list's own status stuck at `Loading` forever.
-    fn repair_loading_list(&mut self) {
-        if let View::List(list) = self.base_mut()
-            && matches!(list.status, FetchStatus::Loading)
-        {
-            list.status = FetchStatus::Idle;
-        }
-    }
-
     /// `synced_at` for a `Done` transition: the DB's `last_synced_at` meta,
     /// falling back to the clock when the read fails or is unparseable.
     fn synced_at_now(&self) -> chrono::DateTime<chrono::Utc> {
@@ -1082,12 +1069,10 @@ impl App {
             }
             SyncEvent::Error(message) => {
                 self.sync = SyncStatus::Failed { message };
-                self.repair_loading_list();
             }
             SyncEvent::NotAuthenticated => {
                 self.auth = AuthStatus::Unauthenticated;
                 self.sync = SyncStatus::Idle;
-                self.repair_loading_list();
             }
         }
     }
@@ -1139,32 +1124,18 @@ pub fn run(
             (Vec::new(), false, None)
         });
 
-    let have_cache = !cached_issues.is_empty();
-
-    // Determine whether to show "Syncing..." overlay (nothing synced yet).
-    let (issues, has_next_page, end_cursor, initial_status) = if have_cache {
-        (
-            cached_issues,
-            initial_has_next_page,
-            initial_end_cursor,
-            FetchStatus::Idle,
-        )
-    } else {
-        (Vec::new(), false, None, FetchStatus::Loading)
-    };
-
     // Fetch viewer identity before `service` moves into `App::new` (a
     // shared read through the `Arc`, so ownership either order is fine).
     let viewer = service.fetch_viewer();
 
     let filter = search_query::args_to_ast(&args);
     let list = ListView::new(
-        issues,
+        cached_issues,
         Pagination {
-            has_next_page,
+            has_next_page: initial_has_next_page,
             current_cursor: None,
             cursor_stack: Vec::new(),
-            end_cursor,
+            end_cursor: initial_end_cursor,
         },
         args,
         filter,
@@ -1193,9 +1164,6 @@ pub fn run(
         tracing::warn!(error = %e, "failed to push keyboard enhancement flags");
     }
     app.session.keyboard_enhanced = keyboard_enhanced;
-    if let View::List(list) = app.base_mut() {
-        list.status = initial_status;
-    }
     spawn_input_thread(events_tx);
     let mut pump = EventPump::Channel;
     let result = run_app(&mut terminal, &mut pump, &mut app);
