@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 const CALLBACK_PORT: u16 = 7342;
 const AUTH_URL: &str = "https://linear.app/oauth/authorize";
-const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
+pub(super) const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 
 /// Non-interactive login: identical to `run()` but errors instead of prompting
 /// when OAuth credentials are missing. Safe to call from a background thread
@@ -119,7 +119,7 @@ impl Browser for RealBrowser {
 /// Look up credentials from env vars (precedence) then the stored config file.
 /// Returns `Ok(None)` when neither source has credentials; propagates errors
 /// from loading the config file.
-fn lookup_stored_credentials() -> Result<Option<(String, String)>> {
+pub(super) fn lookup_stored_credentials() -> Result<Option<(String, String)>> {
     // 1. Environment variables take precedence.
     if let (Ok(id), Ok(secret)) = (
         std::env::var("LINEAR_CLIENT_ID"),
@@ -382,7 +382,7 @@ fn build_token_params<'a>(exchange: &TokenExchange<'a>) -> [(&'a str, &'a str); 
 }
 
 /// Validate the HTTP status and deserialize the token body. Pure.
-fn parse_token_response(status: u16, body: &str) -> Result<AuthToken> {
+pub(super) fn parse_token_response(status: u16, body: &str) -> Result<AuthToken> {
     if !(200..300).contains(&status) {
         return Err(anyhow!("token exchange failed (HTTP {status}): {body}"));
     }
@@ -390,12 +390,12 @@ fn parse_token_response(status: u16, body: &str) -> Result<AuthToken> {
 }
 
 /// POSTs the token-exchange form and returns the HTTP status and raw body.
-trait TokenExchanger {
+pub(super) trait TokenExchanger {
     fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<(u16, String)>;
 }
 
 /// Production exchanger: send the form via ureq.
-struct UreqTokenExchanger;
+pub(super) struct UreqTokenExchanger;
 
 impl TokenExchanger for UreqTokenExchanger {
     fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<(u16, String)> {
