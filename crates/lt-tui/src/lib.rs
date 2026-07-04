@@ -207,18 +207,11 @@ fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
     })
 }
 
-/// The base list's fetch status.
-pub enum FetchStatus {
-    Idle,
-    Error(String),
-}
-
 /// The issue-list view: the base-list fields, owned.
 pub struct ListView {
     pub issues: Vec<Issue>,
     pub table_state: TableState,
     pub pagination: Pagination,
-    pub status: FetchStatus,
     /// An identifier to seek on the next `Issues` re-read; one-shot,
     /// cleared whether or not that re-read finds a match.
     pub pending_select: Option<String>,
@@ -244,7 +237,6 @@ impl ListView {
             issues,
             table_state,
             pagination,
-            status: FetchStatus::Idle,
             pending_select: None,
             args,
             filter,
@@ -299,7 +291,7 @@ impl ListView {
                     self.apply_fetched_selection(reset_selection);
                 }
                 Err(e) => {
-                    self.status = FetchStatus::Error(e.to_string());
+                    tracing::warn!(error = %e, "issue list fetch failed");
                 }
             }
         } else {
@@ -327,7 +319,7 @@ impl ListView {
                     self.apply_fetched_selection(reset_selection);
                 }
                 Err(e) => {
-                    self.status = FetchStatus::Error(e.to_string());
+                    tracing::warn!(error = %e, "issue list fetch failed");
                 }
             }
         }
@@ -381,7 +373,6 @@ impl ListView {
         };
         self.table_state
             .select(if n > 0 { Some(sel) } else { None });
-        self.status = FetchStatus::Idle;
     }
 
     /// Seek to `pending_select`'s identifier and clear it; a miss also
@@ -1107,22 +1098,21 @@ pub fn run(
 ) -> Result<()> {
     // Try to load issues already synced locally first (local-first UX). Use
     // query_issues_page so we can capture the correct has_next_page flag.
-    let (cached_issues, initial_has_next_page, initial_end_cursor) =
-        (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
-            let conn = lt_runtime::db::open_db(lt_runtime::db::db_path()?)?;
-            let limit = i64::from(args.limit.min(250));
-            let (issues, has_next) = lt_runtime::db::query_issues_page(&conn, &args, 0)?;
-            let end_cursor = if has_next {
-                Some(limit.to_string())
-            } else {
-                None
-            };
-            Ok((issues, has_next, end_cursor))
-        })()
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "startup: failed to load cached issues");
-            (Vec::new(), false, None)
-        });
+    let (issues, has_next_page, end_cursor) = (|| -> Result<(Vec<Issue>, bool, Option<String>)> {
+        let conn = lt_runtime::db::open_db(lt_runtime::db::db_path()?)?;
+        let limit = i64::from(args.limit.min(250));
+        let (issues, has_next) = lt_runtime::db::query_issues_page(&conn, &args, 0)?;
+        let end_cursor = if has_next {
+            Some(limit.to_string())
+        } else {
+            None
+        };
+        Ok((issues, has_next, end_cursor))
+    })()
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "startup: failed to load cached issues");
+        (Vec::new(), false, None)
+    });
 
     // Fetch viewer identity before `service` moves into `App::new` (a
     // shared read through the `Arc`, so ownership either order is fine).
@@ -1130,12 +1120,12 @@ pub fn run(
 
     let filter = search_query::args_to_ast(&args);
     let list = ListView::new(
-        cached_issues,
+        issues,
         Pagination {
-            has_next_page: initial_has_next_page,
+            has_next_page,
             current_cursor: None,
             cursor_stack: Vec::new(),
-            end_cursor: initial_end_cursor,
+            end_cursor,
         },
         args,
         filter,
