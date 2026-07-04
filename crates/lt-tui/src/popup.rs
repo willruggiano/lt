@@ -7,9 +7,7 @@ use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{
-    ALL_KEYBINDINGS, App, Scroll, ScrollMotion, StateCtx, StateEvent, TextInput, View, keymap,
-};
+use super::{App, Scroll, ScrollMotion, StateCtx, StateEvent, TextInput, View, keymap};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -109,7 +107,11 @@ pub(crate) fn priority_popup_items() -> Vec<PopupItem> {
 pub struct HelpPopup {
     /// Current search query typed by the user.
     pub search: TextInput,
-    /// Indices into `ALL_KEYBINDINGS` that match the current search.
+    /// The keymap's help rows (`keymap::help_rows()`), built once at
+    /// construction so help can no longer drift from the tables it reads.
+    /// Not `pub`: `keymap::HelpRow` is crate-private.
+    pub(crate) rows: Vec<keymap::HelpRow>,
+    /// Indices into `rows` that match the current search.
     pub filtered: Vec<usize>,
     /// Currently highlighted row in the filtered list.
     pub selected: usize,
@@ -117,23 +119,29 @@ pub struct HelpPopup {
 
 impl HelpPopup {
     pub fn new() -> Self {
-        let filtered = (0..ALL_KEYBINDINGS.len()).collect();
+        let rows = keymap::help_rows();
+        let filtered = (0..rows.len()).collect();
         Self {
             search: TextInput::new(),
+            rows,
             filtered,
             selected: 0,
         }
     }
 
+    /// Matches the query against the rendered binding form (`HelpRow::binding_form`,
+    /// e.g. "j / down"), the label, and the context -- case-insensitive, like today.
     pub fn update_filter(&mut self) {
         let q = self.search.value.to_lowercase();
-        self.filtered = ALL_KEYBINDINGS
+        self.filtered = self
+            .rows
             .iter()
             .enumerate()
-            .filter(|(_, e)| {
+            .filter(|(_, row)| {
                 q.is_empty()
-                    || e.key.to_lowercase().contains(&q)
-                    || e.description.to_lowercase().contains(&q)
+                    || row.binding_form().to_lowercase().contains(&q)
+                    || row.label.to_lowercase().contains(&q)
+                    || row.context.to_lowercase().contains(&q)
             })
             .map(|(i, _)| i)
             .collect();

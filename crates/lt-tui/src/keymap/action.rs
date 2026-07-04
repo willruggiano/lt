@@ -50,9 +50,8 @@ pub(crate) enum Action {
 
 impl Action {
     /// Display name for the help overlay (and a future command palette).
-    /// Unused outside tests until phase 3 wires `help_rows()` -- `#[cfg(test)]`
-    /// so the plain (non-test) build doesn't flag it dead in the meantime.
-    #[cfg(test)]
+    /// Production consumer: `help_rows()` (`docs/design/keybinds.md`, "Help
+    /// overlay from the keymap").
     pub(crate) fn label(self) -> &'static str {
         match self {
             Action::MoveUp => "move up",
