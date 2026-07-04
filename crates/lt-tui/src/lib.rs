@@ -196,6 +196,24 @@ impl ScrollMotion {
         }
     }
 
+    /// Selection movement over a plain `usize` field; no-ops on an empty
+    /// collection.
+    fn apply_selection(self, selected: &mut usize, len: usize, viewport_height: u16) {
+        if len == 0 {
+            return;
+        }
+        *selected = self.apply_index(*selected, len, viewport_height);
+    }
+
+    /// Selection movement over a `TableState`; no-ops on an empty collection.
+    fn apply_table(self, table: &mut TableState, len: usize, viewport_height: u16) {
+        if len == 0 {
+            return;
+        }
+        let cur = table.selected().unwrap_or(0);
+        table.select(Some(self.apply_index(cur, len, viewport_height)));
+    }
+
     /// Offset scrolling; `Bottom` saturates to `u16::MAX` -- ratatui clamps
     /// scroll to content length.
     fn apply_offset(self, offset: u16, viewport_height: u16) -> u16 {
@@ -416,15 +434,7 @@ impl ListView {
 
     /// Selection movement over the shared motion set.
     fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
-        if self.issues.is_empty() {
-            return;
-        }
-        let cur = self.table_state.selected().unwrap_or(0);
-        self.table_state.select(Some(motion.apply_index(
-            cur,
-            self.issues.len(),
-            viewport_height,
-        )));
+        motion.apply_table(&mut self.table_state, self.issues.len(), viewport_height);
     }
 
     /// Only refetch while focused: a refresh must not swap the rows a popup
@@ -851,22 +861,6 @@ impl App {
         self.with_base_list(|list, ctx| {
             list.query.toggle_desc();
             list.refetch(ctx, true);
-        });
-    }
-
-    fn next_page(&mut self) {
-        self.with_base_list(|list, ctx| {
-            if list.query.next_page() {
-                list.refetch(ctx, true);
-            }
-        });
-    }
-
-    fn prev_page(&mut self) {
-        self.with_base_list(|list, ctx| {
-            if list.query.prev_page() {
-                list.refetch(ctx, true);
-            }
         });
     }
 
@@ -1341,8 +1335,16 @@ fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
         Action::SetAssignee => app.open_assignee_popup(),
         Action::Refresh => app.refresh(),
         Action::ToggleSortDirection => app.toggle_desc(),
-        Action::NextPage => app.next_page(),
-        Action::PrevPage => app.prev_page(),
+        Action::NextPage => app.with_base_list(|list, ctx| {
+            if list.query.next_page() {
+                list.refetch(ctx, true);
+            }
+        }),
+        Action::PrevPage => app.with_base_list(|list, ctx| {
+            if list.query.prev_page() {
+                list.refetch(ctx, true);
+            }
+        }),
         // Re-authenticate: background OAuth login.
         Action::Login if !matches!(app.auth, AuthStatus::Authenticating) => {
             app.auth = AuthStatus::Authenticating;

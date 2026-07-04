@@ -158,10 +158,7 @@ impl HelpPopup {
 impl HelpPopup {
     /// Selection movement over the shared motion set.
     pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
-        if self.filtered.is_empty() {
-            return;
-        }
-        self.selected = motion.apply_index(self.selected, self.filtered.len(), viewport_height);
+        motion.apply_selection(&mut self.selected, self.filtered.len(), viewport_height);
     }
 }
 
@@ -271,15 +268,7 @@ impl SearchOverlay {
 impl SearchOverlay {
     /// Selection movement over the shared motion set.
     pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
-        if self.results.is_empty() {
-            return;
-        }
-        let cur = self.table_state.selected().unwrap_or(0);
-        self.table_state.select(Some(motion.apply_index(
-            cur,
-            self.results.len(),
-            viewport_height,
-        )));
+        motion.apply_table(&mut self.table_state, self.results.len(), viewport_height);
     }
 }
 
@@ -428,10 +417,7 @@ impl PopupView {
 
     /// Selection movement over the shared motion set.
     pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
-        if self.items.is_empty() {
-            return;
-        }
-        self.selected = motion.apply_index(self.selected, self.items.len(), viewport_height);
+        motion.apply_selection(&mut self.selected, self.items.len(), viewport_height);
     }
 }
 

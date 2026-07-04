@@ -540,9 +540,7 @@ impl NewIssueModal {
     pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
         let field = self.focused_field.clone();
         let (len, selected) = new_issue_picker_state(self, &field);
-        if len > 0 {
-            *selected = motion.apply_index(*selected, len, viewport_height);
-        }
+        motion.apply_selection(selected, len, viewport_height);
     }
 }
 
