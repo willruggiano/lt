@@ -1,6 +1,6 @@
 ---
 source: crates/lt-tui/src/keymap/mod.rs
-assertion_line: 457
+assertion_line: 406
 expression: "lines.join(\"\\n\")"
 ---
 global j          -> move down
@@ -31,19 +31,15 @@ list   L          -> log in / re-authenticate
 detail c          -> comment on issue
 detail o b        -> open in browser
 popup  enter      -> confirm
-form_nav ctrl+enter -> submit
-form_nav alt+enter  -> submit
-form_nav tab        -> next field
-form_nav shift+tab  -> previous field
-new_issue_picker enter      -> confirm
-new_issue_picker m          -> assign to me
-new_issue_text ctrl+enter -> submit
-new_issue_text alt+enter  -> submit
-new_issue_text tab        -> next field
-new_issue_text shift+tab  -> previous field
-comment_input ctrl+enter -> submit
-comment_input alt+enter  -> submit
-comment_input esc        -> cancel
+new issue ctrl+enter -> submit
+new issue alt+enter  -> submit
+new issue tab        -> next field
+new issue shift+tab  -> previous field
+new issue enter      -> confirm
+new issue m          -> assign to me
+comment ctrl+enter -> submit
+comment alt+enter  -> submit
+comment esc        -> cancel
 search enter      -> confirm
 search ctrl+c     -> clear query
 search down       -> move down

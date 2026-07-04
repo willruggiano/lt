@@ -283,8 +283,8 @@ mod tests {
     }
 
     /// Rule (Types, "esc is esc"): a modifier-carrying esc collapses to
-    /// plain esc, matching the plain-esc `COMMENT_INPUT` row and the
-    /// code-only esc checks in `dispatch_key`/`unbound_flow`.
+    /// plain esc, matching the plain-esc `COMMENT_INPUT_BINDINGS` row and the
+    /// code-only esc checks in `dispatch_key`/`handle_view_key`.
     #[test]
     fn esc_clears_every_modifier() {
         for mods in [

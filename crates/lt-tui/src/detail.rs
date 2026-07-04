@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
 use lt_types::types::Issue;
 
-use super::{App, FetchStatus, Scroll, StateCtx, StateEvent, View, keymap};
+use super::{App, FetchStatus, Keymap, Scroll, StateCtx, StateEvent, Unbound, View, keymap};
 
 /// The detail pane's complete state: the shared `types`/`comments` fragments
 /// the TUI composes for display, plus the panel's scroll offset and comment
@@ -61,6 +61,17 @@ impl DetailView {
         } else {
             self.scroll.saturating_sub(step)
         };
+    }
+
+    /// This pane's declared keymap: the open comment input narrows to its
+    /// own keymap (`esc` cancels the draft rather than popping the pane);
+    /// otherwise the pane's own keymap.
+    pub(crate) fn keymap(&self) -> &'static Keymap {
+        if self.comment_input.is_some() {
+            &COMMENT_INPUT_KEYMAP
+        } else {
+            &DETAIL_KEYMAP
+        }
     }
 }
 
@@ -171,9 +182,49 @@ pub(crate) fn populate_relations(db: &Database, detail: &mut DetailView, issue: 
 
 // -- Detail pane keybindings (docs/design/keybinds.md, "Detail") ------------
 
-/// The `Detail` context's non-navigation actions. Navigation actions never
-/// reach here: `resolve_and_apply` maps them to `ScrollMotion` and applies
-/// them through `View::scroll` instead.
+pub(crate) static DETAIL_BINDINGS: keymap::Table = &[
+    (
+        keymap::Binding::Single(keymap::Key::char('c')),
+        keymap::Action::Comment,
+    ),
+    (
+        keymap::Binding::Chord(keymap::Key::char('o'), keymap::Key::char('b')),
+        keymap::Action::OpenInBrowser,
+    ),
+];
+
+pub(crate) static DETAIL_KEYMAP: Keymap = Keymap {
+    layers: &[DETAIL_BINDINGS, keymap::GLOBAL],
+    apply: Some(apply_detail),
+    unbound: Unbound::Cascade,
+};
+
+/// The detail pane's comment box: the one keymap that binds `esc` -- narrower
+/// than the floor's pop (cancels the draft, keeps the pane open).
+pub(crate) static COMMENT_INPUT_BINDINGS: keymap::Table = &[
+    (
+        keymap::Binding::Single(keymap::Key::ctrl_code(KeyCode::Enter)),
+        keymap::Action::Submit,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::alt(KeyCode::Enter)),
+        keymap::Action::Submit,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Esc)),
+        keymap::Action::Back,
+    ),
+];
+
+pub(crate) static COMMENT_INPUT_KEYMAP: Keymap = Keymap {
+    layers: &[COMMENT_INPUT_BINDINGS],
+    apply: Some(apply_comment_input),
+    unbound: Unbound::Forward(forward_comment_input),
+};
+
+/// The detail pane's non-navigation actions. Navigation actions never reach
+/// here: `handle_view_key` maps them to `ScrollMotion` and applies them
+/// through `View::scroll` instead.
 pub(crate) fn apply_detail(app: &mut App, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Comment => {
@@ -187,15 +238,16 @@ pub(crate) fn apply_detail(app: &mut App, i: usize, action: keymap::Action) {
                 super::open_in_browser(&d.issue.identifier);
             }
         }
-        // Navigation and other contexts' actions never resolve to `Detail`'s
-        // table; the match stays exhaustive over `Action` regardless.
+        // Navigation and other keymaps' actions never resolve to
+        // `DETAIL_BINDINGS`; the match stays exhaustive over `Action`
+        // regardless.
         _ => {}
     }
 }
 
-/// The `CommentInput` context's actions: `Submit`/`Back` -- `Back` is the
-/// keymap's one `esc` row, cancelling the draft without popping the `Detail`
-/// view beneath it (narrower than the floor's pop).
+/// The comment box's actions: `Submit`/`Back` -- `Back` is `COMMENT_INPUT_BINDINGS`'s
+/// one `esc` row, cancelling the draft without popping the detail pane
+/// beneath it (narrower than the floor's pop).
 pub(crate) fn apply_comment_input(app: &mut App, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Submit => submit_comment(app, i),
@@ -204,8 +256,8 @@ pub(crate) fn apply_comment_input(app: &mut App, i: usize, action: keymap::Actio
                 d.comment_input = None;
             }
         }
-        // Navigation and other contexts' actions never resolve to
-        // `CommentInput`'s table; the match stays exhaustive over `Action`
+        // Navigation and other keymaps' actions never resolve to
+        // `COMMENT_INPUT_BINDINGS`; the match stays exhaustive over `Action`
         // regardless.
         _ => {}
     }
