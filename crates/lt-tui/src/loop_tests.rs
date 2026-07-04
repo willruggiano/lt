@@ -11,6 +11,7 @@
 
 use std::sync::atomic::Ordering;
 
+use crossterm::event::KeyModifiers;
 use lt_runtime::db::Database;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -195,17 +196,15 @@ fn prev_page_at_start_is_noop() {
 }
 
 #[test]
-fn cycle_sort_and_toggle_desc_refetch() {
+fn toggle_desc_refetches() {
+    // Cycle-sort is removed outright (docs/design/keybinds.md, "List"): `S`
+    // is reserved for a future Linear subscribe binding, and sort is still
+    // reachable via `/` `sort:` stems. `d` (toggle_desc) stays covered here.
     let rows = [
         db_issue("1", "ENG-1", "Todo", 5),
         db_issue("2", "ENG-2", "Todo", 4),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    let before = app.list_mut().args.sort.clone();
-    app.cycle_sort();
-    assert_ne!(app.list_mut().args.sort, before);
-    assert_eq!(app.list_mut().issues.len(), 2);
-
     let desc_before = app.list_mut().args.desc;
     app.toggle_desc();
     assert_ne!(app.list_mut().args.desc, desc_before);
@@ -385,11 +384,7 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
         anchor: None,
     }));
 
-    handle_popup_key(
-        &mut app,
-        1,
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-    );
+    app.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     // The write goes through the service, which emits `State(Issues)` onto
     // the queue rather than routing it directly; drain it, as `run_app`
     // would in the same frame.
@@ -410,7 +405,7 @@ fn submit_comment_writes_through_the_db_and_refreshes_the_open_detail() {
     detail.comment_input = Some("a new comment".to_string());
     app.views.push(View::Detail(Box::new(detail)));
 
-    detail::handle_key(
+    detail::handle_comment_input(
         &mut app,
         1,
         KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
@@ -473,6 +468,78 @@ fn first_esc_records_timestamp() {
     app.last_esc_time = None;
     app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.last_esc_time.is_some());
+}
+
+// -- keymap: chords, navigation actions, esc-cancels-pending
+// (docs/design/keybinds.md) -------------------------------------------------
+
+#[test]
+fn chord_g_g_selects_top() {
+    let rows = [
+        db_issue("1", "ENG-1", "Todo", 5),
+        db_issue("2", "ENG-2", "Todo", 4),
+        db_issue("3", "ENG-3", "Todo", 3),
+    ];
+    let mut app = app_with_db(&rows).unwrap();
+    fetch_base_list(&mut app, true);
+    app.list_mut().table_state.select(Some(2));
+
+    app.dispatch_key(key('g'));
+    assert_eq!(app.list_mut().table_state.selected(), Some(2)); // still pending
+
+    app.dispatch_key(key('g'));
+    assert_eq!(app.list_mut().table_state.selected(), Some(0));
+}
+
+#[test]
+fn chord_miss_g_j_moves_down() {
+    let rows = [
+        db_issue("1", "ENG-1", "Todo", 5),
+        db_issue("2", "ENG-2", "Todo", 4),
+    ];
+    let mut app = app_with_db(&rows).unwrap();
+    fetch_base_list(&mut app, true);
+
+    app.dispatch_key(key('g'));
+    app.dispatch_key(key('j'));
+
+    assert_eq!(app.list_mut().table_state.selected(), Some(1));
+}
+
+#[test]
+fn enter_and_space_both_open_detail() {
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    fetch_base_list(&mut app, true);
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.views.last(), Some(View::Detail(_))));
+    app.pop_view();
+
+    app.dispatch_key(key(' '));
+    assert!(matches!(app.views.last(), Some(View::Detail(_))));
+}
+
+#[test]
+fn c_opens_the_create_modal() {
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+
+    app.dispatch_key(key('c'));
+
+    assert!(matches!(app.views.last(), Some(View::NewIssue(_))));
+}
+
+#[test]
+fn esc_cancels_a_pending_chord_without_touching_last_esc_time() {
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    app.last_esc_time = None;
+
+    app.dispatch_key(key('g'));
+    assert!(app.pending_key.is_some());
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(app.pending_key.is_none());
+    assert!(app.last_esc_time.is_none());
 }
 
 // -- dispatch floor: Esc/q pop overlays, reset/quit at the base (Decision 6,
@@ -557,15 +624,15 @@ fn floor_q_at_base_quits() {
 
 #[test]
 fn cascade_unbound_key_in_an_overlay_reaches_the_base() {
-    // 'S' (cycle sort) is unbound in the popup's own handler; it should fall
-    // through the cascade to the list's binding underneath.
+    // 'd' (toggle sort direction) is unbound in the popup's own context; it
+    // should fall through the cascade to the list's binding underneath.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let before = app.list_mut().args.sort.clone();
+    let before = app.list_mut().args.desc;
     push_priority_popup(&mut app, priority_popup_items());
 
-    app.dispatch_key(key('S'));
+    app.dispatch_key(key('d'));
 
-    assert_ne!(app.list_mut().args.sort, before);
+    assert_ne!(app.list_mut().args.desc, before);
 }
 
 #[test]
@@ -627,7 +694,7 @@ fn printable_key_in_a_text_context_never_cascades() {
 
 #[test]
 fn popup_scroll_supports_the_shared_motion_set() {
-    // Behavior change 14: g/G/Ctrl-d/Ctrl-u/PageUp/PageDown, previously
+    // Behavior change 14: g g/G/Ctrl-d/Ctrl-u/PageUp/PageDown, previously
     // ignored by the state/priority/assignee popups.
     let items: Vec<PopupItem> = (0..10)
         .map(|i| PopupItem {
@@ -645,6 +712,8 @@ fn popup_scroll_supports_the_shared_motion_set() {
     };
     assert_eq!(popup.selected, 9); // bottom
 
+    // `g` is now a chord prefix: two presses to reach MoveTop.
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
     app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
     let Some(View::Popup(popup)) = app.views.last() else {
         unreachable!("popup view expected")
@@ -816,16 +885,17 @@ fn l_key_gates_on_authenticating() {
 
 #[test]
 fn refresh_requests_sync_on_every_press() {
-    // Item 13: `r` no longer gates on `Syncing` -- a press mid-cycle
-    // coalesces into a follow-up sync instead of being ignored.
+    // Item 13: `ctrl+r` no longer gates on `Syncing` -- a press mid-cycle
+    // coalesces into a follow-up sync instead of being ignored. Refresh
+    // moved from bare `r` to `ctrl+r` (docs/design/keybinds.md, "List").
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     let db = app.db.share().unwrap();
     let service = app.install_recording_service(&db).unwrap();
 
-    app.dispatch_key(key('r'));
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     assert_eq!(service.request_sync_calls.load(Ordering::SeqCst), 1);
 
-    app.dispatch_key(key('r'));
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     assert_eq!(service.request_sync_calls.load(Ordering::SeqCst), 2);
 }
 

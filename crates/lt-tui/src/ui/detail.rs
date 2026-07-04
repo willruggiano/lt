@@ -152,7 +152,7 @@ fn build_detail_lines(d: &DetailView) -> Vec<Line<'static>> {
 
 pub(super) fn render_detail_footer(frame: &mut Frame, area: Rect) {
     frame.render_widget(
-        Paragraph::new("j/k scroll  c comment  o open in browser  Esc/q close"),
+        Paragraph::new("j/k scroll  c comment  o b open in browser  Esc/q close"),
         area,
     );
 }
