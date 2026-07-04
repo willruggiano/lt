@@ -2,14 +2,15 @@
 ///
 /// Linear's OAuth2 token endpoint issues a refresh token alongside the access
 /// token, and rotates it on every refresh (with a 30-minute grace period
-/// during which the previous refresh token is still honored). This module
-/// provides `load_or_refresh_token`, which:
+/// during which the previous refresh token is still honored). Every stored
+/// token carries a refresh token, so refreshing never depends on one being
+/// merely present. This module provides `load_or_refresh_token`, which:
 ///
-///   - silently exchanges a stored refresh token for a new access token via
-///     the `refresh_token` grant when the stored token has expired and a
-///     refresh token is available -- no browser involved; or
+///   - silently exchanges the stored refresh token for a new access token via
+///     the `refresh_token` grant when the stored token has expired and client
+///     credentials are available -- no browser involved; or
 ///   - falls back to the full authorization-code + PKCE flow (which opens a
-///     browser) when there is no token at all, no refresh token, or the
+///     browser) when there is no token at all, no client credentials, or the
 ///     refresh grant itself fails.
 use anyhow::{Result, anyhow};
 use lt_config::AuthToken;
@@ -44,20 +45,15 @@ pub fn load_or_refresh_token() -> Result<AuthToken> {
             Err(anyhow!("not logged in -- run `lt auth login` first"))
         }
         Some(t) if t.is_expired() => {
-            if let (Some(refresh_token), Some((client_id, client_secret))) =
-                (t.refresh_token.clone(), lookup_stored_credentials()?)
-            {
+            if let Some((client_id, client_secret)) = lookup_stored_credentials()? {
                 info!("auth: access token has expired -- refreshing silently");
                 match refresh_with(
                     &TokenExchanger::Ureq,
-                    &refresh_token,
+                    &t.refresh_token,
                     &client_id,
                     &client_secret,
                 ) {
-                    Ok(mut refreshed) => {
-                        if refreshed.refresh_token.is_none() {
-                            refreshed.refresh_token = Some(refresh_token);
-                        }
+                    Ok(refreshed) => {
                         lt_config::save_token(&refreshed)?;
                         return Ok(refreshed);
                     }
@@ -65,9 +61,7 @@ pub fn load_or_refresh_token() -> Result<AuthToken> {
                         warn!(error = %e, "auth: silent token refresh failed -- falling back to browser login");
                     }
                 }
-            }
 
-            if credentials_available()? {
                 info!("auth: starting automatic re-authentication");
                 super::login::run()?;
                 return lt_config::load_token()?.ok_or_else(|| {
@@ -113,7 +107,7 @@ fn refresh_with(
 ) -> Result<AuthToken> {
     let params = build_refresh_params(refresh_token, client_id, client_secret);
     let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
-    parse_token_response(status, &body)
+    parse_token_response(status, &body)?.into_auth_token(Some(refresh_token))
 }
 
 #[cfg(test)]
@@ -141,7 +135,7 @@ mod tests {
         };
         let token = refresh_with(&exchanger, "old-refresh", "cid", "csecret").unwrap();
         assert_eq!(token.access_token, "new-tok");
-        assert_eq!(token.refresh_token, Some("new-refresh".to_string()));
+        assert_eq!(token.refresh_token, "new-refresh".to_string());
 
         let TokenExchanger::Fake { calls, .. } = &exchanger else {
             panic!("expected fake")
@@ -159,10 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_with_response_missing_refresh_token_is_none() {
-        // The caller (load_or_refresh_token) carries over the previous
-        // refresh token when the response omits it; this seam only parses
-        // the response as returned.
+    fn refresh_with_carries_over_refresh_token_when_response_omits_it() {
         let exchanger = TokenExchanger::Fake {
             status: 200,
             body: r#"{"access_token":"new-tok","token_type":"Bearer"}"#.to_string(),
@@ -170,7 +161,7 @@ mod tests {
         };
         let token = refresh_with(&exchanger, "old-refresh", "cid", "csecret").unwrap();
         assert_eq!(token.access_token, "new-tok");
-        assert_eq!(token.refresh_token, None);
+        assert_eq!(token.refresh_token, "old-refresh".to_string());
     }
 
     #[test]

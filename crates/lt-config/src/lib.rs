@@ -52,9 +52,7 @@ pub struct AuthToken {
     /// Absent in tokens saved before this field was introduced.
     #[serde(default)]
     pub issued_at: Option<u64>,
-    /// Absent in tokens saved before this field was introduced.
-    #[serde(default)]
-    pub refresh_token: Option<String>,
+    pub refresh_token: String,
 }
 
 impl AuthToken {
@@ -188,7 +186,7 @@ mod tests {
             expires_in,
             scope: None,
             issued_at,
-            refresh_token: None,
+            refresh_token: "refresh-tok".to_string(),
         }
     }
 
@@ -231,28 +229,30 @@ mod tests {
 
     #[test]
     fn auth_token_json_roundtrips() {
-        let mut original = token(Some(3600), Some(1_000_000));
-        original.refresh_token = Some("refresh-tok".to_string());
+        let original = token(Some(3600), Some(1_000_000));
         let json = serde_json::to_string(&original).unwrap();
         let parsed: AuthToken = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.access_token, "tok");
         assert_eq!(parsed.expires_in, Some(3600));
         assert_eq!(parsed.issued_at, Some(1_000_000));
-        assert_eq!(parsed.refresh_token, Some("refresh-tok".to_string()));
+        assert_eq!(parsed.refresh_token, "refresh-tok".to_string());
     }
 
     #[test]
-    fn auth_token_refresh_token_defaults_when_absent() {
-        let parsed: AuthToken =
-            serde_json::from_str(r#"{"access_token":"a","token_type":"Bearer"}"#).unwrap();
-        assert_eq!(parsed.refresh_token, None);
+    fn auth_token_without_refresh_token_fails_to_parse() {
+        assert!(
+            serde_json::from_str::<AuthToken>(r#"{"access_token":"a","token_type":"Bearer"}"#)
+                .is_err()
+        );
     }
 
     #[test]
     fn auth_token_issued_at_defaults_when_absent() {
         // Tokens saved before issued_at existed must still deserialize.
-        let parsed: AuthToken =
-            serde_json::from_str(r#"{"access_token":"a","token_type":"Bearer"}"#).unwrap();
+        let parsed: AuthToken = serde_json::from_str(
+            r#"{"access_token":"a","token_type":"Bearer","refresh_token":"r"}"#,
+        )
+        .unwrap();
         assert_eq!(parsed.issued_at, None);
         assert!(!parsed.is_expired());
     }
