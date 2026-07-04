@@ -5,6 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use lt_config::{self, AuthToken};
+use lt_types::clock::Clock;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
@@ -396,26 +397,6 @@ fn build_refresh_params<'a>(refresh: &TokenRefresh<'a>) -> [(&'a str, &'a str); 
     ]
 }
 
-// FIXME: ENG-59
-pub(super) enum Clock {
-    System,
-    #[cfg(test)]
-    Fixed(u64),
-}
-
-impl Clock {
-    /// Unix time in seconds, for stamping `issued_at` on new tokens.
-    pub(super) fn now_unix_secs(&self) -> u64 {
-        match self {
-            Self::System => std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
-            #[cfg(test)]
-            Self::Fixed(secs) => *secs,
-        }
-    }
-}
-
 /// Validate the HTTP status and deserialize the token body into a stored
 /// token, stamped with the current time as `issued_at`.
 fn parse_token_response(status: u16, body: &str, clock: &Clock) -> Result<AuthToken> {
@@ -548,6 +529,10 @@ impl TokenExchanger {
 mod tests {
     use super::*;
 
+    fn fixed_clock() -> Clock {
+        Clock::Fixed(chrono::DateTime::from_timestamp(1_000_000, 0).unwrap())
+    }
+
     #[test]
     fn pkce_challenge_is_sha256_of_verifier() {
         let (verifier, challenge) = generate_pkce();
@@ -654,7 +639,7 @@ mod tests {
         let token = parse_token_response(
             200,
             r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"r"}"#,
-            &Clock::Fixed(1_000_000),
+            &fixed_clock(),
         )
         .unwrap();
         assert_eq!(token.access_token, "tok");
@@ -665,7 +650,7 @@ mod tests {
 
     #[test]
     fn parse_token_response_rejects_non_2xx_with_body() {
-        let err = parse_token_response(400, "invalid_grant", &Clock::Fixed(1_000_000)).unwrap_err();
+        let err = parse_token_response(400, "invalid_grant", &fixed_clock()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("HTTP 400"));
         assert!(msg.contains("invalid_grant"));
@@ -673,7 +658,7 @@ mod tests {
 
     #[test]
     fn parse_token_response_rejects_malformed_json() {
-        assert!(parse_token_response(200, "not json", &Clock::Fixed(1_000_000)).is_err());
+        assert!(parse_token_response(200, "not json", &fixed_clock()).is_err());
     }
 
     #[test]
@@ -682,7 +667,7 @@ mod tests {
             parse_token_response(
                 200,
                 r#"{"access_token":"tok","token_type":"Bearer","scope":"read,write"}"#,
-                &Clock::Fixed(1_000_000),
+                &fixed_clock(),
             )
             .is_err()
         );
@@ -694,7 +679,7 @@ mod tests {
             parse_token_response(
                 200,
                 r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600,"scope":"read,write"}"#,
-                &Clock::Fixed(1_000_000),
+                &fixed_clock(),
             )
             .is_err()
         );
@@ -782,7 +767,7 @@ mod tests {
         let exchanger = TokenExchanger::fake(
             200,
             r#"{"access_token":"final-token","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"final-refresh"}"#,
-            Clock::Fixed(1_000_000),
+            fixed_clock(),
         );
         let flow = OauthFlow {
             browser: &browser,
@@ -817,7 +802,7 @@ mod tests {
         let listener = ScriptedCallbackListener {
             code: "auth-code".to_string(),
         };
-        let exchanger = TokenExchanger::fake(401, "unauthorized", Clock::Fixed(1_000_000));
+        let exchanger = TokenExchanger::fake(401, "unauthorized", fixed_clock());
         let flow = OauthFlow {
             browser: &browser,
             listener: &listener,
@@ -833,7 +818,7 @@ mod tests {
         let exchanger = TokenExchanger::fake(
             200,
             r#"{"access_token":"new-tok","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"new-refresh"}"#,
-            Clock::Fixed(1_000_000),
+            fixed_clock(),
         );
         let token = exchanger
             .exchange(&TokenRefresh {
@@ -861,7 +846,7 @@ mod tests {
 
     #[test]
     fn exchange_surfaces_non_2xx_error() {
-        let exchanger = TokenExchanger::fake(400, "invalid_grant", Clock::Fixed(1_000_000));
+        let exchanger = TokenExchanger::fake(400, "invalid_grant", fixed_clock());
         let err = exchanger
             .exchange(&TokenRefresh {
                 client_id: "cid",
