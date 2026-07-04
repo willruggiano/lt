@@ -44,6 +44,7 @@ search   tab                      -> complete forward
 search   shift+tab                -> complete backward
 help     down / j                 -> move down
 help     up / k                   -> move up
-overlay  esc / q                  -> close, back to the view beneath
+overlay  esc                      -> close, back to the view beneath
+overlay  q                        -> close, back to the view beneath (typed in text inputs)
 list     esc                      -> refresh (press twice to reset sort/filter/search)
 list     q                        -> quit

@@ -298,6 +298,12 @@ crossterm KeyEvent (input thread, Press-filtered)
 ///   for Char (shift+p arrives as Char('P'), stored as "P").
 /// - ctrl+letter is stored lowercase ("ctrl+d", never "ctrl+D").
 /// - BackTab is normalized to Tab + SHIFT.
+/// - Esc always clears every modifier: esc is esc, regardless of what
+///   shift/alt/ctrl the terminal tacked onto it.
+/// - SHIFT is cleared for every other code except Tab (whose SHIFT bit is
+///   what distinguishes it from shift+tab); Char already folds SHIFT into
+///   case above -- this is what keeps shift+enter/ctrl+shift+enter and
+///   shift+arrow/pgdn matching their unshifted bindings.
 /// - Only CONTROL | ALT | SHIFT modifier bits are retained.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Key { pub code: KeyCode, pub mods: KeyModifiers }

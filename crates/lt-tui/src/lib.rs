@@ -534,6 +534,17 @@ pub enum KeyFlow {
     Pass,
 }
 
+/// Bundles one dispatch pass's chord prefix, once-normalized key, and the raw
+/// crossterm event editor widgets need verbatim -- one struct instead of
+/// separate parameters threaded through every `resolve_and_apply`/
+/// `unbound_flow` call in the view-stack walk, and computed once per keypress
+/// rather than re-derived per view.
+struct DispatchKey {
+    pending: Option<keymap::Key>,
+    key: keymap::Key,
+    ev: KeyEvent,
+}
+
 /// Forward/backward pagination state.
 pub struct Pagination {
     pub has_next_page: bool,
@@ -888,13 +899,23 @@ impl App {
     /// defines the semantics rather than defending against a bug.
     fn pop_view(&mut self) {
         if self.views.len() > 1 {
-            if let Some(view) = self.views.pop() {
-                for scope in view.scopes() {
-                    self.service.unwatch(scope);
-                }
-            }
+            self.close_view_at(self.views.len() - 1);
         } else {
             self.reset_base_view();
+        }
+    }
+
+    /// Remove the view at `i` from the stack, unwatching the scopes it
+    /// declared -- the same bookkeeping `pop_view` performs for the stack
+    /// top, extracted so a handler can close a view it holds by index (e.g.
+    /// `popup::popup_confirm`, whose popup can be buried under a view
+    /// cascaded on top of it) without disturbing whatever is actually on top.
+    fn close_view_at(&mut self, i: usize) {
+        if i < self.views.len() {
+            let view = self.views.remove(i);
+            for scope in view.scopes() {
+                self.service.unwatch(scope);
+            }
         }
     }
 
@@ -1033,14 +1054,18 @@ impl App {
         // A chord in progress: Esc cancels it and does nothing else --
         // checked before anything else so it never reaches the floor's Back
         // or touches `last_esc_time`.
-        if self.pending_key.is_some() && key.code == KeyCode::Esc {
+        if self.pending_key.is_some() && key == keymap::Key::plain(KeyCode::Esc) {
             self.pending_key = None;
             return;
         }
-        let pending = self.pending_key.take();
+        let dk = DispatchKey {
+            pending: self.pending_key.take(),
+            key,
+            ev,
+        };
         let top = self.views.len() - 1;
         for i in (0..=top).rev() {
-            if matches!(self.handle_view_key(i, pending, ev), KeyFlow::Consumed) {
+            if matches!(self.handle_view_key(i, &dk), KeyFlow::Consumed) {
                 return;
             }
         }
@@ -1055,29 +1080,22 @@ impl App {
 
     /// Dispatch to the view at stack index `i`: derive its keymap context and
     /// resolve.
-    fn handle_view_key(&mut self, i: usize, pending: Option<keymap::Key>, ev: KeyEvent) -> KeyFlow {
+    fn handle_view_key(&mut self, i: usize, dk: &DispatchKey) -> KeyFlow {
         let ctx = key_context(&self.views[i]);
-        self.resolve_and_apply(i, ctx, (pending, ev))
+        self.resolve_and_apply(i, ctx, dk)
     }
 
-    /// Resolve `keys` (the chord prefix, and the original crossterm event
-    /// this keypress carries) against `ctx` and act on the result: `Act`
-    /// applies (navigation through `View::scroll`, everything else through
-    /// the context's `apply_*`); `Pending` records the chord prefix;
-    /// `Unbound` is `unbound_flow`'s (forward, swallow, or cascade, by
-    /// context). The event is kept alongside the chord prefix (rather than
-    /// the normalized `Key`, computed here) since `unbound_flow` needs it
-    /// verbatim when forwarding to an editor widget -- staying under this
-    /// crate's 4-argument limit without a bespoke struct.
+    /// Resolve `dk`'s key against `ctx` and act on the result: `Act` applies
+    /// (navigation through `View::scroll`, everything else through the
+    /// context's `apply_*`); `Pending` records the chord prefix; `Unbound` is
+    /// `unbound_flow`'s (forward, swallow, or cascade, by context).
     fn resolve_and_apply(
         &mut self,
         i: usize,
         ctx: keymap::KeyContext,
-        keys: (Option<keymap::Key>, KeyEvent),
+        dk: &DispatchKey,
     ) -> KeyFlow {
-        let (pending, ev) = keys;
-        let key = keymap::Key::from(ev);
-        match keymap::resolve(ctx, pending, key) {
+        match keymap::resolve(ctx, dk.pending, dk.key) {
             keymap::Resolved::Act(action) => {
                 if let Some(motion) = scroll_motion(action) {
                     let viewport = self.viewport_height;
@@ -1096,7 +1114,7 @@ impl App {
                             detail::apply_comment_input(self, i, action);
                         }
                         keymap::KeyContext::Search => popup::apply_search(self, i, action),
-                        keymap::KeyContext::Help => popup::apply_help(self, i, action),
+                        keymap::KeyContext::Help => {}
                     }
                 }
                 KeyFlow::Consumed
@@ -1105,7 +1123,10 @@ impl App {
                 self.pending_key = Some(k);
                 KeyFlow::Consumed
             }
-            keymap::Resolved::Unbound(_) => self.unbound_flow(i, ctx, ev),
+            // `resolve`'s `Unbound` payload is always `dk.key` (a chord miss
+            // resolves the same key fresh); dropping it here avoids threading
+            // a fifth argument through `unbound_flow`.
+            keymap::Resolved::Unbound(_) => self.unbound_flow(i, ctx, dk),
         }
     }
 
@@ -1114,17 +1135,17 @@ impl App {
     /// to the floor; a text context forwards everything else to its editor
     /// widget and consumes; `NewIssuePicker` consumes without forwarding (a
     /// form swallows strays); `List`/`Detail`/`Popup` cascade to the view
-    /// beneath.
-    fn unbound_flow(&mut self, i: usize, ctx: keymap::KeyContext, ev: KeyEvent) -> KeyFlow {
-        let key = keymap::Key::from(ev);
-        if key.code == KeyCode::Esc {
+    /// beneath. Uses `dk.key`, already normalized -- never re-derives it from
+    /// `dk.ev`.
+    fn unbound_flow(&mut self, i: usize, ctx: keymap::KeyContext, dk: &DispatchKey) -> KeyFlow {
+        if dk.key == keymap::Key::plain(KeyCode::Esc) {
             return KeyFlow::Pass;
         }
         match ctx {
-            keymap::KeyContext::NewIssueText => new_issue::forward_text(self, i, ev),
-            keymap::KeyContext::CommentInput => detail::forward_comment_input(self, i, ev),
-            keymap::KeyContext::Search => popup::forward_search(self, i, ev),
-            keymap::KeyContext::Help => popup::forward_help(self, i, ev),
+            keymap::KeyContext::NewIssueText => new_issue::forward_text(self, i, dk.ev),
+            keymap::KeyContext::CommentInput => detail::forward_comment_input(self, i, dk.ev),
+            keymap::KeyContext::Search => popup::forward_search(self, i, dk.ev),
+            keymap::KeyContext::Help => popup::forward_help(self, i, dk.ev),
             keymap::KeyContext::NewIssuePicker => {}
             keymap::KeyContext::List | keymap::KeyContext::Detail | keymap::KeyContext::Popup => {
                 return KeyFlow::Pass;
@@ -1454,10 +1475,7 @@ fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
         }
         Action::OpenInBrowser => {
             if let Some(issue) = app.selected_issue() {
-                let url = format!("https://linear.app/issue/{}", issue.identifier);
-                if let Err(e) = open::that(url) {
-                    tracing::warn!(error = %e, "failed to open browser for issue url");
-                }
+                open_in_browser(&issue.identifier);
             }
         }
         // Navigation, `Comment`, and `Confirm` never resolve to `List`'s
@@ -1465,5 +1483,14 @@ fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
         // this is called, and `Comment`/`Confirm` belong to other contexts'
         // tables. The match stays exhaustive over `Action` regardless.
         _ => {}
+    }
+}
+
+/// Open `identifier`'s issue in the browser. Shared by `apply_list`'s and
+/// `detail::apply_detail`'s `OpenInBrowser` arms.
+pub(crate) fn open_in_browser(identifier: &str) {
+    let url = format!("https://linear.app/issue/{identifier}");
+    if let Err(e) = open::that(url) {
+        tracing::warn!(error = %e, "failed to open browser for issue url");
     }
 }

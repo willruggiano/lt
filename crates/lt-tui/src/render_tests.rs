@@ -307,6 +307,39 @@ fn search_overlay() {
     insta::assert_snapshot!(draw(&mut app, 100, 20));
 }
 
+/// Testing item 6 (`docs/design/keybinds.md`): the pending-chord indicator
+/// is the status row's highest-priority branch, reachable from the list top
+/// and from a Detail view focused above it (the branch that used to
+/// short-circuit before pending was ever checked).
+#[test]
+fn pending_chord_indicator_shows_at_list_top() {
+    let mut app = app_with_issues(0, 3).unwrap();
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    assert!(app.pending_key.is_some());
+    let out = draw(&mut app, 80, 10);
+    assert!(
+        out.contains("g …"),
+        "expected pending-chord indicator, got:\n{out}"
+    );
+}
+
+#[test]
+fn pending_chord_indicator_shows_over_detail_view() {
+    let mut app = app_with_issues(0, 3).unwrap();
+    let issue = app.list_mut().issues[0].clone();
+    app.views.push(View::Detail(Box::new(build_cached_detail(
+        &issue,
+        Vec::new(),
+    ))));
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    assert!(app.pending_key.is_some());
+    let out = draw(&mut app, 80, 10);
+    assert!(
+        out.contains("g …"),
+        "expected pending-chord indicator over Detail, got:\n{out}"
+    );
+}
+
 #[test]
 fn help_popup() {
     let mut app = app_with_issues(0, 12).unwrap();

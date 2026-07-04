@@ -15,8 +15,8 @@ use crossterm::event::KeyCode;
 pub(crate) use key::Key;
 
 /// Where a key is resolved: the focused view's own context, then GLOBAL --
-/// skipped by the text contexts (`is_text`), which forward instead of
-/// cascading (`docs/design/keybinds.md`, "Contexts and layering").
+/// skipped by the text contexts, which forward instead of cascading
+/// (`docs/design/keybinds.md`, "Contexts and layering").
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum KeyContext {
     // Full keymap contexts: their own table, then GLOBAL.
@@ -24,28 +24,14 @@ pub(crate) enum KeyContext {
     Detail,
     Popup,
     NewIssuePicker,
-    // Text contexts: their own table only; an unbound key forwards to the
-    // context's editor widget instead of cascading.
+    // Text contexts: their own table only (`layers()` never adds GLOBAL);
+    // an unbound key forwards to the context's editor widget instead of
+    // cascading (except `esc`, which always passes to the floor -- handled
+    // by the dispatch seam, not here).
     Search,
     Help,
     NewIssueText,
     CommentInput,
-}
-
-impl KeyContext {
-    /// Text contexts skip GLOBAL, never start chords, and forward an
-    /// unbound key to their editor widget instead of cascading (except
-    /// `esc`, which always passes to the floor -- handled by the dispatch
-    /// seam, not here).
-    pub(crate) fn is_text(self) -> bool {
-        matches!(
-            self,
-            KeyContext::Search
-                | KeyContext::Help
-                | KeyContext::NewIssueText
-                | KeyContext::CommentInput
-        )
-    }
 }
 
 /// A single- or two-key binding. Linear's chords are exactly two keys;
@@ -221,35 +207,37 @@ static TABLES: &[(&str, &[(Binding, Action)])] = &[
     ("help", HELP),
 ];
 
-impl KeyContext {
-    fn table(self) -> &'static [(Binding, Action)] {
-        match self {
-            KeyContext::List => LIST,
-            KeyContext::Detail => DETAIL,
-            KeyContext::Popup => POPUP,
-            KeyContext::NewIssuePicker => NEW_ISSUE_PICKER,
-            KeyContext::Search => SEARCH,
-            KeyContext::Help => HELP,
-            KeyContext::NewIssueText => NEW_ISSUE_TEXT,
-            KeyContext::CommentInput => COMMENT_INPUT,
-        }
-    }
+/// Every context's effective resolution layers, precomputed at compile time
+/// (`docs/design/keybinds.md`, "Contexts and layering"): its own table, then
+/// any shared layers, in precedence order. `NewIssuePicker` additionally
+/// layers `FORM_NAV` (`NewIssueText`'s own table already *is* `FORM_NAV`, so
+/// it needs no second copy). Every non-text context also picks up GLOBAL; a
+/// text context skips it so a navigation letter (`j`, `g`, ...) never steals
+/// a character from the editor it forwards to. `static`, not built per
+/// `resolve()` call: a keypress is on the hot path and every layer set is
+/// known at compile time.
+static LIST_LAYERS: &[&[(Binding, Action)]] = &[LIST, GLOBAL];
+static DETAIL_LAYERS: &[&[(Binding, Action)]] = &[DETAIL, GLOBAL];
+static POPUP_LAYERS: &[&[(Binding, Action)]] = &[POPUP, GLOBAL];
+static NEW_ISSUE_PICKER_LAYERS: &[&[(Binding, Action)]] = &[NEW_ISSUE_PICKER, FORM_NAV, GLOBAL];
+static SEARCH_LAYERS: &[&[(Binding, Action)]] = &[SEARCH];
+static HELP_LAYERS: &[&[(Binding, Action)]] = &[HELP];
+static NEW_ISSUE_TEXT_LAYERS: &[&[(Binding, Action)]] = &[NEW_ISSUE_TEXT];
+static COMMENT_INPUT_LAYERS: &[&[(Binding, Action)]] = &[COMMENT_INPUT];
 
-    /// This context's effective resolution layers: its own table, then any
-    /// shared layers, in precedence order. `NewIssuePicker` additionally
-    /// layers `FORM_NAV` (`NewIssueText`'s own table already *is* `FORM_NAV`,
-    /// so it needs no second copy). Every non-text context also picks up
-    /// GLOBAL; a text context skips it so a navigation letter (`j`, `g`,
-    /// ...) never steals a character from the editor it forwards to.
-    fn layers(self) -> Vec<&'static [(Binding, Action)]> {
-        let mut layers = vec![self.table()];
-        if matches!(self, KeyContext::NewIssuePicker) {
-            layers.push(FORM_NAV);
+impl KeyContext {
+    /// This context's effective resolution layers -- see `LIST_LAYERS` et al.
+    fn layers(self) -> &'static [&'static [(Binding, Action)]] {
+        match self {
+            KeyContext::List => LIST_LAYERS,
+            KeyContext::Detail => DETAIL_LAYERS,
+            KeyContext::Popup => POPUP_LAYERS,
+            KeyContext::NewIssuePicker => NEW_ISSUE_PICKER_LAYERS,
+            KeyContext::Search => SEARCH_LAYERS,
+            KeyContext::Help => HELP_LAYERS,
+            KeyContext::NewIssueText => NEW_ISSUE_TEXT_LAYERS,
+            KeyContext::CommentInput => COMMENT_INPUT_LAYERS,
         }
-        if !self.is_text() {
-            layers.push(GLOBAL);
-        }
-        layers
     }
 }
 
@@ -310,7 +298,7 @@ fn resolve_layers(layers: &[&[(Binding, Action)]], pending: Option<Key>, key: Ke
 /// GLOBAL unless `ctx` is a text context), given the pending chord prefix
 /// `App::dispatch_key` took once at entry.
 pub(crate) fn resolve(ctx: KeyContext, pending: Option<Key>, key: Key) -> Resolved {
-    resolve_layers(&ctx.layers(), pending, key)
+    resolve_layers(ctx.layers(), pending, key)
 }
 
 // ---------------------------------------------------------------------------
@@ -319,22 +307,50 @@ pub(crate) fn resolve(ctx: KeyContext, pending: Option<Key>, key: Key) -> Resolv
 
 /// One help-panel row: one or more equivalent bindings for the same
 /// (context, action) -- e.g. `j`/`down`, both `MoveDown` in `global` -- grouped
-/// so the panel shows them on one line.
+/// so the panel shows them on one line. Rows are immutable once `help_rows()`
+/// returns, so `binding_form`/`haystack` are precomputed there rather than
+/// rebuilt every render frame or filter keystroke.
 pub(crate) struct HelpRow {
     pub(crate) bindings: Vec<Binding>,
     pub(crate) label: &'static str,
     pub(crate) context: &'static str,
+    /// The bindings' `Display` forms joined with `" / "`, e.g. `"j / down"`,
+    /// `"ctrl+enter / alt+enter"` -- the rendered key column.
+    pub(crate) binding_form: String,
+    /// Lowercase `"{binding_form} {label} {context}"`, matched against the
+    /// help popup's filter query.
+    pub(crate) haystack: String,
 }
 
 impl HelpRow {
-    /// The bindings' `Display` forms joined with `" / "`, e.g. `"j / down"`,
-    /// `"ctrl+enter / alt+enter"` -- the rendered and filterable key column.
-    pub(crate) fn binding_form(&self) -> String {
-        self.bindings
+    /// A row with its grouped `bindings` still open to appending (`help_rows`
+    /// merges consecutive same-action rows); `binding_form`/`haystack` are
+    /// filled in by `finalize` once grouping is done.
+    fn open(bindings: Vec<Binding>, label: &'static str, context: &'static str) -> Self {
+        Self {
+            bindings,
+            label,
+            context,
+            binding_form: String::new(),
+            haystack: String::new(),
+        }
+    }
+
+    /// Fill `binding_form`/`haystack` from the now-final `bindings`. Called
+    /// once per row after `help_rows` finishes grouping.
+    fn finalize(&mut self) {
+        self.binding_form = self
+            .bindings
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
-            .join(" / ")
+            .join(" / ");
+        self.haystack = format!(
+            "{} {} {}",
+            self.binding_form.to_lowercase(),
+            self.label.to_lowercase(),
+            self.context.to_lowercase()
+        );
     }
 }
 
@@ -344,24 +360,25 @@ impl HelpRow {
 /// 500ms resets sort/filter/search, `handle_list_esc`) and `q` quits.
 fn floor_rows() -> Vec<HelpRow> {
     vec![
-        HelpRow {
-            bindings: vec![
-                Binding::Single(Key::plain(KeyCode::Esc)),
-                Binding::Single(Key::char('q')),
-            ],
-            label: "close, back to the view beneath",
-            context: "overlay",
-        },
-        HelpRow {
-            bindings: vec![Binding::Single(Key::plain(KeyCode::Esc))],
-            label: "refresh (press twice to reset sort/filter/search)",
-            context: "list",
-        },
-        HelpRow {
-            bindings: vec![Binding::Single(Key::char('q'))],
-            label: "quit",
-            context: "list",
-        },
+        HelpRow::open(
+            vec![Binding::Single(Key::plain(KeyCode::Esc))],
+            "close, back to the view beneath",
+            "overlay",
+        ),
+        // Unlike esc, q is not floor-owned in text contexts: the search/help
+        // filter bars type it, so its "close" meaning only applies above the
+        // base outside a text context.
+        HelpRow::open(
+            vec![Binding::Single(Key::char('q'))],
+            "close, back to the view beneath (typed in text inputs)",
+            "overlay",
+        ),
+        HelpRow::open(
+            vec![Binding::Single(Key::plain(KeyCode::Esc))],
+            "refresh (press twice to reset sort/filter/search)",
+            "list",
+        ),
+        HelpRow::open(vec![Binding::Single(Key::char('q'))], "quit", "list"),
     ]
 }
 
@@ -402,18 +419,16 @@ impl HelpRowBuilder {
             }
             return;
         }
-        self.rows.push(HelpRow {
-            bindings: vec![binding],
-            label: action.label(),
-            context,
-        });
+        self.rows
+            .push(HelpRow::open(vec![binding], action.label(), context));
         self.last = Some((context, action));
     }
 }
 
 /// `HELP_CONTEXTS` in declaration order, grouping consecutive rows for the
 /// same `(context, action)` into one [`HelpRow`], plus the floor's static
-/// rows.
+/// rows, each finalized (`HelpRow::finalize`) once its `bindings` group is
+/// complete.
 pub(crate) fn help_rows() -> Vec<HelpRow> {
     let mut builder = HelpRowBuilder::default();
     for &(context, tables) in HELP_CONTEXTS {
@@ -421,8 +436,12 @@ pub(crate) fn help_rows() -> Vec<HelpRow> {
             builder.push(context, binding, action);
         }
     }
-    builder.rows.extend(floor_rows());
-    builder.rows
+    let mut rows = builder.rows;
+    rows.extend(floor_rows());
+    for row in &mut rows {
+        row.finalize();
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -451,7 +470,11 @@ mod tests {
     /// (its own table, then GLOBAL), flattened so the invariant tests below
     /// stay a single loop level instead of nesting through layers/rows.
     fn context_bindings(ctx: KeyContext) -> Vec<(Binding, Action)> {
-        ctx.layers().into_iter().flatten().copied().collect()
+        ctx.layers()
+            .iter()
+            .flat_map(|layer| layer.iter())
+            .copied()
+            .collect()
     }
 
     /// Every key named by any binding across `ctx`'s effective layers.
@@ -593,9 +616,7 @@ mod tests {
             .map(|row| {
                 format!(
                     "{:<8} {:<24} -> {}",
-                    row.context,
-                    row.binding_form(),
-                    row.label
+                    row.context, row.binding_form, row.label
                 )
             })
             .collect();

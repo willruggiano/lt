@@ -170,9 +170,6 @@ pub(crate) fn populate_relations(db: &Database, detail: &mut DetailView, issue: 
 }
 
 // -- Detail pane keybindings (docs/design/keybinds.md, "Detail") ------------
-//
-// Navigation (j/k/g g/G/Ctrl-d/Ctrl-u/PageDown/PageUp) resolves through the
-// keymap's GLOBAL table and applies via `Scroll`, not here.
 
 /// The `Detail` context's non-navigation actions. Navigation actions never
 /// reach here: `resolve_and_apply` maps them to `ScrollMotion` and applies
@@ -187,10 +184,7 @@ pub(crate) fn apply_detail(app: &mut App, i: usize, action: keymap::Action) {
         }
         keymap::Action::OpenInBrowser => {
             if let Some(d) = detail_view_mut(app, i) {
-                let url = format!("https://linear.app/issue/{}", d.issue.identifier);
-                if let Err(e) = open::that(url) {
-                    tracing::warn!(error = %e, "failed to open browser for issue url");
-                }
+                super::open_in_browser(&d.issue.identifier);
             }
         }
         // Navigation and other contexts' actions never resolve to `Detail`'s
