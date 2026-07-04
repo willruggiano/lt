@@ -8,6 +8,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 ///   `Char` (shift+p arrives as `Char('P')`, stored as `'P'`).
 /// - ctrl+letter is stored lowercase (`"ctrl+d"`, never `"ctrl+D"`).
 /// - `BackTab` is normalized to `Tab` + SHIFT.
+/// - `Esc` always clears every modifier: esc is esc, regardless of what
+///   shift/alt/ctrl the terminal tacked onto it.
+/// - SHIFT is cleared for every other code except `Tab` (whose SHIFT bit is
+///   what distinguishes it from `shift+tab`); `Char` already folds SHIFT into
+///   case above. This is what makes shift+enter/ctrl+shift+enter and
+///   shift+arrow/pgdn match their unshifted bindings.
 /// - Only `CONTROL`/`ALT`/`SHIFT` modifier bits are retained; kitty's extra
 ///   `KeyEventState` bits never reach this type since `Key` has no field for
 ///   them.
@@ -24,6 +30,12 @@ fn normalize(mut code: KeyCode, mut mods: KeyModifiers) -> (KeyCode, KeyModifier
         code = KeyCode::Tab;
         mods.insert(KeyModifiers::SHIFT);
     }
+    if code == KeyCode::Esc {
+        // esc is esc: a modifier-carrying esc (shift+esc, alt+esc, ...)
+        // collapses to plain esc so every esc check compares the normalized
+        // key rather than re-deriving which modifiers to ignore.
+        mods = KeyModifiers::NONE;
+    }
     if let KeyCode::Char(c) = code {
         if mods.contains(KeyModifiers::SHIFT) {
             code = KeyCode::Char(c.to_ascii_uppercase());
@@ -34,6 +46,11 @@ fn normalize(mut code: KeyCode, mut mods: KeyModifiers) -> (KeyCode, KeyModifier
         {
             code = KeyCode::Char(c.to_ascii_lowercase());
         }
+    } else if code != KeyCode::Tab {
+        // SHIFT only distinguishes Tab (-> shift+tab); every other non-Char
+        // code folds it away, restoring shift+enter/ctrl+shift+enter and
+        // shift+arrow/pgdn tolerance.
+        mods.remove(KeyModifiers::SHIFT);
     }
     (code, mods)
 }
@@ -110,7 +127,6 @@ fn code_from_str(token: &str) -> Option<KeyCode> {
         "enter" => KeyCode::Enter,
         "esc" | "escape" => KeyCode::Esc,
         "tab" => KeyCode::Tab,
-        "shift+tab" => KeyCode::BackTab, // renormalized to Tab+SHIFT below
         "backspace" => KeyCode::Backspace,
         "up" => KeyCode::Up,
         "down" => KeyCode::Down,
@@ -193,7 +209,6 @@ impl fmt::Display for Key {
             KeyCode::Enter => write!(f, "enter"),
             KeyCode::Esc => write!(f, "esc"),
             KeyCode::Tab => write!(f, "tab"),
-            KeyCode::BackTab => write!(f, "shift+tab"), // never produced post-normalization
             KeyCode::Backspace => write!(f, "backspace"),
             KeyCode::Up => write!(f, "up"),
             KeyCode::Down => write!(f, "down"),
@@ -265,6 +280,58 @@ mod tests {
         let without_state = Key::from(ev(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert_eq!(with_state, without_state);
         assert_eq!(with_state.to_string().parse::<Key>().unwrap(), with_state);
+    }
+
+    /// Rule (Types, "esc is esc"): a modifier-carrying esc collapses to
+    /// plain esc, matching the plain-esc `COMMENT_INPUT` row and the
+    /// code-only esc checks in `dispatch_key`/`unbound_flow`.
+    #[test]
+    fn esc_clears_every_modifier() {
+        for mods in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ] {
+            let key = Key::from(ev(KeyCode::Esc, mods));
+            assert_eq!(key, Key::plain(KeyCode::Esc), "mods {mods:?}");
+            assert_eq!(key.to_string(), "esc");
+            assert_eq!(key.to_string().parse::<Key>().unwrap(), key);
+        }
+    }
+
+    /// Rule (Types, "SHIFT cleared except Tab"): shift+enter and
+    /// ctrl+shift+enter fold to their unshifted forms -- the submit chords'
+    /// modifier tolerance.
+    #[test]
+    fn shift_enter_folds_to_plain_enter() {
+        let key = Key::from(ev(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(key, Key::plain(KeyCode::Enter));
+    }
+
+    #[test]
+    fn ctrl_shift_enter_folds_to_ctrl_enter() {
+        let key = Key::from(ev(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(key, Key::ctrl_code(KeyCode::Enter));
+    }
+
+    /// Shift+arrow/pgdn scrolling likewise folds to the unshifted binding.
+    #[test]
+    fn shift_down_folds_to_plain_down() {
+        let key = Key::from(ev(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(key, Key::plain(KeyCode::Down));
+    }
+
+    /// Tab is the one code SHIFT still distinguishes: a literal
+    /// `Tab`+SHIFT event (as opposed to `BackTab`) still normalizes to
+    /// `shift+tab`.
+    #[test]
+    fn shift_tab_code_stays_shifted() {
+        let key = Key::from(ev(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(key, Key::shift_tab());
     }
 
     #[test]

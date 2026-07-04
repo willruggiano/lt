@@ -8,14 +8,11 @@ use super::text_span::append_text_input_spans;
 use super::util::{pct, to_u16};
 use crate::HelpPopup;
 
-/// The popup's frame and column sizing: computed once so every row's
-/// key/context/label columns render untruncated (`docs/design/keybinds.md`
-/// phase 3).
+/// The popup's frame sizing: computed once per frame from `popup`'s
+/// already-cached column widths (`docs/design/keybinds.md` phase 3) so every
+/// row's key/context/label columns render untruncated.
 struct HelpLayout {
     popup_area: Rect,
-    binding_forms: Vec<String>,
-    key_col_width: usize,
-    context_col_width: usize,
     gap_str: String,
 }
 
@@ -25,33 +22,14 @@ struct HelpLayout {
 /// inter-column gap from 2 spaces to 1 rather than truncate a label. Height
 /// is up to 80% of `area`, centred.
 fn help_layout(area: Rect, popup: &HelpPopup) -> HelpLayout {
-    let binding_forms: Vec<String> = popup
-        .rows
-        .iter()
-        .map(crate::keymap::HelpRow::binding_form)
-        .collect();
-    let key_col_width = binding_forms.iter().map(String::len).max().unwrap_or(10);
-    let context_col_width = popup
-        .rows
-        .iter()
-        .map(|row| row.context.len())
-        .max()
-        .unwrap_or(6);
-    let label_col_width = popup
-        .rows
-        .iter()
-        .map(|row| row.label.len())
-        .max()
-        .unwrap_or(10);
-
     let borders = 2;
     let inner_max = area.width.saturating_sub(borders);
     let row_width = |gap: u16| {
-        1 + to_u16(key_col_width)
+        1 + to_u16(popup.key_col_width)
             + gap
-            + to_u16(context_col_width)
+            + to_u16(popup.context_col_width)
             + gap
-            + to_u16(label_col_width)
+            + to_u16(popup.label_col_width)
             + 1
     };
     let (inner_width, gap): (u16, u16) = if row_width(2) <= inner_max {
@@ -69,9 +47,6 @@ fn help_layout(area: Rect, popup: &HelpPopup) -> HelpLayout {
 
     HelpLayout {
         popup_area: Rect::new(x, y, width, height),
-        binding_forms,
-        key_col_width,
-        context_col_width,
         gap_str,
     }
 }
@@ -119,11 +94,11 @@ pub(super) fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup
             let abs_idx = vis_idx + scroll_offset;
             let line = format!(
                 " {binding:<kw$}{gap_str}{context:<cw$}{gap_str}{label} ",
-                binding = layout.binding_forms[real_idx],
+                binding = row.binding_form,
                 context = row.context,
                 label = row.label,
-                kw = layout.key_col_width,
-                cw = layout.context_col_width,
+                kw = popup.key_col_width,
+                cw = popup.context_col_width,
                 gap_str = layout.gap_str,
             );
             let style = if abs_idx == popup.selected {

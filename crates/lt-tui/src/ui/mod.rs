@@ -76,7 +76,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 /// footer, a transient footer message, the pending-chord indicator, and the
 /// list footer, matching on the stack top.
 fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &FooterState) {
-    if let Some(View::Detail(d)) = app.views.last() {
+    if let Some(pending) = &app.pending_key {
+        // Highest priority, regardless of which view is focused: a pending
+        // prefix can never coexist with the comment-input hint below (text
+        // contexts never start chords, and `dispatch_key` takes the prefix
+        // once at every dispatch entry), so this is safe to check first.
+        frame.render_widget(Paragraph::new(format!("{pending} …")), chunks[4]);
+    } else if let Some(View::Detail(d)) = app.views.last() {
         if d.comment_input.is_some() {
             frame.render_widget(
                 Paragraph::new(format!(
@@ -90,11 +96,6 @@ fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Foo
         } else {
             render_detail_footer(frame, chunks[4]);
         }
-    } else if let Some(pending) = &app.pending_key {
-        // Takes priority over the plain footer/footer_msg below: pending can
-        // only be set from keymap contexts, and the Detail/comment branches
-        // above already cover the Detail top-of-stack case.
-        frame.render_widget(Paragraph::new(format!("{pending} …")), chunks[4]);
     } else if let Some(msg) = &app.footer_msg {
         frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
     } else {

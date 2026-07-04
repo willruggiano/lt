@@ -115,48 +115,50 @@ pub struct HelpPopup {
     pub filtered: Vec<usize>,
     /// Currently highlighted row in the filtered list.
     pub selected: usize,
+    /// The three help-panel columns' max width across every row, computed
+    /// once here since `rows` is immutable after construction
+    /// (`docs/design/keybinds.md` phase 3): `help_layout` reads these
+    /// instead of rebuilding them every render frame.
+    pub(crate) key_col_width: usize,
+    pub(crate) context_col_width: usize,
+    pub(crate) label_col_width: usize,
 }
 
 impl HelpPopup {
     pub fn new() -> Self {
         let rows = keymap::help_rows();
         let filtered = (0..rows.len()).collect();
+        let key_col_width = rows
+            .iter()
+            .map(|r| r.binding_form.len())
+            .max()
+            .unwrap_or(10);
+        let context_col_width = rows.iter().map(|r| r.context.len()).max().unwrap_or(6);
+        let label_col_width = rows.iter().map(|r| r.label.len()).max().unwrap_or(10);
         Self {
             search: TextInput::new(),
             rows,
             filtered,
             selected: 0,
+            key_col_width,
+            context_col_width,
+            label_col_width,
         }
     }
 
-    /// Matches the query against the rendered binding form (`HelpRow::binding_form`,
-    /// e.g. "j / down"), the label, and the context -- case-insensitive, like today.
+    /// Matches the query against each row's precomputed `haystack`
+    /// (`binding_form`/label/context, lowercased once at construction) --
+    /// case-insensitive, like today.
     pub fn update_filter(&mut self) {
         let q = self.search.value.to_lowercase();
         self.filtered = self
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| {
-                q.is_empty()
-                    || row.binding_form().to_lowercase().contains(&q)
-                    || row.label.to_lowercase().contains(&q)
-                    || row.context.to_lowercase().contains(&q)
-            })
+            .filter(|(_, row)| q.is_empty() || row.haystack.contains(&q))
             .map(|(i, _)| i)
             .collect();
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
-    }
-
-    fn move_down(&mut self) {
-        let max = self.filtered.len().saturating_sub(1);
-        if self.selected < max {
-            self.selected += 1;
-        }
-    }
-
-    fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
     }
 }
 
@@ -165,10 +167,13 @@ impl HelpPopup {
 /// popup has no "half page" concept, `docs/design/keybinds.md`, "Help").
 impl Scroll for HelpPopup {
     fn move_down(&mut self) {
-        self.move_down();
+        let max = self.filtered.len().saturating_sub(1);
+        if self.selected < max {
+            self.selected += 1;
+        }
     }
     fn move_up(&mut self) {
-        self.move_up();
+        self.selected = self.selected.saturating_sub(1);
     }
 }
 
@@ -291,20 +296,6 @@ impl SearchOverlay {
             }
         }
     }
-
-    pub fn move_down(&mut self) {
-        let n = self.results.len();
-        if n == 0 {
-            return;
-        }
-        let i = self.table_state.selected().unwrap_or(0);
-        self.table_state.select(Some((i + 1).min(n - 1)));
-    }
-
-    pub fn move_up(&mut self) {
-        let i = self.table_state.selected().unwrap_or(0);
-        self.table_state.select(Some(i.saturating_sub(1)));
-    }
 }
 
 /// This view's scroll override: `Down`/`Up` move the result-list selection;
@@ -312,10 +303,16 @@ impl SearchOverlay {
 /// no "half page" concept, `docs/design/keybinds.md`, "Search").
 impl Scroll for SearchOverlay {
     fn move_down(&mut self) {
-        self.move_down();
+        let n = self.results.len();
+        if n == 0 {
+            return;
+        }
+        let i = self.table_state.selected().unwrap_or(0);
+        self.table_state.select(Some((i + 1).min(n - 1)));
     }
     fn move_up(&mut self) {
-        self.move_up();
+        let i = self.table_state.selected().unwrap_or(0);
+        self.table_state.select(Some(i.saturating_sub(1)));
     }
 }
 
@@ -497,10 +494,13 @@ impl PopupView {
     }
 }
 
-/// Confirm the popup choice: pop it, then edit the issue it was opened for
-/// (its captured `issue_id`, not the current list selection) through the
-/// sync service, which enqueues the write and emits the matching `State`
-/// event on the queue. A failure surfaces in the footer.
+/// Confirm the popup choice: close the popup at its own stack index `i` --
+/// not necessarily the stack top, since an unbound key can cascade a popup
+/// (e.g. `space`, unbound in `POPUP`) into pushing a further view above it --
+/// then edit the issue it was opened for (its captured `issue_id`, not the
+/// current list selection) through the sync service, which enqueues the
+/// write and emits the matching `State` event on the queue. A failure
+/// surfaces in the footer.
 fn popup_confirm(app: &mut App, i: usize) {
     let Some(View::Popup(popup)) = app.views.get(i) else {
         return;
@@ -510,7 +510,7 @@ fn popup_confirm(app: &mut App, i: usize) {
     };
     let issue_id = popup.issue_id.clone();
     let kind = popup.kind.clone();
-    app.pop_view();
+    app.close_view_at(i);
     if let Some(edit) = popup_edit(&kind, &item)
         && let Err(e) = app.service.edit_issue(&issue_id, edit)
     {
@@ -559,13 +559,6 @@ pub(crate) fn apply_popup(app: &mut App, i: usize, action: keymap::Action) {
 }
 
 // -- Help popup ------------------------------------------------------
-
-/// The `Help` context's non-navigation actions: none today -- `HELP` binds
-/// only `MoveDown`/`MoveUp`, both navigation, intercepted by `scroll_motion`
-/// before this is reached. Kept as a named arm for symmetry with the other
-/// contexts, and so a future non-navigation `Help` binding has an obvious
-/// home.
-pub(crate) fn apply_help(_app: &mut App, _i: usize, _action: keymap::Action) {}
 
 /// Forward an unbound key to the help popup's filter bar. `j`/`k` stay
 /// untypeable here (an existing limitation, carried forward deliberately):
