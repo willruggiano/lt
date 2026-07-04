@@ -25,12 +25,12 @@ pub use detail::DetailView;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
 use lt_runtime::query::IssueQuery;
-use lt_runtime::search_query;
 #[cfg(all(test, feature = "sim"))]
 use lt_runtime::sync::service::IssueEdit;
 pub use lt_runtime::sync::service::RuntimeEvent;
 pub(crate) use lt_runtime::sync::service::StateEvent;
 use lt_runtime::sync::service::{LoginEvent, Scope, SyncEvent, SyncService};
+use lt_runtime::{Clock, search_query};
 use lt_types::types::Issue;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use lt_types::types::priority_label_to_u8;
@@ -47,24 +47,6 @@ use ratatui::backend::Backend;
 use ratatui::widgets::TableState;
 pub(crate) use sync::sync_status_label;
 pub(crate) use text_input::TextInput;
-
-/// An enum rather than a trait or boxed closure: the set of clocks is
-/// closed (the system clock, plus a fixed instant in tests).
-pub enum Clock {
-    System,
-    #[cfg(all(test, feature = "sim"))]
-    Fixed(chrono::DateTime<chrono::Utc>),
-}
-
-impl Clock {
-    pub fn now(&self) -> chrono::DateTime<chrono::Utc> {
-        match self {
-            Clock::System => chrono::Utc::now(),
-            #[cfg(all(test, feature = "sim"))]
-            Clock::Fixed(instant) => *instant,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The app event queue

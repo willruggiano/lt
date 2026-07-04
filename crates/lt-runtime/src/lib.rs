@@ -21,4 +21,5 @@ pub mod notifications;
 #[cfg(feature = "sim")]
 pub use lt_storage::sim;
 pub use lt_storage::{db, search_query, text};
+pub use lt_types::clock::Clock;
 pub use lt_types::query;

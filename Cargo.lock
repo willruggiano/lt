@@ -1535,6 +1535,7 @@ version = "0.6.1"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "lt-config",
  "lt-types",
  "open",
