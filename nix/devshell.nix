@@ -6,10 +6,11 @@
   perSystem = {
     inputs',
     lib,
+    pkgs,
     ...
   }: {
     devshells.default = {
-      packages = [inputs'.cpd.packages.default];
+      packages = [inputs'.cpd.packages.default pkgs.scc];
       motd = lib.mkForce "";
     };
   };
