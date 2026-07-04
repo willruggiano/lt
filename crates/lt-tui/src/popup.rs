@@ -7,9 +7,7 @@ use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{
-    App, Keymap, Scroll, ScrollMotion, StateCtx, StateEvent, TextInput, Unbound, View, keymap,
-};
+use super::{App, Keymap, ScrollMotion, StateCtx, StateEvent, TextInput, Unbound, View, keymap};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -157,17 +155,13 @@ impl HelpPopup {
     }
 }
 
-/// `Down`/`Up` move the filtered-list selection; other motions no-op via
-/// `Scroll`'s defaults.
-impl Scroll for HelpPopup {
-    fn move_down(&mut self) {
-        let max = self.filtered.len().saturating_sub(1);
-        if self.selected < max {
-            self.selected += 1;
+impl HelpPopup {
+    /// Selection movement over the shared motion set.
+    pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        if self.filtered.is_empty() {
+            return;
         }
-    }
-    fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        self.selected = motion.apply_index(self.selected, self.filtered.len(), viewport_height);
     }
 }
 
@@ -274,20 +268,18 @@ impl SearchOverlay {
     }
 }
 
-/// `Down`/`Up` move the result-list selection; other motions no-op via
-/// `Scroll`'s defaults.
-impl Scroll for SearchOverlay {
-    fn move_down(&mut self) {
-        let n = self.results.len();
-        if n == 0 {
+impl SearchOverlay {
+    /// Selection movement over the shared motion set.
+    pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        if self.results.is_empty() {
             return;
         }
-        let i = self.table_state.selected().unwrap_or(0);
-        self.table_state.select(Some((i + 1).min(n - 1)));
-    }
-    fn move_up(&mut self) {
-        let i = self.table_state.selected().unwrap_or(0);
-        self.table_state.select(Some(i.saturating_sub(1)));
+        let cur = self.table_state.selected().unwrap_or(0);
+        self.table_state.select(Some(motion.apply_index(
+            cur,
+            self.results.len(),
+            viewport_height,
+        )));
     }
 }
 
@@ -434,31 +426,12 @@ impl PopupView {
             .unwrap_or(0);
     }
 
-    fn move_by(&mut self, delta: i32) {
-        let n = self.items.len();
-        if n == 0 {
-            return;
-        }
-        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
-        self.selected = if delta >= 0 {
-            self.selected.saturating_add(step).min(n - 1)
-        } else {
-            self.selected.saturating_sub(step)
-        };
-    }
-
     /// Selection movement over the shared motion set.
     pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
-        match motion {
-            ScrollMotion::Down => self.move_by(1),
-            ScrollMotion::Up => self.move_by(-1),
-            ScrollMotion::Top => self.move_by(i32::MIN / 2),
-            ScrollMotion::Bottom => self.move_by(i32::MAX / 2),
-            ScrollMotion::HalfPageDown => self.move_by(i32::from(viewport_height) / 2),
-            ScrollMotion::HalfPageUp => self.move_by(-(i32::from(viewport_height) / 2)),
-            ScrollMotion::PageDown => self.move_by(i32::from(viewport_height)),
-            ScrollMotion::PageUp => self.move_by(-i32::from(viewport_height)),
+        if self.items.is_empty() {
+            return;
         }
+        self.selected = motion.apply_index(self.selected, self.items.len(), viewport_height);
     }
 }
 

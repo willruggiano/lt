@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
 use lt_types::types::Issue;
 
-use super::{App, Keymap, Scroll, StateCtx, StateEvent, Unbound, View, keymap};
+use super::{App, Keymap, ScrollMotion, StateCtx, StateEvent, Unbound, View, keymap};
 
 /// The detail pane's complete state, owned here rather than on `App`.
 pub struct DetailView {
@@ -50,12 +50,9 @@ impl DetailView {
         }
     }
 
-    fn scroll_by(&mut self, step: u16, down: bool) {
-        self.scroll = if down {
-            self.scroll.saturating_add(step)
-        } else {
-            self.scroll.saturating_sub(step)
-        };
+    /// Offset scrolling over the shared motion set.
+    pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        self.scroll = motion.apply_offset(self.scroll, viewport_height);
     }
 
     /// This pane's declared keymap: the open comment input narrows to its
@@ -67,34 +64,6 @@ impl DetailView {
         } else {
             &DETAIL_KEYMAP
         }
-    }
-}
-
-impl Scroll for DetailView {
-    fn move_down(&mut self) {
-        self.scroll = self.scroll.saturating_add(1);
-    }
-    fn move_up(&mut self) {
-        self.scroll = self.scroll.saturating_sub(1);
-    }
-    fn move_top(&mut self) {
-        self.scroll = 0;
-    }
-    fn move_bottom(&mut self) {
-        // Ratatui clamps scroll to content length; use a large sentinel.
-        self.scroll = u16::MAX;
-    }
-    fn half_page_down(&mut self, viewport_height: u16) {
-        self.scroll_by((viewport_height / 2).max(1), true);
-    }
-    fn half_page_up(&mut self, viewport_height: u16) {
-        self.scroll_by((viewport_height / 2).max(1), false);
-    }
-    fn page_down(&mut self, viewport_height: u16) {
-        self.scroll_by(viewport_height.max(1), true);
-    }
-    fn page_up(&mut self, viewport_height: u16) {
-        self.scroll_by(viewport_height.max(1), false);
     }
 }
 

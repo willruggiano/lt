@@ -172,6 +172,43 @@ pub(crate) enum ScrollMotion {
     PageUp,
 }
 
+impl ScrollMotion {
+    /// Selection movement; caller guards `len == 0`.
+    fn apply_index(self, selected: usize, len: usize, viewport_height: u16) -> usize {
+        let delta: i32 = match self {
+            ScrollMotion::Down => 1,
+            ScrollMotion::Up => -1,
+            ScrollMotion::Top => i32::MIN / 2,
+            ScrollMotion::Bottom => i32::MAX / 2,
+            ScrollMotion::HalfPageDown => i32::from(viewport_height) / 2,
+            ScrollMotion::HalfPageUp => -(i32::from(viewport_height) / 2),
+            ScrollMotion::PageDown => i32::from(viewport_height),
+            ScrollMotion::PageUp => -i32::from(viewport_height),
+        };
+        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+        if delta >= 0 {
+            selected.saturating_add(step).min(len - 1)
+        } else {
+            selected.saturating_sub(step)
+        }
+    }
+
+    /// Offset scrolling; `Bottom` saturates to `u16::MAX` -- ratatui clamps
+    /// scroll to content length.
+    fn apply_offset(self, offset: u16, viewport_height: u16) -> u16 {
+        match self {
+            ScrollMotion::Down => offset.saturating_add(1),
+            ScrollMotion::Up => offset.saturating_sub(1),
+            ScrollMotion::Top => 0,
+            ScrollMotion::Bottom => u16::MAX,
+            ScrollMotion::HalfPageDown => offset.saturating_add((viewport_height / 2).max(1)),
+            ScrollMotion::HalfPageUp => offset.saturating_sub((viewport_height / 2).max(1)),
+            ScrollMotion::PageDown => offset.saturating_add(viewport_height.max(1)),
+            ScrollMotion::PageUp => offset.saturating_sub(viewport_height.max(1)),
+        }
+    }
+}
+
 /// Map a navigation `Action` onto its `ScrollMotion`, or `None` if it isn't
 /// one.
 fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
@@ -229,19 +266,17 @@ impl ListView {
         self.table_state.selected().and_then(|i| self.issues.get(i))
     }
 
-    fn move_by(&mut self, delta: i32) {
-        let n = self.issues.len();
-        if n == 0 {
+    /// Selection movement over the shared motion set.
+    fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        if self.issues.is_empty() {
             return;
         }
         let cur = self.table_state.selected().unwrap_or(0);
-        let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
-        let new_i = if delta >= 0 {
-            cur.saturating_add(step).min(n - 1)
-        } else {
-            cur.saturating_sub(step)
-        };
-        self.table_state.select(Some(new_i));
+        self.table_state.select(Some(motion.apply_index(
+            cur,
+            self.issues.len(),
+            viewport_height,
+        )));
     }
 
     /// Only refetch while focused: a refresh must not swap the rows a popup
@@ -398,60 +433,6 @@ fn fetch_list(
 ) {
     let ctx = StateCtx { db, viewer_name };
     list.do_fetch(&ctx, reset_selection);
-}
-
-/// The eight scroll-motion primitives a stepped/offset view is built from.
-/// `move_down`/`move_up` are the only two every implementor must define; the
-/// rest default to no-ops for views with no half-page/top/bottom concept.
-trait Scroll {
-    fn move_down(&mut self);
-    fn move_up(&mut self);
-    fn move_top(&mut self) {}
-    fn move_bottom(&mut self) {}
-    fn half_page_down(&mut self, _viewport_height: u16) {}
-    fn half_page_up(&mut self, _viewport_height: u16) {}
-    fn page_down(&mut self, _viewport_height: u16) {}
-    fn page_up(&mut self, _viewport_height: u16) {}
-
-    fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
-        match motion {
-            ScrollMotion::Down => self.move_down(),
-            ScrollMotion::Up => self.move_up(),
-            ScrollMotion::Top => self.move_top(),
-            ScrollMotion::Bottom => self.move_bottom(),
-            ScrollMotion::HalfPageDown => self.half_page_down(viewport_height),
-            ScrollMotion::HalfPageUp => self.half_page_up(viewport_height),
-            ScrollMotion::PageDown => self.page_down(viewport_height),
-            ScrollMotion::PageUp => self.page_up(viewport_height),
-        }
-    }
-}
-
-impl Scroll for ListView {
-    fn move_down(&mut self) {
-        self.move_by(1);
-    }
-    fn move_up(&mut self) {
-        self.move_by(-1);
-    }
-    fn move_top(&mut self) {
-        self.move_by(i32::MIN / 2);
-    }
-    fn move_bottom(&mut self) {
-        self.move_by(i32::MAX / 2);
-    }
-    fn half_page_down(&mut self, viewport_height: u16) {
-        self.move_by(i32::from(viewport_height) / 2);
-    }
-    fn half_page_up(&mut self, viewport_height: u16) {
-        self.move_by(-(i32::from(viewport_height) / 2));
-    }
-    fn page_down(&mut self, viewport_height: u16) {
-        self.move_by(i32::from(viewport_height));
-    }
-    fn page_up(&mut self, viewport_height: u16) {
-        self.move_by(-i32::from(viewport_height));
-    }
 }
 
 /// Read-only context a view's consume/re-query needs. Built inline from
@@ -1381,3 +1362,67 @@ pub(crate) static ALL_KEYMAPS: &[(&str, &Keymap)] = &[
     ("search", &popup::SEARCH_KEYMAP),
     ("help", &popup::HELP_KEYMAP),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::ScrollMotion;
+
+    #[test]
+    fn apply_index_steps_down_and_up() {
+        assert_eq!(ScrollMotion::Down.apply_index(2, 5, 10), 3);
+        assert_eq!(ScrollMotion::Up.apply_index(2, 5, 10), 1);
+    }
+
+    #[test]
+    fn apply_index_top_and_bottom_saturate() {
+        assert_eq!(ScrollMotion::Top.apply_index(3, 5, 10), 0);
+        assert_eq!(ScrollMotion::Bottom.apply_index(0, 5, 10), 4);
+    }
+
+    #[test]
+    fn apply_index_saturates_at_both_ends() {
+        assert_eq!(ScrollMotion::Up.apply_index(0, 5, 10), 0);
+        assert_eq!(ScrollMotion::Down.apply_index(4, 5, 10), 4);
+    }
+
+    #[test]
+    fn apply_index_half_page_and_page_steps() {
+        assert_eq!(ScrollMotion::HalfPageDown.apply_index(0, 100, 10), 5);
+        assert_eq!(ScrollMotion::HalfPageUp.apply_index(20, 100, 10), 15);
+        assert_eq!(ScrollMotion::PageDown.apply_index(0, 100, 10), 10);
+        assert_eq!(ScrollMotion::PageUp.apply_index(20, 100, 10), 10);
+    }
+
+    #[test]
+    fn apply_offset_steps_down_and_up() {
+        assert_eq!(ScrollMotion::Down.apply_offset(2, 10), 3);
+        assert_eq!(ScrollMotion::Up.apply_offset(2, 10), 1);
+    }
+
+    #[test]
+    fn apply_offset_top_and_bottom() {
+        assert_eq!(ScrollMotion::Top.apply_offset(42, 10), 0);
+        assert_eq!(ScrollMotion::Bottom.apply_offset(0, 10), u16::MAX);
+    }
+
+    #[test]
+    fn apply_offset_saturates_at_both_ends() {
+        assert_eq!(ScrollMotion::Up.apply_offset(0, 10), 0);
+        assert_eq!(ScrollMotion::Down.apply_offset(u16::MAX, 10), u16::MAX);
+    }
+
+    #[test]
+    fn apply_offset_half_page_and_page_steps() {
+        assert_eq!(ScrollMotion::HalfPageDown.apply_offset(0, 10), 5);
+        assert_eq!(ScrollMotion::HalfPageUp.apply_offset(20, 10), 15);
+        assert_eq!(ScrollMotion::PageDown.apply_offset(0, 10), 10);
+        assert_eq!(ScrollMotion::PageUp.apply_offset(20, 10), 10);
+    }
+
+    #[test]
+    fn apply_offset_half_page_and_page_floor_at_one_step() {
+        // A viewport under 2 rows still steps by at least one line.
+        assert_eq!(ScrollMotion::HalfPageDown.apply_offset(0, 1), 1);
+        assert_eq!(ScrollMotion::PageDown.apply_offset(5, 0), 6);
+    }
+}

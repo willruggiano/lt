@@ -1096,6 +1096,30 @@ fn new_issue_modal_team_event_for_a_different_team_falls_through() {
 }
 
 #[test]
+fn new_issue_team_picker_g_selects_the_last_team() {
+    // `G` in the new-issue Team picker moves to the last item -- previously
+    // a no-op via `Scroll`'s trait defaults.
+    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    let mut modal = bare_new_issue_modal();
+    modal.focused_field = NewIssueField::Title;
+    modal.teams = (0..5)
+        .map(|i| PopupItem {
+            label: format!("team-{i}"),
+            id: Some(i.to_string()),
+        })
+        .collect();
+    app.views.push(View::NewIssue(modal));
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.dispatch_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+
+    let Some(View::NewIssue(modal)) = app.views.last() else {
+        unreachable!("new-issue view expected")
+    };
+    assert_eq!(modal.team_selected, modal.teams.len() - 1);
+}
+
+#[test]
 fn popup_team_event_rebuilds_items_and_reanchors_selection() {
     // `State(Team{T})` with `Popup { team_id: Some(T) }`: rebuild `items`
     // from the cache and re-anchor the selection by item id.
