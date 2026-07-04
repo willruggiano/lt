@@ -6,15 +6,15 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lt-types.workspace = true
-lt-runtime.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
-open.workspace = true
-# Crate-specific: only the TUI renders and reads the terminal.
 crossterm = "0.29"
+lt-runtime.workspace = true
+lt-types.workspace = true
+open.workspace = true
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.0"
+tracing.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

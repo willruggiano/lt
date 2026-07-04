@@ -6,7 +6,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use lt_config::{self, AuthToken};
 use sha2::{Digest, Sha256};
-use tracing::info;
+use tracing::{info, warn};
 
 const CALLBACK_PORT: u16 = 7342;
 const AUTH_URL: &str = "https://linear.app/oauth/authorize";
@@ -104,8 +104,11 @@ struct RealBrowser;
 
 impl Browser for RealBrowser {
     fn open(&self, url: &str) {
-        // Best-effort: ignore errors from open (headless environments, etc.)
-        let _ = open::that(url);
+        // Best-effort: headless environments etc. still have the URL logged
+        // above; a failure to launch a browser is not fatal to the flow.
+        if let Err(e) = open::that(url) {
+            warn!(error = %e, "failed to open browser for OAuth authorization");
+        }
     }
 }
 
@@ -298,23 +301,31 @@ impl CallbackListener for TcpCallbackListener {
 
             match parse_callback_request(raw, expected_state) {
                 CallbackOutcome::Ignore => {
-                    let _ = http_reply(&mut stream, 404, "Not found");
+                    if let Err(e) = http_reply(&mut stream, 404, "Not found") {
+                        warn!(error = %e, "failed to write OAuth callback response");
+                    }
                 }
                 CallbackOutcome::StateMismatch => {
-                    let _ = http_reply(&mut stream, 400, "State mismatch");
+                    if let Err(e) = http_reply(&mut stream, 400, "State mismatch") {
+                        warn!(error = %e, "failed to write OAuth callback response");
+                    }
                     return Err(anyhow!("state mismatch in OAuth callback (possible CSRF)"));
                 }
                 CallbackOutcome::Code(code) => {
-                    let _ = http_reply(
+                    if let Err(e) = http_reply(
                         &mut stream,
                         200,
                         "<html><body><h2>Authorization complete.</h2>\
                          <p>You may close this tab.</p></body></html>",
-                    );
+                    ) {
+                        warn!(error = %e, "failed to write OAuth callback response");
+                    }
                     return Ok(code);
                 }
                 CallbackOutcome::Denied(error) => {
-                    let _ = http_reply(&mut stream, 400, "Authorization failed");
+                    if let Err(e) = http_reply(&mut stream, 400, "Authorization failed") {
+                        warn!(error = %e, "failed to write OAuth callback response");
+                    }
                     return Err(anyhow!("authorization denied: {error}"));
                 }
             }
@@ -397,7 +408,10 @@ impl TokenExchanger for UreqTokenExchanger {
         match result {
             Ok(mut resp) => {
                 let status = resp.status().as_u16();
-                let body = resp.body_mut().read_to_string().unwrap_or_default();
+                let body = resp
+                    .body_mut()
+                    .read_to_string()
+                    .context("reading token exchange response body")?;
                 Ok((status, body))
             }
             Err(e) => Err(anyhow::Error::from(e)),

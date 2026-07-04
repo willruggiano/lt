@@ -6,58 +6,73 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
 
 use super::util::{TableSpec, render_issue_table, to_u16};
-use crate::{App, Mode, PopupKind, Status};
+use crate::{FetchStatus, ListView, PopupKind};
 
-pub(super) fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
-    let overlay: Option<String> = match &app.status {
-        Status::Error(msg) => Some(format!("Error: {msg}")),
-        Status::Loading => Some("Loading...".to_string()),
-        Status::Idle => None,
+/// Render the base issue table into `area`. Returns the rendered column
+/// widths, or `None` when a loading/error overlay or the empty-list message
+/// was shown instead -- `popup_anchor` only applies over a rendered table.
+pub(super) fn render_table(
+    frame: &mut Frame,
+    area: Rect,
+    list: &mut ListView,
+) -> Option<[usize; 7]> {
+    let overlay: Option<String> = match &list.status {
+        FetchStatus::Error(msg) => Some(format!("Error: {msg}")),
+        FetchStatus::Loading => Some("Loading...".to_string()),
+        FetchStatus::Idle => None,
     };
     if let Some(msg) = overlay {
         frame.render_widget(Paragraph::new(msg), area);
-        return;
+        return None;
     }
 
-    if app.issues.is_empty() {
+    if list.issues.is_empty() {
         frame.render_widget(Paragraph::new("No issues found."), area);
-        return;
+        return None;
     }
 
-    let sort_col = sort_col_index(&app.args.sort);
+    let sort_col = sort_col_index(&list.args.sort);
+    let desc = list.args.desc;
     let widths = render_issue_table(
         frame,
         area,
         &TableSpec {
-            issues: &app.issues,
+            issues: &list.issues,
             sort_col,
-            desc: app.args.desc,
+            desc,
             cells: row_cells,
         },
-        &mut app.table_state,
+        &mut list.table_state,
     );
+    Some(widths)
+}
 
-    // Compute anchor rect for the popup.
-    // Column mapping: 2=State, 3=Priority, 4=Assignee.
-    // We position the anchor below the selected row at the relevant column x.
-    if let Mode::Popup(ref kind) = app.mode {
-        let col_idx: usize = match kind {
-            PopupKind::State => 2,
-            PopupKind::Priority => 3,
-            PopupKind::Assignee => 4,
-        };
-        // Compute x offset of the target column (each column is widths[i] + 2 spacing).
-        let col_x: u16 = widths[..col_idx]
-            .iter()
-            .map(|w| to_u16(*w) + 2)
-            .sum::<u16>()
-            + area.x;
-        let col_w = to_u16(widths[col_idx]);
-        // Row y: area.y + 1 (header) + selected index + 1 (below row).
-        let sel = to_u16(app.table_state.selected().unwrap_or(0));
-        let row_y = area.y + 1 + sel + 1;
-        app.popup_anchor = Some(ratatui::layout::Rect::new(col_x, row_y, col_w, 1));
-    }
+/// The state/priority/assignee popup's anchor when it sits directly on the
+/// base list (an exact two-view stack): the target column's x offset plus
+/// the row below the selected issue, from the base table's rendered column
+/// widths. A popup over any other stack shape leaves `anchor` `None`, and
+/// `render_popup` centers instead.
+pub(super) fn popup_anchor(
+    area: Rect,
+    widths: &[usize],
+    selected: usize,
+    kind: &PopupKind,
+) -> Rect {
+    let col_idx: usize = match kind {
+        PopupKind::State => 2,
+        PopupKind::Priority => 3,
+        PopupKind::Assignee => 4,
+    };
+    // Compute x offset of the target column (each column is widths[i] + 2 spacing).
+    let col_x: u16 = widths[..col_idx]
+        .iter()
+        .map(|w| to_u16(*w) + 2)
+        .sum::<u16>()
+        + area.x;
+    let col_w = to_u16(widths[col_idx]);
+    // Row y: area.y + 1 (header) + selected index + 1 (below row).
+    let row_y = area.y + 1 + to_u16(selected) + 1;
+    Rect::new(col_x, row_y, col_w, 1)
 }
 
 pub(super) fn row_cells(issue: &Issue) -> [String; 7] {

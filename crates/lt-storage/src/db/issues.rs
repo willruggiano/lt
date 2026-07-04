@@ -138,11 +138,14 @@ pub(crate) fn upsert_issue_tx(
         issue.team.id.inner(),
         Some(&issue.team.name),
     )?;
-    upsert_named_entity(
+    // Every issue upsert knows its state's team, so the team-scoped upsert
+    // back-fills `team_id` for free; `position` stays whatever a targeted
+    // team sync last recorded (`sql::UPSERT_WORKFLOW_STATE_SCOPED`).
+    crate::db::teams::upsert_workflow_state_team_only(
         tx,
-        EntityTable::WorkflowStates,
         issue.state.id.inner(),
-        Some(&issue.state.name),
+        &issue.state.name,
+        issue.team.id.inner(),
     )?;
     if let Some(a) = &issue.assignee {
         upsert_named_entity(tx, EntityTable::Users, a.id.inner(), Some(&a.name))?;

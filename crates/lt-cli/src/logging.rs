@@ -82,8 +82,10 @@ fn prune_old_logs(dir: &std::path::Path, days: u64) {
         let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
             continue;
         };
-        if mtime < threshold {
-            let _ = std::fs::remove_file(&path);
+        if mtime < threshold
+            && let Err(e) = std::fs::remove_file(&path)
+        {
+            tracing::warn!(error = %e, path = %path.display(), "failed to remove old log file");
         }
     }
 }

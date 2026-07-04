@@ -1,5 +1,6 @@
 ---
-source: src/tui/mod.rs
+source: crates/lt-tui/src/render_tests.rs
+assertion_line: 344
 expression: "draw(&mut app, 100, 30)"
 ---
 "user:Ada Lovelace  org:Acme  sort:updated-                                                          "
@@ -31,4 +32,4 @@ expression: "draw(&mut app, 100, 30)"
 "                                                                                                    "
 "                                                                                                    "
 "                                                                                                    "
-"q quit  / filter  ? help  j/k nav  <space> detail  n new                                         [1]"
+"q quit  / filter  ? help  j/k nav  <space> detail  n new                             not synced  [1]"

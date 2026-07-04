@@ -1,10 +1,12 @@
-use std::sync::{Arc, mpsc};
-
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lt_runtime::db::Connection;
+use lt_runtime::sync::service::Scope;
 use lt_types::types::User;
-use lt_types::viewer;
 
-use super::{App, Mode, PopupItem, TextInput, priority_popup_items};
+use super::{
+    App, KeyFlow, PopupItem, StateCtx, StateEvent, TextInput, View, priority_popup_items,
+    state_items,
+};
 
 // ---------------------------------------------------------------------------
 // New-issue modal state
@@ -44,20 +46,6 @@ impl NewIssueField {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Events for modal background loading
-// ---------------------------------------------------------------------------
-
-/// Events sent from background threads that load modal picker data.
-pub enum ModalEvent {
-    /// States loaded for the selected team.
-    StatesLoaded(Vec<PopupItem>),
-    /// Assignees loaded for the selected team, plus an optional viewer ID.
-    AssigneesLoaded(Vec<PopupItem>),
-    /// Loading error.
-    LoadError(String),
-}
-
 /// All mutable state for the new-issue modal form.
 pub struct NewIssueModal {
     pub focused_field: NewIssueField,
@@ -79,13 +67,129 @@ pub struct NewIssueModal {
     pub assignees: Vec<PopupItem>,
     pub assignee_selected: usize,
 
-    /// True while we are waiting for picker data to load.
+    /// True while a targeted team refresh is in flight.
     pub loading: bool,
-    /// Non-empty when a load or submit error occurred.
+    /// Non-empty on submit validation failure. Per-fetch errors are not
+    /// surfaced here (offline, every targeted refresh would fail, making the
+    /// field constant noise); those go to `tracing`.
     pub error: String,
+    /// The team scope the service is currently watching on this modal's
+    /// behalf, distinct from `team_selected` (the live picker cursor, which
+    /// can move via j/k before the user tabs away and commits it). Diffed by
+    /// `new_issue_team_changed` to unwatch the old team and watch the new
+    /// one in the same handler (Decision 3).
+    pub watched_team_id: Option<String>,
+}
 
-    /// Receiver for background-loaded modal data.
-    pub modal_rx: Option<mpsc::Receiver<ModalEvent>>,
+impl NewIssueModal {
+    /// This modal's own team-id lookup, deduplicating the call sites that
+    /// need it: submit validation, the `Team{team_id}` consume guard, and
+    /// `View::scopes()`.
+    pub(crate) fn selected_team_id(&self) -> Option<String> {
+        self.teams
+            .get(self.team_selected)
+            .and_then(|t| t.id.clone())
+    }
+
+    /// `Teams`: re-read the team list and re-anchor the selection by id
+    /// (fallback index 0). `Team{team_id}`, guarded by `selected_team_id()`
+    /// matching: re-read states/members, preserving the user's picks by item
+    /// id, and clear `loading`. A team-id mismatch (a stale refresh for a
+    /// team the user has since tabbed away from) falls through.
+    pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
+        match ev {
+            StateEvent::Teams => {
+                let conn = match ctx.db.connect() {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "new-issue modal: failed to open db connection");
+                        return;
+                    }
+                };
+                let teams = match lt_runtime::db::query_teams(&conn) {
+                    Ok(teams) => teams,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "new-issue modal: failed to query teams");
+                        return;
+                    }
+                };
+                let current_id = self.selected_team_id();
+                self.teams = teams.into_iter().map(PopupItem::from).collect();
+                self.team_selected = reanchor(&self.teams, current_id.as_deref());
+            }
+            StateEvent::Team { team_id }
+                if self.selected_team_id().as_deref() == Some(team_id.as_str()) =>
+            {
+                let conn = match ctx.db.connect() {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "new-issue modal: failed to open db connection");
+                        return;
+                    }
+                };
+                let current_state = self
+                    .states
+                    .get(self.state_selected)
+                    .and_then(|s| s.id.clone());
+                self.states = state_items(&conn, team_id);
+                self.state_selected = reanchor(&self.states, current_state.as_deref());
+
+                let current_assignee = self
+                    .assignees
+                    .get(self.assignee_selected)
+                    .and_then(|a| a.id.clone());
+                self.assignees = assignee_items(&conn, team_id);
+                self.assignee_selected = reanchor(&self.assignees, current_assignee.as_deref());
+
+                self.loading = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The modal's assignee picker items for `team_id`: `build_assignee_items`
+/// fed by the persisted `db::synced_viewer` and `query_team_members`.
+/// `state_items` (the states half) is shared with the state popup --
+/// imported from `popup`, not redefined here.
+fn assignee_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
+    let viewer = match lt_runtime::db::synced_viewer(conn) {
+        Ok(viewer) => viewer,
+        Err(e) => {
+            tracing::warn!(error = %e, "new-issue modal: failed to read synced viewer");
+            None
+        }
+    };
+    let members = lt_runtime::db::query_team_members(conn, team_id).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, team_id, "new-issue modal: failed to query team members");
+        Vec::new()
+    });
+    build_assignee_items(viewer.as_ref(), members)
+}
+
+/// `state_items`/`assignee_items` for `team_id`, opening a fresh connection.
+/// Empty on a connection failure (offline-safe: the caller just sees an
+/// empty picker until the background refresh lands).
+fn team_scoped_items(
+    db: &lt_runtime::db::Database,
+    team_id: &str,
+) -> (Vec<PopupItem>, Vec<PopupItem>) {
+    match db.connect() {
+        Ok(conn) => (state_items(&conn, team_id), assignee_items(&conn, team_id)),
+        Err(e) => {
+            tracing::warn!(error = %e, "new-issue modal: failed to open db connection");
+            (Vec::new(), Vec::new())
+        }
+    }
+}
+
+/// Find `id`'s position in `items`, falling back to index 0 when it is gone
+/// (or `id` is `None`, e.g. nothing was selected yet).
+fn reanchor(items: &[PopupItem], id: Option<&str>) -> usize {
+    items
+        .iter()
+        .position(|item| item.id.as_deref() == id)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -94,199 +198,124 @@ pub struct NewIssueModal {
 
 impl super::App {
     pub(crate) fn open_new_issue_modal(&mut self) {
-        // Pre-fill team from active filter if set.
-        let preset_team = self.args.team.clone();
+        // Pre-fill team from the base list's active filter if set.
+        let preset_team = match self.base() {
+            View::List(list) => list.args.team.clone(),
+            _ => None,
+        };
 
-        let mut modal = NewIssueModal {
+        let teams: Vec<PopupItem> = self
+            .db
+            .connect()
+            .and_then(|conn| lt_runtime::db::query_teams(&conn))
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "new-issue modal: failed to load teams");
+                Vec::new()
+            })
+            .into_iter()
+            .map(PopupItem::from)
+            .collect();
+
+        let team_selected = preset_team
+            .as_ref()
+            .and_then(|preset| {
+                teams
+                    .iter()
+                    .position(|t| t.label.to_lowercase().contains(&preset.to_lowercase()))
+            })
+            .unwrap_or(0);
+        let team_id = teams.get(team_selected).and_then(|t| t.id.clone());
+        let (states, assignees) = match &team_id {
+            Some(id) => team_scoped_items(&self.db, id),
+            None => (Vec::new(), Vec::new()),
+        };
+
+        self.push_view(View::NewIssue(NewIssueModal {
             focused_field: NewIssueField::Title,
             title: TextInput::new(),
             description: String::new(),
-            teams: Vec::new(),
-            team_selected: 0,
+            teams,
+            team_selected,
             priorities: priority_popup_items(),
             priority_selected: 0,
-            states: Vec::new(),
+            states,
             state_selected: 0,
-            assignees: Vec::new(),
+            assignees,
             assignee_selected: 0,
             loading: true,
             error: String::new(),
-            modal_rx: None,
-        };
+            watched_team_id: team_id,
+        }));
+    }
 
-        // Fetch teams synchronously (fast -- just a list).
-        match self.service.fetch_teams() {
-            Ok(teams) => {
-                modal.teams = teams
-                    .into_iter()
-                    .map(|t| PopupItem {
-                        label: t.name.clone(),
-                        id: Some(t.id.into_inner()),
-                    })
-                    .collect();
-                // Pre-select team from filter.
-                if let Some(ref preset) = preset_team
-                    && let Some(idx) = modal
-                        .teams
-                        .iter()
-                        .position(|t| t.label.to_lowercase().contains(&preset.to_lowercase()))
-                {
-                    modal.team_selected = idx;
-                }
-                modal.loading = false;
+    /// Leaving the Team field (Tab/Enter): unwatch the previously-watched
+    /// team and watch the newly-selected one (Decision 3), then an instant
+    /// read for it.
+    fn new_issue_team_changed(&mut self, i: usize) {
+        let (old_team_id, new_team_id) = match self.views.get(i) {
+            Some(View::NewIssue(modal)) => {
+                (modal.watched_team_id.clone(), modal.selected_team_id())
             }
-            Err(e) => {
-                modal.error = format!("Failed to fetch teams: {e}");
-                modal.loading = false;
+            _ => return,
+        };
+        if old_team_id != new_team_id {
+            if let Some(old) = old_team_id {
+                self.service.unwatch(Scope::Team { team_id: old });
+            }
+            if let Some(new) = new_team_id.clone() {
+                self.service.watch(Scope::Team { team_id: new });
+            }
+            if let Some(View::NewIssue(modal)) = self.views.get_mut(i) {
+                modal.watched_team_id.clone_from(&new_team_id);
             }
         }
 
-        self.mode = Mode::NewIssue;
-        self.new_issue_modal = Some(modal);
-    }
-
-    /// Kick off background loading of states and assignees for the selected team.
-    fn new_issue_load_states_and_assignees_bg(&mut self) {
-        let service = Arc::clone(&self.service);
-        let Some(modal) = self.new_issue_modal.as_mut() else {
-            return;
-        };
-        let Some(team_id) = modal
-            .teams
-            .get(modal.team_selected)
-            .and_then(|t| t.id.clone())
-        else {
+        let Some(team_id) = new_team_id else {
             return;
         };
 
-        modal.loading = true;
-        modal.error.clear();
-
-        let (tx, rx) = mpsc::channel::<ModalEvent>();
-        modal.modal_rx = Some(rx);
-
-        std::thread::spawn(move || {
-            // Fetch viewer for "me" shortcut.
-            let viewer = service.fetch_viewer();
-
-            // Fetch states.
-            match service.fetch_workflow_states(&team_id) {
-                Ok(states) => {
-                    let items: Vec<PopupItem> = states
-                        .into_iter()
-                        .map(|s| PopupItem {
-                            label: s.name,
-                            id: Some(s.id.into_inner()),
-                        })
-                        .collect();
-                    let _ = tx.send(ModalEvent::StatesLoaded(items));
-                }
-                Err(e) => {
-                    let _ = tx.send(ModalEvent::LoadError(format!(
-                        "Failed to fetch states: {e}"
-                    )));
-                    return;
-                }
-            }
-
-            // Fetch assignees.
-            match service.fetch_team_members(&team_id) {
-                Ok(members) => {
-                    let items = build_assignee_items(viewer.as_ref(), members);
-                    let _ = tx.send(ModalEvent::AssigneesLoaded(items));
-                }
-                Err(e) => {
-                    let _ = tx.send(ModalEvent::LoadError(format!(
-                        "Failed to fetch assignees: {e}"
-                    )));
-                }
-            }
-        });
+        let (states, assignees) = team_scoped_items(&self.db, &team_id);
+        if let Some(View::NewIssue(modal)) = self.views.get_mut(i) {
+            modal.states = states;
+            modal.state_selected = 0;
+            modal.assignees = assignees;
+            modal.assignee_selected = 0;
+            modal.loading = true;
+        }
     }
 
-    fn new_issue_submit(&mut self) {
-        let Some(modal) = self.new_issue_modal.as_ref() else {
+    fn new_issue_submit(&mut self, i: usize) {
+        let Some(View::NewIssue(modal)) = self.views.get(i) else {
             return;
         };
 
         if modal.title.value.trim().is_empty() {
-            if let Some(m) = self.new_issue_modal.as_mut() {
+            if let Some(View::NewIssue(m)) = self.views.get_mut(i) {
                 m.error = "Title is required".to_string();
                 m.focused_field = NewIssueField::Title;
             }
             return;
         }
 
-        let Some(team_id) = modal
-            .teams
-            .get(modal.team_selected)
-            .and_then(|t| t.id.clone())
-        else {
-            if let Some(m) = self.new_issue_modal.as_mut() {
+        let Some(team_id) = modal.selected_team_id() else {
+            if let Some(View::NewIssue(m)) = self.views.get_mut(i) {
                 m.error = "Select a team".to_string();
             }
             return;
         };
 
-        // Offline create: write an optimistic temp row and queue the command.
-        // The sync drainer posts it and reconciles the temp id with the server.
-        let (input, optimistic) = build_create_request(modal, team_id);
-        let result = lt_runtime::db::db_path()
-            .and_then(lt_runtime::db::open_db)
-            .and_then(|conn| {
-                lt_runtime::db::outbox::enqueue_issue_create(&conn, &optimistic, &input)
-            });
-
-        match result {
-            Ok(()) => {
-                let identifier = optimistic.identifier.clone();
-                self.mode = Mode::List;
-                self.new_issue_modal = None;
+        let input = build_issue_create_input(modal, &team_id);
+        match self.service.create_issue(&input) {
+            Ok(identifier) => {
+                self.pop_view();
                 self.footer_msg = Some("Created issue (pending sync)".to_string());
-                self.do_fetch_and_select(Some(identifier));
+                if let View::List(list) = self.base_mut() {
+                    list.pending_select = Some(identifier);
+                }
             }
             Err(e) => {
-                if let Some(m) = self.new_issue_modal.as_mut() {
+                if let Some(View::NewIssue(m)) = self.views.get_mut(i) {
                     m.error = format!("Failed to queue issue: {e}");
-                }
-            }
-        }
-    }
-
-    /// Poll modal background channel and update modal state.
-    pub(crate) fn poll_modal_events(&mut self) {
-        // Collect events before mutating -- avoids borrow issues.
-        let events: Vec<ModalEvent> = {
-            let Some(modal) = self.new_issue_modal.as_ref() else {
-                return;
-            };
-            let Some(rx) = modal.modal_rx.as_ref() else {
-                return;
-            };
-            let mut evts = Vec::new();
-            while let Ok(ev) = rx.try_recv() {
-                evts.push(ev);
-            }
-            evts
-        };
-
-        for ev in events {
-            let Some(modal) = self.new_issue_modal.as_mut() else {
-                break;
-            };
-            match ev {
-                ModalEvent::StatesLoaded(items) => {
-                    modal.states = items;
-                    modal.state_selected = 0;
-                }
-                ModalEvent::AssigneesLoaded(items) => {
-                    modal.assignees = items;
-                    modal.assignee_selected = 0;
-                    modal.loading = false;
-                }
-                ModalEvent::LoadError(msg) => {
-                    modal.error = msg;
-                    modal.loading = false;
                 }
             }
         }
@@ -297,88 +326,50 @@ impl super::App {
 // Issue creation
 // ---------------------------------------------------------------------------
 
-/// Build the typed `issueCreate` input and the optimistic issue fragment from
-/// the modal's current selections. The optimistic fragment carries a `local:`
-/// temp id and a `NEW` placeholder identifier; the drainer rewrites both with
-/// the server's values on ack. `team_id` is the resolved (validated) team id.
-fn build_create_request(
+/// Build the typed `issueCreate` input (ids only) from the modal's current
+/// picker selections. `team_id` is the resolved (validated) team id. The
+/// optimistic issue fragment used to live here too; it moved into
+/// `LinearSyncService::create_issue`, which resolves display names from its
+/// own lookup tables -- the fragment is a database row, not presentation.
+fn build_issue_create_input(
     modal: &NewIssueModal,
-    team_id: String,
-) -> (lt_types::inputs::IssueCreateInput, lt_types::types::Issue) {
-    use lt_types::types;
-
+    team_id: &str,
+) -> lt_types::inputs::IssueCreateInput {
     let title = modal.title.value.trim().to_string();
     let description = if modal.description.trim().is_empty() {
         None
     } else {
         Some(modal.description.trim().to_string())
     };
-    let state = modal.states.get(modal.state_selected);
-    let state_id = state.and_then(|s| s.id.clone());
-    let state_name = state.map_or_else(|| "Backlog".to_string(), |s| s.label.clone());
+    let state_id = modal
+        .states
+        .get(modal.state_selected)
+        .and_then(|s| s.id.clone());
     let priority = modal
         .priorities
         .get(modal.priority_selected)
         .and_then(|p| p.id.as_ref())
         .and_then(|s| s.parse::<u8>().ok());
-    let assignee = modal.assignees.get(modal.assignee_selected);
-    let assignee_id = assignee.and_then(|a| a.id.clone());
-    let team_name = modal
-        .teams
-        .get(modal.team_selected)
-        .map(|t| t.label.clone())
-        .unwrap_or_default();
+    let assignee_id = modal
+        .assignees
+        .get(modal.assignee_selected)
+        .and_then(|a| a.id.clone());
 
-    let input = lt_types::inputs::IssueCreateInput {
-        title: title.clone(),
-        team_id: team_id.clone(),
-        description: description.clone(),
-        state_id: state_id.clone(),
-        priority: priority.map(i32::from),
-        assignee_id: assignee_id.clone(),
-    };
-
-    let priority = priority.unwrap_or(0);
-    let now = lt_types::scalars::DateTime(chrono::Utc::now());
-    let optimistic = types::Issue {
-        id: lt_runtime::db::outbox::temp_id().into(),
-        identifier: "NEW".to_string(),
+    lt_types::inputs::IssueCreateInput {
         title,
-        priority: lt_types::scalars::Priority(priority),
-        priority_label: types::priority_u8_to_label(priority).to_string(),
-        // Fall back to a name-keyed id when the modal lacked one so the
-        // relational join still resolves a label.
-        state: types::WorkflowState {
-            id: state_id.unwrap_or_else(|| state_name.clone()).into(),
-            name: state_name,
-        },
-        assignee: assignee_id.map(|id| types::User {
-            id: id.into(),
-            name: assignee.map(|a| a.label.clone()).unwrap_or_default(),
-        }),
-        team: types::Team {
-            id: team_id.into(),
-            name: team_name,
-        },
+        team_id: team_id.to_string(),
         description,
-        labels: types::IssueLabelConnection { nodes: Vec::new() },
-        project: None,
-        cycle: None,
-        creator: None,
-        parent: None,
-        created_at: now,
-        updated_at: now,
-    };
-
-    (input, optimistic)
+        state_id,
+        priority: priority.map(i32::from),
+        assignee_id,
+    }
 }
 
 /// Build the assignee popup items: "Me (name)" at top if the viewer is known,
 /// then "Unassigned", then the remaining team members (excluding the viewer).
-pub(crate) fn build_assignee_items(
-    viewer: Option<&viewer::User>,
-    members: Vec<User>,
-) -> Vec<PopupItem> {
+/// `viewer` is the persisted `db::synced_viewer` -- offline-safe, absent
+/// before the first successful sync.
+pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = Vec::new();
     if let Some(v) = viewer {
         items.push(PopupItem {
@@ -395,10 +386,7 @@ pub(crate) fn build_assignee_items(
         if viewer.is_some_and(|v| v.id.inner() == m.id.inner()) {
             continue;
         }
-        items.push(PopupItem {
-            label: m.name,
-            id: Some(m.id.into_inner()),
-        });
+        items.push(m.into());
     }
     items
 }
@@ -407,7 +395,9 @@ pub(crate) fn build_assignee_items(
 // Key handlers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    let code = key.code;
+    let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     let alt = modifiers.contains(KeyModifiers::ALT);
@@ -415,19 +405,19 @@ pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyM
     // Ctrl-Enter submits the form (Alt-Enter on terminals that cannot
     // distinguish Ctrl-Enter from Enter).
     if (ctrl || alt) && code == KeyCode::Enter {
-        app.new_issue_submit();
-        return;
+        app.new_issue_submit(i);
+        return KeyFlow::Consumed;
     }
 
-    // Esc cancels.
+    // Esc is not bound here: it resolves at the floor (Decision 6). Checked
+    // before the per-field dispatch below so it isn't swallowed as literal
+    // text by the Title/Description fields.
     if code == KeyCode::Esc {
-        app.mode = Mode::List;
-        app.new_issue_modal = None;
-        return;
+        return KeyFlow::Pass;
     }
 
-    let Some(modal) = app.new_issue_modal.as_mut() else {
-        return;
+    let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
+        return KeyFlow::Consumed;
     };
 
     match &modal.focused_field.clone() {
@@ -449,13 +439,11 @@ pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyM
             let field = field.clone();
             match code {
                 KeyCode::Tab if !shift => {
-                    // When leaving Team field, pre-load states and assignees in background.
+                    // When leaving Team field, refresh states and assignees.
                     if field == NewIssueField::Team {
                         let next = modal.focused_field.next();
                         modal.focused_field = next;
-                        // Release the mutable borrow before calling the method.
-                        let _ = modal;
-                        app.new_issue_load_states_and_assignees_bg();
+                        app.new_issue_team_changed(i);
                     } else {
                         modal.focused_field = modal.focused_field.next();
                     }
@@ -487,9 +475,7 @@ pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyM
                     if field == NewIssueField::Team {
                         let next = modal.focused_field.next();
                         modal.focused_field = next;
-                        // Release the mutable borrow before calling the method.
-                        let _ = modal;
-                        app.new_issue_load_states_and_assignees_bg();
+                        app.new_issue_team_changed(i);
                     } else {
                         modal.focused_field = modal.focused_field.next();
                     }
@@ -498,6 +484,7 @@ pub(crate) fn handle_new_issue_key(app: &mut App, code: KeyCode, modifiers: KeyM
             }
         }
     }
+    KeyFlow::Consumed
 }
 
 /// Handle a key press while the new-issue Description field is focused.

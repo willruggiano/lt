@@ -1,11 +1,13 @@
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lt_runtime::db::Connection;
+use lt_runtime::query::IssueQuery;
 use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{ALL_KEYBINDINGS, App, Mode, TextInput};
+use super::{ALL_KEYBINDINGS, App, KeyFlow, ScrollMotion, StateCtx, StateEvent, TextInput, View};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -23,6 +25,50 @@ pub struct PopupItem {
     /// Opaque ID sent to the Linear API (state id, assignee id, etc.).
     /// None means "unassign" for the assignee popup.
     pub id: Option<String>,
+}
+
+impl From<lt_types::types::Team> for PopupItem {
+    fn from(team: lt_types::types::Team) -> Self {
+        Self {
+            label: team.name,
+            id: Some(team.id.into_inner()),
+        }
+    }
+}
+
+impl From<lt_types::types::WorkflowState> for PopupItem {
+    fn from(state: lt_types::types::WorkflowState) -> Self {
+        Self {
+            label: state.name,
+            id: Some(state.id.into_inner()),
+        }
+    }
+}
+
+impl From<lt_types::types::User> for PopupItem {
+    fn from(user: lt_types::types::User) -> Self {
+        Self {
+            label: user.name,
+            id: Some(user.id.into_inner()),
+        }
+    }
+}
+
+/// State/priority/assignee picker: the popup's items plus the target
+/// captured at open.
+pub struct PopupView {
+    pub kind: PopupKind,
+    /// Target issue id, captured at open; confirm no longer depends on the
+    /// list selection being unchanged.
+    pub issue_id: String,
+    /// The issue's team -- the scope key for the `Team{team_id}` refresh
+    /// (state and assignee popups; `None` for the static priority popup).
+    pub team_id: Option<String>,
+    pub items: Vec<PopupItem>,
+    pub selected: usize,
+    /// Written by the renderer when this popup sits directly on the base
+    /// table; `None` => `render_popup` centers.
+    pub anchor: Option<ratatui::layout::Rect>,
 }
 
 /// Linear priority options as popup items.
@@ -116,6 +162,11 @@ pub struct SearchOverlay {
     pub ast: search_query::QueryAst,
     /// Tab-completion state.
     pub completer: Completer,
+    /// The base list's query limit, captured once at open time
+    /// (`open_search_overlay`) so both views show the same number of
+    /// results. Faithful for the overlay's whole lifetime: the base list's
+    /// limit cannot change while Search has focus (it consumes every key).
+    pub limit: u32,
 }
 
 impl SearchOverlay {
@@ -136,6 +187,7 @@ impl SearchOverlay {
             has_searched: false,
             ast,
             completer,
+            limit: IssueQuery::default().limit,
         }
     }
 
@@ -148,8 +200,9 @@ impl SearchOverlay {
     /// `viewport_rows` is the number of visible rows in the content area
     /// (excluding the table header).  The result set is capped at this value
     /// so that the search overlay never grows taller than the normal list
-    ///.
-    pub fn run_search(&mut self, viewport_rows: u16, list_limit: usize) {
+    ///. Reads through `db` rather than resolving `db_path()` directly, so
+    /// tests that install an in-memory database are honored.
+    pub fn run_search(&mut self, db: &lt_runtime::db::Database, viewport_rows: u16) {
         self.fts_unavailable = false;
         self.has_searched = true;
         let raw = self.query.value.trim().to_string();
@@ -168,13 +221,14 @@ impl SearchOverlay {
         // Use the same limit as the normal issue list so both views show the
         // same number of results.  Cap to viewport height so we never render
         // more rows than fit on screen.
+        let list_limit = self.limit as usize;
         let limit = if viewport_rows > 0 {
             list_limit.min(viewport_rows as usize)
         } else {
             list_limit
         };
-        match lt_runtime::db::db_path()
-            .and_then(lt_runtime::db::open_db)
+        match db
+            .connect()
             .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
         {
             Ok(issues) => {
@@ -224,211 +278,223 @@ impl SearchOverlay {
 // Popup open/move/confirm methods
 // ---------------------------------------------------------------------------
 
+/// A team's workflow states. Shared by `open_state_popup`/
+/// `PopupView::consume`'s `State` arm and the new-issue modal's own state
+/// picker.
+pub(crate) fn state_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
+    lt_runtime::db::query_team_states(conn, team_id)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, team_id, "failed to query team states");
+            Vec::new()
+        })
+        .into_iter()
+        .map(PopupItem::from)
+        .collect()
+}
+
+/// The assignee popup's items -- "Unassign" plus a team's members. Shared by
+/// `open_assignee_popup` and `PopupView::consume`'s `Assignee` arm.
+fn assignee_popup_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
+    let mut items: Vec<PopupItem> = vec![PopupItem {
+        label: "Unassign".to_string(),
+        id: None,
+    }];
+    match lt_runtime::db::query_team_members(conn, team_id) {
+        Ok(members) => items.extend(members.into_iter().map(PopupItem::from)),
+        Err(e) => tracing::warn!(error = %e, team_id, "failed to query team members"),
+    }
+    items
+}
+
 impl super::App {
     pub(crate) fn open_state_popup(&mut self) {
-        let issue = match self.selected_issue() {
-            Some(i) => i.clone(),
-            None => return,
+        let Some(issue) = self.selected_issue() else {
+            return;
         };
+        let issue_id = issue.id.inner().to_string();
+        let team_id = issue.team.id.inner().to_string();
         let current_state_name = issue.state.name.clone();
-        match self.service.fetch_workflow_states(issue.team.id.inner()) {
-            Ok(states) => {
-                self.popup_items = states
-                    .into_iter()
-                    .map(|s| PopupItem {
-                        label: s.name,
-                        id: Some(s.id.into_inner()),
-                    })
-                    .collect();
-                self.popup_selected = self
-                    .popup_items
-                    .iter()
-                    .position(|item| item.label == current_state_name)
-                    .unwrap_or(0);
-                self.mode = Mode::Popup(PopupKind::State);
-                self.footer_msg = None;
-            }
-            Err(e) => {
-                self.footer_msg = Some(format!("Failed to fetch states: {e}"));
-            }
-        }
+
+        let items = self.db.connect().map_or_else(
+            |e| {
+                tracing::warn!(error = %e, "state popup: failed to open db connection");
+                Vec::new()
+            },
+            |conn| state_items(&conn, &team_id),
+        );
+        let selected = items
+            .iter()
+            .position(|item| item.label == current_state_name)
+            .unwrap_or(0);
+        self.push_view(View::Popup(PopupView {
+            kind: PopupKind::State,
+            issue_id,
+            team_id: Some(team_id),
+            items,
+            selected,
+            anchor: None,
+        }));
+        self.footer_msg = None;
     }
 
     pub(crate) fn open_priority_popup(&mut self) {
-        let Some(priority) = self.selected_issue().map(|i| i.priority) else {
+        let Some(issue) = self.selected_issue() else {
             return;
         };
+        let issue_id = issue.id.inner().to_string();
         // Linear priority: 0=No priority, 1=Urgent, 2=High, 3=Normal, 4=Low
-        self.popup_items = priority_popup_items();
-        self.popup_selected = usize::from(priority.0);
-        self.mode = Mode::Popup(PopupKind::Priority);
+        let selected = usize::from(issue.priority.0);
+        self.push_view(View::Popup(PopupView {
+            kind: PopupKind::Priority,
+            issue_id,
+            team_id: None,
+            items: priority_popup_items(),
+            selected,
+            anchor: None,
+        }));
         self.footer_msg = None;
     }
 
     pub(crate) fn open_assignee_popup(&mut self) {
-        let issue = match self.selected_issue() {
-            Some(i) => i.clone(),
-            None => return,
+        let Some(issue) = self.selected_issue() else {
+            return;
         };
-        let mut items: Vec<PopupItem> = vec![PopupItem {
-            label: "Unassign".to_string(),
-            id: None,
-        }];
-        match self.service.fetch_team_members(issue.team.id.inner()) {
-            Ok(members) => {
-                for m in members {
-                    items.push(PopupItem {
-                        label: m.name,
-                        id: Some(m.id.into_inner()),
-                    });
-                }
-            }
-            Err(e) => {
-                self.footer_msg = Some(format!("Failed to fetch members: {e}"));
-                return;
-            }
-        }
-        self.popup_selected = issue
-            .assignee
-            .as_ref()
+        let issue_id = issue.id.inner().to_string();
+        let team_id = issue.team.id.inner().to_string();
+        let current_assignee = issue.assignee.as_ref().map(|a| a.id.inner().to_string());
+
+        let items = self.db.connect().map_or_else(
+            |e| {
+                tracing::warn!(error = %e, "assignee popup: failed to open db connection");
+                Vec::new()
+            },
+            |conn| assignee_popup_items(&conn, &team_id),
+        );
+        let selected = current_assignee
             .and_then(|a| {
                 items
                     .iter()
-                    .position(|item| item.id.as_deref() == Some(a.id.inner()))
+                    .position(|item| item.id.as_deref() == Some(a.as_str()))
             })
             .unwrap_or(0);
-        self.popup_items = items;
-        self.mode = Mode::Popup(PopupKind::Assignee);
+        self.push_view(View::Popup(PopupView {
+            kind: PopupKind::Assignee,
+            issue_id,
+            team_id: Some(team_id),
+            items,
+            selected,
+            anchor: None,
+        }));
         self.footer_msg = None;
     }
+}
 
-    pub(crate) fn popup_move(&mut self, delta: i32) {
-        let n = self.popup_items.len();
+impl PopupView {
+    /// The state and assignee popups' subscription: a matching
+    /// `Team{team_id}` rebuilds `items` and re-anchors the selection by item
+    /// id. The priority popup is static (`team_id: None`) and never matches.
+    pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
+        let StateEvent::Team { team_id } = ev else {
+            return;
+        };
+        if self.team_id.as_deref() != Some(team_id.as_str()) {
+            return;
+        }
+        let conn = match ctx.db.connect() {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::warn!(error = %e, "popup: failed to open db connection");
+                return;
+            }
+        };
+        let items = match &self.kind {
+            PopupKind::State => state_items(&conn, team_id),
+            PopupKind::Assignee => assignee_popup_items(&conn, team_id),
+            PopupKind::Priority => return,
+        };
+        let current_id = self.items.get(self.selected).and_then(|i| i.id.clone());
+        self.items = items;
+        self.selected = self
+            .items
+            .iter()
+            .position(|i| i.id.as_deref() == current_id.as_deref())
+            .unwrap_or(0);
+    }
+
+    /// Move the selection by `delta` items, clamped to the item list.
+    fn move_by(&mut self, delta: i32) {
+        let n = self.items.len();
         if n == 0 {
             return;
         }
         let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
-        self.popup_selected = if delta >= 0 {
-            self.popup_selected.saturating_add(step).min(n - 1)
+        self.selected = if delta >= 0 {
+            self.selected.saturating_add(step).min(n - 1)
         } else {
-            self.popup_selected.saturating_sub(step)
+            self.selected.saturating_sub(step)
         };
     }
 
-    fn popup_confirm(&mut self) {
-        let kind = match &self.mode {
-            Mode::Popup(k) => k.clone(),
-            _ => return,
-        };
-        let item = match self.popup_items.get(self.popup_selected) {
-            Some(i) => i.clone(),
-            None => return,
-        };
-        let issue = match self.selected_issue() {
-            Some(i) => i.clone(),
-            None => return,
-        };
-
-        // 1. Enqueue local intent (overlay + outbox) in one transaction. No
-        //    network: the sync drainer replays it. The read model merges the
-        //    overlay, so the change renders without a base write.
-        enqueue_edit(issue.id.inner(), &kind, &item);
-
-        // 2. Update the in-memory issue list for instant feedback before the
-        //    next DB-backed fetch reloads the merged read model.
-        apply_optimistic_in_memory(self, &kind, &item);
-
-        self.mode = Mode::List;
-        self.popup_anchor = None;
-    }
-
-    pub(crate) fn popup_cancel(&mut self) {
-        self.mode = Mode::List;
-        self.popup_anchor = None;
+    /// This popup's scroll override: selection movement over the shared
+    /// motion set (Decision 6). Previously only j/k moved the selection;
+    /// g/G/Ctrl-d/Ctrl-u/PageDown/PageUp were ignored (behavior change 14).
+    pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
+        match motion {
+            ScrollMotion::Down => self.move_by(1),
+            ScrollMotion::Up => self.move_by(-1),
+            ScrollMotion::Top => self.move_by(i32::MIN / 2),
+            ScrollMotion::Bottom => self.move_by(i32::MAX / 2),
+            ScrollMotion::HalfPageDown => self.move_by(i32::from(viewport_height) / 2),
+            ScrollMotion::HalfPageUp => self.move_by(-(i32::from(viewport_height) / 2)),
+            ScrollMotion::PageDown => self.move_by(i32::from(viewport_height)),
+            ScrollMotion::PageUp => self.move_by(-i32::from(viewport_height)),
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Optimistic SQLite helpers
-// ---------------------------------------------------------------------------
-
-/// Enqueue a popup edit as local intent: the matching overlay row plus the
-/// coalesced `issueUpdate` outbox command, in one transaction. Unset choices
-/// (a priority/state item with no id) are no-ops; an assignee item with no id
-/// clears the assignee.
-fn enqueue_edit(issue_id: &str, kind: &PopupKind, item: &PopupItem) {
-    use lt_runtime::db::outbox::{
-        enqueue_assignee_change, enqueue_priority_change, enqueue_state_change,
-    };
-    let Ok(conn) = lt_runtime::db::db_path().and_then(lt_runtime::db::open_db) else {
+/// Confirm the popup choice: pop it, then edit the issue it was opened for
+/// (its captured `issue_id`, not the current list selection) through the
+/// sync service, which enqueues the write and emits the matching `State`
+/// event on the queue. A failure surfaces in the footer.
+fn popup_confirm(app: &mut App, i: usize) {
+    let Some(View::Popup(popup)) = app.views.get(i) else {
         return;
     };
-    let _ = match kind {
-        PopupKind::State => match &item.id {
-            Some(id) => enqueue_state_change(&conn, issue_id, id, &item.label),
-            None => Ok(()),
-        },
-        PopupKind::Priority => match item.id.as_deref().and_then(|s| s.parse::<u8>().ok()) {
-            Some(p) => enqueue_priority_change(&conn, issue_id, p),
-            None => Ok(()),
-        },
-        PopupKind::Assignee => enqueue_assignee_change(
-            &conn,
-            issue_id,
-            item.id.as_deref().map(|id| (id, item.label.as_str())),
-        ),
+    let Some(item) = popup.items.get(popup.selected).cloned() else {
+        return;
     };
-}
-
-/// Apply a popup choice to an issue fragment in place. Shared by the in-memory
-/// update and the optimistic DB write so they never diverge.
-fn apply_change(issue: &mut lt_types::types::Issue, kind: &PopupKind, item: &PopupItem) {
-    match kind {
-        PopupKind::State => {
-            issue.state.name.clone_from(&item.label);
-            if let Some(id) = &item.id {
-                issue.state.id = id.clone().into();
-            }
-        }
-        PopupKind::Priority => {
-            issue.priority_label.clone_from(&item.label);
-            if let Some(pstr) = &item.id {
-                issue.priority = pstr
-                    .parse()
-                    .map_or(issue.priority, lt_types::scalars::Priority);
-            }
-        }
-        PopupKind::Assignee => {
-            if item.id.is_none() {
-                issue.assignee = None;
-            } else {
-                issue.assignee = Some(lt_types::types::User {
-                    id: item.id.clone().unwrap_or_default().into(),
-                    name: item.label.clone(),
-                });
-            }
-        }
+    let issue_id = popup.issue_id.clone();
+    let kind = popup.kind.clone();
+    app.pop_view();
+    if let Some(edit) = popup_edit(&kind, &item)
+        && let Err(e) = app.service.edit_issue(&issue_id, edit)
+    {
+        app.footer_msg = Some(format!("Failed to save: {e}"));
     }
 }
 
-/// The optimistic issue fragment a popup choice produces: the selected issue
-/// with the chosen field applied. Used by the render tests to exercise the
-/// applied-change shape; the live write path applies the change in-memory via
-/// [`apply_optimistic_in_memory`].
-#[cfg(all(test, feature = "sim"))]
-pub(crate) fn build_optimistic_issue(
-    issue: &lt_types::types::Issue,
-    kind: &PopupKind,
-    item: &PopupItem,
-) -> lt_types::types::Issue {
-    let mut updated = issue.clone();
-    apply_change(&mut updated, kind, item);
-    updated
-}
+// ---------------------------------------------------------------------------
+// Popup selection -> IssueEdit mapping
+// ---------------------------------------------------------------------------
 
-pub(crate) fn apply_optimistic_in_memory(app: &mut App, kind: &PopupKind, item: &PopupItem) {
-    if let Some(issue) = app.selected_issue_mut() {
-        apply_change(issue, kind, item);
+/// Map a popup selection onto an `IssueEdit`. Unset choices (a priority/state
+/// item with no id) are no-ops (`None`); an assignee item with no id clears
+/// the assignee.
+fn popup_edit(kind: &PopupKind, item: &PopupItem) -> Option<lt_runtime::sync::service::IssueEdit> {
+    use lt_runtime::sync::service::IssueEdit;
+    match kind {
+        PopupKind::State => item.id.clone().map(|id| IssueEdit::State {
+            id,
+            name: item.label.clone(),
+        }),
+        PopupKind::Priority => item
+            .id
+            .as_deref()
+            .and_then(|s| s.parse::<u8>().ok())
+            .map(IssueEdit::Priority),
+        PopupKind::Assignee => Some(IssueEdit::Assignee(
+            item.id.clone().map(|id| (id, item.label.clone())),
+        )),
     }
 }
 
@@ -438,28 +504,30 @@ pub(crate) fn apply_optimistic_in_memory(app: &mut App, kind: &PopupKind, item: 
 
 // -- Popup key handler ----------------------------------------------
 
-pub(crate) fn handle_popup_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Char('j') | KeyCode::Down => app.popup_move(1),
-        KeyCode::Char('k') | KeyCode::Up => app.popup_move(-1),
-        KeyCode::Enter => app.popup_confirm(),
-        KeyCode::Esc => app.popup_cancel(),
-        _ => {}
+pub(crate) fn handle_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    // Esc (Back) and the scroll motions are not bound here: they resolve at
+    // the floor and scroll-default layers of `dispatch_key` (Decision 6).
+    match key.code {
+        KeyCode::Enter => popup_confirm(app, i),
+        _ => return KeyFlow::Pass,
     }
+    KeyFlow::Consumed
 }
 
 // -- Help popup key handler -----------------------------------------
 
-pub(crate) fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+pub(crate) fn handle_help_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    let code = key.code;
+    let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Esc => {
-            app.mode = Mode::List;
-            app.help_popup = None;
-        }
+        // Esc (Back) is not bound here: it resolves at the floor (Decision
+        // 6). The catch-all below forwards it to the search bar, so this arm
+        // must return `Pass` explicitly rather than fall out of the match.
+        KeyCode::Esc => return KeyFlow::Pass,
         // Navigation: j/k/<down>/<up> move the filtered list.
         KeyCode::Down | KeyCode::Char('j') if !ctrl => {
-            if let Some(ref mut popup) = app.help_popup {
+            if let Some(View::Help(popup)) = app.views.get_mut(i) {
                 let max = popup.filtered.len().saturating_sub(1);
                 if popup.selected < max {
                     popup.selected += 1;
@@ -467,34 +535,36 @@ pub(crate) fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifi
             }
         }
         KeyCode::Up | KeyCode::Char('k') if !ctrl => {
-            if let Some(ref mut popup) = app.help_popup {
+            if let Some(View::Help(popup)) = app.views.get_mut(i) {
                 popup.selected = popup.selected.saturating_sub(1);
             }
         }
         // Everything else goes to the TextInput search bar.
         _ => {
-            if let Some(ref mut popup) = app.help_popup
+            if let Some(View::Help(popup)) = app.views.get_mut(i)
                 && popup.search.handle_key(code, modifiers)
             {
                 popup.update_filter();
             }
         }
     }
+    KeyFlow::Consumed
 }
 
 // -- FTS search overlay key handler --------------------------------
 
-pub(crate) fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+pub(crate) fn handle_search_key(app: &mut App, i: usize, key: KeyEvent) -> KeyFlow {
+    let code = key.code;
+    let modifiers = key.modifiers;
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Esc => {
-            // Esc exits the search overlay and returns to the full list (go back).
-            app.mode = Mode::List;
-            app.search_overlay = None;
-        }
+        // Esc (Back) is not bound here: it resolves at the floor (Decision
+        // 6). The catch-all below forwards it to the query bar, so this arm
+        // must return `Pass` explicitly rather than fall out of the match.
+        KeyCode::Esc => return KeyFlow::Pass,
         KeyCode::Char('c') if ctrl => {
             // Ctrl+C resets the search query back to the default.
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.query = TextInput::from(search_query::DEFAULT_QUERY.to_string());
                 overlay.last_changed = Some(Instant::now());
             }
@@ -503,30 +573,30 @@ pub(crate) fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModi
         // Result-list navigation: <down>/<up> only. Plain j/k must fall
         // through to the query bar so they can be typed as filter text.
         KeyCode::Down => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.move_down();
             }
         }
         KeyCode::Up => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.move_up();
             }
         }
         // Ctrl+N -- cycle completion forward.
         KeyCode::Char('n') if ctrl => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.completer.cycle_next();
             }
         }
         // Ctrl+P -- cycle completion backward.
         KeyCode::Char('p') if ctrl => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 overlay.completer.cycle_prev();
             }
         }
         // Ctrl+Y -- accept the highlighted completion candidate.
         KeyCode::Char('y') if ctrl => {
-            if let Some(ref mut overlay) = app.search_overlay {
+            if let Some(View::Search(overlay)) = app.views.get_mut(i) {
                 let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
                 if overlay
                     .completer
@@ -541,47 +611,51 @@ pub(crate) fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModi
         }
         // Tab / Shift-Tab: apply stem-key completion.
         // These must NOT be forwarded to TextInput::handle_key.
-        KeyCode::Tab => apply_completion_tab(app, true),
-        KeyCode::BackTab => apply_completion_tab(app, false),
+        KeyCode::Tab => apply_completion_tab(app, i, true),
+        KeyCode::BackTab => apply_completion_tab(app, i, false),
         // Everything else goes to the TextInput query bar.
         _ => {
-            if let Some(ref mut overlay) = app.search_overlay
+            if let Some(View::Search(overlay)) = app.views.get_mut(i)
                 && overlay.query.handle_key(code, modifiers)
             {
                 overlay.last_changed = Some(Instant::now());
             }
         }
     }
+    KeyFlow::Consumed
 }
 
-/// Confirm the search: leave search mode with the filtered results visible by
-/// transferring them into `app.issues` so normal keybindings work.
+/// Confirm the search: pop the overlay (the borrow requires it, and it
+/// destroys the overlay anyway) and transfer its results into the base list
+/// so normal keybindings work.
 fn confirm_search(app: &mut App) {
-    if let Some(ref mut overlay) = app.search_overlay {
-        // Flush any pending debounce so the AST and results reflect every
-        // character the user typed before hitting Enter.
-        if overlay.last_changed.is_some() {
-            overlay.last_changed = None;
-            overlay.run_search(app.viewport_height, app.args.limit as usize);
-        }
-        let results = std::mem::take(&mut overlay.results);
-        let selected = overlay.table_state.selected();
-        // AST is the single source of truth.
-        app.active_filter = overlay.ast.clone();
-        app.sync_args_from_filter();
-        app.issues = results;
-        let n = app.issues.len();
-        let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
-        app.table_state.select(if n > 0 { Some(sel) } else { None });
+    let Some(View::Search(mut overlay)) = app.views.pop() else {
+        return;
+    };
+    // Flush any pending debounce so the AST and results reflect every
+    // character the user typed before hitting Enter.
+    if overlay.last_changed.is_some() {
+        overlay.last_changed = None;
+        overlay.run_search(&app.db, app.viewport_height);
     }
-    app.mode = Mode::List;
-    app.search_overlay = None;
+    let results = std::mem::take(&mut overlay.results);
+    let selected = overlay.table_state.selected();
+    if let View::List(list) = app.base_mut() {
+        // AST is the single source of truth.
+        list.filter = overlay.ast.clone();
+        list.sync_args_from_filter();
+        list.issues = results;
+        let n = list.issues.len();
+        let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
+        list.table_state
+            .select(if n > 0 { Some(sel) } else { None });
+    }
 }
 
 /// Apply stem-key completion in the given direction (Tab forward, Shift-Tab
 /// backward) and re-parse the query AST.
-fn apply_completion_tab(app: &mut App, forward: bool) {
-    if let Some(ref mut overlay) = app.search_overlay {
+fn apply_completion_tab(app: &mut App, i: usize, forward: bool) {
+    if let Some(View::Search(overlay)) = app.views.get_mut(i) {
         let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
         overlay
             .completer
@@ -593,17 +667,20 @@ fn apply_completion_tab(app: &mut App, forward: bool) {
     }
 }
 
-/// Fire the FTS search when the debounce interval (150ms) has elapsed.
+/// Fire the FTS search when the debounce interval (150ms) has elapsed. The
+/// search overlay is only ever the top of the stack, so `views.last` is the
+/// live check; `viewport_height` and `&app.db` are copied/borrowed before the
+/// `views.last_mut()` borrow since `run_search` needs both simultaneously.
 pub(crate) fn poll_search_debounce(app: &mut App) {
-    let should_search = match app.search_overlay {
-        Some(ref overlay) => match overlay.last_changed {
-            Some(t) => t.elapsed() >= Duration::from_millis(150),
-            None => false,
-        },
-        None => false,
-    };
-    if should_search && let Some(ref mut overlay) = app.search_overlay {
+    let viewport_height = app.viewport_height;
+    let db = &app.db;
+    let should_search = matches!(
+        app.views.last(),
+        Some(View::Search(overlay))
+            if overlay.last_changed.is_some_and(|t| t.elapsed() >= Duration::from_millis(150))
+    );
+    if should_search && let Some(View::Search(overlay)) = app.views.last_mut() {
         overlay.last_changed = None;
-        overlay.run_search(app.viewport_height, app.args.limit as usize);
+        overlay.run_search(db, viewport_height);
     }
 }

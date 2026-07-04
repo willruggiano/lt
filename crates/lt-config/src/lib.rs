@@ -22,8 +22,9 @@ pub fn set_profile(name: Option<String>) -> Result<()> {
     {
         anyhow::bail!("invalid profile name {n:?}: use only letters, digits, '-' and '_'");
     }
-    let _ = PROFILE.set(name.unwrap_or_else(|| "default".to_string()));
-    Ok(())
+    PROFILE
+        .set(name.unwrap_or_else(|| "default".to_string()))
+        .map_err(|_| anyhow::anyhow!("set_profile called more than once"))
 }
 
 fn profile() -> &'static str {
