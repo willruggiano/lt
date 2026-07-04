@@ -381,12 +381,45 @@ fn build_token_params<'a>(exchange: &TokenExchange<'a>) -> [(&'a str, &'a str); 
     ]
 }
 
+/// The token endpoint's response body. `refresh_token` is optional on the
+/// wire: a refresh-grant response inside the rotation grace period may
+/// omit it, in which case the previous refresh token is still valid.
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct TokenResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: Option<u64>,
+    scope: Option<String>,
+    refresh_token: Option<String>,
+}
+
+impl TokenResponse {
+    /// Convert the wire response into a storable token.
+    /// `previous_refresh_token` fills the gap when a refresh-grant
+    /// response omits the rotated token; the initial code exchange has
+    /// nothing to fall back to, so absence there is an error.
+    pub(super) fn into_auth_token(self, previous_refresh_token: Option<&str>) -> Result<AuthToken> {
+        let refresh_token = self
+            .refresh_token
+            .or_else(|| previous_refresh_token.map(str::to_string))
+            .ok_or_else(|| anyhow!("token response did not include a refresh token"))?;
+        Ok(AuthToken {
+            access_token: self.access_token,
+            token_type: self.token_type,
+            expires_in: self.expires_in,
+            scope: self.scope,
+            issued_at: None,
+            refresh_token,
+        })
+    }
+}
+
 /// Validate the HTTP status and deserialize the token body. Pure.
-pub(super) fn parse_token_response(status: u16, body: &str) -> Result<AuthToken> {
+pub(super) fn parse_token_response(status: u16, body: &str) -> Result<TokenResponse> {
     if !(200..300).contains(&status) {
         return Err(anyhow!("token exchange failed (HTTP {status}): {body}"));
     }
-    serde_json::from_str::<AuthToken>(body).context("parsing token response")
+    serde_json::from_str::<TokenResponse>(body).context("parsing token response")
 }
 
 /// POSTs a token-grant form and returns the HTTP status and raw body. The
@@ -447,7 +480,7 @@ impl TokenExchanger {
 fn exchange_code(exchanger: &TokenExchanger, exchange: &TokenExchange) -> Result<AuthToken> {
     let params = build_token_params(exchange);
     let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
-    parse_token_response(status, &body)
+    parse_token_response(status, &body)?.into_auth_token(None)
 }
 
 #[cfg(test)]
@@ -543,10 +576,14 @@ mod tests {
 
     #[test]
     fn parse_token_response_deserializes_success_body() {
-        let token =
-            parse_token_response(200, r#"{"access_token":"tok","token_type":"Bearer"}"#).unwrap();
+        let token = parse_token_response(
+            200,
+            r#"{"access_token":"tok","token_type":"Bearer","refresh_token":"r"}"#,
+        )
+        .unwrap();
         assert_eq!(token.access_token, "tok");
         assert_eq!(token.token_type, "Bearer");
+        assert_eq!(token.refresh_token, Some("r".to_string()));
     }
 
     #[test]
@@ -643,7 +680,7 @@ mod tests {
         };
         let exchanger = TokenExchanger::Fake {
             status: 200,
-            body: r#"{"access_token":"final-token","token_type":"Bearer"}"#.to_string(),
+            body: r#"{"access_token":"final-token","token_type":"Bearer","refresh_token":"final-refresh"}"#.to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
         };
         let flow = OauthFlow {
@@ -654,6 +691,7 @@ mod tests {
 
         let token = run_with_credentials(&flow, "cid", "csecret").unwrap();
         assert_eq!(token.access_token, "final-token");
+        assert_eq!(token.refresh_token, "final-refresh");
 
         // The browser was sent the authorization URL.
         let opened = browser.opened.borrow();
@@ -689,5 +727,16 @@ mod tests {
             exchanger,
         };
         assert!(run_with_credentials(&flow, "cid", "csecret").is_err());
+    }
+
+    #[test]
+    fn exchange_code_without_refresh_token_in_response_errors() {
+        let exchanger = TokenExchanger::Fake {
+            status: 200,
+            body: r#"{"access_token":"tok","token_type":"Bearer"}"#.to_string(),
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+        let err = exchange_code(&exchanger, &exchange()).unwrap_err();
+        assert!(err.to_string().contains("refresh token"));
     }
 }
