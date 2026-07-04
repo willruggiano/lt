@@ -15,9 +15,7 @@ use anyhow::{Result, anyhow};
 use lt_config::AuthToken;
 use tracing::{info, warn};
 
-use super::login::{
-    TOKEN_URL, TokenExchanger, UreqTokenExchanger, lookup_stored_credentials, parse_token_response,
-};
+use super::login::{TOKEN_URL, TokenExchanger, lookup_stored_credentials, parse_token_response};
 
 /// Load the stored token, attempting an automatic re-authentication if the
 /// token is expired and client credentials are available.
@@ -51,7 +49,7 @@ pub fn load_or_refresh_token() -> Result<AuthToken> {
             {
                 info!("auth: access token has expired -- refreshing silently");
                 match refresh_with(
-                    &UreqTokenExchanger,
+                    &TokenExchanger::Ureq,
                     &refresh_token,
                     &client_id,
                     &client_secret,
@@ -108,7 +106,7 @@ fn build_refresh_params<'a>(
 /// Exchange a refresh token for a new access token via the `refresh_token`
 /// grant.
 fn refresh_with(
-    exchanger: &dyn TokenExchanger,
+    exchanger: &TokenExchanger,
     refresh_token: &str,
     client_id: &str,
     client_secret: &str,
@@ -132,26 +130,9 @@ mod tests {
         assert_eq!(map.get("client_secret").copied(), Some("csecret"));
     }
 
-    struct FakeTokenExchanger {
-        status: u16,
-        body: String,
-        calls: std::cell::RefCell<Vec<Vec<(String, String)>>>,
-    }
-    impl TokenExchanger for FakeTokenExchanger {
-        fn post_form(&self, _url: &str, params: &[(&str, &str)]) -> Result<(u16, String)> {
-            self.calls.borrow_mut().push(
-                params
-                    .iter()
-                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-                    .collect(),
-            );
-            Ok((self.status, self.body.clone()))
-        }
-    }
-
     #[test]
     fn refresh_with_returns_new_token_on_success() {
-        let exchanger = FakeTokenExchanger {
+        let exchanger = TokenExchanger::Fake {
             status: 200,
             body:
                 r#"{"access_token":"new-tok","token_type":"Bearer","refresh_token":"new-refresh"}"#
@@ -162,7 +143,10 @@ mod tests {
         assert_eq!(token.access_token, "new-tok");
         assert_eq!(token.refresh_token, Some("new-refresh".to_string()));
 
-        let calls = exchanger.calls.borrow();
+        let TokenExchanger::Fake { calls, .. } = &exchanger else {
+            panic!("expected fake")
+        };
+        let calls = calls.borrow();
         let sent: std::collections::HashMap<_, _> = calls[0].iter().cloned().collect();
         assert_eq!(
             sent.get("grant_type").map(String::as_str),
@@ -179,7 +163,7 @@ mod tests {
         // The caller (load_or_refresh_token) carries over the previous
         // refresh token when the response omits it; this seam only parses
         // the response as returned.
-        let exchanger = FakeTokenExchanger {
+        let exchanger = TokenExchanger::Fake {
             status: 200,
             body: r#"{"access_token":"new-tok","token_type":"Bearer"}"#.to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
@@ -191,7 +175,7 @@ mod tests {
 
     #[test]
     fn refresh_with_surfaces_non_2xx_error() {
-        let exchanger = FakeTokenExchanger {
+        let exchanger = TokenExchanger::Fake {
             status: 400,
             body: "invalid_grant".to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
