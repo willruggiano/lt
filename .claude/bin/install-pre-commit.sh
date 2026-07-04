@@ -21,7 +21,7 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
 fi
 
 nix_bin=/nix/var/nix/profiles/default/bin
-project_dir="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+project_dir="$CLAUDE_PROJECT_DIR"
 
 log() { printf '[claude-pre-commit] %s\n' "$*" >&2; }
 

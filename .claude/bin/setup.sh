@@ -24,7 +24,7 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
 fi
 
 nix_bin=/nix/var/nix/profiles/default/bin
-project_dir="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+project_dir="$CLAUDE_PROJECT_DIR"
 
 log() { printf '[claude-setup] %s\n' "$*" >&2; }
 
@@ -78,6 +78,7 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   # source time and re-appends it after the devshell entries, so prepend nix
   # here first. It sets no SSL_CERT_FILE or NIX_CONFIG, so the proxy CA and the
   # flake-config acceptance below survive the dump that follows.
+  # shellcheck disable=SC2016
   printf 'export PATH=%s:"$PATH"\n' "$nix_bin" >"$CLAUDE_ENV_FILE"
   printf "export NIX_CONFIG='accept-flake-config = true'\n" >>"$CLAUDE_ENV_FILE"
   [ -n "${NIX_SSL_CERT_FILE:-}" ] &&

@@ -24,7 +24,6 @@
         (readonly cfg.settings.configFile)
       ];
 
-    # Nix, formatting, and Markdown linting here. Makefile for the cargo gates.
     pre-commit.settings = {
       hooks = {
         treefmt = {
@@ -32,6 +31,7 @@
           package = config.packages.treefmt;
         };
         deadnix.enable = true;
+        shellcheck.enable = true;
         statix.enable = true;
         # markdownlint-cli2 reads .markdownlint-cli2.jsonc for its globs and the
         # custom wiki-link rule; git-hooks.nix ships only markdownlint (cli v1).

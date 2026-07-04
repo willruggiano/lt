@@ -20,16 +20,11 @@
     treefmt = {
       projectRootFile = "flake.nix";
       programs = {
-        # Json and Markdown
+        alejandra.enable = true;
         prettier = {
           enable = true;
           settings.proseWrap = "always";
         };
-        # Nix
-        alejandra.enable = true;
-        # Python
-        ruff-format.enable = true;
-        # Shell
         shfmt.enable = true;
       };
       settings.formatter = {
