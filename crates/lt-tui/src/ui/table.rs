@@ -1,5 +1,4 @@
 use lt_runtime::query::SortField;
-use lt_runtime::text;
 use lt_types::types::Issue;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -75,7 +74,7 @@ pub(super) fn popup_anchor(
 pub(super) fn row_cells(issue: &Issue) -> [String; 7] {
     [
         issue.identifier.clone(),
-        text::truncate(&issue.title, 40),
+        issue.title.clone(),
         issue.state.name.clone(),
         issue.priority_label.clone(),
         issue
