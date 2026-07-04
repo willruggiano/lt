@@ -634,29 +634,38 @@ pub(crate) fn forward_search(app: &mut App, i: usize, ev: KeyEvent) {
 }
 
 /// Confirm the search: pop the overlay (the borrow requires it, and it
-/// destroys the overlay anyway) and transfer its results into the base list
-/// so normal keybindings work.
+/// destroys the overlay anyway), flush any pending debounce, then hand the
+/// *query* -- not the overlay's viewport-capped `results` -- to the base
+/// list. The overlay's selected row is captured by identifier and set as
+/// `pending_select` so the refetch re-anchors the selection instead of
+/// reusing its (possibly stale) index.
 fn confirm_search(app: &mut App) {
     let Some(View::Search(mut overlay)) = app.views.pop() else {
         return;
     };
-    // Flush any pending debounce so the AST and results reflect every
+    // Flush any pending debounce so the AST and selection reflect every
     // character the user typed before hitting Enter.
     if overlay.last_changed.is_some() {
         overlay.last_changed = None;
         overlay.run_search(&app.db, app.viewport_height);
     }
-    let results = std::mem::take(&mut overlay.results);
-    let selected = overlay.table_state.selected();
-    if let View::List(list) = app.base_mut() {
+    let anchor = overlay
+        .table_state
+        .selected()
+        .and_then(|i| overlay.results.get(i))
+        .map(|issue| issue.identifier.clone());
+    let ctx = StateCtx {
+        db: &app.db,
+        viewer_name: app.auth.viewer_name(),
+    };
+    if let Some(View::List(list)) = app.views.first_mut() {
         // AST is the single source of truth.
-        list.query.filter = overlay.ast.clone();
+        list.query.filter = overlay.ast;
         list.query.sync_args_from_filter();
-        list.issues = results;
-        let n = list.issues.len();
-        let sel = selected.unwrap_or(0).min(n.saturating_sub(1));
-        list.table_state
-            .select(if n > 0 { Some(sel) } else { None });
+        list.query.pagination.cursor_stack.clear();
+        list.query.pagination.current_cursor = None;
+        list.pending_select = anchor;
+        list.refetch(&ctx, true);
     }
 }
 

@@ -254,6 +254,45 @@ fn open_with_filterful_query_matches_post_sync_refetch() {
     assert_eq!(startup, post_sync);
 }
 
+// -- confirm_search: query handoff, not viewport-capped row transfer -------
+
+#[test]
+fn confirm_search_hands_off_the_query_not_the_viewport_capped_rows() {
+    // 6 rows match state:todo; the overlay caps `results` to the 3-row
+    // viewport, but the base list's query limit (the `IssueQuery` default,
+    // 50) is far larger -- confirm must hand off the query so the base list
+    // refetches the full match set, not the overlay's capped rows.
+    let mut rows: Vec<lt_types::types::Issue> = (1..=6)
+        .map(|i| db_issue(&i.to_string(), &format!("ENG-{i}"), "Todo", i))
+        .collect();
+    rows.push(db_issue("7", "ENG-7", "Done", 7));
+    let mut app = app_with_db(&rows).unwrap();
+    app.viewport_height = 3;
+
+    let mut overlay = SearchOverlay::new();
+    overlay.query = TextInput::from("state:todo".to_string());
+    overlay.run_search(&app.db, app.viewport_height);
+    assert_eq!(overlay.results.len(), 3); // viewport-capped
+    app.views.push(View::Search(overlay));
+
+    // Move the overlay's selection off row 0 before confirming.
+    app.dispatch_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.dispatch_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let Some(View::Search(overlay)) = app.views.last() else {
+        unreachable!("search view expected")
+    };
+    let anchor = overlay.results[overlay.table_state.selected().unwrap()]
+        .identifier
+        .clone();
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(app.views.len(), 1); // overlay popped
+    assert_eq!(app.list_mut().issues.len(), 6); // full match set, not capped to 3
+    let selected = app.list_mut().table_state.selected().unwrap();
+    assert_eq!(app.list_mut().issues[selected].identifier, anchor);
+}
+
 // -- populate_relations ---------------------------------------------------
 
 #[test]
