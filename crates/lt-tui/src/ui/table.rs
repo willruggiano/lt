@@ -48,10 +48,8 @@ pub(super) fn render_table(
 }
 
 /// The state/priority/assignee popup's anchor when it sits directly on the
-/// base list (an exact two-view stack): the target column's x offset plus
-/// the row below the selected issue, from the base table's rendered column
-/// widths. A popup over any other stack shape leaves `anchor` `None`, and
-/// `render_popup` centers instead.
+/// base list: the target column's x offset plus the row below the selected
+/// issue, from the base table's rendered column widths.
 pub(super) fn popup_anchor(
     area: Rect,
     widths: &[usize],
@@ -90,7 +88,6 @@ pub(super) fn row_cells(issue: &Issue) -> [String; 7] {
     ]
 }
 
-// Returns the column index (0-6) that corresponds to the active sort field, if any.
 pub(super) fn sort_col_index(field: &SortField) -> Option<usize> {
     match field {
         SortField::Title => Some(1),

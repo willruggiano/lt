@@ -8,9 +8,8 @@ use super::text_span::append_text_input_spans;
 use super::util::{pct, to_u16};
 use crate::HelpPopup;
 
-/// The popup's frame sizing: computed once per frame from `popup`'s
-/// already-cached column widths (`docs/design/keybinds.md` phase 3) so every
-/// row's key/context/label columns render untruncated.
+/// The popup's frame sizing, computed once per frame from `popup`'s
+/// already-cached column widths.
 struct HelpLayout {
     popup_area: Rect,
     gap_str: String,
@@ -64,19 +63,15 @@ pub(super) fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    // Split inner: search bar (1 row) + list (rest).
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
 
-    // Search bar.
     let mut search_line = Line::from(vec![Span::raw("/ ")]);
     append_text_input_spans(&mut search_line, &popup.search, &[]);
     frame.render_widget(Paragraph::new(search_line), chunks[0]);
 
-    // Keybinding list: keys / context / label columns.
     let list_height = chunks[1].height as usize;
     let total = popup.filtered.len();
 
-    // Compute scroll so selected row stays visible.
     let scroll_offset = if popup.selected >= list_height {
         popup.selected - list_height + 1
     } else {
@@ -110,13 +105,11 @@ pub(super) fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup
         })
         .collect();
 
-    // Show count hint at bottom if list is truncated.
     let count_hint = if total > list_height {
         format!(" [{}/{}] ", popup.selected + 1, total)
     } else {
         String::new()
     };
-    // Render hint in the last row of the list area if needed.
     if !count_hint.is_empty() && chunks[1].height > 0 {
         let hint_area = Rect::new(
             chunks[1].x,

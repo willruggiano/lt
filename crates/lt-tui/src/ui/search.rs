@@ -19,12 +19,9 @@ pub(super) fn render_search_overlay(
     overlay: &mut SearchOverlay,
     sort: &SortOrder,
 ) {
-    // The search bar is rendered in the header row (chunks[0]) by render().
     // This function only handles the results in the main content area (chunks[2]).
     let area = chunks[2];
 
-    // When the query is empty, leave the underlying issue table visible.
-    // When FTS is unavailable, show the error but still don't wipe the table.
     if overlay.fts_unavailable {
         // Show an error overlay without hiding the table entirely.
         frame.render_widget(
@@ -39,10 +36,8 @@ pub(super) fn render_search_overlay(
         return;
     }
 
-    // Keep the underlying list visible when:
-    // - a search is queued but hasn't fired yet (debounce pending), or
-    // - the overlay was just opened and no search has run yet.
-    // This avoids a flash of empty content or a spurious "No results." on entry.
+    // Keep the underlying list visible while a search is queued (debounce
+    // pending) or hasn't run yet, avoiding a flash of empty content.
     if overlay.results.is_empty() && (overlay.last_changed.is_some() || !overlay.has_searched) {
         return;
     }

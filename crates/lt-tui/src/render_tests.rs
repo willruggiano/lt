@@ -1,10 +1,6 @@
-// Rendering tests (docs/design/visual-rendering-tests.md)
-//
-// These drive `ui::render` into a ratatui `TestBackend` and snapshot the
-// resulting buffer with `insta`. They populate `App` state directly via
-// `App::for_test` and skip the DB/thread action methods, so no DB, network, or
-// profile global is touched. Data comes from the deterministic `sim` generator,
-// so the module is gated on `feature = "sim"`.
+// Rendering tests: drive `ui::render` into a `TestBackend` and snapshot the
+// buffer with `insta`, using `App::for_test` state and the deterministic
+// `sim` generator. See [[visual-rendering-tests.md]].
 
 use crossterm::event::KeyModifiers;
 use lt_types::types::User;
@@ -127,10 +123,9 @@ fn detail_scroll_saturates() {
 
 #[test]
 fn popup_move_clamps_and_cancel_resets_stack() {
-    // j/Down and Esc are no longer bound in the popup's own handler -- they
-    // resolve through the keymap's GLOBAL table and the floor layer of
-    // `dispatch_key` (Decision 6), so this test drives them through it
-    // rather than `popup::apply_popup` directly.
+    // j/Down and Esc aren't bound in the popup's own table; drive them
+    // through the full key-dispatch cascade instead of calling the handler
+    // directly.
     let mut app = app_with_issues(0, 1).unwrap();
     let issue_id = app.list_mut().issues[0].id.inner().to_string();
     app.views.push(View::Popup(PopupView {
@@ -162,9 +157,8 @@ fn popup_move_clamps_and_cancel_resets_stack() {
 
 #[test]
 fn close_detail_clears_pane_state() {
-    // Esc is no longer bound in the detail pane's own handler; it resolves
-    // at the floor (Decision 6), which pops the pane the same way -- except
-    // the comment input's own narrower Esc (cancel the draft) wins first.
+    // Esc resolves at the floor, which pops the pane -- except the comment
+    // input's narrower Esc (cancel the draft) wins first.
     let mut app = app_with_issues(0, 1).unwrap();
     let issue = app.list_mut().issues[0].clone();
     let mut detail = build_cached_detail(&issue, Vec::new());
@@ -229,9 +223,8 @@ fn priority_label_to_u8_maps_levels() {
 
 #[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
-    // `viewer` is the persisted `db::synced_viewer` shape, not the live
-    // API `viewer::User` -- this is the "Me (...)" resolution the modal
-    // uses at consume time.
+    // `viewer` here is the persisted-db shape, distinct from the live API
+    // `viewer::User`.
     let viewer = User {
         id: "v".into(),
         name: "Vic".to_string(),
@@ -307,10 +300,8 @@ fn search_overlay() {
     insta::assert_snapshot!(draw(&mut app, 100, 20));
 }
 
-/// Testing item 6 (`docs/design/keybinds.md`): the pending-chord indicator
-/// is the status row's highest-priority branch, reachable from the list top
-/// and from a Detail view focused above it (the branch that used to
-/// short-circuit before pending was ever checked).
+/// The pending-chord indicator is the status row's highest-priority
+/// branch, reachable from both the list top and a focused Detail view.
 #[test]
 fn pending_chord_indicator_shows_at_list_top() {
     let mut app = app_with_issues(0, 3).unwrap();

@@ -18,7 +18,6 @@ pub(super) fn submit_key_label(keyboard_enhanced: bool) -> &'static str {
     }
 }
 
-/// Render the modal's single-line title field.
 fn render_modal_title(frame: &mut Frame, area: Rect, modal: &NewIssueModal) {
     let active = modal.focused_field == NewIssueField::Title;
     let label = Span::styled(
@@ -38,7 +37,6 @@ fn render_modal_title(frame: &mut Frame, area: Rect, modal: &NewIssueModal) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Render the modal's multiline description field.
 fn render_modal_description(frame: &mut Frame, area: Rect, modal: &NewIssueModal) {
     let active = modal.focused_field == NewIssueField::Description;
     let label = Span::styled(
@@ -73,14 +71,12 @@ pub(super) fn render_new_issue_modal(
     modal: &NewIssueModal,
     keyboard_enhanced: bool,
 ) {
-    // Modal dimensions: 70% wide, 22 rows tall, centred.
     let width = pct(area.width, 70);
     let height = 22_u16.min(area.height.saturating_sub(2));
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let modal_area = Rect::new(x, y, width, height);
 
-    // Clear the area under the modal.
     frame.render_widget(Clear, modal_area);
 
     let block = Block::default()
@@ -93,9 +89,6 @@ pub(super) fn render_new_issue_modal(
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
-    // Layout: fields stacked vertically.
-    // Title (1), Team (picker rows up to 5), Priority (picker), State (picker),
-    // Assignee (picker), Description (remaining), error line (1).
     let picker_height = 5_u16;
     let constraints = [
         Constraint::Length(2),                 // 0: Title label+input
@@ -108,10 +101,8 @@ pub(super) fn render_new_issue_modal(
     ];
     let chunks = Layout::vertical(constraints).split(inner);
 
-    // ---- Title ----
     render_modal_title(frame, chunks[0], modal);
 
-    // ---- Team picker ----
     render_field_picker(
         frame,
         chunks[1],
@@ -124,7 +115,6 @@ pub(super) fn render_new_issue_modal(
         },
     );
 
-    // ---- Priority picker ----
     render_field_picker(
         frame,
         chunks[2],
@@ -137,7 +127,6 @@ pub(super) fn render_new_issue_modal(
         },
     );
 
-    // ---- State picker ----
     render_field_picker(
         frame,
         chunks[3],
@@ -150,7 +139,6 @@ pub(super) fn render_new_issue_modal(
         },
     );
 
-    // ---- Assignee picker ----
     render_field_picker(
         frame,
         chunks[4],
@@ -163,10 +151,8 @@ pub(super) fn render_new_issue_modal(
         },
     );
 
-    // ---- Description ----
     render_modal_description(frame, chunks[5], modal);
 
-    // ---- Error / loading line ----
     let status_text = if modal.loading {
         "Loading...".to_string()
     } else if !modal.error.is_empty() {
@@ -186,7 +172,6 @@ struct FieldPicker<'a> {
     visible_rows: u16,
 }
 
-/// Render a labelled inline list-picker for a single form field.
 fn render_field_picker(frame: &mut Frame, area: Rect, picker: &FieldPicker) {
     let FieldPicker {
         label,
@@ -198,7 +183,6 @@ fn render_field_picker(frame: &mut Frame, area: Rect, picker: &FieldPicker) {
     let label_style_active = Style::new().add_modifier(Modifier::REVERSED);
     let label_style_normal = Style::new().add_modifier(Modifier::BOLD);
 
-    // Split: 1 row for label, rest for list.
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
 
     let label_span = Span::styled(
@@ -229,7 +213,6 @@ fn render_field_picker(frame: &mut Frame, area: Rect, picker: &FieldPicker) {
         return;
     }
 
-    // Compute scroll offset so the selected item is always visible.
     let visible = (chunks[1].height as usize).min(visible_rows as usize);
     let scroll_offset = if selected >= visible {
         selected - visible + 1

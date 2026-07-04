@@ -3,37 +3,21 @@ use std::str::FromStr;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// A normalized key press. Canonical form:
-/// - Char keys carry case in the char itself; SHIFT is always cleared for
-///   `Char` (shift+p arrives as `Char('P')`, stored as `'P'`).
-/// - ctrl+letter is stored lowercase (`"ctrl+d"`, never `"ctrl+D"`).
-/// - `BackTab` is normalized to `Tab` + SHIFT.
-/// - `Esc` always clears every modifier: esc is esc, regardless of what
-///   shift/alt/ctrl the terminal tacked onto it.
-/// - SHIFT is cleared for every other code except `Tab` (whose SHIFT bit is
-///   what distinguishes it from `shift+tab`); `Char` already folds SHIFT into
-///   case above. This is what makes shift+enter/ctrl+shift+enter and
-///   shift+arrow/pgdn match their unshifted bindings.
-/// - Only `CONTROL`/`ALT`/`SHIFT` modifier bits are retained; kitty's extra
-///   `KeyEventState` bits never reach this type since `Key` has no field for
-///   them.
+/// A normalized key press: SHIFT folds into `Char` case, `BackTab` becomes
+/// `Tab`+SHIFT, and `Esc` always clears every modifier.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Key {
     pub(crate) code: KeyCode,
     pub(crate) mods: KeyModifiers,
 }
 
-/// Fold `code`/`mods` into canonical form, shared by [`From<KeyEvent>`] and
-/// [`FromStr`] so both entry points agree on the same normalization.
 fn normalize(mut code: KeyCode, mut mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
     if code == KeyCode::BackTab {
         code = KeyCode::Tab;
         mods.insert(KeyModifiers::SHIFT);
     }
     if code == KeyCode::Esc {
-        // esc is esc: a modifier-carrying esc (shift+esc, alt+esc, ...)
-        // collapses to plain esc so every esc check compares the normalized
-        // key rather than re-deriving which modifiers to ignore.
+        // esc is esc: a modifier-carrying esc collapses to plain esc.
         mods = KeyModifiers::NONE;
     }
     if let KeyCode::Char(c) = code {
@@ -48,17 +32,15 @@ fn normalize(mut code: KeyCode, mut mods: KeyModifiers) -> (KeyCode, KeyModifier
         }
     } else if code != KeyCode::Tab {
         // SHIFT only distinguishes Tab (-> shift+tab); every other non-Char
-        // code folds it away, restoring shift+enter/ctrl+shift+enter and
-        // shift+arrow/pgdn tolerance.
+        // code folds it away.
         mods.remove(KeyModifiers::SHIFT);
     }
     (code, mods)
 }
 
 impl From<KeyEvent> for Key {
-    /// The sole entry point from crossterm: strips everything but
-    /// `CONTROL`/`ALT`/`SHIFT` from the modifiers (dropping kitty's
-    /// `KeyEventState` and any other modifier bit), then normalizes.
+    /// Strips everything but `CONTROL`/`ALT`/`SHIFT` from the modifiers,
+    /// then normalizes.
     fn from(ev: KeyEvent) -> Self {
         let mods = ev.modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
         let (code, mods) = normalize(ev.code, mods);
@@ -67,9 +49,8 @@ impl From<KeyEvent> for Key {
 }
 
 impl Key {
-    // Table-building const constructors. Callers pass the already-canonical
-    // form directly (e.g. `Key::char('G')` for a bare capital G); these do
-    // not re-run `normalize` since `const fn` cannot call it.
+    // Precondition: `c`/`code` must already be canonical -- `const fn` can't
+    // call `normalize`.
     pub(crate) const fn char(c: char) -> Self {
         Self {
             code: KeyCode::Char(c),
@@ -98,9 +79,8 @@ impl Key {
         }
     }
 
-    /// ctrl + a non-char key, e.g. `ctrl+enter`'s submit chord. The `ctrl`
-    /// ctor above only takes a `char` since ctrl+letter needs `normalize`'s
-    /// lowercasing; a non-char code has no such folding.
+    /// ctrl + a non-char key; `ctrl` above only takes a `char` since
+    /// ctrl+letter needs `normalize`'s lowercasing.
     pub(crate) const fn ctrl_code(code: KeyCode) -> Self {
         Self {
             code,
@@ -108,9 +88,7 @@ impl Key {
         }
     }
 
-    /// `shift+tab`, the canonical post-normalization form `BackTab` folds
-    /// into (see `normalize`); table rows want it directly rather than
-    /// through a `KeyCode::BackTab` roundabout.
+    /// The canonical post-normalization form `BackTab` folds into.
     pub(crate) const fn shift_tab() -> Self {
         Self {
             code: KeyCode::Tab,
@@ -119,9 +97,6 @@ impl Key {
     }
 }
 
-/// Map a named-key token (case-insensitive) to its `KeyCode`, or a
-/// single-character token to `Char`. The inverse of [`fmt::Display`]'s
-/// per-code arm below.
 fn code_from_str(token: &str) -> Option<KeyCode> {
     Some(match token.to_ascii_lowercase().as_str() {
         "enter" => KeyCode::Enter,
@@ -150,9 +125,7 @@ fn code_from_str(token: &str) -> Option<KeyCode> {
     })
 }
 
-/// Parse error for [`Key::from_str`]. The keymap has no runtime config
-/// surface yet ([[docs/design/keybinds.md]] Non-goals); `FromStr` exists for
-/// the round-trip tests and a future config layer.
+/// No runtime config surface uses this yet; see [[keybinds.md#Non-goals]].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct ParseKeyError;
 
@@ -168,8 +141,7 @@ impl FromStr for Key {
     type Err = ParseKeyError;
 
     /// Lenient: modifier prefixes (`ctrl+`/`control+`, `alt+`, `shift+`) in
-    /// any order, then a key token. `"shift+p"` folds to `'P'` through the
-    /// same [`normalize`] path `From<KeyEvent>` uses.
+    /// any order, then a key token.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut mods = KeyModifiers::NONE;
         let mut parts = s.split('+').peekable();
@@ -221,10 +193,8 @@ impl fmt::Display for Key {
             KeyCode::Delete => write!(f, "delete"),
             KeyCode::Insert => write!(f, "insert"),
             KeyCode::F(n) => write!(f, "f{n}"),
-            // Keys not reachable through a normal terminal without the kitty
-            // keyboard protocol's REPORT_ALL_KEYS_AS_ESCAPE_CODES flag, which
-            // this app does not enable (lib.rs's PushKeyboardEnhancementFlags
-            // call); no table binds them, so a plain debug form is adequate.
+            // Unreachable without the kitty keyboard protocol's extended
+            // flags, which this app does not enable; a debug form suffices.
             other => write!(f, "{other:?}"),
         }
     }
@@ -244,8 +214,6 @@ mod tests {
         KeyEvent::new_with_kind_and_state(code, mods, KeyEventKind::Press, state)
     }
 
-    /// Test 1 (docs/design/keybinds.md, Testing strategy): round-trip
-    /// agreement for representative events.
     #[test]
     fn round_trip_shift_g() {
         let key = Key::from(ev(KeyCode::Char('G'), KeyModifiers::SHIFT));
@@ -282,9 +250,6 @@ mod tests {
         assert_eq!(with_state.to_string().parse::<Key>().unwrap(), with_state);
     }
 
-    /// Rule (Types, "esc is esc"): a modifier-carrying esc collapses to
-    /// plain esc, matching the plain-esc `COMMENT_INPUT_BINDINGS` row and the
-    /// code-only esc checks in `dispatch_key`/`handle_view_key`.
     #[test]
     fn esc_clears_every_modifier() {
         for mods in [
@@ -300,9 +265,7 @@ mod tests {
         }
     }
 
-    /// Rule (Types, "SHIFT cleared except Tab"): shift+enter and
-    /// ctrl+shift+enter fold to their unshifted forms -- the submit chords'
-    /// modifier tolerance.
+    /// Submit chords tolerate shift/ctrl+shift on enter.
     #[test]
     fn shift_enter_folds_to_plain_enter() {
         let key = Key::from(ev(KeyCode::Enter, KeyModifiers::SHIFT));
@@ -318,15 +281,13 @@ mod tests {
         assert_eq!(key, Key::ctrl_code(KeyCode::Enter));
     }
 
-    /// Shift+arrow/pgdn scrolling likewise folds to the unshifted binding.
     #[test]
     fn shift_down_folds_to_plain_down() {
         let key = Key::from(ev(KeyCode::Down, KeyModifiers::SHIFT));
         assert_eq!(key, Key::plain(KeyCode::Down));
     }
 
-    /// Tab is the one code SHIFT still distinguishes: a literal
-    /// `Tab`+SHIFT event (as opposed to `BackTab`) still normalizes to
+    /// A literal `Tab`+SHIFT event (not `BackTab`) also normalizes to
     /// `shift+tab`.
     #[test]
     fn shift_tab_code_stays_shifted() {
@@ -374,9 +335,7 @@ mod tests {
 
     #[test]
     fn binding_round_trip_g_g() {
-        // The `Binding` half of the round-trip (chord display) is exercised
-        // in `keymap::mod`'s invariant test; this pins the per-key half a
-        // chord is built from.
+        // Pins the per-key half a chord is built from.
         let g = Key::char('g');
         assert_eq!(format!("{g} {g}"), "g g");
     }

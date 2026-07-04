@@ -27,7 +27,6 @@ pub(super) fn render_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         PopupKind::Assignee => " Reassign ",
     };
 
-    // Size the popup to fit its contents.
     let max_label = items.iter().map(|i| i.label.len()).max().unwrap_or(10);
     let width = to_u16(
         (max_label + 4)
@@ -36,7 +35,6 @@ pub(super) fn render_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
     );
     let height = to_u16((items.len() + 2).min(area.height as usize));
 
-    // Position: if we have an anchor, open directly below the cell; otherwise centre.
     let (x, y) = if let Some(anch) = anchor {
         // Prefer opening below the anchor row, clamp so the popup stays on screen.
         let px = anch.x.min(area.x + area.width.saturating_sub(width));

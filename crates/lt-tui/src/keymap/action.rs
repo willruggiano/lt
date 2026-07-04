@@ -1,13 +1,9 @@
 /// A key resolves to an `Action`, interpreted by the context that resolved
 /// it -- e.g. `MoveDown` is list-selection movement in `List`, offset
-/// scrolling in `Detail` (`docs/design/keybinds.md`, Architecture). Phase 2
-/// adds the text/form contexts' variants (`Back`, `Submit`, the form/search
-/// actions) alongside phase 1's List/Detail/Popup set.
+/// scrolling in `Detail`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Action {
-    // Navigation -- mapped onto `ScrollMotion` and applied through
-    // `View::scroll` (Decision 6 of `docs/design/tui-app-event-queue-adr.md`)
-    // rather than through a per-context `apply_*` function.
+    // Navigation.
     MoveUp,
     MoveDown,
     MoveTop,
@@ -50,8 +46,6 @@ pub(crate) enum Action {
 
 impl Action {
     /// Display name for the help overlay (and a future command palette).
-    /// Production consumer: `help_rows()` (`docs/design/keybinds.md`, "Help
-    /// overlay from the keymap").
     pub(crate) fn label(self) -> &'static str {
         match self {
             Action::MoveUp => "move up",

@@ -1,11 +1,6 @@
-//! The keymap: a normalized [`Key`], an [`Action`] enum, [`Binding`] tables,
-//! and the machinery that resolves a key through a view's declared layers
-//! ([`resolve`]) into an [`Action`], plus help-row generation from those same
-//! tables ([`help_rows`]). [`GLOBAL`] is the shared navigation vocabulary
-//! layered under most views. Each view declares its own binding tables and a
-//! [`crate::Keymap`] naming its layers, apply function, and unbound-key
-//! policy; this module owns none of that -- only the vocabulary and the
-//! resolution/help-row algorithms.
+//! The keymap: [`Key`]/[`Binding`]/[`Action`], [`resolve`] (a key through a
+//! view's declared layers into an action), and [`help_rows`] (help-panel rows
+//! from the same tables). [`GLOBAL`] is the shared navigation layer.
 
 mod action;
 mod key;
@@ -16,9 +11,8 @@ pub(crate) use action::Action;
 use crossterm::event::KeyCode;
 pub(crate) use key::Key;
 
-/// A single- or two-key binding. Linear's chords are exactly two keys;
-/// `Chord(Key, Key)` over `Vec<Key>` makes deeper nesting unrepresentable
-/// rather than untested.
+/// A single- or two-key binding. `Chord(Key, Key)` over `Vec<Key>` makes
+/// deeper nesting unrepresentable rather than untested.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Binding {
     Single(Key),
@@ -34,15 +28,12 @@ impl fmt::Display for Binding {
     }
 }
 
-/// A `(Binding, Action)` table: one view's declared bindings, or the shared
-/// `GLOBAL` layer.
 pub(crate) type Table = &'static [(Binding, Action)];
 
 /// A view's effective resolution layers, in precedence order: its own table
 /// first, then any shared layers.
 pub(crate) type Layers = &'static [Table];
 
-/// The outcome of resolving a key against a set of layers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Resolved {
     Act(Action),
@@ -51,13 +42,12 @@ pub(crate) enum Resolved {
 }
 
 // ---------------------------------------------------------------------------
-// Shared vocabulary (docs/design/keybinds.md, "Default binding tables")
+// Shared vocabulary
 // ---------------------------------------------------------------------------
 
-/// The shared navigation vocabulary, layered under most views' own tables. A
-/// view whose own table forwards to a text editor instead of cascading skips
-/// this layer, so a navigation letter (`j`, `g`, ...) never steals a
-/// character from the editor.
+/// A view whose own table forwards to a text editor instead of cascading
+/// skips this layer, so a navigation letter never steals a character from
+/// the editor.
 pub(crate) static GLOBAL: &[(Binding, Action)] = &[
     (Binding::Single(Key::char('j')), Action::MoveDown),
     (Binding::Single(Key::plain(KeyCode::Down)), Action::MoveDown),
@@ -78,7 +68,7 @@ pub(crate) static GLOBAL: &[(Binding, Action)] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Resolution (docs/design/keybinds.md, "Resolution and chords")
+// Resolution
 // ---------------------------------------------------------------------------
 
 fn lookup_chord(table: &[(Binding, Action)], prefix: Key, key: Key) -> Option<Action> {
@@ -101,10 +91,8 @@ fn lookup_single(table: &[(Binding, Action)], key: Key) -> Option<Action> {
     })
 }
 
-/// Resolve `key` against `layers`, given the pending chord prefix
-/// `App::dispatch_key` took once at entry. A slice rather than a fixed array:
-/// text contexts have one layer (their own table), non-text contexts two or
-/// three (own table, any shared layers, then GLOBAL).
+/// `layers` is a slice rather than a fixed array since layer count varies by
+/// context (one to three).
 pub(crate) fn resolve(layers: Layers, pending: Option<Key>, key: Key) -> Resolved {
     if let Some(prefix) = pending {
         for layer in layers {
@@ -130,30 +118,24 @@ pub(crate) fn resolve(layers: Layers, pending: Option<Key>, key: Key) -> Resolve
 }
 
 // ---------------------------------------------------------------------------
-// Help overlay (docs/design/keybinds.md, "Help overlay from the keymap")
+// Help overlay
 // ---------------------------------------------------------------------------
 
-/// One help-panel row: one or more equivalent bindings for the same
-/// (context, action) -- e.g. `j`/`down`, both `MoveDown` in `global` -- grouped
-/// so the panel shows them on one line. Rows are immutable once `help_rows()`
-/// returns, so `binding_form`/`haystack` are precomputed there rather than
-/// rebuilt every render frame or filter keystroke.
+/// One or more equivalent bindings for the same `(context, action)` -- e.g.
+/// `j`/`down` -- grouped so the panel shows them on one line.
 pub(crate) struct HelpRow {
     pub(crate) bindings: Vec<Binding>,
     pub(crate) label: &'static str,
     pub(crate) context: &'static str,
-    /// The bindings' `Display` forms joined with `" / "`, e.g. `"j / down"`,
-    /// `"ctrl+enter / alt+enter"` -- the rendered key column.
+    /// `Display` forms joined with `" / "`, e.g. `"j / down"`.
     pub(crate) binding_form: String,
-    /// Lowercase `"{binding_form} {label} {context}"`, matched against the
-    /// help popup's filter query.
+    /// Lowercase `"{binding_form} {label} {context}"`, for filter matching.
     pub(crate) haystack: String,
 }
 
 impl HelpRow {
-    /// A row with its grouped `bindings` still open to appending (`help_rows`
-    /// merges consecutive same-action rows); `binding_form`/`haystack` are
-    /// filled in by `finalize` once grouping is done.
+    /// `bindings` still open to appending; `binding_form`/`haystack` are
+    /// empty until `finalize`.
     fn open(bindings: Vec<Binding>, label: &'static str, context: &'static str) -> Self {
         Self {
             bindings,
@@ -164,8 +146,6 @@ impl HelpRow {
         }
     }
 
-    /// Fill `binding_form`/`haystack` from the now-final `bindings`. Called
-    /// once per row after `help_rows` finishes grouping.
     fn finalize(&mut self) {
         self.binding_form = self
             .bindings
@@ -182,10 +162,7 @@ impl HelpRow {
     }
 }
 
-/// The Esc/q floor's dispatch behavior (`docs/design/keybinds.md`, "Contexts
-/// and layering"): not table bindings, so `help_rows` appends them by hand.
-/// `esc`/`q` close an overlay; at the base list, `esc` refreshes (twice within
-/// 500ms resets sort/filter/search, `handle_list_esc`) and `q` quits.
+/// `esc`/`q` aren't table bindings, so they're appended here by hand.
 fn floor_rows() -> Vec<HelpRow> {
     vec![
         HelpRow::open(
@@ -193,9 +170,8 @@ fn floor_rows() -> Vec<HelpRow> {
             "close, back to the view beneath",
             "overlay",
         ),
-        // Unlike esc, q is not floor-owned in text contexts: the search/help
-        // filter bars type it, so its "close" meaning only applies above the
-        // base outside a text context.
+        // Unlike esc, q is typed in text contexts, so its "close" meaning
+        // only applies outside one.
         HelpRow::open(
             vec![Binding::Single(Key::char('q'))],
             "close, back to the view beneath (typed in text inputs)",
@@ -232,10 +208,6 @@ impl HelpRowBuilder {
     }
 }
 
-/// `contexts` in declaration order, grouping consecutive rows for the same
-/// `(context, action)` into one [`HelpRow`], plus the floor's static rows,
-/// each finalized (`HelpRow::finalize`) once its `bindings` group is
-/// complete.
 pub(crate) fn help_rows(contexts: &[(&'static str, &[Table])]) -> Vec<HelpRow> {
     let mut builder = HelpRowBuilder::default();
     for &(context, tables) in contexts {
@@ -262,9 +234,6 @@ mod tests {
         }
     }
 
-    /// Every `(Binding, Action)` row across `layers`, flattened so the
-    /// invariant tests below stay a single loop level instead of nesting
-    /// through layers/rows.
     fn layer_bindings(layers: Layers) -> Vec<(Binding, Action)> {
         layers
             .iter()
@@ -273,7 +242,6 @@ mod tests {
             .collect()
     }
 
-    /// Every key named by any binding across `layers`.
     fn layer_keys(layers: Layers) -> Vec<Key> {
         layer_bindings(layers)
             .iter()
@@ -281,7 +249,7 @@ mod tests {
             .collect()
     }
 
-    // -- Resolution units (Testing strategy, item 2) -------------------
+    // -- Resolution units -------------------------------------------------
 
     #[test]
     fn chord_hit_g_g_selects_top() {
@@ -309,10 +277,8 @@ mod tests {
 
     #[test]
     fn layer_precedence_context_wins_over_global() {
-        // No production table currently overrides a GLOBAL key (by design:
-        // the invariant test below forbids ambiguity), so this exercises the
-        // resolution mechanism directly with synthetic layers standing in
-        // for "context table" and "GLOBAL".
+        // No production table overrides GLOBAL (the invariant test below
+        // forbids it), so this uses synthetic layers instead.
         const CONTEXT_LAYER: &[(Binding, Action)] =
             &[(Binding::Single(Key::char('d')), Action::ToggleSortDirection)];
         const GLOBAL_STAND_IN: &[(Binding, Action)] =
@@ -324,7 +290,7 @@ mod tests {
         );
     }
 
-    // -- Invariants (Testing strategy, item 3) --------------------------
+    // -- Invariants ---------------------------------------------------------
 
     #[test]
     fn no_context_duplicates_a_binding() {
@@ -391,7 +357,7 @@ mod tests {
         }
     }
 
-    // -- Binding snapshot (Testing strategy, item 4) --------------------
+    // -- Binding snapshot -----------------------------------------------
 
     #[test]
     fn binding_snapshot() {
@@ -410,8 +376,8 @@ mod tests {
         insta::assert_snapshot!(lines.join("\n"));
     }
 
-    /// The second snapshot (Testing strategy, item 4): `help_rows()`'s
-    /// grouped, filterable output -- the exact data the help popup renders.
+    /// `help_rows()`'s grouped, filterable output, as opposed to the raw
+    /// table above.
     #[test]
     fn help_rows_snapshot() {
         let lines: Vec<String> = help_rows(crate::HELP_CONTEXTS)
