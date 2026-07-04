@@ -11,14 +11,14 @@ description:
 
 The authoritative rules live in the repo; this skill distills the operative ones
 and links to the source. When a rule here and a `docs/rules/` file disagree, the
-file wins.
+rule file wins.
 
-- Posture and working principles: `docs/rules/posture.md`
-- Rust conventions (lints, panic-safety): `docs/rules/rust.md`
-- Strictness and commits: `docs/rules/contributing.md`
-- Test conventions: `docs/rules/testing.md`
-- System design: `docs/architecture.md`
-- Validating a change: `.claude/skills/lt-check/SKILL.md`
+- Posture and working principles: [[docs/rules/posture.md]]
+- Rust conventions (lints, panic-safety): [[docs/rules/rust.md]]
+- Strictness and commits: [[docs/rules/contributing.md]]
+- Test conventions: [[docs/rules/testing.md]]
+- System design: [[docs/architecture.md]]
+- Validating a change: [[.claude/skills/lt-check/SKILL.md]]
 
 ## Posture (do this before typing)
 
@@ -82,11 +82,5 @@ clones that `cpd` and `cargo dupes` will reject.
 
 ## After writing: validate, then commit
 
-- Validate with the gate, not ad-hoc cargo: run `make check` and `make test`
-  through the nix devshell (see `.claude/skills/lt-check/SKILL.md`), or delegate
-  to the `lt-check-runner` agent. Format through the **nightly** devshell — a
-  stable `rustfmt` silently skips the workspace's import-grouping rules and the
-  push then fails CI.
-- Commits are conventional: `<type>(<scope>): <subject>`. A commit that closes a
-  Linear issue ends with `Closes: ENG-XXX`; partial progress uses
-  `Refs: ENG-XXX` (one trailer per issue).
+- Use the `lt-check-runner` subagent to validate your changes.
+- Consult [[docs/rules/contributing.md]] for commit conventions.

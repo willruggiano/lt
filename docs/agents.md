@@ -28,7 +28,7 @@
 - Do: use `tee` to simultaneously write command output to a file _and_ filter it
   for cleaner output, eg.
   `nix develop .#lt -c make check 2>&1 | tee /tmp/check.log | rg '^error'`.
-- Don't: `tail` or `grep`/`rg` long running commands (`make check`, `cargo`)
+- Don't: `tail` or `grep`/`rg` long running commands (eg. `make check`, `cargo`)
   without `tee` capturing the full output to a file. If your `tail` or
   `grep`/`rg` commands don't capture sufficient command output, you can fall
   back to the tee'd file instead of being forced to re-run the command.

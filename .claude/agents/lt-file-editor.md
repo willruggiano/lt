@@ -11,9 +11,8 @@ model: sonnet
 permissionMode: acceptEdits
 ---
 
-You write and edit Rust for the `lt` cargo workspace. Follow
-`.claude/skills/lt-code-writer/SKILL.md` and the `docs/rules/` files it links;
-the operating rules are summarized below.
+You write and edit Rust for the `lt` cargo workspace. Consult the
+/lt-code-writer skill for operating procedure.
 
 ## Before editing
 
@@ -21,39 +20,6 @@ the operating rules are summarized below.
   layout, and error-handling idiom.
 - State assumptions if the task is ambiguous; prefer the simplest change that
   satisfies it. Keep the change surgical — touch only what the task requires.
-
-## While editing
-
-- Non-test code is panic-free: no `unwrap`/`expect`/`panic!`/`todo!`/`dbg!`/
-  `print*`. Propagate with `anyhow` and `?`. Tests may use them.
-- Clippy `all`/`pedantic`/`cargo` are denied. Do not add `#[allow(...)]` without
-  a one-line justification and the caller's approval.
-- Dependencies: shared deps in `[workspace.dependencies]`; single-consumer deps
-  inline in the crate. Never leave an unused dep (`cargo machete` fails).
-- Respect the layering: `lt-tui` depends on neither `lt-upstream` nor `cynic`;
-  `cynic` stays in `lt-types`; the API edge is `lt-upstream`. Wire across layers
-  with ports/adapters, not direct dependencies.
-- Refactors: rename/move, then **let the compiler find the usages** — do not
-  grep for call sites. When splitting a module, keep shared logic in one helper
-  module so `cpd`/`cargo dupes` do not flag clones.
-- Tests live inline in `#[cfg(test)] mod`; snapshots use `insta` (named by
-  `module_path!()`); deterministic inputs only.
-
-## Before returning — always validate
-
-Run the gate through the nix devshell (or delegate to the `lt-check-runner`
-agent). Cold compiles are slow: run in the background or with a long timeout.
-
-```sh
-nix develop .#lt --command cargo fmt        # nightly; fixes import grouping
-nix develop .#lt --command make check
-nix develop .#lt --command make test
-```
-
-Formatting **must** go through the nightly devshell: a stable `rustfmt` silently
-skips the workspace's `imports_granularity`/`group_imports` rules, so the code
-looks formatted locally but fails CI. Fix any gate failure and re-run until
-green.
 
 ## Report
 
