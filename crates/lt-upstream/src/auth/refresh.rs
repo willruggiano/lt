@@ -17,7 +17,7 @@ use lt_config::AuthToken;
 use tracing::{info, warn};
 
 use super::login::{
-    TOKEN_URL, TokenExchanger, lookup_stored_credentials, now_unix_secs, parse_token_response,
+    Clock, TOKEN_URL, TokenExchanger, lookup_stored_credentials, parse_token_response,
 };
 
 /// Load the stored token, attempting an automatic re-authentication if the
@@ -52,8 +52,8 @@ pub fn load_or_refresh_token() -> Result<AuthToken> {
                 match refresh_with(
                     &TokenExchanger::Ureq,
                     &t.refresh_token,
-                    &client_id,
-                    &client_secret,
+                    (&client_id, &client_secret),
+                    &Clock::System,
                 ) {
                     Ok(refreshed) => {
                         lt_config::save_token(&refreshed)?;
@@ -100,16 +100,17 @@ fn build_refresh_params<'a>(
 }
 
 /// Exchange a refresh token for a new access token via the `refresh_token`
-/// grant.
+/// grant. `credentials` is `(client_id, client_secret)`.
 fn refresh_with(
     exchanger: &TokenExchanger,
     refresh_token: &str,
-    client_id: &str,
-    client_secret: &str,
+    credentials: (&str, &str),
+    clock: &Clock,
 ) -> Result<AuthToken> {
+    let (client_id, client_secret) = credentials;
     let params = build_refresh_params(refresh_token, client_id, client_secret);
     let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
-    parse_token_response(status, &body)?.into_auth_token(Some(refresh_token), now_unix_secs())
+    parse_token_response(status, &body, Some(refresh_token), clock)
 }
 
 #[cfg(test)]
@@ -134,9 +135,16 @@ mod tests {
                 .to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
         };
-        let token = refresh_with(&exchanger, "old-refresh", "cid", "csecret").unwrap();
+        let token = refresh_with(
+            &exchanger,
+            "old-refresh",
+            ("cid", "csecret"),
+            &Clock::Fixed(1_000_000),
+        )
+        .unwrap();
         assert_eq!(token.access_token, "new-tok");
         assert_eq!(token.refresh_token, "new-refresh".to_string());
+        assert_eq!(token.issued_at, 1_000_000);
 
         let TokenExchanger::Fake { calls, .. } = &exchanger else {
             panic!("expected fake")
@@ -161,7 +169,13 @@ mod tests {
                 .to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
         };
-        let token = refresh_with(&exchanger, "old-refresh", "cid", "csecret").unwrap();
+        let token = refresh_with(
+            &exchanger,
+            "old-refresh",
+            ("cid", "csecret"),
+            &Clock::Fixed(1_000_000),
+        )
+        .unwrap();
         assert_eq!(token.access_token, "new-tok");
         assert_eq!(token.refresh_token, "old-refresh".to_string());
     }
@@ -173,7 +187,13 @@ mod tests {
             body: "invalid_grant".to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
         };
-        let err = refresh_with(&exchanger, "old-refresh", "cid", "csecret").unwrap_err();
+        let err = refresh_with(
+            &exchanger,
+            "old-refresh",
+            ("cid", "csecret"),
+            &Clock::Fixed(1_000_000),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("invalid_grant"));
     }
 }
