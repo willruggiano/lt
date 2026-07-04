@@ -257,6 +257,12 @@ fn list_view() {
 }
 
 #[test]
+fn list_view_wide_terminal_grows_title_column() {
+    let mut app = app_with_issues(0, 12).unwrap();
+    insta::assert_snapshot!(draw(&mut app, 160, 20));
+}
+
+#[test]
 fn empty_list() {
     let mut app = App::for_test(Vec::new()).unwrap();
     app.auth = authenticated("Ada Lovelace", "Acme");

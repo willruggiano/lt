@@ -1,5 +1,5 @@
 ---
-source: src/tui/mod.rs
+source: crates/lt-tui/src/render_tests.rs
 expression: "draw(&mut app, 100, 24)"
 ---
 "user:Ada Lovelace  org:Acme  sort:updated-                                                          "

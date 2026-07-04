@@ -1,6 +1,5 @@
 ---
 source: crates/lt-tui/src/render_tests.rs
-assertion_line: 307
 expression: "draw(&mut app, 100, 20)"
 ---
 "user:Ada Lovelace  org:Acme  sort:updated-                                                          "

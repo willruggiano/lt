@@ -1,3 +1,4 @@
+use lt_runtime::text;
 use lt_types::types::Issue;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
@@ -33,6 +34,8 @@ pub(super) fn render_issue_table(
     spec: &TableSpec,
     table_state: &mut TableState,
 ) -> [usize; 7] {
+    const MIN_TITLE_WIDTH: usize = 40;
+
     let sort_marker = if spec.desc { "-" } else { "+" };
     let base_headers: [&str; 7] = [
         "IDENTIFIER",
@@ -61,12 +64,37 @@ pub(super) fn render_issue_table(
         }
     }
 
+    // The TITLE column absorbs whatever horizontal space the terminal has
+    // left over, instead of sizing to its (unbounded) content: sum the other
+    // six columns plus their spacing, and clamp widths[1] to what remains. It
+    // never asks for less than MIN_TITLE_WIDTH (or its full content, if that's
+    // shorter), so when the other columns are too wide to leave room, the
+    // table over-subscribes the area and ratatui squeezes columns instead of
+    // collapsing TITLE to near-nothing.
+    let other_widths: usize = widths
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 1)
+        .map(|(_, w)| *w)
+        .sum();
+    let spacing = 2 * (widths.len() - 1);
+    let available = usize::from(area.width)
+        .saturating_sub(other_widths)
+        .saturating_sub(spacing);
+    widths[1] = widths[1].min(available.max(MIN_TITLE_WIDTH.min(widths[1])));
+
     let header = Row::new(headers.map(Cell::from)).style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row> = spec
         .issues
         .iter()
-        .map(|issue| Row::new((spec.cells)(issue).map(Cell::from)))
+        .map(|issue| {
+            let mut cells = (spec.cells)(issue);
+            if cells[1].len() > widths[1] {
+                cells[1] = text::truncate(&cells[1], widths[1]);
+            }
+            Row::new(cells.map(Cell::from))
+        })
         .collect();
 
     let constraints: Vec<Constraint> = widths
