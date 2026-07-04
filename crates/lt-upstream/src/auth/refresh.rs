@@ -1,10 +1,9 @@
 /// Auto-refresh the stored OAuth session when the access token has expired.
 ///
 /// Linear's OAuth2 token endpoint issues a refresh token alongside the access
-/// token, and rotates it on every refresh (with a 30-minute grace period
-/// during which the previous refresh token is still honored). Every stored
-/// token carries a refresh token, so refreshing never depends on one being
-/// merely present. This module provides `load_or_refresh_token`, which:
+/// token on every grant. Every stored token carries a refresh token, so
+/// refreshing never depends on one being merely present. This module provides
+/// `load_or_refresh_token`, which:
 ///
 ///   - silently exchanges the stored refresh token for a new access token via
 ///     the `refresh_token` grant when the stored token has expired and client
@@ -16,9 +15,7 @@ use anyhow::{Result, anyhow};
 use lt_config::AuthToken;
 use tracing::{info, warn};
 
-use super::login::{
-    Clock, TOKEN_URL, TokenExchanger, lookup_stored_credentials, parse_token_response,
-};
+use super::login::{Clock, TokenExchanger, TokenRefresh, lookup_stored_credentials};
 
 /// Load the stored token, attempting an automatic re-authentication if the
 /// token is expired and client credentials are available.
@@ -49,12 +46,11 @@ pub fn load_or_refresh_token() -> Result<AuthToken> {
         Some(t) if t.is_expired() => {
             if let Some((client_id, client_secret)) = lookup_stored_credentials()? {
                 info!("auth: access token has expired -- refreshing silently");
-                match refresh_with(
-                    &TokenExchanger::Ureq,
-                    &t.refresh_token,
-                    (&client_id, &client_secret),
-                    &Clock::System,
-                ) {
+                match TokenExchanger::new(Clock::System).exchange(&TokenRefresh {
+                    client_id: &client_id,
+                    client_secret: &client_secret,
+                    refresh_token: &t.refresh_token,
+                }) {
                     Ok(refreshed) => {
                         lt_config::save_token(&refreshed)?;
                         return Ok(refreshed);
@@ -83,117 +79,4 @@ pub fn load_or_refresh_token() -> Result<AuthToken> {
 /// config file), without blocking for interactive input.
 fn credentials_available() -> Result<bool> {
     Ok(lookup_stored_credentials()?.is_some())
-}
-
-/// Build the form fields for the refresh-token grant. Pure.
-fn build_refresh_params<'a>(
-    refresh_token: &'a str,
-    client_id: &'a str,
-    client_secret: &'a str,
-) -> [(&'a str, &'a str); 4] {
-    [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-        ("client_id", client_id),
-        ("client_secret", client_secret),
-    ]
-}
-
-/// Exchange a refresh token for a new access token via the `refresh_token`
-/// grant. `credentials` is `(client_id, client_secret)`.
-fn refresh_with(
-    exchanger: &TokenExchanger,
-    refresh_token: &str,
-    credentials: (&str, &str),
-    clock: &Clock,
-) -> Result<AuthToken> {
-    let (client_id, client_secret) = credentials;
-    let params = build_refresh_params(refresh_token, client_id, client_secret);
-    let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
-    parse_token_response(status, &body, Some(refresh_token), clock)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_refresh_params_carries_grant_and_credentials() {
-        let params = build_refresh_params("rtok", "cid", "csecret");
-        let map: std::collections::HashMap<_, _> = params.iter().copied().collect();
-        assert_eq!(map.get("grant_type").copied(), Some("refresh_token"));
-        assert_eq!(map.get("refresh_token").copied(), Some("rtok"));
-        assert_eq!(map.get("client_id").copied(), Some("cid"));
-        assert_eq!(map.get("client_secret").copied(), Some("csecret"));
-    }
-
-    #[test]
-    fn refresh_with_returns_new_token_on_success() {
-        let exchanger = TokenExchanger::Fake {
-            status: 200,
-            body: r#"{"access_token":"new-tok","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"new-refresh"}"#
-                .to_string(),
-            calls: std::cell::RefCell::new(Vec::new()),
-        };
-        let token = refresh_with(
-            &exchanger,
-            "old-refresh",
-            ("cid", "csecret"),
-            &Clock::Fixed(1_000_000),
-        )
-        .unwrap();
-        assert_eq!(token.access_token, "new-tok");
-        assert_eq!(token.refresh_token, "new-refresh".to_string());
-        assert_eq!(token.issued_at, 1_000_000);
-
-        let TokenExchanger::Fake { calls, .. } = &exchanger else {
-            panic!("expected fake")
-        };
-        let calls = calls.borrow();
-        let sent: std::collections::HashMap<_, _> = calls[0].iter().cloned().collect();
-        assert_eq!(
-            sent.get("grant_type").map(String::as_str),
-            Some("refresh_token")
-        );
-        assert_eq!(
-            sent.get("refresh_token").map(String::as_str),
-            Some("old-refresh")
-        );
-    }
-
-    #[test]
-    fn refresh_with_carries_over_refresh_token_when_response_omits_it() {
-        let exchanger = TokenExchanger::Fake {
-            status: 200,
-            body: r#"{"access_token":"new-tok","token_type":"Bearer","expires_in":3600,"scope":"read,write"}"#
-                .to_string(),
-            calls: std::cell::RefCell::new(Vec::new()),
-        };
-        let token = refresh_with(
-            &exchanger,
-            "old-refresh",
-            ("cid", "csecret"),
-            &Clock::Fixed(1_000_000),
-        )
-        .unwrap();
-        assert_eq!(token.access_token, "new-tok");
-        assert_eq!(token.refresh_token, "old-refresh".to_string());
-    }
-
-    #[test]
-    fn refresh_with_surfaces_non_2xx_error() {
-        let exchanger = TokenExchanger::Fake {
-            status: 400,
-            body: "invalid_grant".to_string(),
-            calls: std::cell::RefCell::new(Vec::new()),
-        };
-        let err = refresh_with(
-            &exchanger,
-            "old-refresh",
-            ("cid", "csecret"),
-            &Clock::Fixed(1_000_000),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("invalid_grant"));
-    }
 }

@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 const CALLBACK_PORT: u16 = 7342;
 const AUTH_URL: &str = "https://linear.app/oauth/authorize";
-pub(super) const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
+const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 
 /// Non-interactive login: identical to `run()` but errors instead of prompting
 /// when OAuth credentials are missing. Safe to call from a background thread
@@ -39,7 +39,6 @@ struct OauthFlow<'a> {
     browser: &'a dyn Browser,
     listener: &'a dyn CallbackListener,
     exchanger: TokenExchanger,
-    clock: Clock,
 }
 
 /// Production wiring: real browser, TCP callback listener, ureq HTTP.
@@ -47,8 +46,7 @@ fn production_flow() -> OauthFlow<'static> {
     OauthFlow {
         browser: &RealBrowser,
         listener: &TcpCallbackListener,
-        exchanger: TokenExchanger::Ureq,
-        clock: Clock::System,
+        exchanger: TokenExchanger::new(Clock::System),
     }
 }
 
@@ -79,18 +77,15 @@ fn run_with_credentials(
 
     info!("Authorization received. Exchanging for token...");
 
-    exchange_code(
-        &flow.exchanger,
-        &TokenExchange {
+    flow.exchanger
+        .exchange_code(&TokenExchange {
             client_id,
             client_secret,
             code: &code,
             redirect_uri: &redirect_uri,
             code_verifier: &code_verifier,
-        },
-        &flow.clock,
-    )
-    .context("exchanging authorization code for token")
+        })
+        .context("exchanging authorization code for token")
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +367,13 @@ struct TokenExchange<'a> {
     code_verifier: &'a str,
 }
 
+/// Inputs required to exchange a refresh token for a new access token.
+pub(super) struct TokenRefresh<'a> {
+    pub(super) client_id: &'a str,
+    pub(super) client_secret: &'a str,
+    pub(super) refresh_token: &'a str,
+}
+
 /// Build the form fields for the token-exchange POST. Pure.
 fn build_token_params<'a>(exchange: &TokenExchange<'a>) -> [(&'a str, &'a str); 6] {
     [
@@ -384,8 +386,17 @@ fn build_token_params<'a>(exchange: &TokenExchange<'a>) -> [(&'a str, &'a str); 
     ]
 }
 
-/// An enum rather than a trait or boxed closure: the set of clocks is
-/// closed (the system clock, plus a fixed instant in tests).
+/// Build the form fields for the refresh-token grant POST. Pure.
+fn build_refresh_params<'a>(refresh: &TokenRefresh<'a>) -> [(&'a str, &'a str); 4] {
+    [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh.refresh_token),
+        ("client_id", refresh.client_id),
+        ("client_secret", refresh.client_secret),
+    ]
+}
+
+// FIXME: ENG-59
 pub(super) enum Clock {
     System,
     #[cfg(test)]
@@ -407,48 +418,39 @@ impl Clock {
 
 /// Validate the HTTP status and deserialize the token body into a stored
 /// token, stamped with the current time as `issued_at`.
-/// `previous_refresh_token` fills the gap when a refresh-grant response
-/// inside the rotation grace period omits the rotated token; the initial
-/// code exchange has nothing to fall back to, so absence there is an error.
-pub(super) fn parse_token_response(
-    status: u16,
-    body: &str,
-    previous_refresh_token: Option<&str>,
-    clock: &Clock,
-) -> Result<AuthToken> {
+fn parse_token_response(status: u16, body: &str, clock: &Clock) -> Result<AuthToken> {
     #[derive(serde::Deserialize)]
-    struct Wire {
+    struct Response {
         access_token: String,
         token_type: String,
         expires_in: u64,
         scope: String,
-        refresh_token: Option<String>,
+        refresh_token: String,
     }
     if !(200..300).contains(&status) {
         return Err(anyhow!("token exchange failed (HTTP {status}): {body}"));
     }
-    let wire: Wire = serde_json::from_str(body).context("parsing token response")?;
-    let refresh_token = wire
-        .refresh_token
-        .or_else(|| previous_refresh_token.map(str::to_string))
-        .ok_or_else(|| anyhow!("token response did not include a refresh token"))?;
+    let response: Response = serde_json::from_str(body).context("parsing token response")?;
     Ok(AuthToken {
-        access_token: wire.access_token,
-        token_type: wire.token_type,
-        expires_in: wire.expires_in,
-        scope: wire.scope,
+        access_token: response.access_token,
+        token_type: response.token_type,
+        expires_in: response.expires_in,
+        scope: response.scope,
         issued_at: clock.now_unix_secs(),
-        refresh_token,
+        refresh_token: response.refresh_token,
     })
 }
 
-/// POSTs a token-grant form and returns the HTTP status and raw body. The
-/// set of exchangers is closed -- ureq in production, a scripted fake in
-/// tests -- so it is an enum rather than a trait with two impls.
-pub(super) enum TokenExchanger {
-    /// Send the form via ureq.
+/// Exchanges OAuth grants for tokens against `TOKEN_URL`.
+pub(super) struct TokenExchanger {
+    transport: Transport,
+    clock: Clock,
+}
+
+/// The set of transports is closed -- ureq in production, a scripted fake
+/// in tests -- so it is an enum rather than a trait with two impls.
+enum Transport {
     Ureq,
-    /// Return a scripted response and record each form it was sent.
     #[cfg(test)]
     Fake {
         status: u16,
@@ -458,10 +460,55 @@ pub(super) enum TokenExchanger {
 }
 
 impl TokenExchanger {
-    pub(super) fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<(u16, String)> {
-        match self {
-            Self::Ureq => {
-                let result = ureq::post(url)
+    pub(super) fn new(clock: Clock) -> Self {
+        Self {
+            transport: Transport::Ureq,
+            clock,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fake(status: u16, body: &str, clock: Clock) -> Self {
+        Self {
+            transport: Transport::Fake {
+                status,
+                body: body.to_string(),
+                calls: std::cell::RefCell::new(Vec::new()),
+            },
+            clock,
+        }
+    }
+
+    /// The forms `POSTed` so far, for asserting on grant parameters.
+    #[cfg(test)]
+    pub(super) fn sent_forms(&self) -> Vec<Vec<(String, String)>> {
+        match &self.transport {
+            Transport::Ureq => Vec::new(),
+            Transport::Fake { calls, .. } => calls.borrow().clone(),
+        }
+    }
+
+    /// Exchange a refresh token for a new access token via the
+    /// `refresh_token` grant.
+    pub(super) fn exchange(&self, refresh: &TokenRefresh) -> Result<AuthToken> {
+        self.post_and_parse(&build_refresh_params(refresh))
+    }
+
+    /// Exchange an authorization code for an access token via the
+    /// `authorization_code` grant.
+    fn exchange_code(&self, exchange: &TokenExchange) -> Result<AuthToken> {
+        self.post_and_parse(&build_token_params(exchange))
+    }
+
+    fn post_and_parse(&self, params: &[(&str, &str)]) -> Result<AuthToken> {
+        let (status, body) = self.post_form(params)?;
+        parse_token_response(status, &body, &self.clock)
+    }
+
+    fn post_form(&self, params: &[(&str, &str)]) -> Result<(u16, String)> {
+        match &self.transport {
+            Transport::Ureq => {
+                let result = ureq::post(TOKEN_URL)
                     .config()
                     .http_status_as_error(false)
                     .build()
@@ -480,7 +527,7 @@ impl TokenExchanger {
                 }
             }
             #[cfg(test)]
-            Self::Fake {
+            Transport::Fake {
                 status,
                 body,
                 calls,
@@ -495,16 +542,6 @@ impl TokenExchanger {
             }
         }
     }
-}
-
-fn exchange_code(
-    exchanger: &TokenExchanger,
-    exchange: &TokenExchange,
-    clock: &Clock,
-) -> Result<AuthToken> {
-    let params = build_token_params(exchange);
-    let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
-    parse_token_response(status, &body, None, clock)
 }
 
 #[cfg(test)]
@@ -599,11 +636,24 @@ mod tests {
     }
 
     #[test]
+    fn build_refresh_params_carries_grant_and_credentials() {
+        let params = build_refresh_params(&TokenRefresh {
+            client_id: "cid",
+            client_secret: "csecret",
+            refresh_token: "rtok",
+        });
+        let map: std::collections::HashMap<_, _> = params.iter().copied().collect();
+        assert_eq!(map.get("grant_type").copied(), Some("refresh_token"));
+        assert_eq!(map.get("refresh_token").copied(), Some("rtok"));
+        assert_eq!(map.get("client_id").copied(), Some("cid"));
+        assert_eq!(map.get("client_secret").copied(), Some("csecret"));
+    }
+
+    #[test]
     fn parse_token_response_deserializes_success_body() {
         let token = parse_token_response(
             200,
             r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"r"}"#,
-            None,
             &Clock::Fixed(1_000_000),
         )
         .unwrap();
@@ -615,8 +665,7 @@ mod tests {
 
     #[test]
     fn parse_token_response_rejects_non_2xx_with_body() {
-        let err =
-            parse_token_response(400, "invalid_grant", None, &Clock::Fixed(1_000_000)).unwrap_err();
+        let err = parse_token_response(400, "invalid_grant", &Clock::Fixed(1_000_000)).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("HTTP 400"));
         assert!(msg.contains("invalid_grant"));
@@ -624,7 +673,7 @@ mod tests {
 
     #[test]
     fn parse_token_response_rejects_malformed_json() {
-        assert!(parse_token_response(200, "not json", None, &Clock::Fixed(1_000_000)).is_err());
+        assert!(parse_token_response(200, "not json", &Clock::Fixed(1_000_000)).is_err());
     }
 
     #[test]
@@ -633,7 +682,18 @@ mod tests {
             parse_token_response(
                 200,
                 r#"{"access_token":"tok","token_type":"Bearer","scope":"read,write"}"#,
-                None,
+                &Clock::Fixed(1_000_000),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parse_token_response_rejects_missing_refresh_token() {
+        assert!(
+            parse_token_response(
+                200,
+                r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600,"scope":"read,write"}"#,
                 &Clock::Fixed(1_000_000),
             )
             .is_err()
@@ -719,16 +779,15 @@ mod tests {
         let listener = ScriptedCallbackListener {
             code: "auth-code".to_string(),
         };
-        let exchanger = TokenExchanger::Fake {
-            status: 200,
-            body: r#"{"access_token":"final-token","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"final-refresh"}"#.to_string(),
-            calls: std::cell::RefCell::new(Vec::new()),
-        };
+        let exchanger = TokenExchanger::fake(
+            200,
+            r#"{"access_token":"final-token","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"final-refresh"}"#,
+            Clock::Fixed(1_000_000),
+        );
         let flow = OauthFlow {
             browser: &browser,
             listener: &listener,
             exchanger,
-            clock: Clock::Fixed(1_000_000),
         };
 
         let token = run_with_credentials(&flow, "cid", "csecret").unwrap();
@@ -744,11 +803,8 @@ mod tests {
         assert!(opened[0].contains("linear.app"));
 
         // The exchange POSTed the code from the listener and our credentials.
-        let TokenExchanger::Fake { calls, .. } = &flow.exchanger else {
-            panic!("expected fake")
-        };
-        let calls = calls.borrow();
-        let sent: std::collections::HashMap<_, _> = calls[0].iter().cloned().collect();
+        let forms = flow.exchanger.sent_forms();
+        let sent: std::collections::HashMap<_, _> = forms[0].iter().cloned().collect();
         assert_eq!(sent.get("code").map(String::as_str), Some("auth-code"));
         assert_eq!(sent.get("client_id").map(String::as_str), Some("cid"));
     }
@@ -761,29 +817,58 @@ mod tests {
         let listener = ScriptedCallbackListener {
             code: "auth-code".to_string(),
         };
-        let exchanger = TokenExchanger::Fake {
-            status: 401,
-            body: "unauthorized".to_string(),
-            calls: std::cell::RefCell::new(Vec::new()),
-        };
+        let exchanger = TokenExchanger::fake(401, "unauthorized", Clock::Fixed(1_000_000));
         let flow = OauthFlow {
             browser: &browser,
             listener: &listener,
             exchanger,
-            clock: Clock::Fixed(1_000_000),
         };
         assert!(run_with_credentials(&flow, "cid", "csecret").is_err());
     }
 
+    // -- Refresh-token grant ----------------------------------------------
+
     #[test]
-    fn exchange_code_without_refresh_token_in_response_errors() {
-        let exchanger = TokenExchanger::Fake {
-            status: 200,
-            body: r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600,"scope":"read,write"}"#
-                .to_string(),
-            calls: std::cell::RefCell::new(Vec::new()),
-        };
-        let err = exchange_code(&exchanger, &exchange(), &Clock::Fixed(1_000_000)).unwrap_err();
-        assert!(err.to_string().contains("refresh token"));
+    fn exchange_posts_refresh_grant_and_returns_token() {
+        let exchanger = TokenExchanger::fake(
+            200,
+            r#"{"access_token":"new-tok","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"new-refresh"}"#,
+            Clock::Fixed(1_000_000),
+        );
+        let token = exchanger
+            .exchange(&TokenRefresh {
+                client_id: "cid",
+                client_secret: "csecret",
+                refresh_token: "old-refresh",
+            })
+            .unwrap();
+        assert_eq!(token.access_token, "new-tok");
+        assert_eq!(token.refresh_token, "new-refresh".to_string());
+        assert_eq!(token.issued_at, 1_000_000);
+
+        let forms = exchanger.sent_forms();
+        let sent: std::collections::HashMap<_, _> = forms[0].iter().cloned().collect();
+        assert_eq!(
+            sent.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            sent.get("refresh_token").map(String::as_str),
+            Some("old-refresh")
+        );
+        assert_eq!(sent.get("client_id").map(String::as_str), Some("cid"));
+    }
+
+    #[test]
+    fn exchange_surfaces_non_2xx_error() {
+        let exchanger = TokenExchanger::fake(400, "invalid_grant", Clock::Fixed(1_000_000));
+        let err = exchanger
+            .exchange(&TokenRefresh {
+                client_id: "cid",
+                client_secret: "csecret",
+                refresh_token: "old-refresh",
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid_grant"));
     }
 }
