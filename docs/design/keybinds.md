@@ -143,8 +143,8 @@ Sources: [inbox](https://linear.app/docs/inbox),
 
 Linear's rich-text editor shortcuts ([editor](https://linear.app/docs/editor))
 are out of scope: `lt`'s text fields are line editors, not a rich-text surface.
-`TextInput`'s line-editing bindings (`crates/lt-tui/src/text_input.rs:3-17`) are
-the editing vocabulary.
+`TextInput`'s line-editing bindings (`TextInput::handle_key`) are the editing
+vocabulary.
 
 ### Platform note
 
@@ -256,11 +256,7 @@ The keymap module is vocabulary and resolution machinery only. Each view
 declares its own binding tables and a `Keymap` — resolution layers, apply
 function, unbound policy — next to its state and handlers (lib.rs for the list,
 detail.rs, popup.rs, new_issue.rs), and `View::keymap()` selects the declaration
-from the view's own state (ENG-46).
-
-Deleted: `ALL_KEYBINDINGS`/`HelpEntry` (lib.rs:527-634),
-`ScrollMotion::from_key` (lib.rs:179-192, subsumed by the `GLOBAL` table), and
-the `match KeyCode` bodies of the six handlers. No new dependencies.
+from the view's own state (ENG-46). No new dependencies.
 
 ### Key flow
 
@@ -293,7 +289,7 @@ crossterm KeyEvent (input thread, Press-filtered)
         |                   Swallow -> consumed (a form swallows strays)
         |                   Cascade -> pass to the view beneath
         v (no view consumed the key)
-  the Esc/q floor           delivered (lib.rs:1137-1143): esc/q pop above
+  the Esc/q floor           dispatch_key's terminal arm: esc/q pop above
                             the base; at the base, esc = double-esc reset,
                             q = quit
 ```
@@ -370,12 +366,12 @@ impl Action {
 
 Navigation actions are semantic — `MoveDown` is list-selection in List, scroll
 in Detail, item-selection in Popup — which keeps the enum small. The scroll
-family (`MoveUp` through `PageUp`) maps 1:1 onto the delivered `ScrollMotion`
-(lib.rs:165-177) and applies through the delivered `View::scroll` overrides
-(lib.rs:144-157), which already implement exactly those per-view semantics.
-There is no `Quit` variant: quit is the floor's, not a binding's. A reserved
-Linear binding becomes one new variant + one table row + one apply arm when its
-feature lands; that is the entire extensibility story.
+family (`MoveUp` through `PageUp`) maps 1:1 onto `ScrollMotion`
+(`scroll_motion`) and applies through the `View::scroll` overrides, which
+implement exactly those per-view semantics. There is no `Quit` variant: quit is
+the floor's, not a binding's. A reserved Linear binding becomes one new
+variant + one table row + one apply arm when its feature lands; that is the
+entire extensibility story.
 
 ### View-declared keymaps and layering
 
@@ -401,32 +397,29 @@ the list keymap; `View::Detail(d)` → the comment-input keymap iff
 `d.comment_input.is_some()`, else the detail keymap; `View::NewIssue(m)` by
 `m.focused_field` (Title/Description → the text keymap, pickers → the picker
 keymap) — the sub-focus decisions live on `DetailView::keymap` and
-`NewIssueModal::keymap`, absorbing the old inline gates.
+`NewIssueModal::keymap`.
 
 Two layers, resolved own-table-first:
 
 - The view's own table.
 - `GLOBAL` — the navigation vocabulary (`j`/`k`/arrows, `g g`, `G`,
-  `ctrl+d`/`ctrl+u`, page keys). This is the merge the ADR's reconciliation
-  section calls for: GLOBAL and the delivered scroll-default layer deliver
-  per-view semantics for the same keys, and GLOBAL wins as the resolution layer.
-  The key set of `ScrollMotion::from_key` (lib.rs:179-192) becomes GLOBAL's rows
-  (`g` → `g g` is the one change) and the function is deleted; the navigation
-  actions apply through the delivered `View::scroll` seam, whose per-view
-  overrides (selection movement in List/Popup, offset scrolling in Detail, no-op
-  elsewhere) are untouched. Like the scroll defaults it replaces, GLOBAL
-  resolves at the focused view only: the stack cascade delivers _keys_ downward;
-  GLOBAL delivers per-context _semantics_ for the same key (`j` scrolls in
-  Detail, moves the selection in List) — a resolution layer within each view,
-  not a layer at the bottom of the stack.
+  `ctrl+d`/`ctrl+u`, page keys), the resolution-layer merge of
+  [[tui-app-event-queue-adr.md#Keymap design reconciliation]]. The navigation
+  actions apply through the `View::scroll` seam, whose per-view overrides carry
+  the semantics (selection movement in List/Popup, offset scrolling in Detail,
+  Down/Up-only movement in the picker, search, and help lists). GLOBAL resolves
+  at the focused view only: the stack cascade delivers _keys_ downward; GLOBAL
+  delivers per-context _semantics_ for the same key (`j` scrolls in Detail,
+  moves the selection in List) — a resolution layer within each view, not a
+  layer at the bottom of the stack.
 
-`esc` and `q` are not bindings. The delivered floor — `dispatch_key`'s terminal
-arm (lib.rs:1137-1143) — owns them: Back (`pop_view`) above the base; at the
-base, the double-esc reset and quit. A table binds `esc` only where it means
-something narrower than pop (the comment input's cancel); no table binds `q`
-(text contexts forward it to their editor, so it stays typeable). The q-leak the
-ADR disclosed is resolved structurally, as delivered: the floor consumes `q` as
-Back before it could ever mean Quit from an overlay.
+`esc` and `q` are not bindings. The floor — `dispatch_key`'s terminal arm — owns
+them: Back (`pop_view`) above the base; at the base, the double-esc reset and
+quit. A table binds `esc` only where it means something narrower than pop (the
+comment input's cancel); no table binds `q` (text contexts forward it to their
+editor, so it stays typeable). The q-leak the ADR disclosed is resolved
+structurally: the floor consumes `q` as Back before it could ever mean Quit from
+an overlay.
 
 Keymaps split by their declared `Unbound` policy:
 
@@ -434,17 +427,15 @@ Keymaps split by their declared `Unbound` policy:
   the comment input): (a) skip the `GLOBAL` layer — a `j` binding must not steal
   the letter from the query bar, (b) never start chords, (c) forward unbound
   keys to their editor widget (`TextInput::handle_key`, the description editor,
-  the comment buffer), preserving the widgets' existing behavior including the
-  search debounce touch (popup.rs:618-622) and `enter`-as-newline in multiline
-  fields (detail.rs:277, new_issue.rs:500-502). Forwarding consumes: printable
+  the comment buffer), preserving the widgets' behavior including the search
+  debounce touch (`forward_search`) and `enter`-as-newline in multiline fields
+  (`forward_text`, `forward_comment_input`). Forwarding consumes: printable
   input never cascades. `esc` is the one key never forwarded: unbound `esc`
-  passes to the floor instead, keeping overlay-close floor-owned — the keymap
-  form of the explicit `Esc => Pass` arms the delivered handlers carry
-  (popup.rs:527, popup.rs:564, new_issue.rs:412-419).
+  passes to the floor instead, keeping overlay-close floor-owned.
 - **`Swallow` — the new-issue picker fields** consume unbound keys without
   forwarding: the modal is a form, and a stray letter acting on a view
   underneath it would be hostile. `esc` passes to the floor here too, which pops
-  the modal (and unwatches its scopes, `pop_view` lib.rs:979).
+  the modal (and unwatches its scopes, `pop_view`).
 - **`Cascade`** (`List`, `Detail`, `Popup`) lets an unbound key cascade to the
   view beneath, ending at `views[0]` and then the floor. This is what makes list
   bindings reachable from overlays.
@@ -480,8 +471,7 @@ pub fn resolve(layers: Layers, pending: Option<Key>, key: Key) -> Resolved {
   both `Single`-bound and a chord prefix — so prefix-vs-action ambiguity (the
   reason other systems need timeouts) is structurally impossible.
 - Pending state is one field, `App.pending_key: Option<Key>`, rendered in
-  `render_status_row` (ui/mod.rs:78-99) as e.g. `g …`, taking priority over the
-  plain footer.
+  `render_status_row` as e.g. `g …`, taking priority over the plain footer.
 
 Tables are `static` slices of `(Binding, Action)` built with the `const`
 constructors — no HashMap, no lazy init; the largest table is ~16 rows and a
@@ -489,10 +479,10 @@ linear scan per keypress is irrelevant.
 
 ### Dispatch
 
-The dispatch site is delivered: the `AppEvent::Key` arm of `App::apply`
-(lib.rs:1106-1113) feeding `dispatch_key` (lib.rs:1120-1145). The queue's wire
-type is the raw crossterm `KeyEvent`, not `keymap::Key`: normalization happens
-exactly once, at the boundary between transport and keymap:
+The dispatch site is the `AppEvent::Key` arm of `App::apply`, feeding
+`dispatch_key`. The queue's wire type is the raw crossterm `KeyEvent`, not
+`keymap::Key`: normalization happens exactly once, at the boundary between
+transport and keymap:
 
 ```rust
 match event {
@@ -501,40 +491,37 @@ match event {
 }
 ```
 
-`dispatch_key` keeps its delivered four-layer shape with the first two layers
-folded into keymap resolution: the per-view handler call and the separate
-`ScrollMotion::from_key` check become one `resolve` against the focused view's
-declared layers (GLOBAL now carries the scroll keys); on `Act` apply through the
+`dispatch_key` walks the stack top-down; per view, `handle_view_key` is one
+`resolve` against that view's declared layers: on `Act` apply through the
 keymap's apply fn and stop; on `Unbound` under a `Cascade` policy repeat against
-the view beneath (`KeyFlow::Pass`, lib.rs:515-518); the Esc/q floor stays the
-terminal arm, verbatim. `resolve` itself is stack-unaware; the cascade and floor
-are dispatch-loop behavior above it.
+the view beneath (`KeyFlow::Pass`); the Esc/q floor is the terminal arm.
+`resolve` itself is stack-unaware; the cascade and floor are dispatch-loop
+behavior above it.
 
-The six handlers become per-view
-`apply_*(app: &mut App, idx: usize, action: Action)` functions in their current
-files, referenced from each view's `Keymap` declaration, bodies unchanged, arms
-keyed on `Action` instead of `KeyCode` + modifier booleans (the `idx` re-fetches
-the view, per the ADR's borrow rule: no view borrow crosses a `&mut App` call).
-Help declares no apply fn (`apply: None`): its table is navigation-only, and
-everything else forwards to its filter bar.
+Each view's non-navigation actions apply through a per-view
+`apply_*(app: &mut App, idx: usize, action: Action)` function next to its state,
+referenced from its `Keymap` declaration, arms keyed on `Action` (the `idx`
+re-fetches the view, per the ADR's borrow rule: no view borrow crosses a
+`&mut App` call). Help declares no apply fn (`apply: None`): its table is
+navigation-only, and everything else forwards to its filter bar.
 
-| Today                                    | Becomes                     |
-| ---------------------------------------- | --------------------------- |
-| `handle_list_key` lib.rs:1454            | `apply_list`                |
-| `detail::handle_key` detail.rs:184       | `apply_detail`              |
-| `popup::handle_key` popup.rs:507         | `apply_popup`               |
-| `handle_help_key` popup.rs:519           | forward to filter           |
-| `handle_search_key` popup.rs:556         | `apply_search` + forward    |
-| `new_issue::handle_key` new_issue.rs:398 | `apply_new_issue` + forward |
+| Keymap                          | Apply                                           |
+| ------------------------------- | ----------------------------------------------- |
+| `LIST_KEYMAP`                   | `apply_list`                                    |
+| `DETAIL_KEYMAP`                 | `apply_detail`                                  |
+| `POPUP_KEYMAP`                  | `apply_popup`                                   |
+| `HELP_KEYMAP`                   | none; unbound keys → `forward_help`             |
+| `SEARCH_KEYMAP`                 | `apply_search` + `forward_search`               |
+| `PICKER_KEYMAP` / `TEXT_KEYMAP` | `apply_new_issue` (+ `forward_text`)            |
+| `COMMENT_INPUT_KEYMAP`          | `apply_comment_input` + `forward_comment_input` |
 
-Behavior that moves intact: the team watch swap (`new_issue_team_changed`,
-new_issue.rs:254-268, called from the Tab/Enter arms) into the
-`Confirm`/`NextField` arms. `Action::Back` survives in exactly one table — the
+The team watch swap (`new_issue_team_changed`) hangs off the
+`Confirm`/`NextField` arms. `Action::Back` appears in exactly one table — the
 comment input's `esc`, which cancels the input without popping the Detail view
-beneath it (detail.rs:262-267), narrower than the floor's pop. Every other
-close/cancel path is the floor's: confirm/cancel pop the view and restore
-whatever is beneath, and the base's double-esc reset stays `handle_list_esc`
-(lib.rs:1061-1077), invoked by the floor, outside the keymap.
+beneath it, narrower than the floor's pop. Every other close/cancel path is the
+floor's: confirm/cancel pop the view and restore whatever is beneath, and the
+base's double-esc reset is `handle_list_esc`, invoked by the floor, outside the
+keymap.
 
 ## Default binding tables
 
@@ -551,13 +538,9 @@ whatever is beneath, and the base's double-esc reset stays `handle_list_esc`
 | Non-conflicts after normalization         | `d` (sort dir) vs `D` (due date), `L` (login) vs `l` (labels), pagination `ctrl+n`/`ctrl+p` vs completion `ctrl+n`/`ctrl+p` (layering).                        |
 
 `esc` and `q` appear in no table below (the comment input's `esc` excepted): the
-delivered floor handles them — Back above the base; double-esc reset and quit at
-it.
+floor handles them — Back above the base; double-esc reset and quit at it.
 
 ### GLOBAL (skipped by text contexts)
-
-The delivered scroll-default key set (`ScrollMotion::from_key`), with `g`
-becoming the `g g` chord:
 
 | Binding         | Action       |
 | --------------- | ------------ |
@@ -584,26 +567,22 @@ becoming the `g g` chord:
 `ctrl+7` is the legacy alias for `ctrl+/`: without the kitty protocol, terminals
 send Ctrl+/ as 0x1F, which crossterm decodes as ctrl+`'7'` (crossterm 0.29,
 `src/event/sys/unix/parse.rs:110-113`); kitty-enhanced terminals deliver a true
-`ctrl+/`. Both are bound, like the submit chords. Cycle-sort (`S` today,
-lib.rs:1478 / `App::cycle_sort` lib.rs:1022) is removed outright — `S` is
-reserved for subscribe — and its functionality remains reachable via `/` `sort:`
-stems. The hand-written `!ctrl` guard on `d` (lib.rs:1481) disappears
-structurally: after normalization, `d` and `ctrl+d` are distinct `Key` values
-resolved in distinct layers.
+`ctrl+/`. Both are bound, like the submit chords. `d` needs no modifier guard
+against `ctrl+d`: after normalization they are distinct `Key` values resolved in
+distinct layers.
 
 ### Detail
 
-`c` → Comment, `o b` → OpenInBrowser, plus GLOBAL (navigation = the delivered
-offset-scrolling override; `g g` replaces today's `g` for scroll-to-top).
-`esc`/`q` close via the floor, as today. Pass-through: unbound keys cascade to
-the base list (e.g. `/` opens Search, `s`/`p`/`a` act on the list selection
-until phase 4 binds them here).
+`c` → Comment, `o b` → OpenInBrowser, plus GLOBAL (navigation = the
+offset-scrolling `View::scroll` override). `esc`/`q` close via the floor.
+Pass-through: unbound keys cascade to the base list (e.g. `/` opens Search,
+`s`/`p`/`a` act on the list selection until phase 4 binds them here).
 
 ### Popup
 
-`enter` → Confirm, plus GLOBAL (the delivered selection-movement override;
-MoveTop/MoveBottom clamp to first/last item). `esc`/`q` close via the floor, as
-today ([[tui-app-event-queue-adr.md]] behavior change 14). Pass-through.
+`enter` → Confirm, plus GLOBAL (the selection-movement `View::scroll` override;
+MoveTop/MoveBottom clamp to first/last item). `esc`/`q` close via the floor
+([[tui-app-event-queue-adr.md]] behavior change 14). Pass-through.
 
 ### New issue — picker fields
 
@@ -637,7 +616,7 @@ existing limitation, carried forward deliberately.)
 
 ## Help overlay from the keymap
 
-`ALL_KEYBINDINGS` and `HelpEntry` are deleted. The keymap module provides:
+The keymap module provides:
 
 ```rust
 pub struct HelpRow {
@@ -659,28 +638,23 @@ first, and collapses the two new-issue contexts into one "new issue" entry (the
 text context's table _is_ the shared form-nav layer, so form-nav plus the
 picker's own rows is their union, with no duplicates).
 
-`HelpPopup` (popup.rs:107-131) stores `rows: Vec<HelpRow>` built once; the
-renderer joins the bindings' `Display` forms with `" / "` ("j / down",
-"ctrl+enter / alt+enter"), and `update_filter` matches against that rendered
-form, the label, and the context. `ui/help.rs` reads the rows and gains a
-context column. Help can no longer drift because it _is_ the keymap; the
-existing inaccuracies (the "Esc/q to close" title while `q` filters, the `q` =
-"quit" entry that is wrong everywhere above the base) disappear as a class.
+`HelpPopup` stores `rows: Vec<HelpRow>` built once; the renderer joins the
+bindings' `Display` forms with `" / "` ("j / down", "ctrl+enter / alt+enter"),
+and `update_filter` matches against that rendered form, the label, and the
+context. `ui/help.rs` reads the rows and renders a context column. Help cannot
+drift because it _is_ the keymap.
 
 ## Kitty keyboard protocol and the submit chord
 
-The loop enables the kitty protocol when supported (lib.rs:1330-1356);
-`Session.keyboard_enhanced` (lib.rs:703-710) exists because plain terminals
-cannot encode `ctrl+enter`. Today's handlers accept ctrl **or** alt
-unconditionally (new_issue.rs:405-410, detail.rs:256-260) and
-`keyboard_enhanced` only selects the hint string (`submit_key_label`,
-ui/new_issue.rs:13-18). The keymap replicates this exactly: both `ctrl+enter`
-and `alt+enter` are statically bound to `Submit` — no runtime capability
-switching. Without kitty, `ctrl+enter` arrives as plain `enter` (newline in
-multiline fields, today's behavior) and `alt+enter` is the escape hatch. The
-same both-bound pattern covers `ctrl+/`/`ctrl+7` for the shortcuts panel. The
-`From<KeyEvent>` conversion strips kitty's extra state bits so enhanced and
-legacy terminals produce identical `Key` values for every table entry.
+The loop enables the kitty protocol when supported; `Session.keyboard_enhanced`
+exists because plain terminals cannot encode `ctrl+enter`. Both `ctrl+enter` and
+`alt+enter` are statically bound to `Submit` — no runtime capability switching;
+`keyboard_enhanced` only selects the hint string (`submit_key_label`). Without
+kitty, `ctrl+enter` arrives as plain `enter` (newline in multiline fields) and
+`alt+enter` is the escape hatch. The same both-bound pattern covers
+`ctrl+/`/`ctrl+7` for the shortcuts panel. The `From<KeyEvent>` conversion
+strips kitty's extra state bits so enhanced and legacy terminals produce
+identical `Key` values for every table entry.
 
 ## Testing strategy
 
@@ -696,8 +670,8 @@ Inline `#[cfg(test)]` modules per [[testing.md]].
    the same key). Dispatch units: an unbound key in a Popup resolves in the List
    beneath; `q` above the base pops via the floor, never Quit; a printable key
    in Search never cascades; `esc` in Search reaches the floor, not the query
-   bar. (The delivered cascade/floor tests cover the floor itself; these pin the
-   keymap's pass policies.)
+   bar. (The cascade/floor tests cover the floor itself; these pin the keymap's
+   pass policies.)
 3. **Invariants** (mod.rs), over every declared keymap's layers: no duplicate
    `Binding`; no key both `Single`-bound and a chord prefix; every table binding
    round-trips through Display/FromStr; no table binds `q`, and none binds `esc`
@@ -711,7 +685,7 @@ Inline `#[cfg(test)]` modules per [[testing.md]].
    `AppEvent::Key(...)` entries): `g`,`g` selects top; `g`,`j` moves down;
    `enter` opens detail; `c` opens the create modal; `esc` cancels a pending `g`
    without touching `last_esc_time`. The existing
-   `run_app_dispatches_keys_and_quits` assertions (loop_tests.rs:431) survive
+   `run_app_dispatches_keys_and_quits` assertions (loop_tests.rs) survive
    unchanged.
 6. **Render test**: footer shows the pending-prefix indicator (render-test
    pattern with `pending_key = Some(...)`).
