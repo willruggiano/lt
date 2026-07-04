@@ -5,25 +5,16 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
 
 use super::util::{TableSpec, render_issue_table, to_u16};
-use crate::{FetchStatus, ListView, PopupKind};
+use crate::{ListView, PopupKind};
 
 /// Render the base issue table into `area`. Returns the rendered column
-/// widths, or `None` when a loading/error overlay or the empty-list message
-/// was shown instead -- `popup_anchor` only applies over a rendered table.
+/// widths, or `None` when the empty-list message was shown instead --
+/// `popup_anchor` only applies over a rendered table.
 pub(super) fn render_table(
     frame: &mut Frame,
     area: Rect,
     list: &mut ListView,
 ) -> Option<[usize; 7]> {
-    let overlay: Option<String> = match &list.status {
-        FetchStatus::Error(msg) => Some(format!("Error: {msg}")),
-        FetchStatus::Idle => None,
-    };
-    if let Some(msg) = overlay {
-        frame.render_widget(Paragraph::new(msg), area);
-        return None;
-    }
-
     if list.issues.is_empty() {
         frame.render_widget(Paragraph::new("No issues found."), area);
         return None;
