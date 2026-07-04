@@ -7,7 +7,7 @@ paths:
 
 - Configuration is the source of truth (`Cargo.toml`, `clippy.toml`, etc). Do
   not duplicate configuration values into documentation, per
-  [[documentation.md]]
+  [[documentation.md]].
 - Do not silence a lint with `#[allow(...)]` without a one-line justification
   comment _and_ user approval (per [[contributing.md#Strictness]]).
 - When a class of mistake could be caught by a stricter setting or an extra
@@ -34,6 +34,6 @@ paths:
     code comments, ever. Don't say "Stage 1 adds this. Stage 2 adds that."
   - Do: keep comments at the same level of abstraction as the code they are
     annotating. Generally speaking, comments should only describe the code they
-    annotating, and never reference code that exists in other modules, calls the
+    annotate, and never reference code that exists in other modules, calls the
     annotated code, or otherwise exists above or below the annotated code in the
     codebase architecture, even if related or part of the same system.

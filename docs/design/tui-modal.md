@@ -102,7 +102,7 @@ The TUI already implements all six modes. The main gaps relative to this design
 are:
 
 1. No explicit mode indicator in the status bar.
-2. The "filter" mode is labelled "Search" internally and in user- visible
+2. The "filter" mode is labelled "Search" internally and in user-visible
    strings. Renaming it to "filter" (triggered by `/`) aligns with the
    description in the bead.
 3. `Esc` in Normal mode currently calls `do_fetch(true)` (resets the list).
@@ -117,7 +117,7 @@ are:
 2. Update `render_footer` to include the mode label on the right side, between
    the sync status and the page number.
 
-3. Optionally rename `Mode::Search` to `Mode::Filter` (search-and- replace;
+3. Optionally rename `Mode::Search` to `Mode::Filter` (search-and-replace;
    requires updating all match arms).
 
 4. Update the help entry for `/` from `"filter by title"` to
