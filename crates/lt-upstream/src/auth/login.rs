@@ -39,6 +39,7 @@ struct OauthFlow<'a> {
     browser: &'a dyn Browser,
     listener: &'a dyn CallbackListener,
     exchanger: TokenExchanger,
+    clock: Clock,
 }
 
 /// Production wiring: real browser, TCP callback listener, ureq HTTP.
@@ -47,6 +48,7 @@ fn production_flow() -> OauthFlow<'static> {
         browser: &RealBrowser,
         listener: &TcpCallbackListener,
         exchanger: TokenExchanger::Ureq,
+        clock: Clock::System,
     }
 }
 
@@ -86,6 +88,7 @@ fn run_with_credentials(
             redirect_uri: &redirect_uri,
             code_verifier: &code_verifier,
         },
+        &flow.clock,
     )
     .context("exchanging authorization code for token")
 }
@@ -381,56 +384,62 @@ fn build_token_params<'a>(exchange: &TokenExchange<'a>) -> [(&'a str, &'a str); 
     ]
 }
 
-/// The token endpoint's response body. `refresh_token` is optional on the
-/// wire: a refresh-grant response inside the rotation grace period may
-/// omit it, in which case the previous refresh token is still valid.
-#[derive(Debug, serde::Deserialize)]
-pub(super) struct TokenResponse {
-    access_token: String,
-    token_type: String,
-    expires_in: u64,
-    scope: String,
-    refresh_token: Option<String>,
+/// An enum rather than a trait or boxed closure: the set of clocks is
+/// closed (the system clock, plus a fixed instant in tests).
+pub(super) enum Clock {
+    System,
+    #[cfg(test)]
+    Fixed(u64),
 }
 
-impl TokenResponse {
-    /// Convert the wire response into a storable token, stamped with
-    /// `issued_at`. `previous_refresh_token` fills the gap when a
-    /// refresh-grant response omits the rotated token; the initial code
-    /// exchange has nothing to fall back to, so absence there is an error.
-    pub(super) fn into_auth_token(
-        self,
-        previous_refresh_token: Option<&str>,
-        issued_at: u64,
-    ) -> Result<AuthToken> {
-        let refresh_token = self
-            .refresh_token
-            .or_else(|| previous_refresh_token.map(str::to_string))
-            .ok_or_else(|| anyhow!("token response did not include a refresh token"))?;
-        Ok(AuthToken {
-            access_token: self.access_token,
-            token_type: self.token_type,
-            expires_in: self.expires_in,
-            scope: self.scope,
-            issued_at,
-            refresh_token,
-        })
+impl Clock {
+    /// Unix time in seconds, for stamping `issued_at` on new tokens.
+    pub(super) fn now_unix_secs(&self) -> u64 {
+        match self {
+            Self::System => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            #[cfg(test)]
+            Self::Fixed(secs) => *secs,
+        }
     }
 }
 
-/// Current Unix time in seconds, for stamping `issued_at` on new tokens.
-pub(super) fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-/// Validate the HTTP status and deserialize the token body. Pure.
-pub(super) fn parse_token_response(status: u16, body: &str) -> Result<TokenResponse> {
+/// Validate the HTTP status and deserialize the token body into a stored
+/// token, stamped with the current time as `issued_at`.
+/// `previous_refresh_token` fills the gap when a refresh-grant response
+/// inside the rotation grace period omits the rotated token; the initial
+/// code exchange has nothing to fall back to, so absence there is an error.
+pub(super) fn parse_token_response(
+    status: u16,
+    body: &str,
+    previous_refresh_token: Option<&str>,
+    clock: &Clock,
+) -> Result<AuthToken> {
+    #[derive(serde::Deserialize)]
+    struct Wire {
+        access_token: String,
+        token_type: String,
+        expires_in: u64,
+        scope: String,
+        refresh_token: Option<String>,
+    }
     if !(200..300).contains(&status) {
         return Err(anyhow!("token exchange failed (HTTP {status}): {body}"));
     }
-    serde_json::from_str::<TokenResponse>(body).context("parsing token response")
+    let wire: Wire = serde_json::from_str(body).context("parsing token response")?;
+    let refresh_token = wire
+        .refresh_token
+        .or_else(|| previous_refresh_token.map(str::to_string))
+        .ok_or_else(|| anyhow!("token response did not include a refresh token"))?;
+    Ok(AuthToken {
+        access_token: wire.access_token,
+        token_type: wire.token_type,
+        expires_in: wire.expires_in,
+        scope: wire.scope,
+        issued_at: clock.now_unix_secs(),
+        refresh_token,
+    })
 }
 
 /// POSTs a token-grant form and returns the HTTP status and raw body. The
@@ -488,10 +497,14 @@ impl TokenExchanger {
     }
 }
 
-fn exchange_code(exchanger: &TokenExchanger, exchange: &TokenExchange) -> Result<AuthToken> {
+fn exchange_code(
+    exchanger: &TokenExchanger,
+    exchange: &TokenExchange,
+    clock: &Clock,
+) -> Result<AuthToken> {
     let params = build_token_params(exchange);
     let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
-    parse_token_response(status, &body)?.into_auth_token(None, now_unix_secs())
+    parse_token_response(status, &body, None, clock)
 }
 
 #[cfg(test)]
@@ -590,16 +603,20 @@ mod tests {
         let token = parse_token_response(
             200,
             r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"r"}"#,
+            None,
+            &Clock::Fixed(1_000_000),
         )
         .unwrap();
         assert_eq!(token.access_token, "tok");
         assert_eq!(token.token_type, "Bearer");
-        assert_eq!(token.refresh_token, Some("r".to_string()));
+        assert_eq!(token.refresh_token, "r".to_string());
+        assert_eq!(token.issued_at, 1_000_000);
     }
 
     #[test]
     fn parse_token_response_rejects_non_2xx_with_body() {
-        let err = parse_token_response(400, "invalid_grant").unwrap_err();
+        let err =
+            parse_token_response(400, "invalid_grant", None, &Clock::Fixed(1_000_000)).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("HTTP 400"));
         assert!(msg.contains("invalid_grant"));
@@ -607,7 +624,7 @@ mod tests {
 
     #[test]
     fn parse_token_response_rejects_malformed_json() {
-        assert!(parse_token_response(200, "not json").is_err());
+        assert!(parse_token_response(200, "not json", None, &Clock::Fixed(1_000_000)).is_err());
     }
 
     #[test]
@@ -616,6 +633,8 @@ mod tests {
             parse_token_response(
                 200,
                 r#"{"access_token":"tok","token_type":"Bearer","scope":"read,write"}"#,
+                None,
+                &Clock::Fixed(1_000_000),
             )
             .is_err()
         );
@@ -709,6 +728,7 @@ mod tests {
             browser: &browser,
             listener: &listener,
             exchanger,
+            clock: Clock::Fixed(1_000_000),
         };
 
         let token = run_with_credentials(&flow, "cid", "csecret").unwrap();
@@ -716,7 +736,7 @@ mod tests {
         assert_eq!(token.refresh_token, "final-refresh");
         assert_eq!(token.expires_in, 3600);
         assert_eq!(token.scope, "read,write");
-        assert!(token.issued_at > 0);
+        assert_eq!(token.issued_at, 1_000_000);
 
         // The browser was sent the authorization URL.
         let opened = browser.opened.borrow();
@@ -750,6 +770,7 @@ mod tests {
             browser: &browser,
             listener: &listener,
             exchanger,
+            clock: Clock::Fixed(1_000_000),
         };
         assert!(run_with_credentials(&flow, "cid", "csecret").is_err());
     }
@@ -762,7 +783,7 @@ mod tests {
                 .to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
         };
-        let err = exchange_code(&exchanger, &exchange()).unwrap_err();
+        let err = exchange_code(&exchanger, &exchange(), &Clock::Fixed(1_000_000)).unwrap_err();
         assert!(err.to_string().contains("refresh token"));
     }
 }
