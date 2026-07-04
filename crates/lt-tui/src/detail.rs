@@ -4,9 +4,7 @@ use lt_types::types::Issue;
 
 use super::{App, FetchStatus, Keymap, Scroll, StateCtx, StateEvent, Unbound, View, keymap};
 
-/// The detail pane's complete state: the shared `types`/`comments` fragments
-/// the TUI composes for display, plus the panel's scroll offset and comment
-/// draft (owned here, not on `App`).
+/// The detail pane's complete state, owned here rather than on `App`.
 pub struct DetailView {
     pub issue: Issue,
     pub comments: Vec<lt_types::comments::Comment>,
@@ -22,9 +20,7 @@ pub struct DetailView {
 
 impl DetailView {
     /// This pane's `StateEvent` subscriptions: `Comments{issue_id}` matching
-    /// its own issue re-reads the thread; `Issues` re-reads the displayed
-    /// issue itself (a popup edit confirmed above this pane, or a sync
-    /// upsert). Both are payload-free idempotent re-reads through `ctx.db`.
+    /// its own issue re-reads the thread; `Issues` re-reads the issue itself.
     pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
         match ev {
             StateEvent::Comments { issue_id } if issue_id == self.issue.id.inner() => {
@@ -54,7 +50,6 @@ impl DetailView {
         }
     }
 
-    /// Scroll the detail pane by `step` rows, `down` toward the bottom.
     fn scroll_by(&mut self, step: u16, down: bool) {
         self.scroll = if down {
             self.scroll.saturating_add(step)
@@ -75,7 +70,6 @@ impl DetailView {
     }
 }
 
-/// This view's scroll override: offset scrolling (Decision 6).
 impl Scroll for DetailView {
     fn move_down(&mut self) {
         self.scroll = self.scroll.saturating_add(1);
@@ -105,18 +99,13 @@ impl Scroll for DetailView {
 }
 
 impl App {
-    /// Open the detail pane for the currently selected issue.
-    ///
-    /// The detail pane is populated instantly from local data so it appears
-    /// without waiting on the network. `push_view` declares the pane's
-    /// `Comments{issue_id}` interest, which prompts the loop to refresh it;
-    /// the re-read happens at consume time, not here (`DetailView::consume`).
+    /// Open the detail pane for the currently selected issue, populated
+    /// instantly from local data; the network re-read happens later.
     pub(crate) fn open_detail(&mut self) {
         let Some(issue) = self.selected_issue().cloned() else {
             return;
         };
 
-        // Build the detail view instantly from local data.
         let cached_comments = self
             .db
             .connect()
@@ -161,14 +150,12 @@ pub(crate) fn populate_relations(db: &Database, detail: &mut DetailView, issue: 
             return;
         }
     };
-    // Look up children.
     match lt_runtime::db::query_children(&conn, issue.id.inner()) {
         Ok(children) => detail.children = children,
         Err(e) => {
             tracing::warn!(error = %e, issue_id = issue.id.inner(), "detail pane: failed to query children");
         }
     }
-    // Look up parent.
     if let Some(ref parent) = issue.parent {
         match lt_runtime::db::query_issue_by_id(&conn, parent.id.inner()) {
             Ok(Some(row)) => detail.parent = Some(row),
@@ -180,7 +167,7 @@ pub(crate) fn populate_relations(db: &Database, detail: &mut DetailView, issue: 
     }
 }
 
-// -- Detail pane keybindings (docs/design/keybinds.md, "Detail") ------------
+// -- Detail pane keybindings -------------------------------------------------
 
 pub(crate) static DETAIL_BINDINGS: keymap::Table = &[
     (
@@ -222,9 +209,7 @@ pub(crate) static COMMENT_INPUT_KEYMAP: Keymap = Keymap {
     unbound: Unbound::Forward(forward_comment_input),
 };
 
-/// The detail pane's non-navigation actions. Navigation actions never reach
-/// here: `handle_view_key` maps them to `ScrollMotion` and applies them
-/// through `View::scroll` instead.
+/// The detail pane's non-navigation actions.
 pub(crate) fn apply_detail(app: &mut App, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Comment => {
@@ -238,16 +223,14 @@ pub(crate) fn apply_detail(app: &mut App, i: usize, action: keymap::Action) {
                 super::open_in_browser(&d.issue.identifier);
             }
         }
-        // Navigation and other keymaps' actions never resolve to
-        // `DETAIL_BINDINGS`; the match stays exhaustive over `Action`
-        // regardless.
+        // Other keymaps' actions never resolve here; kept exhaustive over
+        // `Action` regardless.
         _ => {}
     }
 }
 
-/// The comment box's actions: `Submit`/`Back` -- `Back` is `COMMENT_INPUT_BINDINGS`'s
-/// one `esc` row, cancelling the draft without popping the detail pane
-/// beneath it (narrower than the floor's pop).
+/// The comment box's actions: `Back` cancels the draft without popping the
+/// pane beneath it.
 pub(crate) fn apply_comment_input(app: &mut App, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Submit => submit_comment(app, i),
@@ -256,9 +239,8 @@ pub(crate) fn apply_comment_input(app: &mut App, i: usize, action: keymap::Actio
                 d.comment_input = None;
             }
         }
-        // Navigation and other keymaps' actions never resolve to
-        // `COMMENT_INPUT_BINDINGS`; the match stays exhaustive over `Action`
-        // regardless.
+        // Other keymaps' actions never resolve here; kept exhaustive over
+        // `Action` regardless.
         _ => {}
     }
 }
@@ -270,11 +252,9 @@ fn detail_view_mut(app: &mut App, i: usize) -> Option<&mut DetailView> {
     })
 }
 
-/// Enqueue the comment buffer as a local create through the sync service: the
-/// optimistic `local:` row plus a `commentCreate` outbox command, in one
-/// transaction, followed by the matching `State(Comments)` event on the
-/// queue -- the sync drainer later posts the command and reconciles the temp
-/// row with the server copy. A failure surfaces in the footer.
+/// Enqueue the comment buffer as a local create: the optimistic `local:` row
+/// plus a `commentCreate` outbox command, in one transaction. A failure
+/// surfaces in the footer.
 fn submit_comment(app: &mut App, i: usize) {
     let Some(detail) = detail_view_mut(app, i) else {
         return;
@@ -295,11 +275,8 @@ fn submit_comment(app: &mut App, i: usize) {
     }
 }
 
-/// Forward an unbound key to the comment buffer (same editing model as the
-/// new-issue description field: cursor always at the end). `Submit`/`Back`
-/// are the keymap's (`apply_comment_input`); everything else lands here
-/// verbatim, using the original crossterm event so the widget sees its exact
-/// `KeyCode`/`KeyModifiers`.
+/// Forward an unbound key to the comment buffer verbatim, using the raw
+/// crossterm event so the widget sees the exact `KeyCode`/`KeyModifiers`.
 pub(crate) fn forward_comment_input(app: &mut App, i: usize, ev: KeyEvent) {
     let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
     let Some(detail) = detail_view_mut(app, i) else {

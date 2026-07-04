@@ -22,10 +22,9 @@ pub enum PopupKind {
 /// A single selectable item shown in the generic list-picker popup.
 #[derive(Clone)]
 pub struct PopupItem {
-    /// Human-readable label.
     pub label: String,
     /// Opaque ID sent to the Linear API (state id, assignee id, etc.).
-    /// None means "unassign" for the assignee popup.
+    /// `None` means "unassign" for the assignee popup.
     pub id: Option<String>,
 }
 
@@ -107,20 +106,15 @@ pub(crate) fn priority_popup_items() -> Vec<PopupItem> {
 
 /// Mutable state for the help popup.
 pub struct HelpPopup {
-    /// Current search query typed by the user.
     pub search: TextInput,
-    /// The keymap's help rows (`keymap::help_rows(crate::HELP_CONTEXTS)`),
-    /// built once at construction so help can no longer drift from the
-    /// tables it reads. Not `pub`: `keymap::HelpRow` is crate-private.
+    /// Built once at construction so help can't drift from the tables it
+    /// reads.
     pub(crate) rows: Vec<keymap::HelpRow>,
     /// Indices into `rows` that match the current search.
     pub filtered: Vec<usize>,
-    /// Currently highlighted row in the filtered list.
     pub selected: usize,
     /// The three help-panel columns' max width across every row, computed
-    /// once here since `rows` is immutable after construction
-    /// (`docs/design/keybinds.md` phase 3): `help_layout` reads these
-    /// instead of rebuilding them every render frame.
+    /// once since `rows` is immutable after construction.
     pub(crate) key_col_width: usize,
     pub(crate) context_col_width: usize,
     pub(crate) label_col_width: usize,
@@ -148,9 +142,8 @@ impl HelpPopup {
         }
     }
 
-    /// Matches the query against each row's precomputed `haystack`
-    /// (`binding_form`/label/context, lowercased once at construction) --
-    /// case-insensitive, like today.
+    /// Matches the query against each row's precomputed `haystack`,
+    /// case-insensitive.
     pub fn update_filter(&mut self) {
         let q = self.search.value.to_lowercase();
         self.filtered = self
@@ -164,9 +157,8 @@ impl HelpPopup {
     }
 }
 
-/// This view's scroll override: `Down`/`Up` move the filtered-list
-/// selection; every other motion no-ops via `Scroll`'s defaults (the help
-/// popup has no "half page" concept, `docs/design/keybinds.md`, "Help").
+/// `Down`/`Up` move the filtered-list selection; other motions no-op via
+/// `Scroll`'s defaults.
 impl Scroll for HelpPopup {
     fn move_down(&mut self) {
         let max = self.filtered.len().saturating_sub(1);
@@ -185,27 +177,20 @@ impl Scroll for HelpPopup {
 
 /// Mutable state for the FTS search overlay.
 pub struct SearchOverlay {
-    /// Current query typed by the user.
     pub query: TextInput,
-    /// Issues returned by the last FTS query.
     pub results: Vec<lt_types::types::Issue>,
-    /// Table selection state for the results list.
     pub table_state: TableState,
     /// When the query was last modified (used for 150ms debounce).
     pub last_changed: Option<Instant>,
     /// True when FTS index is unavailable (no sync yet).
     pub fts_unavailable: bool,
     /// True once `run_search()` has been called at least once.
-    /// Used by the renderer to distinguish "never searched" from "searched, no results".
     pub has_searched: bool,
-    /// Parsed AST of the current query string.
     pub ast: search_query::QueryAst,
-    /// Tab-completion state.
     pub completer: Completer,
-    /// The base list's query limit, captured once at open time
-    /// (`open_search_overlay`) so both views show the same number of
-    /// results. Faithful for the overlay's whole lifetime: the base list's
-    /// limit cannot change while Search has focus (it consumes every key).
+    /// The base list's query limit, captured once at open so both views
+    /// show the same number of results; can't change while Search has
+    /// focus.
     pub limit: u32,
 }
 
@@ -231,17 +216,10 @@ impl SearchOverlay {
         }
     }
 
-    /// Run the structured search query and refresh results.
-    ///
-    /// The query string is parsed into stems (sort:, assignee:, priority:,
-    /// state:, team:) plus optional free-text FTS terms.  The default query
-    /// is `sort:updated-` which shows all issues sorted by updated desc.
-    ///
-    /// `viewport_rows` is the number of visible rows in the content area
-    /// (excluding the table header).  The result set is capped at this value
-    /// so that the search overlay never grows taller than the normal list
-    ///. Reads through `db` rather than resolving `db_path()` directly, so
-    /// tests that install an in-memory database are honored.
+    /// Run the structured search query and refresh results, capped to
+    /// `viewport_rows` so the overlay never grows taller than the list.
+    /// Reads through `db` rather than resolving `db_path()` directly, so
+    /// tests with an in-memory database are honored.
     pub fn run_search(&mut self, db: &lt_runtime::db::Database, viewport_rows: u16) {
         self.fts_unavailable = false;
         self.has_searched = true;
@@ -258,9 +236,7 @@ impl SearchOverlay {
         let parsed = search_query::ParsedQuery::from(&self.ast);
         self.completer.update(&self.ast, self.query.cursor);
 
-        // Use the same limit as the normal issue list so both views show the
-        // same number of results.  Cap to viewport height so we never render
-        // more rows than fit on screen.
+        // Cap to the viewport height so we never render more rows than fit.
         let list_limit = self.limit as usize;
         let limit = if viewport_rows > 0 {
             list_limit.min(viewport_rows as usize)
@@ -280,12 +256,10 @@ impl SearchOverlay {
                 }
             }
             Err(e) => {
-                // Only mark FTS as unavailable when the error is genuinely
-                // about the FTS index or the issues table being missing (i.e.
-                // no sync has been done yet).  A query-syntax error caused by
-                // an incomplete stem token must NOT set fts_unavailable -- that
-                // would show the misleading "run lt sync first" banner while
-                // the user is still typing.
+                // Only a genuine missing-index/table error marks FTS
+                // unavailable; a syntax error from an incomplete stem token
+                // must not, or the "run lt sync first" banner would flash
+                // while the user is still typing.
                 let msg = e.to_string().to_lowercase();
                 let is_missing = msg.contains("issues_fts")
                     || msg.contains("no such table")
@@ -300,9 +274,8 @@ impl SearchOverlay {
     }
 }
 
-/// This view's scroll override: `Down`/`Up` move the result-list selection;
-/// every other motion no-ops via `Scroll`'s defaults (the search overlay has
-/// no "half page" concept, `docs/design/keybinds.md`, "Search").
+/// `Down`/`Up` move the result-list selection; other motions no-op via
+/// `Scroll`'s defaults.
 impl Scroll for SearchOverlay {
     fn move_down(&mut self) {
         let n = self.results.len();
@@ -322,9 +295,7 @@ impl Scroll for SearchOverlay {
 // Popup open/move/confirm methods
 // ---------------------------------------------------------------------------
 
-/// A team's workflow states. Shared by `open_state_popup`/
-/// `PopupView::consume`'s `State` arm and the new-issue modal's own state
-/// picker.
+/// A team's workflow states.
 pub(crate) fn state_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
     lt_runtime::db::query_team_states(conn, team_id)
         .unwrap_or_else(|e| {
@@ -336,8 +307,7 @@ pub(crate) fn state_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
         .collect()
 }
 
-/// The assignee popup's items -- "Unassign" plus a team's members. Shared by
-/// `open_assignee_popup` and `PopupView::consume`'s `Assignee` arm.
+/// The assignee popup's items: "Unassign" plus a team's members.
 fn assignee_popup_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = vec![PopupItem {
         label: "Unassign".to_string(),
@@ -434,9 +404,8 @@ impl super::App {
 }
 
 impl PopupView {
-    /// The state and assignee popups' subscription: a matching
-    /// `Team{team_id}` rebuilds `items` and re-anchors the selection by item
-    /// id. The priority popup is static (`team_id: None`) and never matches.
+    /// A matching `Team{team_id}` rebuilds `items` and re-anchors the
+    /// selection by item id; the priority popup is static and never matches.
     pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
         let StateEvent::Team { team_id } = ev else {
             return;
@@ -465,7 +434,6 @@ impl PopupView {
             .unwrap_or(0);
     }
 
-    /// Move the selection by `delta` items, clamped to the item list.
     fn move_by(&mut self, delta: i32) {
         let n = self.items.len();
         if n == 0 {
@@ -479,9 +447,7 @@ impl PopupView {
         };
     }
 
-    /// This popup's scroll override: selection movement over the shared
-    /// motion set (Decision 6). Previously only j/k moved the selection;
-    /// g/G/Ctrl-d/Ctrl-u/PageDown/PageUp were ignored (behavior change 14).
+    /// Selection movement over the shared motion set.
     pub(crate) fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
         match motion {
             ScrollMotion::Down => self.move_by(1),
@@ -496,13 +462,9 @@ impl PopupView {
     }
 }
 
-/// Confirm the popup choice: close the popup at its own stack index `i` --
-/// not necessarily the stack top, since an unbound key can cascade a popup
-/// (e.g. `space`, unbound in `POPUP`) into pushing a further view above it --
-/// then edit the issue it was opened for (its captured `issue_id`, not the
-/// current list selection) through the sync service, which enqueues the
-/// write and emits the matching `State` event on the queue. A failure
-/// surfaces in the footer.
+/// Confirm the popup choice: close the popup at its own index `i` (not
+/// necessarily the stack top), then edit the issue it was opened for -- the
+/// captured `issue_id`, not the current list selection.
 fn popup_confirm(app: &mut App, i: usize) {
     let Some(View::Popup(popup)) = app.views.get(i) else {
         return;
@@ -562,9 +524,7 @@ pub(crate) static POPUP_KEYMAP: Keymap = Keymap {
     unbound: Unbound::Cascade,
 };
 
-/// The state/priority/assignee popup's non-navigation action. Navigation
-/// actions never reach here: `handle_view_key` maps them to `ScrollMotion`
-/// and applies them through `View::scroll` instead.
+/// The state/priority/assignee popup's non-navigation action.
 pub(crate) fn apply_popup(app: &mut App, i: usize, action: keymap::Action) {
     if let keymap::Action::Confirm = action {
         popup_confirm(app, i);
@@ -600,10 +560,9 @@ pub(crate) static HELP_KEYMAP: Keymap = Keymap {
     unbound: Unbound::Forward(forward_help),
 };
 
-/// Forward an unbound key to the help popup's filter bar. `j`/`k` stay
-/// untypeable here (an existing limitation, carried forward deliberately):
-/// they resolve to `MoveDown`/`MoveUp` in `HELP_BINDINGS` and never reach
-/// `Unbound`.
+/// Forward an unbound key to the help popup's filter bar; `j`/`k` never
+/// reach here since `HELP_BINDINGS` resolves them to `MoveDown`/`MoveUp`
+/// first.
 pub(crate) fn forward_help(app: &mut App, i: usize, ev: KeyEvent) {
     if let Some(View::Help(popup)) = app.views.get_mut(i)
         && popup.search.handle_key(ev.code, ev.modifiers)
@@ -662,9 +621,7 @@ pub(crate) static SEARCH_KEYMAP: Keymap = Keymap {
     unbound: Unbound::Forward(forward_search),
 };
 
-/// The FTS search overlay's non-navigation actions. Navigation (`MoveDown`/
-/// `MoveUp`) never reaches here: `handle_view_key` maps it to `ScrollMotion`
-/// and applies it through `View::scroll` instead.
+/// The FTS search overlay's non-navigation actions.
 pub(crate) fn apply_search(app: &mut App, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Confirm => confirm_search(app),
@@ -700,9 +657,8 @@ pub(crate) fn apply_search(app: &mut App, i: usize, action: keymap::Action) {
         }
         keymap::Action::CompleteForward => apply_completion_tab(app, i, true),
         keymap::Action::CompleteBackward => apply_completion_tab(app, i, false),
-        // Navigation and other keymaps' actions never resolve to
-        // `SEARCH_BINDINGS`; the match stays exhaustive over `Action`
-        // regardless.
+        // Other keymaps' actions never resolve here; kept exhaustive over
+        // `Action` regardless.
         _ => {}
     }
 }
@@ -760,10 +716,9 @@ fn apply_completion_tab(app: &mut App, i: usize, forward: bool) {
     }
 }
 
-/// Fire the FTS search when the debounce interval (150ms) has elapsed. The
-/// search overlay is only ever the top of the stack, so `views.last` is the
-/// live check; `viewport_height` and `&app.db` are copied/borrowed before the
-/// `views.last_mut()` borrow since `run_search` needs both simultaneously.
+/// Fire the FTS search once the 150ms debounce elapses. `viewport_height`/
+/// `&app.db` are captured before the `views.last_mut()` borrow, since
+/// `run_search` needs both simultaneously.
 pub(crate) fn poll_search_debounce(app: &mut App) {
     let viewport_height = app.viewport_height;
     let db = &app.db;

@@ -1,15 +1,6 @@
-//! Render Markdown source into styled ratatui lines for the issue detail view.
-//!
-//! The detail view feeds issue descriptions and comment bodies through
-//! [`render`], which walks the `CommonMark` event stream and emits one
-//! [`Line`] per visual row. Block structure (paragraphs, headings, lists,
-//! code blocks, block quotes) controls line breaks and indentation; inline
-//! structure (emphasis, code, links) controls per-span styling.
-//!
-//! ```text
-//! Markdown ──▶ pulldown_cmark::Parser ──▶ Renderer ──▶ Vec<Line>
-//!              (Event stream)              (this file)   (Paragraph)
-//! ```
+//! Render Markdown source into styled ratatui lines for the issue detail
+//! view. Block structure controls line breaks/indentation; inline structure
+//! controls per-span styling.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};

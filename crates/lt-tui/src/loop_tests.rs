@@ -1,13 +1,6 @@
-// Event-loop tests
-//
-// These drive the DB- and event-coupled surface that the render tests skip:
-// `do_fetch` and pagination against a shared in-memory SQLite, `run_app`
-// driven by an `EventPump::Scripted` into a `TestBackend`, the double-esc
-// reset, and the sync/login typestate transitions (`consume_sync_event`/
-// `consume_login_event`) fed directly (no live threads). Writers go through
-// `RecordingSyncService`, which performs the real enqueue synchronously and
-// emits onto the app's queue -- `drain_events` applies it, mirroring
-// `run_app`'s post-wait drain.
+// Event-loop tests: the DB- and event-coupled surface render tests skip --
+// `do_fetch`/pagination, `run_app` via `EventPump::Scripted`, double-esc,
+// and sync/login typestate transitions, all fed directly (no live threads).
 
 use std::sync::atomic::Ordering;
 
@@ -19,8 +12,7 @@ use ratatui::backend::TestBackend;
 use super::*;
 
 /// Apply every event currently queued -- the test-side equivalent of
-/// `run_app`'s post-wait drain, for handlers that write through the service
-/// (whose events land on the queue, not a direct function call).
+/// `run_app`'s post-wait drain.
 fn drain_events(app: &mut App) {
     while let Ok(event) = app.events_rx.try_recv() {
         app.apply(event);
@@ -197,9 +189,6 @@ fn prev_page_at_start_is_noop() {
 
 #[test]
 fn toggle_desc_refetches() {
-    // Cycle-sort is removed outright (docs/design/keybinds.md, "List"): `S`
-    // is reserved for a future Linear subscribe binding, and sort is still
-    // reachable via `/` `sort:` stems. `d` (toggle_desc) stays covered here.
     let rows = [
         db_issue("1", "ENG-1", "Todo", 5),
         db_issue("2", "ENG-2", "Todo", 4),
@@ -235,10 +224,10 @@ fn populate_relations_fills_parent_and_children() {
     assert_eq!(detail.children[0].identifier, "ENG-10");
 }
 
-// -- route_state_event (scope-relevance matrix N1-N3, N9-N10) -------------
+// -- route_state_event ------------------------------------------------------
 
-/// Shared N1/N3 fixture: an app seeded with `issue`, a fresh `"cm1"` comment
-/// already in the DB, and a `Detail(issue)` already pushed.
+/// An app seeded with `issue`, a fresh `"cm1"` comment already in the DB,
+/// and a `Detail(issue)` already pushed.
 fn app_with_open_detail_and_fresh_comment(
     issue: &lt_types::types::Issue,
     body: &str,
@@ -256,7 +245,7 @@ fn app_with_open_detail_and_fresh_comment(
 
 #[test]
 fn route_state_event_comments_updates_a_live_matching_detail() {
-    // N1: `Comments{A}` with `Detail(A)` live -- re-reads `query_comments(A)`.
+    // `Comments{A}` with `Detail(A)` live re-reads `query_comments(A)`.
     let issue = db_issue("c1", "ENG-1", "Todo", 5);
     let mut app = app_with_open_detail_and_fresh_comment(&issue, "fresh").unwrap();
 
@@ -273,8 +262,7 @@ fn route_state_event_comments_updates_a_live_matching_detail() {
 
 #[test]
 fn route_state_event_comments_falls_through_without_a_matching_detail() {
-    // N2: no consumer at all, then a `Detail(B)` whose id does not match --
-    // both drop the event.
+    // No consumer, then a `Detail(B)` id mismatch -- both drop the event.
     let a = db_issue("a", "ENG-1", "Todo", 5);
     let b = db_issue("b", "ENG-2", "Todo", 4);
     let mut app = app_with_db(&[a.clone(), b.clone()]).unwrap();
@@ -302,7 +290,7 @@ fn route_state_event_comments_falls_through_without_a_matching_detail() {
 
 #[test]
 fn route_state_event_comments_applied_twice_is_idempotent() {
-    // N3: duplicate/late events are idempotent re-reads of current truth.
+    // Duplicate/late events are idempotent re-reads of current truth.
     let issue = db_issue("c1", "ENG-1", "Todo", 5);
     let mut app = app_with_open_detail_and_fresh_comment(&issue, "fresh").unwrap();
 
@@ -320,7 +308,7 @@ fn route_state_event_comments_applied_twice_is_idempotent() {
 
 #[test]
 fn route_state_event_issues_refreshes_the_focused_base() {
-    // N9: `[List]` -- the base is focused, so `Issues` re-fetches.
+    // The base is focused, so `Issues` re-fetches.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues.len(), 1);
@@ -335,7 +323,7 @@ fn route_state_event_issues_refreshes_the_focused_base() {
 
 #[test]
 fn route_state_event_issues_under_an_overlay_skips_the_base_but_refreshes_detail() {
-    // N10: an overlay above the base -- the base's `focused` guard drops the
+    // An overlay above the base: the base's `focused` guard drops the
     // refresh, but a live `Detail` still re-reads its own issue.
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
@@ -466,8 +454,7 @@ fn first_esc_records_timestamp() {
     assert!(app.last_esc_time.is_some());
 }
 
-// -- keymap: chords, navigation actions, esc-cancels-pending
-// (docs/design/keybinds.md) -------------------------------------------------
+// -- keymap: chords, navigation actions, esc-cancels-pending ----------------
 
 #[test]
 fn chord_g_g_selects_top() {
@@ -538,8 +525,7 @@ fn esc_cancels_a_pending_chord_without_touching_last_esc_time() {
     assert!(app.last_esc_time.is_none());
 }
 
-// -- dispatch floor: Esc/q pop overlays, reset/quit at the base (Decision 6,
-// N13) ----------------------------------------------------------------------
+// -- dispatch floor: Esc/q pop overlays, reset/quit at the base -------------
 
 /// A bare priority popup, pushed on top of `app`'s base list.
 fn push_priority_popup(app: &mut App, items: Vec<PopupItem>) {
@@ -599,8 +585,7 @@ fn floor_esc_pops_new_issue_overlay() {
 
 #[test]
 fn floor_q_pops_overlay_never_quits() {
-    // The round-1 q-leak hazard is resolved structurally: `q` from an
-    // overlay is Back, never Quit.
+    // `q` from an overlay is Back, never Quit.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     push_priority_popup(&mut app, priority_popup_items());
     app.dispatch_key(key('q'));
@@ -616,7 +601,7 @@ fn floor_q_at_base_quits() {
 }
 
 // -- cascade: unbound keys fall through toward the base; scroll and text
-// contexts never cascade (Decision 6, N13-N15) -------------------------------
+// contexts never cascade -----------------------------------------------------
 
 #[test]
 fn cascade_unbound_key_in_an_overlay_reaches_the_base() {
@@ -646,8 +631,8 @@ fn cascade_bound_key_stops_at_the_overlay() {
 
 #[test]
 fn scroll_key_moves_the_focused_view_and_never_a_view_beneath() {
-    // N15: an unconsumed scroll key resolves at the focused view's `scroll`
-    // and never reaches the view beneath.
+    // An unconsumed scroll key resolves at the focused view's `scroll` and
+    // never reaches the view beneath.
     let rows = [
         db_issue("1", "ENG-1", "Todo", 5),
         db_issue("2", "ENG-2", "Todo", 4),
@@ -674,7 +659,7 @@ fn scroll_key_moves_the_focused_view_and_never_a_view_beneath() {
 
 #[test]
 fn printable_key_in_a_text_context_never_cascades() {
-    // N14: `q` typed into the search query bar must be consumed as text, not
+    // `q` typed into the search query bar must be consumed as text, not
     // reach the floor's Back.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     app.views.push(View::Search(SearchOverlay::new()));
@@ -708,9 +693,8 @@ fn printable_key_in_search_never_reaches_the_list_beneath() {
 
 #[test]
 fn q_typed_in_the_help_filter_is_text() {
-    // `q` above the base is normally Back at the floor; the help popup's own
-    // filter bar must still get to type it (`docs/design/keybinds.md`,
-    // "Help").
+    // `q` above the base is normally Back at the floor; the help popup's
+    // own filter bar must still get to type it.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     app.views.push(View::Help(HelpPopup::new()));
 
@@ -745,8 +729,8 @@ fn esc_with_comment_input_open_cancels_input_and_keeps_detail_view() {
 
 #[test]
 fn popup_scroll_supports_the_shared_motion_set() {
-    // Behavior change 14: g g/G/Ctrl-d/Ctrl-u/PageUp/PageDown, previously
-    // ignored by the state/priority/assignee popups.
+    // `g g`/`G`/`Ctrl-d`/`Ctrl-u`/`PageUp`/`PageDown` all move the popup
+    // selection.
     let items: Vec<PopupItem> = (0..10)
         .map(|i| PopupItem {
             label: i.to_string(),
@@ -763,7 +747,7 @@ fn popup_scroll_supports_the_shared_motion_set() {
     };
     assert_eq!(popup.selected, 9); // bottom
 
-    // `g` is now a chord prefix: two presses to reach MoveTop.
+    // `g` is a chord prefix: two presses reach MoveTop.
     app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
     app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
     let Some(View::Popup(popup)) = app.views.last() else {
@@ -803,8 +787,8 @@ fn consume_sync_event_started_sets_syncing() {
 
 #[test]
 fn consume_sync_event_done_sets_identity_and_synced() {
-    // N11: `Sync(Done)` only transitions the typestate now -- the `State
-    // (Issues)` the loop emits alongside is a separate queued event.
+    // `Sync(Done)` only transitions the typestate; the `State(Issues)` the
+    // loop emits alongside is a separate queued event.
     let mut app = app_with_db(&[]).unwrap();
     app.sync = SyncStatus::Syncing;
 
@@ -893,8 +877,8 @@ fn consume_sync_event_not_authenticated_sets_auth_and_goes_idle() {
 
 #[test]
 fn consume_login_event_success_sets_identity_without_touching_sync() {
-    // The follow-up delta sync after a successful login is the loop's now
-    // (Decision 2); this consumer only transitions `auth`.
+    // The follow-up delta sync after a successful login is the loop's;
+    // this consumer only transitions `auth`.
     let mut app = app_with_db(&[]).unwrap();
     app.sync = SyncStatus::Idle;
 
@@ -928,17 +912,15 @@ fn l_key_gates_on_authenticating() {
     assert_eq!(service.login_calls.load(Ordering::SeqCst), 1);
 
     // A second press while already authenticating is a no-op -- the TUI's
-    // own gate; the loop separately ignores a second `Login` command while
-    // one is in flight (`lt-runtime`'s service-loop tests).
+    // own gate.
     app.dispatch_key(key('L'));
     assert_eq!(service.login_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
 fn refresh_requests_sync_on_every_press() {
-    // Item 13: `ctrl+r` no longer gates on `Syncing` -- a press mid-cycle
-    // coalesces into a follow-up sync instead of being ignored. Refresh
-    // moved from bare `r` to `ctrl+r` (docs/design/keybinds.md, "List").
+    // `ctrl+r` doesn't gate on `Syncing`: a press mid-cycle coalesces into
+    // a follow-up sync rather than being ignored.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     let db = app.db.share().unwrap();
     let service = app.install_recording_service(&db).unwrap();
@@ -950,8 +932,7 @@ fn refresh_requests_sync_on_every_press() {
     assert_eq!(service.request_sync_calls.load(Ordering::SeqCst), 2);
 }
 
-/// Seed team `team_id` with two ordered workflow states ("Todo" @1.0, "Done"
-/// @2.0), shared by the `Team{team_id}` picker-rebuild tests (N6, N8).
+/// Seed `team_id` with two ordered workflow states ("Todo" @1.0, "Done" @2.0).
 fn seed_team_states(conn: &lt_runtime::db::Connection, team_id: &str) -> Result<()> {
     lt_runtime::db::upsert_team_state(
         conn,
@@ -974,8 +955,7 @@ fn seed_team_states(conn: &lt_runtime::db::Connection, team_id: &str) -> Result<
     Ok(())
 }
 
-/// A bare `NewIssueModal` for `route_state_event` tests -- only the fields
-/// under test vary between callers.
+/// A bare `NewIssueModal` fixture; callers vary only the fields under test.
 fn bare_new_issue_modal() -> NewIssueModal {
     NewIssueModal {
         focused_field: NewIssueField::Team,
@@ -997,7 +977,7 @@ fn bare_new_issue_modal() -> NewIssueModal {
 
 #[test]
 fn new_issue_modal_teams_event_rereads_and_reanchors_by_id() {
-    // N4: `State(Teams)` with `NewIssue` in the stack -- re-read teams and
+    // `State(Teams)` with `NewIssue` in the stack: re-read teams and
     // re-anchor the selection by id (not index).
     let mut app = app_with_db(&[]).unwrap();
     {
@@ -1038,7 +1018,7 @@ fn new_issue_modal_teams_event_rereads_and_reanchors_by_id() {
 
 #[test]
 fn route_state_event_teams_with_no_modal_is_a_noop() {
-    // N5: `State(Teams)` with no `NewIssue` in the stack -- no consumer.
+    // `State(Teams)` with no `NewIssue` in the stack: no consumer.
     let mut app = app_with_db(&[]).unwrap();
     app.route_state_event(&StateEvent::Teams);
     assert_eq!(app.views.len(), 1);
@@ -1046,8 +1026,8 @@ fn route_state_event_teams_with_no_modal_is_a_noop() {
 
 #[test]
 fn new_issue_modal_team_event_rereads_and_preserves_picks_by_id() {
-    // N6: `State(Team{T})` with `NewIssue` on team T -- re-read states/
-    // members, preserve the picks by id, clear `loading`.
+    // `State(Team{T})` with `NewIssue` on team T: re-read states/members,
+    // preserve the picks by id, clear `loading`.
     let mut app = app_with_db(&[]).unwrap();
     {
         let conn = app.db.connect().unwrap();
@@ -1096,8 +1076,8 @@ fn new_issue_modal_team_event_rereads_and_preserves_picks_by_id() {
 
 #[test]
 fn new_issue_modal_team_event_for_a_different_team_falls_through() {
-    // N7: `State(Team{T})` with `NewIssue` on team U -- the id mismatch
-    // falls through, leaving `loading`/items untouched.
+    // `State(Team{T})` with `NewIssue` on team U: the id mismatch falls
+    // through, leaving `loading`/items untouched.
     let mut app = app_with_db(&[]).unwrap();
     let mut modal = bare_new_issue_modal();
     modal.teams = vec![PopupItem {
@@ -1121,8 +1101,8 @@ fn new_issue_modal_team_event_for_a_different_team_falls_through() {
 
 #[test]
 fn popup_team_event_rebuilds_items_and_reanchors_selection() {
-    // N8: `State(Team{T})` with `Popup { team_id: Some(T) }` -- rebuild
-    // `items` from the cache and re-anchor the selection by item id.
+    // `State(Team{T})` with `Popup { team_id: Some(T) }`: rebuild `items`
+    // from the cache and re-anchor the selection by item id.
     let mut app = app_with_db(&[]).unwrap();
     {
         let conn = app.db.connect().unwrap();

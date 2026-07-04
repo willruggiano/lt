@@ -77,10 +77,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 /// list footer, matching on the stack top.
 fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &FooterState) {
     if let Some(pending) = &app.pending_key {
-        // Highest priority, regardless of which view is focused: a pending
-        // prefix can never coexist with the comment-input hint below (text
-        // contexts never start chords, and `dispatch_key` takes the prefix
-        // once at every dispatch entry), so this is safe to check first.
+        // Highest priority: a pending prefix can never coexist with the
+        // comment-input hint below, since text contexts never start chords.
         frame.render_widget(Paragraph::new(format!("{pending} …")), chunks[4]);
     } else if let Some(View::Detail(d)) = app.views.last() {
         if d.comment_input.is_some() {
@@ -103,13 +101,9 @@ fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Foo
     }
 }
 
-/// Render the whole view stack, bottom to top: the `List` arm fills the
-/// full-frame table wherever it sits (the base is not special to the
-/// renderer, only to the stack's never-empty invariant); each view above it
-/// draws over what is beneath. Per-view render data the walk doesn't already
-/// have -- the popup anchor, the search overlay's sort marker, the modal's
-/// keyboard-enhanced flag -- is read/derived in the arm that needs it, not
-/// hoisted above the walk where every other view would pay for it.
+/// Render the whole view stack, bottom to top, each drawing over what's
+/// beneath. Per-view data is derived in the arm that needs it, not hoisted
+/// where every view would pay for it.
 fn render_views(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
     let len = app.views.len();
     let mut list_widths: Option<[usize; 7]> = None;
@@ -127,10 +121,9 @@ fn render_views(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
             }
             View::Detail(detail) => render_detail_overlay(frame, chunks[2], detail),
             View::Popup(popup) => {
-                // The popup anchor rule: only when the popup sits directly on
-                // the base list (an exact two-view stack) does the base
-                // table's geometry anchor it; otherwise `render_popup`
-                // centers.
+                // Anchor to the base table's geometry only when the popup
+                // sits directly on it (an exact two-view stack); otherwise
+                // `render_popup` centers.
                 if len == 2
                     && i == 1
                     && let Some(widths) = &list_widths

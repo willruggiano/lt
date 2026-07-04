@@ -1,28 +1,14 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
-/// A single-line text input with a byte-offset cursor and vim-style bindings.
-///
-/// Bindings handled in `handle_key`:
-///   Backspace / ctrl+h  -- delete char before cursor
-///   ctrl+w              -- delete word before cursor
-///   ctrl+u              -- delete to start of line
-///   ctrl+k              -- delete to end of line
-///   ctrl+d / Delete     -- delete char under cursor
-///   alt+d               -- delete word after cursor
-///   ctrl+a / Home       -- move to start
-///   ctrl+e / End        -- move to end
-///   ctrl+f / Right      -- move right one char
-///   ctrl+b / Left       -- move left one char
-///   ctrl+Left           -- move left one word
-///   ctrl+Right          -- move right one word
+/// A single-line text input with a byte-offset cursor and vim/emacs-style
+/// key bindings (see `handle_key`).
 #[derive(Clone, Default)]
 pub struct TextInput {
     pub value: String,
     /// Byte offset of the cursor, always on a char boundary.
     pub cursor: usize,
-    /// If set, the range `cursor..selection_end` is "selected" (highlighted).
-    /// `selection_end` is always >= cursor and always on a char boundary.
-    /// Typing a character replaces the selection; movement keys clear it.
+    /// If set, `cursor..selection_end` is "selected"; always >= cursor and
+    /// on a char boundary. Typing replaces it; movement clears it.
     pub selection_end: Option<usize>,
 }
 
@@ -135,8 +121,7 @@ impl TextInput {
         self.cursor = self.value.len();
     }
 
-    /// Delete char before cursor (backspace).
-    /// If a selection is active, deletes the selection range instead.
+    /// If a selection is active, deletes it instead.
     pub fn backspace(&mut self) {
         if let Some(end) = self.selection_end.take() {
             self.value.drain(self.cursor..end);
@@ -147,8 +132,7 @@ impl TextInput {
         }
     }
 
-    /// Delete char at cursor (forward delete).
-    /// If a selection is active, deletes the selection range instead.
+    /// If a selection is active, deletes it instead.
     pub fn delete_forward(&mut self) {
         if let Some(end) = self.selection_end.take() {
             self.value.drain(self.cursor..end);
@@ -158,7 +142,6 @@ impl TextInput {
         }
     }
 
-    /// Delete word before cursor (ctrl+w).
     pub fn delete_word_before(&mut self) {
         self.selection_end = None;
         let start = self.prev_word_boundary();
@@ -166,44 +149,34 @@ impl TextInput {
         self.cursor = start;
     }
 
-    /// Delete word after cursor (alt+d).
     pub fn delete_word_after(&mut self) {
         self.selection_end = None;
         let end = self.next_word_boundary();
         self.value.drain(self.cursor..end);
     }
 
-    /// Delete from cursor to start of line (ctrl+u).
     pub fn delete_to_start(&mut self) {
         self.selection_end = None;
         self.value.drain(..self.cursor);
         self.cursor = 0;
     }
 
-    /// Delete from cursor to end of line (ctrl+k).
     pub fn delete_to_end(&mut self) {
         self.selection_end = None;
         self.value.truncate(self.cursor);
     }
 
-    /// Insert a char at the cursor.
-    /// If a selection is active (`selection_end` is set), the selected range is
-    /// deleted first so that typing replaces the selection.
+    /// If a selection is active, it's deleted first so typing replaces it.
     pub fn insert(&mut self, c: char) {
         if let Some(end) = self.selection_end.take() {
-            // Delete the selected range cursor..end before inserting.
             self.value.drain(self.cursor..end);
         }
         self.value.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
 
-    /// Handle a key event.  Returns `true` if the value was modified (caller
-    /// may want to trigger re-filtering etc.), `false` if only cursor moved or
-    /// key was not handled.
-    /// Handle the deletion key bindings. Returns `Some(true)` when a deletion
-    /// key was handled (the buffer always changes), or `None` if `code` is not
-    /// a deletion key.
+    /// `Some(true)` when a deletion key was handled; `None` if `code` isn't
+    /// one.
     fn handle_deletion_key(&mut self, code: KeyCode, ctrl: bool, alt: bool) -> Option<bool> {
         match code {
             KeyCode::Backspace => self.backspace(),
@@ -219,6 +192,8 @@ impl TextInput {
         Some(true)
     }
 
+    /// Returns `true` if the value changed; `false` if only the cursor
+    /// moved or the key was unhandled.
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         let alt = modifiers.contains(KeyModifiers::ALT);

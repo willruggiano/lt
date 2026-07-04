@@ -73,29 +73,22 @@ pub struct NewIssueModal {
     /// surfaced here (offline, every targeted refresh would fail, making the
     /// field constant noise); those go to `tracing`.
     pub error: String,
-    /// The team scope the service is currently watching on this modal's
-    /// behalf, distinct from `team_selected` (the live picker cursor, which
-    /// can move via j/k before the user tabs away and commits it). Diffed by
-    /// `new_issue_team_changed` to unwatch the old team and watch the new
-    /// one in the same handler (Decision 3).
+    /// The team scope the service is watching, distinct from the live
+    /// `team_selected` cursor; diffed to unwatch the old team, watch the new.
     pub watched_team_id: Option<String>,
 }
 
 impl NewIssueModal {
-    /// This modal's own team-id lookup, deduplicating the call sites that
-    /// need it: submit validation, the `Team{team_id}` consume guard, and
-    /// `View::scopes()`.
+    /// This modal's own team-id lookup.
     pub(crate) fn selected_team_id(&self) -> Option<String> {
         self.teams
             .get(self.team_selected)
             .and_then(|t| t.id.clone())
     }
 
-    /// `Teams`: re-read the team list and re-anchor the selection by id
-    /// (fallback index 0). `Team{team_id}`, guarded by `selected_team_id()`
-    /// matching: re-read states/members, preserving the user's picks by item
-    /// id, and clear `loading`. A team-id mismatch (a stale refresh for a
-    /// team the user has since tabbed away from) falls through.
+    /// `Teams` re-reads the list, re-anchoring by id. `Team{team_id}`
+    /// (guarded by a `selected_team_id()` match) re-reads states/members and
+    /// clears `loading`.
     pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
         match ev {
             StateEvent::Teams => {
@@ -161,10 +154,7 @@ impl NewIssueModal {
     }
 }
 
-/// The modal's assignee picker items for `team_id`: `build_assignee_items`
-/// fed by the persisted `db::synced_viewer` and `query_team_members`.
-/// `state_items` (the states half) is shared with the state popup --
-/// imported from `popup`, not redefined here.
+/// The modal's assignee picker items for `team_id`.
 fn assignee_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
     let viewer = match lt_runtime::db::synced_viewer(conn) {
         Ok(viewer) => viewer,
@@ -261,9 +251,8 @@ impl super::App {
         }));
     }
 
-    /// Leaving the Team field (Tab/Enter): unwatch the previously-watched
-    /// team and watch the newly-selected one (Decision 3), then an instant
-    /// read for it.
+    /// Leaving the Team field: unwatch the previously-watched team and
+    /// watch the newly-selected one, then an instant read for it.
     fn new_issue_team_changed(&mut self, i: usize) {
         let (old_team_id, new_team_id) = match self.views.get(i) {
             Some(View::NewIssue(modal)) => {
@@ -340,10 +329,7 @@ impl super::App {
 // ---------------------------------------------------------------------------
 
 /// Build the typed `issueCreate` input (ids only) from the modal's current
-/// picker selections. `team_id` is the resolved (validated) team id. The
-/// optimistic issue fragment used to live here too; it moved into
-/// `LinearSyncService::create_issue`, which resolves display names from its
-/// own lookup tables -- the fragment is a database row, not presentation.
+/// picker selections. `team_id` is the resolved (validated) team id.
 fn build_issue_create_input(
     modal: &NewIssueModal,
     team_id: &str,
@@ -378,10 +364,8 @@ fn build_issue_create_input(
     }
 }
 
-/// Build the assignee popup items: "Me (name)" at top if the viewer is known,
-/// then "Unassigned", then the remaining team members (excluding the viewer).
-/// `viewer` is the persisted `db::synced_viewer` -- offline-safe, absent
-/// before the first successful sync.
+/// The assignee popup items: "Me (name)" first if known, then "Unassigned",
+/// then the remaining team members (excluding the viewer).
 pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = Vec::new();
     if let Some(v) = viewer {
@@ -408,11 +392,8 @@ pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) ->
 // Key handlers
 // ---------------------------------------------------------------------------
 
-/// Shared by the picker and text keymaps: the submit chord plus Tab/Shift+Tab
-/// field navigation (`docs/design/keybinds.md`, "New issue -- picker
-/// fields"/"-- text fields"). The text keymap's own table *is* this layer
-/// (everything else forwards to the focused field's editor); the picker
-/// keymap layers it alongside its own Confirm/PickMe rows.
+/// Shared by the picker and text keymaps: the submit chord plus
+/// Tab/Shift+Tab field navigation.
 pub(crate) static FORM_NAV: keymap::Table = &[
     (
         keymap::Binding::Single(keymap::Key::ctrl_code(KeyCode::Enter)),
@@ -432,10 +413,8 @@ pub(crate) static FORM_NAV: keymap::Table = &[
     ),
 ];
 
-/// New-issue modal, picker fields (Team/Priority/State/Assignee): `FORM_NAV`
-/// plus GLOBAL's `j`/`k`/`down`/`up`, which move the focused picker's
-/// selection (`View::scroll`'s `NewIssue` override); `enter` advances like
-/// `Tab` (leaving Team swaps the watched scope).
+/// New-issue modal, picker fields: `FORM_NAV` plus GLOBAL's navigation keys,
+/// which move the focused picker's selection; `enter` advances like `Tab`.
 pub(crate) static PICKER_BINDINGS: keymap::Table = &[
     (
         keymap::Binding::Single(keymap::Key::plain(KeyCode::Enter)),
@@ -462,10 +441,8 @@ pub(crate) static TEXT_KEYMAP: Keymap = Keymap {
     unbound: Unbound::Forward(forward_text),
 };
 
-/// The new-issue modal's picker/text actions (`docs/design/keybinds.md`,
-/// "New issue -- picker fields"/"-- text fields"): `Submit`/`NextField`/
-/// `PrevField` are shared by both keymaps; `Confirm`/`PickMe` only ever
-/// resolve from `PICKER_KEYMAP` (`TEXT_KEYMAP`'s table has no such rows).
+/// `Submit`/`NextField`/`PrevField` are shared by both keymaps;
+/// `Confirm`/`PickMe` only resolve from the picker keymap.
 pub(crate) fn apply_new_issue(app: &mut App, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Submit => app.new_issue_submit(i),
@@ -485,16 +462,14 @@ pub(crate) fn apply_new_issue(app: &mut App, i: usize, action: keymap::Action) {
                 modal.assignee_selected = 0;
             }
         }
-        // Navigation and other keymaps' actions never resolve to
-        // `PICKER_BINDINGS`/`FORM_NAV`; the match stays exhaustive over
+        // Other keymaps' actions never resolve here; kept exhaustive over
         // `Action` regardless.
         _ => {}
     }
 }
 
-/// Advance to the next field (`Tab`/`NextField` and `Enter`/`Confirm` on a
-/// picker field share this exact body): leaving Team swaps the watched team
-/// scope (`new_issue_team_changed`); any other field just advances.
+/// Advance to the next field: leaving Team swaps the watched team scope;
+/// any other field just advances.
 fn new_issue_advance(app: &mut App, i: usize) {
     let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
         return;
@@ -508,10 +483,8 @@ fn new_issue_advance(app: &mut App, i: usize) {
     }
 }
 
-/// Forward an unbound key from `TEXT_KEYMAP` to the focused text field's own
-/// editor: `TextInput::handle_key` for Title, the description's line-buffer
-/// logic (`enter`-as-newline, cursor always at the end) for Description. Uses
-/// the original crossterm event, not the normalized `Key`.
+/// Forward an unbound key to the focused text field's own editor, using the
+/// raw crossterm event rather than the normalized `Key`.
 pub(crate) fn forward_text(app: &mut App, i: usize, ev: KeyEvent) {
     let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
     let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
@@ -529,7 +502,6 @@ pub(crate) fn forward_text(app: &mut App, i: usize, ev: KeyEvent) {
     }
 }
 
-/// Handle a key press while the new-issue Description field is focused.
 fn handle_description_key(modal: &mut NewIssueModal, code: KeyCode, ctrl: bool) {
     match code {
         KeyCode::Enter => {
@@ -562,12 +534,8 @@ fn handle_description_key(modal: &mut NewIssueModal, code: KeyCode, ctrl: bool) 
     }
 }
 
-/// This view's scroll override, reached only through `PICKER_KEYMAP`
-/// (`TEXT_KEYMAP`'s layers skip GLOBAL, so its unbound keys forward instead
-/// of reaching `View::scroll`): `Down`/`Up` move the focused picker's
-/// selection; every other motion no-ops via `Scroll`'s defaults -- a form
-/// has no "half page" concept (`docs/design/keybinds.md`, "New issue --
-/// picker fields").
+/// `Down`/`Up` move the focused picker's selection; other motions no-op via
+/// `Scroll`'s defaults.
 impl Scroll for NewIssueModal {
     fn move_down(&mut self) {
         let field = self.focused_field.clone();
@@ -583,7 +551,6 @@ impl Scroll for NewIssueModal {
     }
 }
 
-/// Returns a mutable reference to (item count, selected index) for a picker field.
 fn new_issue_picker_state<'a>(
     modal: &'a mut NewIssueModal,
     field: &NewIssueField,

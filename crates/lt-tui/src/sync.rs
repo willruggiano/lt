@@ -1,9 +1,7 @@
 use super::{AuthStatus, Clock, SyncStatus};
 
-/// The footer's sync/auth status label, derived at render time from
-/// `(SyncStatus, AuthStatus, Clock)` -- no string is stored for it. Auth
-/// takes priority over sync: an in-flight, absent, or failed login masks
-/// whatever the sync typestate happens to be.
+/// The footer's sync/auth status label. Auth takes priority: an in-flight,
+/// absent, or failed login masks whatever the sync typestate is.
 pub(crate) fn sync_status_label(sync: &SyncStatus, auth: &AuthStatus, clock: &Clock) -> String {
     match auth {
         AuthStatus::Authenticating => {
@@ -22,9 +20,7 @@ pub(crate) fn sync_status_label(sync: &SyncStatus, auth: &AuthStatus, clock: &Cl
     }
 }
 
-/// Pure "synced X min ago" formatter for `SyncStatus::Synced` -- the only
-/// branch that still needs a clock. The syncing/not-synced/error/auth
-/// branches live in `sync_status_label` now.
+/// "synced X min ago" formatter -- the only branch that needs a clock.
 fn format_sync_label(synced_at: chrono::DateTime<chrono::Utc>, clock: &Clock) -> String {
     let elapsed = clock.now().signed_duration_since(synced_at);
     match elapsed.num_minutes() {

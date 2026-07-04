@@ -48,20 +48,15 @@ use ratatui::widgets::TableState;
 pub(crate) use sync::sync_status_label;
 pub(crate) use text_input::TextInput;
 
-/// Wall-clock source. The set of clocks is closed -- the real system clock in
-/// the binary, plus a fixed instant in tests -- so it is an enum rather than a
-/// trait or a boxed closure (cf. `db::Database`, which is an enum for the same
-/// reason). The `Fixed` variant is compiled out of the production binary.
+/// An enum rather than a trait or boxed closure: the set of clocks is
+/// closed (the system clock, plus a fixed instant in tests).
 pub enum Clock {
-    /// The real wall clock.
     System,
-    /// A clock frozen at a fixed instant, for deterministic tests.
     #[cfg(all(test, feature = "sim"))]
     Fixed(chrono::DateTime<chrono::Utc>),
 }
 
 impl Clock {
-    /// Read the current instant.
     pub fn now(&self) -> chrono::DateTime<chrono::Utc> {
         match self {
             Clock::System => chrono::Utc::now(),
@@ -92,9 +87,8 @@ pub enum AppEvent {
 /// separate mode flag to keep consistent.
 pub enum View {
     List(ListView),
-    // Boxed: `DetailView` is by far the largest variant (owns comments and
-    // parent/children issues), so boxing it keeps every other `View`
-    // push/pop from paying for its size.
+    // Boxed: `DetailView` is by far the largest variant, so boxing it keeps
+    // every other `View` push/pop from paying for its size.
     Detail(Box<DetailView>),
     Popup(PopupView),
     NewIssue(NewIssueModal),
@@ -102,20 +96,17 @@ pub enum View {
     Help(HelpPopup),
 }
 
-/// A view's declared key handling: the layers its keys resolve through
-/// (its own table first, then any shared layers, then GLOBAL unless the
-/// view forwards text), the apply function for non-navigation actions
-/// (None when the table is navigation-only), and what an unbound key does.
+/// A view's declared key handling: its resolution layers, the apply
+/// function for non-navigation actions, and the unbound-key policy.
 pub(crate) struct Keymap {
     pub(crate) layers: keymap::Layers,
     pub(crate) apply: Option<fn(&mut App, usize, keymap::Action)>,
     pub(crate) unbound: Unbound,
 }
 
-/// What a key no layer binds does in a given keymap: cascade to the view
-/// beneath, be swallowed (a form ignores strays), or forward verbatim to
-/// the view's editor widget. `esc` is exempt: it always passes to the
-/// floor before this policy is consulted.
+/// What a key no layer binds does: cascade, be swallowed, or forward
+/// verbatim to the view's editor widget. `esc` is exempt: it always passes
+/// to the floor before this policy is consulted.
 pub(crate) enum Unbound {
     Cascade,
     Swallow,
@@ -123,8 +114,7 @@ pub(crate) enum Unbound {
 }
 
 impl View {
-    /// Route a state invalidation to this view's consumer, if it has one.
-    /// `focused` is true iff this is the top of the stack. Search/Help have
+    /// `focused` is true iff this is the top of the stack; Search/Help have
     /// no `StateEvent` dependencies.
     fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
         match self {
@@ -137,7 +127,6 @@ impl View {
     }
 
     /// The scopes this view displays, derived from its current state.
-    /// `push_view` watches these before pushing; `pop_view` unwatches them.
     fn scopes(&self) -> Vec<Scope> {
         match self {
             View::Detail(d) => vec![Scope::Comments {
@@ -160,13 +149,7 @@ impl View {
     }
 
     /// Resolve a scroll motion against this view's own semantics: selection
-    /// movement for `List`/`Popup`, offset scrolling for `Detail` (Decision
-    /// 6). `NewIssue`'s override moves the focused picker's selection for
-    /// Down/Up only (other motions no-op: a form has no "half page"
-    /// concept); `Search`/`Help` similarly override Down/Up to move their own
-    /// result/filtered list. All three only ever see Down/Up in practice --
-    /// their text keymaps' layers skip GLOBAL, so this seam is reached only
-    /// through `new_issue::PICKER_KEYMAP`.
+    /// movement for `List`/`Popup`, offset scrolling for `Detail`.
     fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
         match self {
             View::List(list) => list.scroll(motion, viewport_height),
@@ -178,9 +161,8 @@ impl View {
         }
     }
 
-    /// This view's declared keymap, delegating the sub-focus decision
-    /// (`Detail`'s open comment input, `NewIssue`'s focused field) to the
-    /// view type itself.
+    /// This view's declared keymap, delegating any sub-focus decision to
+    /// the view type itself.
     fn keymap(&self) -> &'static Keymap {
         match self {
             View::List(_) => &LIST_KEYMAP,
@@ -193,12 +175,9 @@ impl View {
     }
 }
 
-/// A scroll/selection motion, applied through the focused view's
-/// [`View::scroll`] when the keymap resolves a key to a navigation
-/// `Action` (the `GLOBAL` table, `keymap::mod`). One method over the shared
-/// `j`/`k`/`g g`/`G`/Ctrl-d/Ctrl-u/PageDown/PageUp family, rather than one
-/// method per motion: avoids eight near-identical trait methods for the same
-/// dispatch seam.
+/// A scroll/selection motion: one enum over the shared navigation family
+/// rather than one method per motion, avoiding eight near-identical trait
+/// methods for the same dispatch seam.
 #[derive(Clone, Copy)]
 pub(crate) enum ScrollMotion {
     Down,
@@ -211,8 +190,8 @@ pub(crate) enum ScrollMotion {
     PageUp,
 }
 
-/// Map a navigation `Action` onto its `ScrollMotion`, or `None` for the
-/// non-navigation actions `apply_*` handles instead.
+/// Map a navigation `Action` onto its `ScrollMotion`, or `None` if it isn't
+/// one.
 fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
     use keymap::Action;
     Some(match action {
@@ -228,31 +207,23 @@ fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
     })
 }
 
-/// The base list's fetch status. Its only render site is the base table's
-/// Loading/Error overlay (`ui/table.rs`); its writers are `ListView::do_fetch`
-/// and the sync lifecycle's Loading->Idle repair.
+/// The base list's fetch status.
 pub enum FetchStatus {
     Idle,
     Loading,
     Error(String),
 }
 
-/// The issue-list view: the base-list fields, owned. `status`'s only render
-/// site is the base table's Loading/Error overlay (`ui/table.rs`); its
-/// writers are `do_fetch` and the sync lifecycle's Loading->Idle repair
-/// (reached from other views through `App::base_mut`).
+/// The issue-list view: the base-list fields, owned.
 pub struct ListView {
     pub issues: Vec<Issue>,
     pub table_state: TableState,
     pub pagination: Pagination,
     pub status: FetchStatus,
-    /// An identifier to seek to on the next `Issues` re-read, set by
-    /// `new_issue_submit` after `create_issue` returns the optimistic
-    /// identifier. Consumed (and cleared) by that re-read.
+    /// An identifier to seek on the next `Issues` re-read; one-shot,
+    /// cleared whether or not that re-read finds a match.
     pub pending_select: Option<String>,
-    /// The issue-list query: sort/team/limit and the rest of the fields
-    /// `do_fetch` reads. Kept in sync with `filter`'s `sort:` token by
-    /// `sync_args_from_filter`.
+    /// The issue-list query, kept in sync with `filter`'s `sort:` token.
     pub args: IssueQuery,
     /// Single source of truth for the active filter/search state. Updated on
     /// Enter (confirm search), double-esc (reset), and sort shortcuts.
@@ -300,10 +271,8 @@ impl ListView {
         self.table_state.select(Some(new_i));
     }
 
-    /// The base list's subscription: `Issues`, only while focused -- the
-    /// don't-clobber policy expressed as `focused` instead of a mode check: a
-    /// refresh must not swap the rows a popup is anchored to or a search
-    /// overlay was opened over.
+    /// Only refetch while focused: a refresh must not swap the rows a popup
+    /// is anchored to or a search overlay covers.
     fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
         if matches!(ev, StateEvent::Issues) && focused {
             self.do_fetch(ctx, false); // offset- and selection-preserving
@@ -311,8 +280,6 @@ impl ListView {
         }
     }
 
-    /// The base list's re-read: `self.args`/`self.filter` plus `ctx.db` and
-    /// the viewer name for `assignee:me` resolution.
     fn do_fetch(&mut self, ctx: &StateCtx, reset_selection: bool) {
         self.status = FetchStatus::Loading;
         let mut parsed = search_query::ParsedQuery::from(&self.filter);
@@ -338,7 +305,7 @@ impl ListView {
                 }
             }
         } else {
-            // No active filters -- use paginated query as before.
+            // No active filters: use the paginated query.
             let offset: i64 = self
                 .pagination
                 .current_cursor
@@ -368,9 +335,7 @@ impl ListView {
         }
     }
 
-    /// Keep `args.sort`/`args.desc` in sync with `filter`. Called after
-    /// `filter` is updated so that `do_fetch()` and the table sort-column
-    /// marker reflect the confirmed filter state.
+    /// Keep `args.sort`/`args.desc` in sync with `filter`.
     fn sync_args_from_filter(&mut self) {
         let parsed = search_query::ParsedQuery::from(&self.filter);
         if let Some((field, dir)) = parsed.sort {
@@ -379,8 +344,8 @@ impl ListView {
         }
     }
 
-    /// Produce a new `QueryAst` with the sort: token replaced to match
-    /// `args.sort`/`args.desc`. Used by `toggle_desc`.
+    /// Produce a new `QueryAst` with the `sort:` token replaced to match
+    /// `args.sort`/`args.desc`.
     fn replace_sort_in_filter(&self) -> search_query::QueryAst {
         let dir = if self.args.desc { "-" } else { "+" };
         let new_sort = format!("sort:{}{}", self.args.sort.label(), dir);
@@ -395,8 +360,8 @@ impl ListView {
         search_query::parse_query_ast(&parts.join(" "))
     }
 
-    /// `d`: toggle sort direction, rewrite `filter`'s `sort:` token to match,
-    /// reset pagination, and re-fetch from the top.
+    /// `d`: toggle sort direction, rewrite `filter`'s `sort:` token to
+    /// match, and re-fetch from the top.
     fn toggle_desc(&mut self, ctx: &StateCtx) {
         self.args.desc = !self.args.desc;
         self.filter = self.replace_sort_in_filter();
@@ -421,10 +386,8 @@ impl ListView {
         self.status = FetchStatus::Idle;
     }
 
-    /// Consume `pending_select`, if set: seek to the identifier and clear it.
-    /// A miss (the create hasn't landed in this read, e.g. it is filtered
-    /// out) also clears it -- `pending_select` is a one-shot seek, not a
-    /// retried one.
+    /// Seek to `pending_select`'s identifier and clear it; a miss also
+    /// clears it, since this is a one-shot seek, not a retried one.
     fn seek_pending_select(&mut self) {
         if let Some(id) = self.pending_select.take()
             && let Some(idx) = self.issues.iter().position(|i| i.identifier == id)
@@ -454,9 +417,8 @@ impl ListView {
     }
 }
 
-/// Re-fetch `list` from `db`: builds the `StateCtx` from disjoint fields and
-/// drives `ListView::do_fetch`. A free function next to `ListView`, not an
-/// `App` method -- the fetch is the list's own, not app-level state.
+/// Re-fetch `list` from `db`. A free function, not an `App` method: the
+/// fetch is the list's own state, not app-level.
 fn fetch_list(
     list: &mut ListView,
     db: &lt_runtime::db::Database,
@@ -467,15 +429,9 @@ fn fetch_list(
     list.do_fetch(&ctx, reset_selection);
 }
 
-/// The eight scroll-motion primitives a stepped/offset view (`List`,
-/// `Detail`) is built from. The provided `scroll` method maps a
-/// [`ScrollMotion`] onto them once, so the same eight-arm dispatch isn't
-/// duplicated per view (`cpd`/`cargo dupes`); implementors just define their
-/// own movement primitives directly. `move_down`/`move_up` are the only two
-/// every implementor must define; the rest default to no-ops for the
-/// picker/list-selection views (`NewIssue`, `Search`, `Help`) that have no
-/// "half page"/top/bottom concept, so those impls stay two methods instead of
-/// eight identical no-op bodies apiece.
+/// The eight scroll-motion primitives a stepped/offset view is built from.
+/// `move_down`/`move_up` are the only two every implementor must define; the
+/// rest default to no-ops for views with no half-page/top/bottom concept.
 trait Scroll {
     fn move_down(&mut self);
     fn move_up(&mut self);
@@ -500,7 +456,6 @@ trait Scroll {
     }
 }
 
-/// This view's scroll override: selection movement (Decision 6).
 impl Scroll for ListView {
     fn move_down(&mut self) {
         self.move_by(1);
@@ -529,28 +484,24 @@ impl Scroll for ListView {
 }
 
 /// Read-only context a view's consume/re-query needs. Built inline from
-/// disjoint `App` field borrows at each call site: an `App::state_ctx(&self)`
-/// accessor would borrow all of `self` and conflict with any simultaneous
-/// `&mut self.views` access.
+/// disjoint `App` field borrows: an accessor method would borrow all of
+/// `self` and conflict with a simultaneous `&mut self.views`.
 pub struct StateCtx<'a> {
     pub db: &'a lt_runtime::db::Database,
     pub viewer_name: Option<&'a str>,
 }
 
-/// What a key handler did with a key. `Pass` hands it to the next layer: the
-/// cascade toward the base, then the Esc/q floor (Decision 6). A handler
-/// that returns `Pass` must not have mutated anything (in particular the
-/// stack), so the walk's indices stay valid.
+/// `Pass` cascades to the next layer, then the Esc/q floor. A `Pass`
+/// handler must not mutate anything (in particular the stack), so the
+/// walk's indices stay valid.
 pub enum KeyFlow {
     Consumed,
     Pass,
 }
 
-/// Bundles one dispatch pass's chord prefix, once-normalized key, and the raw
-/// crossterm event editor widgets need verbatim -- one struct instead of
-/// separate parameters threaded through every `handle_view_key` call in the
-/// view-stack walk, and computed once per keypress rather than re-derived per
-/// view.
+/// One dispatch pass's chord prefix, once-normalized key, and the raw event
+/// editor widgets need verbatim -- computed once per keypress rather than
+/// threaded as separate parameters.
 struct DispatchKey {
     pending: Option<keymap::Key>,
     key: keymap::Key,
@@ -565,11 +516,8 @@ pub struct Pagination {
     pub end_cursor: Option<String>,
 }
 
-/// Background-sync typestate. The footer label is derived state and no
-/// longer stored: it is formatted at render time from `(SyncStatus,
-/// AuthStatus, Clock)` (`sync::sync_status_label`). Scheduling -- and so
-/// `next_sync_at` -- belongs to the loop now (Decision 2); this typestate is
-/// a pure consumer of the events it reports.
+/// Background-sync typestate: a pure consumer of the events the sync loop
+/// reports.
 pub enum SyncStatus {
     /// Nothing has happened yet, or the loop reported `NotAuthenticated`.
     Idle,
@@ -583,14 +531,12 @@ pub enum SyncStatus {
     },
 }
 
-/// Authentication typestate. The TUI never holds tokens (they live in
-/// `lt-config`/`lt-upstream` behind the `SyncService` seam); its witness of
-/// authentication is the viewer identity.
+/// Authentication typestate: the TUI never holds tokens itself; its witness
+/// of authentication is the viewer identity.
 pub enum AuthStatus {
-    /// The startup identity fetch failed but a token may exist; the
-    /// in-flight startup sync resolves this. Not `Unauthenticated`: the
-    /// periodic-retry gate must not block a token-holding user who is merely
-    /// offline (`fetch_viewer` `None` + first sync `Error`).
+    /// The startup identity fetch failed but a token may exist, resolved by
+    /// the in-flight startup sync. Not `Unauthenticated`: a token-holding but
+    /// offline user must not be blocked by the retry gate.
     Unknown,
     /// The OAuth login flow is in flight; gates `L`.
     Authenticating,
@@ -634,16 +580,9 @@ pub struct Session {
 }
 
 /// A recording, thread-free fake [`SyncService`] for render/loop tests.
-///
-/// `watch`/`unwatch`/`request_sync`/`login` never touch the network; they
-/// record their call so tests assert on the recording instead of a live
-/// thread. The write methods (`create_comment`/`edit_issue`/`create_issue`)
-/// delegate to a real [`crate::LinearSyncService`] sharing the test's
-/// in-memory database (see [`lt_runtime::db::Database::share`]), so they
-/// perform the real enqueue and emit through the same `on_event` the test
-/// wired -- synchronously, so tests stay thread-free. `run` is a no-op: no
-/// test drives the loop itself; they script `AppEvent::Runtime(..)` instead
-/// (see `loop_tests`).
+/// Write methods delegate to a real `LinearSyncService` sharing the test's
+/// in-memory database, so they really enqueue; everything else just records
+/// the call for assertions. `run` is a no-op.
 #[cfg(all(test, feature = "sim"))]
 struct RecordingSyncService {
     inner: lt_runtime::LinearSyncService,
@@ -717,39 +656,31 @@ impl SyncService for RecordingSyncService {
 }
 
 pub struct App {
-    /// The live view stack, bottom to top. Never empty: `views[0]` is the
-    /// base view for this CLI invocation -- today always the issue list. The
-    /// top view is focused; every view renders, bottom to top.
+    /// The view stack, bottom to top; the top is focused. Never empty:
+    /// `views[0]` is always the base view (today, the issue list).
     pub views: Vec<View>,
 
     pub quit: bool,
-    // Set by ui::render each frame so key handlers know page size.
+    // Page size for key handlers; set once per frame.
     pub viewport_height: u16,
 
-    /// A chord's first key, waiting for its second
-    /// (`docs/design/keybinds.md`, "Resolution and chords"). No timer: it
-    /// survives idle frames of the event loop's `recv_timeout` wait until
-    /// the next key resolves or drops it. Rendered in the status row
-    /// (`ui::render`). Not `pub`: `keymap::Key` is crate-private, and only
-    /// `dispatch_key`/`ui::render` touch this field.
+    /// A chord's first key, waiting for its second. No timer: it survives
+    /// idle frames until the next key resolves or drops it.
     pending_key: Option<keymap::Key>,
 
     // -- footer message ----------------------------------------------
     pub footer_msg: Option<String>,
 
-    // -- background-job typestates (Decision 6) -----------------------
+    // -- background-job typestates --------------------------------------
     pub sync: SyncStatus,
     pub auth: AuthStatus,
 
-    /// Terminal/session capability flags.
     pub session: Session,
 
     // -- launch seeds / double-esc reset -------------------------------
-    /// Snapshot of the filter at startup; the base list's own `filter`
-    /// (Decision 5) is the live copy. Used to reset on double-esc.
+    /// Snapshot of the filter at startup, for the double-esc reset.
     pub initial_filter: search_query::QueryAst,
-    /// The args as passed at startup; the base list's own `args`
-    /// (Decision 5) is the live copy. Used to restore state on double-esc.
+    /// Snapshot of the args at startup, for the double-esc reset.
     pub initial_args: IssueQuery,
     /// Timestamp of the last Esc keypress (used to detect double-esc).
     pub last_esc_time: Option<Instant>,
@@ -762,23 +693,17 @@ pub struct App {
     /// clock so time-derived labels are deterministic.
     pub clock: Clock,
 
-    /// The sync/API edge, injected by `lt-cli`. The TUI drives all network
-    /// work through this trait object, so it has no dependency on `lt-sync`.
+    /// The sync/API edge. A trait object so the TUI has no direct
+    /// dependency on the sync implementation.
     pub service: Arc<dyn SyncService>,
 
-    /// The single consumer of the app event queue, drained once per frame in
-    /// `run_app`. `lt-cli` owns the sender: it feeds the input thread and
-    /// wraps it into the service's `OnEvent` callback.
+    /// The single consumer of the app event queue, drained once per frame.
     events_rx: mpsc::Receiver<AppEvent>,
 }
 
 impl App {
-    // A private constructor that wires the app's initial state plus the
-    // injected sync service and the queue's receiving end (`lt-cli` owns the
-    // sender). `sync`/`auth` start at their unstarted typestates
-    // (`Idle`/`Unknown`); `run()` transitions `auth` from `fetch_viewer()`
-    // before the loop starts, and `sync` transitions on the loop's first
-    // `Sync(Started)`.
+    // `sync`/`auth` start unstarted (`Idle`/`Unknown`); they transition once
+    // the loop's own events arrive.
     fn new(
         list: ListView,
         service: Arc<dyn SyncService>,
@@ -807,11 +732,9 @@ impl App {
         }
     }
 
-    /// Build an `App` for rendering tests: a throwaway in-memory database and
-    /// event channel, and a [`RecordingSyncService`] sharing that database.
-    /// Callers populate the view stack/`auth` directly and drive
-    /// `ui::render`. See `docs/design/visual-rendering-tests.md`. Fallible
-    /// (in-memory SQLite setup): callers -- always `#[test]` fns -- unwrap.
+    /// An `App` for rendering tests: a throwaway in-memory database and
+    /// event channel, backed by a [`RecordingSyncService`]. Fallible
+    /// (in-memory SQLite setup).
     #[cfg(all(test, feature = "sim"))]
     fn for_test(issues: Vec<Issue>) -> Result<Self> {
         let db = lt_runtime::db::Database::memory()?;
@@ -836,9 +759,7 @@ impl App {
     }
 
     /// Swap in a fresh database, shared with a fresh [`RecordingSyncService`]
-    /// and event channel -- so `app.db` and `app.service`'s writes/reads
-    /// agree on the same rows. Used by tests that need a specific seeded
-    /// database (`loop_tests::app_with_db`).
+    /// and event channel, so `db`/`service` agree on the same rows.
     #[cfg(all(test, feature = "sim"))]
     fn install_db(&mut self, db: lt_runtime::db::Database) -> Result<()> {
         self.install_recording_service(&db)?;
@@ -847,9 +768,8 @@ impl App {
     }
 
     /// Swap in a fresh `RecordingSyncService` (and its paired event channel)
-    /// sharing `db`, returning it so the caller can assert on its recording
-    /// (`watch`/`unwatch`/`request_sync`/`login` calls) -- the equivalent of
-    /// the old `CountingSyncService`.
+    /// sharing `db`, returning it so callers can assert on its recorded
+    /// calls.
     #[cfg(all(test, feature = "sim"))]
     fn install_recording_service(
         &mut self,
@@ -862,11 +782,7 @@ impl App {
         Ok(service)
     }
 
-    /// The base view (`views[0]`), always present -- the stack-never-empty
-    /// invariant holds from `App::new`'s seed through `pop_view`'s floor at
-    /// `reset_base_view`. The base is not always a list; callers match on
-    /// the variant and degrade to a no-op (or a documented default) when it
-    /// isn't.
+    /// The base view (`views[0]`), always present.
     fn base(&self) -> &View {
         &self.views[0]
     }
@@ -893,8 +809,7 @@ impl App {
         }
     }
 
-    /// Push a view, watching the scopes it declares (Decision 3). The
-    /// counterpart to `pop_view`'s unwatch.
+    /// Push a view, watching the scopes it declares.
     fn push_view(&mut self, view: View) {
         for scope in view.scopes() {
             self.service.watch(scope);
@@ -902,13 +817,8 @@ impl App {
         self.views.push(view);
     }
 
-    /// Pop the focused view, unwatching the scopes it declared. The stack is
-    /// never empty: popping the base resets it to the default base view for
-    /// this CLI invocation instead (today: the issue list rebuilt from
-    /// `initial_args`/`initial_filter` -- the same reset double-esc
-    /// performs). No path reaches the `else` branch today (the list's Esc is
-    /// the double-esc reset below, and never pops through here); the branch
-    /// defines the semantics rather than defending against a bug.
+    /// Pop the focused view, unwatching its scopes. The stack is never
+    /// empty: popping the base resets it to the default instead.
     fn pop_view(&mut self) {
         if self.views.len() > 1 {
             self.close_view_at(self.views.len() - 1);
@@ -917,11 +827,8 @@ impl App {
         }
     }
 
-    /// Remove the view at `i` from the stack, unwatching the scopes it
-    /// declared -- the same bookkeeping `pop_view` performs for the stack
-    /// top, extracted so a handler can close a view it holds by index (e.g.
-    /// `popup::popup_confirm`, whose popup can be buried under a view
-    /// cascaded on top of it) without disturbing whatever is actually on top.
+    /// Remove the view at `i`, unwatching the scopes it declared, without
+    /// disturbing whatever else is on the stack.
     fn close_view_at(&mut self, i: usize) {
         if i < self.views.len() {
             let view = self.views.remove(i);
@@ -931,9 +838,8 @@ impl App {
         }
     }
 
-    /// Full reset to the state the TUI was launched with: sort, filters, and
-    /// search query. The same reset the list's double-esc performs and
-    /// `pop_view` falls back to at the floor.
+    /// Full reset to the state the TUI was launched with: sort, filters,
+    /// and search query.
     fn reset_base_view(&mut self) {
         let args = self.initial_args.clone();
         let filter = self.initial_filter.clone();
@@ -948,11 +854,8 @@ impl App {
         self.last_esc_time = None;
     }
 
-    /// `r`: an immediate re-read plus a request to the loop for a full
-    /// sync -- no typestate write; `Syncing` arrives via the loop's own
-    /// `Sync(Started)`. Pressed mid-cycle, it coalesces into a follow-up
-    /// sync instead of being ignored (the loop processes commands one at a
-    /// time; this one just queues behind the in-flight cycle).
+    /// `r`: an immediate re-read plus a sync request. Pressed mid-cycle,
+    /// this coalesces into a follow-up sync rather than being ignored.
     fn refresh(&mut self) {
         let viewer_name = self.auth.viewer_name();
         // immediate re-read for responsiveness
@@ -974,9 +877,7 @@ impl App {
         self.with_base_list(ListView::prev_page);
     }
 
-    /// Build the (now slim) `StateCtx` and drive `op` against the base list
-    /// -- shared by pagination and the sort commands, which just mutate
-    /// list-owned query/pagination state and re-fetch.
+    /// Build a `StateCtx` and drive `op` against the base list.
     fn with_base_list(&mut self, op: fn(&mut ListView, &StateCtx)) {
         let ctx = StateCtx {
             db: &self.db,
@@ -987,8 +888,7 @@ impl App {
         }
     }
 
-    /// Downcast the view at `i` via `extract`. Shared by handlers that reach
-    /// their own view by stack index (detail/popup key handlers).
+    /// Downcast the view at `i` via `extract`.
     fn view_at_mut<T>(
         &mut self,
         i: usize,
@@ -1018,16 +918,13 @@ impl App {
 
     fn open_search_overlay(&mut self) {
         let mut overlay = SearchOverlay::new();
-        // Capture the base list's query limit once at open time: it cannot
-        // change while Search has focus (it consumes every key), so this
-        // snapshot is faithful for the overlay's whole lifetime. A non-list
-        // base keeps `SearchOverlay::new()`'s default.
+        // Capture the query limit once: it can't change while Search has
+        // focus, so the snapshot stays faithful for the overlay's lifetime.
         if let View::List(list) = self.base() {
             overlay.limit = list.args.limit;
         }
-        // Restore the base list's filter when re-opening, unless it is just
-        // the default sort stem. A non-list base degrades to the
-        // freshly-created default overlay (Decision 5).
+        // Restore the base list's filter when reopening, unless it's just
+        // the default sort stem.
         if let View::List(list) = self.base()
             && list.filter.raw != search_query::DEFAULT_QUERY
         {
@@ -1041,7 +938,7 @@ impl App {
 
     /// Apply a queued app event: a key cascades through `dispatch_key`; a
     /// state invalidation walks the view stack; a sync/login outcome
-    /// transitions the typestates (Decision 7).
+    /// transitions the typestates.
     fn apply(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.dispatch_key(key),
@@ -1051,17 +948,9 @@ impl App {
         }
     }
 
-    /// Normalize once, then walk the view stack top-down (Decision 6): every
-    /// view resolves the key against its own declared keymap (`View::keymap`),
-    /// applying navigation through `View::scroll` and everything else through
-    /// the keymap's `apply`; an unbound key either forwards to a text
-    /// widget's editor, is swallowed by a form, or cascades to the view
-    /// beneath, per that keymap's `Unbound` policy (`docs/design/keybinds.md`,
-    /// "View-declared keymaps and layering"). The Esc/q floor is the
-    /// terminal arm,
-    /// unchanged. `pending`, the chord prefix, is taken once here and
-    /// resolved against every view in the walk (`docs/design/keybinds.md`,
-    /// "Resolution and chords").
+    /// Normalize once, then walk the view stack top-down; `pending`, the
+    /// chord prefix, is taken once here for the whole walk before falling to
+    /// the Esc/q floor.
     fn dispatch_key(&mut self, ev: KeyEvent) {
         let key = keymap::Key::from(ev);
         // A chord in progress: Esc cancels it and does nothing else --
@@ -1085,18 +974,14 @@ impl App {
         match key.code {
             // Back, above the base: `q` never reaches Quit from an overlay.
             KeyCode::Esc | KeyCode::Char('q') if top > 0 => self.pop_view(),
-            KeyCode::Esc => self.handle_list_esc(), // double-esc reset, unchanged
+            KeyCode::Esc => self.handle_list_esc(), // double-esc reset
             KeyCode::Char('q') => self.quit = true,
             _ => {}
         }
     }
 
-    /// Dispatch to the view at stack index `i`: resolve `dk`'s key against
-    /// its declared keymap and act on the result. `Act` applies (navigation
-    /// through `View::scroll`, everything else through the keymap's
-    /// `apply`); `Pending` records the chord prefix; `Unbound` forwards,
-    /// swallows, or cascades per the keymap's `unbound` policy -- except
-    /// `esc`, which is never forwarded and always passes to the floor.
+    /// Resolve `dk`'s key against the view at `i`'s keymap and act on the
+    /// result; `esc` is never forwarded and always passes to the floor.
     fn handle_view_key(&mut self, i: usize, dk: &DispatchKey) -> KeyFlow {
         let km = self.views[i].keymap();
         match keymap::resolve(km.layers, dk.pending, dk.key) {
@@ -1134,11 +1019,8 @@ impl App {
         }
     }
 
-    /// Route a state invalidation down the stack, top first. Applies are
-    /// idempotent payload-free re-reads, so the order is semantically
-    /// irrelevant; top-down is chosen for coherence with the key cascade --
-    /// one direction to reason about. The base list is just `views[0]`'s
-    /// consumer.
+    /// Route a state invalidation down the stack, top first (order is
+    /// semantically irrelevant; chosen for coherence with the key cascade).
     fn route_state_event(&mut self, ev: &StateEvent) {
         let ctx = StateCtx {
             db: &self.db,
@@ -1161,10 +1043,8 @@ impl App {
         }
     }
 
-    /// `synced_at` for a `Done` transition: the DB meta `last_synced_at`
-    /// every successful sync writes, falling back to the clock (exact, since
-    /// the sync just finished) when the read fails or the row is
-    /// missing/unparseable.
+    /// `synced_at` for a `Done` transition: the DB's `last_synced_at` meta,
+    /// falling back to the clock when the read fails or is unparseable.
     fn synced_at_now(&self) -> chrono::DateTime<chrono::Utc> {
         let raw = match self.db.connect() {
             Ok(conn) => match lt_runtime::db::get_meta(&conn, "last_synced_at") {
@@ -1183,10 +1063,8 @@ impl App {
             .map_or_else(|| self.clock.now(), |dt| dt.with_timezone(&chrono::Utc))
     }
 
-    /// Transition the `sync` typestate (and `auth`, when a cycle delivered an
-    /// identity) per Decision 7's table. The `State(Issues)` the loop emits
-    /// alongside `Sync(Done)` is a separate queued event, routed through
-    /// `route_state_event` -- this consumer no longer derives it.
+    /// Transition the `sync` typestate, and `auth` if a cycle delivered an
+    /// identity.
     fn consume_sync_event(&mut self, ev: SyncEvent) {
         match ev {
             SyncEvent::Started => {
@@ -1214,9 +1092,7 @@ impl App {
         }
     }
 
-    /// Transition the `auth` typestate per Decision 7's table. The
-    /// follow-up delta sync after a successful login is the loop's now
-    /// (Decision 2), not this consumer's.
+    /// Transition the `auth` typestate from a login outcome.
     fn consume_login_event(&mut self, ev: LoginEvent) {
         match ev {
             LoginEvent::Success { viewer } => {
@@ -1227,7 +1103,7 @@ impl App {
                     message: message.clone(),
                 };
                 // A transient direct write: deriving it from `Failed` would
-                // pin the message past the actions that clear it today.
+                // pin the message past whatever clears it.
                 self.footer_msg = Some(format!("Login failed: {message}"));
             }
         }
@@ -1277,9 +1153,8 @@ pub fn run(
         (Vec::new(), false, None, FetchStatus::Loading)
     };
 
-    // Fetch viewer identity for header display before `service` moves into
-    // `App::new` (a shared read through the `Arc`, so ownership is fine
-    // either way; the identity is needed to seed `auth` regardless).
+    // Fetch viewer identity before `service` moves into `App::new` (a
+    // shared read through the `Arc`, so ownership either order is fine).
     let viewer = service.fetch_viewer();
 
     let filter = search_query::args_to_ast(&args);
@@ -1300,9 +1175,7 @@ pub fn run(
         Some(viewer) => AuthStatus::Authenticated { viewer },
         None => AuthStatus::Unknown,
     };
-    // `sync` stays `Idle` until the loop's own `Sync(Started)` arrives; the
-    // loop's `run` (spawned by `lt-cli` before this function is called) owns
-    // the startup sync.
+    // `sync` stays `Idle` until the loop's own `Sync(Started)` arrives.
 
     let mut terminal = ratatui::init();
     // Without the kitty keyboard protocol, terminals encode Ctrl-Enter and
@@ -1335,10 +1208,8 @@ pub fn run(
     result
 }
 
-/// Detached input thread: blocks on `event::read()` and forwards every key
-/// press onto the app event queue. Resize/mouse/release events are dropped,
-/// as today. The thread outlives `run_app` -- it exits on a `send` failure
-/// (the app dropped `events_rx`) or a read error (the terminal is gone).
+/// Detached input thread: forwards every key press onto the app event
+/// queue; exits on a `send` failure or a read error.
 fn spawn_input_thread(tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
         loop {
@@ -1348,7 +1219,7 @@ fn spawn_input_thread(tx: mpsc::Sender<AppEvent>) {
                         return;
                     }
                 }
-                Ok(_) => {}       // resize/mouse/release: dropped, as today
+                Ok(_) => {}       // resize/mouse/release: dropped
                 Err(_) => return, // terminal gone
             }
         }
@@ -1356,8 +1227,7 @@ fn spawn_input_thread(tx: mpsc::Sender<AppEvent>) {
 }
 
 /// Where the loop's blocking wait gets its first event each frame. A closed
-/// set (cf. `Clock` and `db::Database`): the channel in the binary, a script
-/// in tests.
+/// set: the channel in the binary, a script in tests.
 enum EventPump {
     Channel,
     /// Scripted events for loop tests; errors when exhausted so a test that
@@ -1406,8 +1276,7 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     loop {
-        // The loop's clock owns sync scheduling now (Decision 2); the frame
-        // loop's own inline timer is only `poll_search_debounce`.
+        // The frame loop's only inline timer is `poll_search_debounce`.
         poll_search_debounce(app);
 
         terminal.draw(|frame| ui::render(frame, app))?;
@@ -1500,11 +1369,8 @@ static LIST_KEYMAP: Keymap = Keymap {
     unbound: Unbound::Cascade,
 };
 
-/// The list view's non-navigation actions (`docs/design/keybinds.md`,
-/// "List"). Navigation actions never reach here: `handle_view_key` maps them
-/// to `ScrollMotion` and applies them through `View::scroll` instead. The
-/// list is always the base view in this stage, so it reaches its own state
-/// through `base_mut` rather than the index (`_i`).
+/// The list view's non-navigation actions. The list is always the base
+/// view, so it reaches its own state through `base_mut` rather than `_i`.
 fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
     use keymap::Action;
     match action {
@@ -1529,16 +1395,14 @@ fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
                 open_in_browser(&issue.identifier);
             }
         }
-        // Navigation, `Comment`, and `Confirm` never resolve to `List`'s
-        // `apply_list`: navigation is intercepted by `scroll_motion` before
-        // this is called, and `Comment`/`Confirm` belong to other contexts'
-        // tables. The match stays exhaustive over `Action` regardless.
+        // Navigation is intercepted by `scroll_motion` before this runs;
+        // `Comment`/`Confirm` belong to other contexts. Kept exhaustive
+        // over `Action` regardless.
         _ => {}
     }
 }
 
-/// Open `identifier`'s issue in the browser. Shared by `apply_list`'s and
-/// `detail::apply_detail`'s `OpenInBrowser` arms.
+/// Open `identifier`'s issue in the browser.
 pub(crate) fn open_in_browser(identifier: &str) {
     let url = format!("https://linear.app/issue/{identifier}");
     if let Err(e) = open::that(url) {
@@ -1548,11 +1412,9 @@ pub(crate) fn open_in_browser(identifier: &str) {
 
 // -- Help overlay registry ---------------------------------------------------
 
-/// The help overlay's user-facing contexts, in display order: each view's
-/// declared tables under its display name. The two new-issue contexts
-/// collapse into one displayed context, "new issue": the text context's
-/// table *is* the shared form-nav layer, so form-nav plus the picker's own
-/// rows is their union, with no duplicates.
+/// The help overlay's contexts, in display order. The two new-issue
+/// contexts collapse into one: form-nav plus the picker's own rows, with no
+/// duplicates.
 pub(crate) static HELP_CONTEXTS: &[(&str, &[keymap::Table])] = &[
     ("global", &[keymap::GLOBAL]),
     ("list", &[LIST_BINDINGS]),

@@ -11,12 +11,9 @@ fn byte_in_error(byte_offset: usize, errors: &[ParseError]) -> bool {
         .any(|e| byte_offset >= e.span.start && byte_offset < e.span.end)
 }
 
-/// Split `text` (whose first byte is at `offset` in the original input string)
-/// into contiguous sub-slices, each tagged with whether it overlaps a parse
-/// error.  Adjacent bytes with the same error status are grouped together.
-///
-/// Returns `Vec<(&str, bool)>` where the bool is `true` when the slice is in
-/// error territory.
+/// Split `text` (starting at byte `offset` in the original input) into
+/// contiguous `(slice, in_error)` sub-slices, grouping adjacent bytes with
+/// the same error status.
 fn error_segments<'a>(text: &'a str, offset: usize, errors: &[ParseError]) -> Vec<(&'a str, bool)> {
     if errors.is_empty() || text.is_empty() {
         return vec![(text, false)];
@@ -33,15 +30,12 @@ fn error_segments<'a>(text: &'a str, offset: usize, errors: &[ParseError]) -> Ve
             seg_is_err = is_err;
         }
     }
-    // Push the final segment.
     result.push((&text[seg_start..], seg_is_err));
     result
 }
 
-/// Append styled spans for a non-cursor text segment.
-///
-/// Bytes overlapping a parse-error span are rendered with `Color::Red`; all
-/// other bytes use the default (terminal-inherited) style.
+/// Bytes overlapping a parse-error span render `Color::Red`; everything
+/// else uses the default (terminal-inherited) style.
 fn push_text_spans(line: &mut Line, text: &str, offset: usize, errors: &[ParseError]) {
     for (seg, is_err) in error_segments(text, offset, errors) {
         if seg.is_empty() {
@@ -90,20 +84,10 @@ fn push_after_cursor_spans(
     }
 }
 
-/// Append spans representing a `TextInput` to an existing `Line`.
-///
-/// The character at the cursor position is rendered with a reversed
-/// (block-cursor) style.  If the cursor is at the end of the string, a
-/// space with reversed style is appended to show the cursor position.
-///
-/// When `input.selection_end` is set, the range `cursor..selection_end` is
-/// rendered with UNDERLINED style (in addition to the block cursor char).
-///
-/// `errors` is the list of parse errors from the current `QueryAst`.  Any
-/// text whose byte range overlaps an error span is rendered with
-/// `Color::Red` to give the user a visual signal that a stem was not
-/// recognised.  Pass an empty slice when no error highlighting is needed
-/// (e.g. modal title input).
+/// Append spans for `input` to `line`: the char at the cursor renders
+/// REVERSED (or a space, if the cursor is at the end); an active
+/// `cursor..selection_end` is underlined; bytes overlapping `errors` render
+/// red.
 pub(super) fn append_text_input_spans(line: &mut Line, input: &TextInput, errors: &[ParseError]) {
     let (before, ch_at_cursor, after) = input.display_parts();
     // `before` occupies bytes [0, cursor).
@@ -112,8 +96,8 @@ pub(super) fn append_text_input_spans(line: &mut Line, input: &TextInput, errors
     }
     match ch_at_cursor {
         Some(ch) => {
-            // Cursor is on an existing character -- highlight it with REVERSED.
-            // Cursor style takes priority over error colour.
+            // Highlight the cursor char with REVERSED; takes priority over
+            // error colour.
             let mut s = String::new();
             s.push(ch);
             line.spans.push(Span::styled(
