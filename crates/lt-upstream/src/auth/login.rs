@@ -388,17 +388,21 @@ fn build_token_params<'a>(exchange: &TokenExchange<'a>) -> [(&'a str, &'a str); 
 pub(super) struct TokenResponse {
     access_token: String,
     token_type: String,
-    expires_in: Option<u64>,
-    scope: Option<String>,
+    expires_in: u64,
+    scope: String,
     refresh_token: Option<String>,
 }
 
 impl TokenResponse {
-    /// Convert the wire response into a storable token.
-    /// `previous_refresh_token` fills the gap when a refresh-grant
-    /// response omits the rotated token; the initial code exchange has
-    /// nothing to fall back to, so absence there is an error.
-    pub(super) fn into_auth_token(self, previous_refresh_token: Option<&str>) -> Result<AuthToken> {
+    /// Convert the wire response into a storable token, stamped with
+    /// `issued_at`. `previous_refresh_token` fills the gap when a
+    /// refresh-grant response omits the rotated token; the initial code
+    /// exchange has nothing to fall back to, so absence there is an error.
+    pub(super) fn into_auth_token(
+        self,
+        previous_refresh_token: Option<&str>,
+        issued_at: u64,
+    ) -> Result<AuthToken> {
         let refresh_token = self
             .refresh_token
             .or_else(|| previous_refresh_token.map(str::to_string))
@@ -408,10 +412,17 @@ impl TokenResponse {
             token_type: self.token_type,
             expires_in: self.expires_in,
             scope: self.scope,
-            issued_at: None,
+            issued_at,
             refresh_token,
         })
     }
+}
+
+/// Current Unix time in seconds, for stamping `issued_at` on new tokens.
+pub(super) fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Validate the HTTP status and deserialize the token body. Pure.
@@ -480,7 +491,7 @@ impl TokenExchanger {
 fn exchange_code(exchanger: &TokenExchanger, exchange: &TokenExchange) -> Result<AuthToken> {
     let params = build_token_params(exchange);
     let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
-    parse_token_response(status, &body)?.into_auth_token(None)
+    parse_token_response(status, &body)?.into_auth_token(None, now_unix_secs())
 }
 
 #[cfg(test)]
@@ -578,7 +589,7 @@ mod tests {
     fn parse_token_response_deserializes_success_body() {
         let token = parse_token_response(
             200,
-            r#"{"access_token":"tok","token_type":"Bearer","refresh_token":"r"}"#,
+            r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"r"}"#,
         )
         .unwrap();
         assert_eq!(token.access_token, "tok");
@@ -597,6 +608,17 @@ mod tests {
     #[test]
     fn parse_token_response_rejects_malformed_json() {
         assert!(parse_token_response(200, "not json").is_err());
+    }
+
+    #[test]
+    fn parse_token_response_rejects_missing_expires_in() {
+        assert!(
+            parse_token_response(
+                200,
+                r#"{"access_token":"tok","token_type":"Bearer","scope":"read,write"}"#,
+            )
+            .is_err()
+        );
     }
 
     // -- Callback parsing (pure) ----------------------------------------------
@@ -680,7 +702,7 @@ mod tests {
         };
         let exchanger = TokenExchanger::Fake {
             status: 200,
-            body: r#"{"access_token":"final-token","token_type":"Bearer","refresh_token":"final-refresh"}"#.to_string(),
+            body: r#"{"access_token":"final-token","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"final-refresh"}"#.to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
         };
         let flow = OauthFlow {
@@ -692,6 +714,9 @@ mod tests {
         let token = run_with_credentials(&flow, "cid", "csecret").unwrap();
         assert_eq!(token.access_token, "final-token");
         assert_eq!(token.refresh_token, "final-refresh");
+        assert_eq!(token.expires_in, 3600);
+        assert_eq!(token.scope, "read,write");
+        assert!(token.issued_at > 0);
 
         // The browser was sent the authorization URL.
         let opened = browser.opened.borrow();
@@ -733,7 +758,8 @@ mod tests {
     fn exchange_code_without_refresh_token_in_response_errors() {
         let exchanger = TokenExchanger::Fake {
             status: 200,
-            body: r#"{"access_token":"tok","token_type":"Bearer"}"#.to_string(),
+            body: r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600,"scope":"read,write"}"#
+                .to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
         };
         let err = exchange_code(&exchanger, &exchange()).unwrap_err();

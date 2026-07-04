@@ -16,7 +16,9 @@ use anyhow::{Result, anyhow};
 use lt_config::AuthToken;
 use tracing::{info, warn};
 
-use super::login::{TOKEN_URL, TokenExchanger, lookup_stored_credentials, parse_token_response};
+use super::login::{
+    TOKEN_URL, TokenExchanger, lookup_stored_credentials, now_unix_secs, parse_token_response,
+};
 
 /// Load the stored token, attempting an automatic re-authentication if the
 /// token is expired and client credentials are available.
@@ -107,7 +109,7 @@ fn refresh_with(
 ) -> Result<AuthToken> {
     let params = build_refresh_params(refresh_token, client_id, client_secret);
     let (status, body) = exchanger.post_form(TOKEN_URL, &params)?;
-    parse_token_response(status, &body)?.into_auth_token(Some(refresh_token))
+    parse_token_response(status, &body)?.into_auth_token(Some(refresh_token), now_unix_secs())
 }
 
 #[cfg(test)]
@@ -128,9 +130,8 @@ mod tests {
     fn refresh_with_returns_new_token_on_success() {
         let exchanger = TokenExchanger::Fake {
             status: 200,
-            body:
-                r#"{"access_token":"new-tok","token_type":"Bearer","refresh_token":"new-refresh"}"#
-                    .to_string(),
+            body: r#"{"access_token":"new-tok","token_type":"Bearer","expires_in":3600,"scope":"read,write","refresh_token":"new-refresh"}"#
+                .to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
         };
         let token = refresh_with(&exchanger, "old-refresh", "cid", "csecret").unwrap();
@@ -156,7 +157,8 @@ mod tests {
     fn refresh_with_carries_over_refresh_token_when_response_omits_it() {
         let exchanger = TokenExchanger::Fake {
             status: 200,
-            body: r#"{"access_token":"new-tok","token_type":"Bearer"}"#.to_string(),
+            body: r#"{"access_token":"new-tok","token_type":"Bearer","expires_in":3600,"scope":"read,write"}"#
+                .to_string(),
             calls: std::cell::RefCell::new(Vec::new()),
         };
         let token = refresh_with(&exchanger, "old-refresh", "cid", "csecret").unwrap();
