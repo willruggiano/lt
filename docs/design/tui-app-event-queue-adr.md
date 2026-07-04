@@ -446,11 +446,11 @@ This round changes what the base view owns:
   rebuilds `views[0]` from them), `last_esc_time`, `footer_msg`,
   `viewport_height`, `session`, the `sync`/`auth` typestates, and the wiring
   (`db`, `clock`, `service`, `events_rx`).
-- Non-list readers reach the base's query through `base_list()` — the header
-  filter context, the table's sort marker
+- Non-list readers reach the base's query through `base()`, matching on
+  `View::List` — the header filter context, the table's sort marker
   (`crates/lt-tui/src/ui/table.rs:12-13`), the search overlay's limit, and the
-  modal's preset team. `None` (a future non-list base) degrades them to
-  empty/default, which is correct.
+  modal's preset team. A non-list base degrades them to empty/default, which is
+  correct.
 
 The stack-not-slot rationale, the popup anchor rule
 (`crates/lt-tui/src/ui/table.rs:47-65`), and the round-1 rejected alternatives

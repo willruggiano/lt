@@ -638,7 +638,7 @@ fn confirm_search(app: &mut App) {
     }
     let results = std::mem::take(&mut overlay.results);
     let selected = overlay.table_state.selected();
-    if let Some(list) = app.base_list_mut() {
+    if let View::List(list) = app.base_mut() {
         // AST is the single source of truth.
         list.filter = overlay.ast.clone();
         list.sync_args_from_filter();

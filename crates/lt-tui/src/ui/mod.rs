@@ -40,10 +40,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Some(View::Search(overlay)) = app.views.last() {
         render_header_with_search(frame, chunks[0], &app.auth, overlay);
     } else {
-        let context = app
-            .base_list()
-            .map(|l| search_query::render_filter_context(&l.filter))
-            .unwrap_or_default();
+        let context = match app.base() {
+            View::List(list) => search_query::render_filter_context(&list.filter),
+            _ => String::new(),
+        };
         render_header(frame, chunks[0], &context, &app.auth);
     }
 
@@ -51,10 +51,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // terminal cell buffer is explicitly cleared (chunk[3]).
     frame.render_widget(Paragraph::new(""), chunks[3]);
 
-    let base_list = app.base_list();
-    let has_next = base_list.is_some_and(|l| l.pagination.has_next_page);
-    let has_prev = base_list.is_some_and(|l| !l.pagination.cursor_stack.is_empty());
-    let page = base_list.map_or(1, |l| l.pagination.cursor_stack.len() + 1);
+    let (has_next, has_prev, page) = match app.base() {
+        View::List(list) => (
+            list.pagination.has_next_page,
+            !list.pagination.cursor_stack.is_empty(),
+            list.pagination.cursor_stack.len() + 1,
+        ),
+        _ => (false, false, 1),
+    };
 
     let sync_label = sync_status_label(&app.sync, &app.auth, &app.clock);
     let footer = FooterState {

@@ -201,7 +201,7 @@ impl ScrollMotion {
 /// The issue-list view: the base-list fields, owned. `status`'s only render
 /// site is the base table's Loading/Error overlay (`ui/table.rs`); its
 /// writers are `do_fetch` and the sync lifecycle's Loading->Idle repair
-/// (reached from other views through `App::base_list_mut`).
+/// (reached from other views through `App::base_mut`).
 pub struct ListView {
     pub issues: Vec<Issue>,
     pub table_state: TableState,
@@ -938,29 +938,27 @@ impl App {
         Ok(service)
     }
 
-    /// Read-only access to the base view, when it is a list. Non-list writers
-    /// reach the base through this and `base_list_mut`; `None` (a future
-    /// non-list base) degrades those writes to no-ops.
-    fn base_list(&self) -> Option<&ListView> {
-        match self.views.first() {
-            Some(View::List(list)) => Some(list),
-            _ => None,
-        }
+    /// The base view (`views[0]`), always present -- the stack-never-empty
+    /// invariant holds from `App::new`'s seed through `pop_view`'s floor at
+    /// `reset_base_view`. The base is not always a list; callers match on
+    /// the variant and degrade to a no-op (or a documented default) when it
+    /// isn't.
+    fn base(&self) -> &View {
+        &self.views[0]
     }
 
-    fn base_list_mut(&mut self) -> Option<&mut ListView> {
-        match self.views.first_mut() {
-            Some(View::List(list)) => Some(list),
-            _ => None,
-        }
+    fn base_mut(&mut self) -> &mut View {
+        &mut self.views[0]
     }
 
     /// The base list's query limit, degrading to `IssueQuery::default()`'s
     /// when the base is not a list (a future non-list base has none). Used
     /// by the search overlay, which caps its results at the same limit.
     fn list_limit(&self) -> u32 {
-        self.base_list()
-            .map_or_else(|| IssueQuery::default().limit, |l| l.args.limit)
+        match self.base() {
+            View::List(list) => list.args.limit,
+            _ => IssueQuery::default().limit,
+        }
     }
 
     /// Test-only infallible accessor: render/loop tests always seed a list
@@ -968,14 +966,17 @@ impl App {
     /// handle.
     #[cfg(all(test, feature = "sim"))]
     fn list_mut(&mut self) -> &mut ListView {
-        match self.views.first_mut() {
-            Some(View::List(list)) => list,
+        match self.base_mut() {
+            View::List(list) => list,
             _ => unreachable!("test base view is not a list"),
         }
     }
 
     fn selected_issue(&self) -> Option<&Issue> {
-        self.base_list().and_then(ListView::selected_issue)
+        match self.base() {
+            View::List(list) => list.selected_issue(),
+            _ => None,
+        }
     }
 
     /// Push a view, watching the scopes it declares (Decision 3). The
@@ -1012,7 +1013,7 @@ impl App {
     fn reset_base_view(&mut self) {
         let args = self.initial_args.clone();
         let filter = self.initial_filter.clone();
-        if let Some(list) = self.base_list_mut() {
+        if let View::List(list) = self.base_mut() {
             list.args = args;
             list.filter = filter;
             list.pagination.cursor_stack.clear();
@@ -1101,11 +1102,12 @@ impl App {
     fn open_search_overlay(&mut self) {
         let mut overlay = SearchOverlay::new();
         // Restore the base list's filter when re-opening, unless it is just
-        // the default sort stem. `base_list()` degrades a future non-list
-        // base to the freshly-created default overlay (Decision 5).
-        if let Some(filter) = self.base_list().map(|l| l.filter.clone())
-            && filter.raw != search_query::DEFAULT_QUERY
+        // the default sort stem. A non-list base degrades to the
+        // freshly-created default overlay (Decision 5).
+        if let View::List(list) = self.base()
+            && list.filter.raw != search_query::DEFAULT_QUERY
         {
+            let filter = list.filter.clone();
             overlay.query = TextInput::from(filter.raw.clone());
             overlay.ast = filter;
             overlay.last_changed = Some(Instant::now());
@@ -1189,7 +1191,7 @@ impl App {
     /// itself route an `Issues` invalidation (`Error`/`NotAuthenticated`)
     /// must not leave the list's own status stuck at `Loading` forever.
     fn repair_loading_list(&mut self) {
-        if let Some(list) = self.base_list_mut()
+        if let View::List(list) = self.base_mut()
             && matches!(list.status, Status::Loading)
         {
             list.status = Status::Idle;
@@ -1355,7 +1357,7 @@ pub fn run(
         tracing::warn!(error = %e, "failed to push keyboard enhancement flags");
     }
     app.session.keyboard_enhanced = keyboard_enhanced;
-    if let Some(list) = app.base_list_mut() {
+    if let View::List(list) = app.base_mut() {
         list.status = initial_status;
     }
     spawn_input_thread(events_tx);
@@ -1466,7 +1468,7 @@ where
 
 fn handle_list_key(app: &mut App, _i: usize, key: KeyEvent) -> KeyFlow {
     // The list is always the base view in this stage, so it reaches its own
-    // state through `base_list_mut` rather than the index. Movement
+    // state through `base_mut` rather than the index. Movement
     // (j/k/g/G/Ctrl-d/Ctrl-u/PageDown/PageUp) and Esc/q are not bound here:
     // they resolve at the scroll-default and floor layers of `dispatch_key`
     // (Decision 6).

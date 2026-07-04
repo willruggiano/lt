@@ -199,7 +199,10 @@ fn reanchor(items: &[PopupItem], id: Option<&str>) -> usize {
 impl super::App {
     pub(crate) fn open_new_issue_modal(&mut self) {
         // Pre-fill team from the base list's active filter if set.
-        let preset_team = self.base_list().and_then(|l| l.args.team.clone());
+        let preset_team = match self.base() {
+            View::List(list) => list.args.team.clone(),
+            _ => None,
+        };
 
         let teams: Vec<PopupItem> = self
             .db
@@ -306,7 +309,7 @@ impl super::App {
             Ok(identifier) => {
                 self.pop_view();
                 self.footer_msg = Some("Created issue (pending sync)".to_string());
-                if let Some(list) = self.base_list_mut() {
+                if let View::List(list) = self.base_mut() {
                     list.pending_select = Some(identifier);
                 }
             }

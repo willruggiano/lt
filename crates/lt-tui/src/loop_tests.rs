@@ -142,9 +142,7 @@ fn pending_select_seeks_identifier_on_next_issues_event() {
     ];
     let mut app = app_with_db(&rows).unwrap();
     app.fetch_base_list(true);
-    if let Some(list) = app.base_list_mut() {
-        list.pending_select = Some("ENG-3".to_string());
-    }
+    app.list_mut().pending_select = Some("ENG-3".to_string());
 
     app.route_state_event(&StateEvent::Issues);
 

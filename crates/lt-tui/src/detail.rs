@@ -151,7 +151,7 @@ impl App {
         populate_relations(&self.db, &mut detail, &issue);
 
         self.push_view(View::Detail(Box::new(detail)));
-        if let Some(list) = self.base_list_mut() {
+        if let View::List(list) = self.base_mut() {
             list.status = Status::Idle;
         }
     }
