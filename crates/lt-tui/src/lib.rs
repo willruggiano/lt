@@ -102,6 +102,26 @@ pub enum View {
     Help(HelpPopup),
 }
 
+/// A view's declared key handling: the layers its keys resolve through
+/// (its own table first, then any shared layers, then GLOBAL unless the
+/// view forwards text), the apply function for non-navigation actions
+/// (None when the table is navigation-only), and what an unbound key does.
+pub(crate) struct Keymap {
+    pub(crate) layers: keymap::Layers,
+    pub(crate) apply: Option<fn(&mut App, usize, keymap::Action)>,
+    pub(crate) unbound: Unbound,
+}
+
+/// What a key no layer binds does in a given keymap: cascade to the view
+/// beneath, be swallowed (a form ignores strays), or forward verbatim to
+/// the view's editor widget. `esc` is exempt: it always passes to the
+/// floor before this policy is consulted.
+pub(crate) enum Unbound {
+    Cascade,
+    Swallow,
+    Forward(fn(&mut App, usize, KeyEvent)),
+}
+
 impl View {
     /// Route a state invalidation to this view's consumer, if it has one.
     /// `focused` is true iff this is the top of the stack. Search/Help have
@@ -145,8 +165,8 @@ impl View {
     /// Down/Up only (other motions no-op: a form has no "half page"
     /// concept); `Search`/`Help` similarly override Down/Up to move their own
     /// result/filtered list. All three only ever see Down/Up in practice --
-    /// their text sub-contexts skip GLOBAL, so this seam is reached only from
-    /// `NewIssuePicker`.
+    /// their text keymaps' layers skip GLOBAL, so this seam is reached only
+    /// through `new_issue::PICKER_KEYMAP`.
     fn scroll(&mut self, motion: ScrollMotion, viewport_height: u16) {
         match self {
             View::List(list) => list.scroll(motion, viewport_height),
@@ -155,6 +175,20 @@ impl View {
             View::NewIssue(modal) => modal.scroll(motion, viewport_height),
             View::Search(overlay) => overlay.scroll(motion, viewport_height),
             View::Help(help) => help.scroll(motion, viewport_height),
+        }
+    }
+
+    /// This view's declared keymap, delegating the sub-focus decision
+    /// (`Detail`'s open comment input, `NewIssue`'s focused field) to the
+    /// view type itself.
+    fn keymap(&self) -> &'static Keymap {
+        match self {
+            View::List(_) => &LIST_KEYMAP,
+            View::Detail(d) => d.keymap(),
+            View::Popup(_) => &popup::POPUP_KEYMAP,
+            View::NewIssue(m) => m.keymap(),
+            View::Search(_) => &popup::SEARCH_KEYMAP,
+            View::Help(_) => &popup::HELP_KEYMAP,
         }
     }
 }
@@ -192,28 +226,6 @@ fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
         Action::PageUp => ScrollMotion::PageUp,
         _ => return None,
     })
-}
-
-/// The keymap context a view resolves through, derived from the view variant
-/// plus its sub-focus (`docs/design/keybinds.md`, "Contexts and layering"):
-/// `Detail`'s open comment input and `NewIssue`'s focused field each narrow
-/// to a context of their own.
-fn key_context(view: &View) -> keymap::KeyContext {
-    match view {
-        View::List(_) => keymap::KeyContext::List,
-        View::Detail(d) if d.comment_input.is_some() => keymap::KeyContext::CommentInput,
-        View::Detail(_) => keymap::KeyContext::Detail,
-        View::Popup(_) => keymap::KeyContext::Popup,
-        View::NewIssue(m) => match m.focused_field {
-            NewIssueField::Title | NewIssueField::Description => keymap::KeyContext::NewIssueText,
-            NewIssueField::Team
-            | NewIssueField::Priority
-            | NewIssueField::State
-            | NewIssueField::Assignee => keymap::KeyContext::NewIssuePicker,
-        },
-        View::Search(_) => keymap::KeyContext::Search,
-        View::Help(_) => keymap::KeyContext::Help,
-    }
 }
 
 /// The base list's fetch status. Its only render site is the base table's
@@ -536,9 +548,9 @@ pub enum KeyFlow {
 
 /// Bundles one dispatch pass's chord prefix, once-normalized key, and the raw
 /// crossterm event editor widgets need verbatim -- one struct instead of
-/// separate parameters threaded through every `resolve_and_apply`/
-/// `unbound_flow` call in the view-stack walk, and computed once per keypress
-/// rather than re-derived per view.
+/// separate parameters threaded through every `handle_view_key` call in the
+/// view-stack walk, and computed once per keypress rather than re-derived per
+/// view.
 struct DispatchKey {
     pending: Option<keymap::Key>,
     key: keymap::Key,
@@ -1040,15 +1052,16 @@ impl App {
     }
 
     /// Normalize once, then walk the view stack top-down (Decision 6): every
-    /// view resolves the key against its keymap context (`key_context`),
-    /// applying navigation through `View::scroll` and everything else
-    /// through the context's `apply_*`; an unbound key either forwards to a
-    /// text context's editor, is swallowed by `NewIssuePicker`'s form, or
-    /// cascades to the view beneath (`docs/design/keybinds.md`, "Contexts
-    /// and layering"). The Esc/q floor is the terminal arm, unchanged.
-    /// `pending`, the chord prefix, is taken once here and resolved against
-    /// every view in the walk (`docs/design/keybinds.md`, "Resolution and
-    /// chords").
+    /// view resolves the key against its own declared keymap (`View::keymap`),
+    /// applying navigation through `View::scroll` and everything else through
+    /// the keymap's `apply`; an unbound key either forwards to a text
+    /// widget's editor, is swallowed by a form, or cascades to the view
+    /// beneath, per that keymap's `Unbound` policy (`docs/design/keybinds.md`,
+    /// "View-declared keymaps and layering"). The Esc/q floor is the
+    /// terminal arm,
+    /// unchanged. `pending`, the chord prefix, is taken once here and
+    /// resolved against every view in the walk (`docs/design/keybinds.md`,
+    /// "Resolution and chords").
     fn dispatch_key(&mut self, ev: KeyEvent) {
         let key = keymap::Key::from(ev);
         // A chord in progress: Esc cancels it and does nothing else --
@@ -1078,44 +1091,23 @@ impl App {
         }
     }
 
-    /// Dispatch to the view at stack index `i`: derive its keymap context and
-    /// resolve.
+    /// Dispatch to the view at stack index `i`: resolve `dk`'s key against
+    /// its declared keymap and act on the result. `Act` applies (navigation
+    /// through `View::scroll`, everything else through the keymap's
+    /// `apply`); `Pending` records the chord prefix; `Unbound` forwards,
+    /// swallows, or cascades per the keymap's `unbound` policy -- except
+    /// `esc`, which is never forwarded and always passes to the floor.
     fn handle_view_key(&mut self, i: usize, dk: &DispatchKey) -> KeyFlow {
-        let ctx = key_context(&self.views[i]);
-        self.resolve_and_apply(i, ctx, dk)
-    }
-
-    /// Resolve `dk`'s key against `ctx` and act on the result: `Act` applies
-    /// (navigation through `View::scroll`, everything else through the
-    /// context's `apply_*`); `Pending` records the chord prefix; `Unbound` is
-    /// `unbound_flow`'s (forward, swallow, or cascade, by context).
-    fn resolve_and_apply(
-        &mut self,
-        i: usize,
-        ctx: keymap::KeyContext,
-        dk: &DispatchKey,
-    ) -> KeyFlow {
-        match keymap::resolve(ctx, dk.pending, dk.key) {
+        let km = self.views[i].keymap();
+        match keymap::resolve(km.layers, dk.pending, dk.key) {
             keymap::Resolved::Act(action) => {
                 if let Some(motion) = scroll_motion(action) {
                     let viewport = self.viewport_height;
                     if let Some(view) = self.views.get_mut(i) {
                         view.scroll(motion, viewport);
                     }
-                } else {
-                    match ctx {
-                        keymap::KeyContext::List => apply_list(self, i, action),
-                        keymap::KeyContext::Detail => detail::apply_detail(self, i, action),
-                        keymap::KeyContext::Popup => popup::apply_popup(self, i, action),
-                        keymap::KeyContext::NewIssuePicker | keymap::KeyContext::NewIssueText => {
-                            new_issue::apply_new_issue(self, i, action);
-                        }
-                        keymap::KeyContext::CommentInput => {
-                            detail::apply_comment_input(self, i, action);
-                        }
-                        keymap::KeyContext::Search => popup::apply_search(self, i, action),
-                        keymap::KeyContext::Help => {}
-                    }
+                } else if let Some(apply) = km.apply {
+                    apply(self, i, action);
                 }
                 KeyFlow::Consumed
             }
@@ -1125,33 +1117,21 @@ impl App {
             }
             // `resolve`'s `Unbound` payload is always `dk.key` (a chord miss
             // resolves the same key fresh); dropping it here avoids threading
-            // a fifth argument through `unbound_flow`.
-            keymap::Resolved::Unbound(_) => self.unbound_flow(i, ctx, dk),
-        }
-    }
-
-    /// What an `Unbound` key does, by context (`docs/design/keybinds.md`,
-    /// "Contexts and layering"): `esc` is never forwarded and always passes
-    /// to the floor; a text context forwards everything else to its editor
-    /// widget and consumes; `NewIssuePicker` consumes without forwarding (a
-    /// form swallows strays); `List`/`Detail`/`Popup` cascade to the view
-    /// beneath. Uses `dk.key`, already normalized -- never re-derives it from
-    /// `dk.ev`.
-    fn unbound_flow(&mut self, i: usize, ctx: keymap::KeyContext, dk: &DispatchKey) -> KeyFlow {
-        if dk.key == keymap::Key::plain(KeyCode::Esc) {
-            return KeyFlow::Pass;
-        }
-        match ctx {
-            keymap::KeyContext::NewIssueText => new_issue::forward_text(self, i, dk.ev),
-            keymap::KeyContext::CommentInput => detail::forward_comment_input(self, i, dk.ev),
-            keymap::KeyContext::Search => popup::forward_search(self, i, dk.ev),
-            keymap::KeyContext::Help => popup::forward_help(self, i, dk.ev),
-            keymap::KeyContext::NewIssuePicker => {}
-            keymap::KeyContext::List | keymap::KeyContext::Detail | keymap::KeyContext::Popup => {
-                return KeyFlow::Pass;
+            // a redundant argument through the match below.
+            keymap::Resolved::Unbound(_) => {
+                if dk.key == keymap::Key::plain(KeyCode::Esc) {
+                    return KeyFlow::Pass; // esc is the floor's, never a forward
+                }
+                match km.unbound {
+                    Unbound::Cascade => KeyFlow::Pass,
+                    Unbound::Swallow => KeyFlow::Consumed,
+                    Unbound::Forward(forward) => {
+                        forward(self, i, dk.ev);
+                        KeyFlow::Consumed
+                    }
+                }
             }
         }
-        KeyFlow::Consumed
     }
 
     /// Route a state invalidation down the stack, top first. Applies are
@@ -1449,11 +1429,82 @@ where
 
 // -- Normal list keybindings -------------------------------------------------
 
-/// The `List` context's non-navigation actions (`docs/design/keybinds.md`,
-/// "List"). Navigation actions never reach here: `resolve_and_apply` maps
-/// them to `ScrollMotion` and applies them through `View::scroll` instead.
-/// The list is always the base view in this stage, so it reaches its own
-/// state through `base_mut` rather than the index (`_i`).
+static LIST_BINDINGS: keymap::Table = &[
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Enter)),
+        keymap::Action::OpenDetail,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char(' ')),
+        keymap::Action::OpenDetail,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('/')),
+        keymap::Action::OpenSearch,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::ctrl('/')),
+        keymap::Action::OpenHelp,
+    ),
+    // Legacy terminals send Ctrl+/ as 0x1F, which crossterm decodes as
+    // ctrl+'7'; kitty-enhanced terminals deliver a true ctrl+/. Both bound.
+    (
+        keymap::Binding::Single(keymap::Key::ctrl('7')),
+        keymap::Action::OpenHelp,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('c')),
+        keymap::Action::CreateIssue,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('s')),
+        keymap::Action::SetStatus,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('p')),
+        keymap::Action::SetPriority,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('a')),
+        keymap::Action::SetAssignee,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::ctrl('r')),
+        keymap::Action::Refresh,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('d')),
+        keymap::Action::ToggleSortDirection,
+    ),
+    (
+        keymap::Binding::Chord(keymap::Key::char('o'), keymap::Key::char('b')),
+        keymap::Action::OpenInBrowser,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::ctrl('n')),
+        keymap::Action::NextPage,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::ctrl('p')),
+        keymap::Action::PrevPage,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('L')),
+        keymap::Action::Login,
+    ),
+];
+
+static LIST_KEYMAP: Keymap = Keymap {
+    layers: &[LIST_BINDINGS, keymap::GLOBAL],
+    apply: Some(apply_list),
+    unbound: Unbound::Cascade,
+};
+
+/// The list view's non-navigation actions (`docs/design/keybinds.md`,
+/// "List"). Navigation actions never reach here: `handle_view_key` maps them
+/// to `ScrollMotion` and applies them through `View::scroll` instead. The
+/// list is always the base view in this stage, so it reaches its own state
+/// through `base_mut` rather than the index (`_i`).
 fn apply_list(app: &mut App, _i: usize, action: keymap::Action) {
     use keymap::Action;
     match action {
@@ -1494,3 +1545,37 @@ pub(crate) fn open_in_browser(identifier: &str) {
         tracing::warn!(error = %e, "failed to open browser for issue url");
     }
 }
+
+// -- Help overlay registry ---------------------------------------------------
+
+/// The help overlay's user-facing contexts, in display order: each view's
+/// declared tables under its display name. The two new-issue contexts
+/// collapse into one displayed context, "new issue": the text context's
+/// table *is* the shared form-nav layer, so form-nav plus the picker's own
+/// rows is their union, with no duplicates.
+pub(crate) static HELP_CONTEXTS: &[(&str, &[keymap::Table])] = &[
+    ("global", &[keymap::GLOBAL]),
+    ("list", &[LIST_BINDINGS]),
+    ("detail", &[detail::DETAIL_BINDINGS]),
+    ("popup", &[popup::POPUP_BINDINGS]),
+    (
+        "new issue",
+        &[new_issue::FORM_NAV, new_issue::PICKER_BINDINGS],
+    ),
+    ("comment", &[detail::COMMENT_INPUT_BINDINGS]),
+    ("search", &[popup::SEARCH_BINDINGS]),
+    ("help", &[popup::HELP_BINDINGS]),
+];
+
+/// Every declared keymap, named for test diagnostics.
+#[cfg(test)]
+pub(crate) static ALL_KEYMAPS: &[(&str, &Keymap)] = &[
+    ("list", &LIST_KEYMAP),
+    ("detail", &detail::DETAIL_KEYMAP),
+    ("comment_input", &detail::COMMENT_INPUT_KEYMAP),
+    ("popup", &popup::POPUP_KEYMAP),
+    ("new_issue_picker", &new_issue::PICKER_KEYMAP),
+    ("new_issue_text", &new_issue::TEXT_KEYMAP),
+    ("search", &popup::SEARCH_KEYMAP),
+    ("help", &popup::HELP_KEYMAP),
+];

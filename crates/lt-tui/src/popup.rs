@@ -1,13 +1,15 @@
 use std::time::{Duration, Instant};
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use lt_runtime::db::Connection;
 use lt_runtime::query::IssueQuery;
 use lt_runtime::search_query;
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{App, Scroll, ScrollMotion, StateCtx, StateEvent, TextInput, View, keymap};
+use super::{
+    App, Keymap, Scroll, ScrollMotion, StateCtx, StateEvent, TextInput, Unbound, View, keymap,
+};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -107,9 +109,9 @@ pub(crate) fn priority_popup_items() -> Vec<PopupItem> {
 pub struct HelpPopup {
     /// Current search query typed by the user.
     pub search: TextInput,
-    /// The keymap's help rows (`keymap::help_rows()`), built once at
-    /// construction so help can no longer drift from the tables it reads.
-    /// Not `pub`: `keymap::HelpRow` is crate-private.
+    /// The keymap's help rows (`keymap::help_rows(crate::HELP_CONTEXTS)`),
+    /// built once at construction so help can no longer drift from the
+    /// tables it reads. Not `pub`: `keymap::HelpRow` is crate-private.
     pub(crate) rows: Vec<keymap::HelpRow>,
     /// Indices into `rows` that match the current search.
     pub filtered: Vec<usize>,
@@ -126,7 +128,7 @@ pub struct HelpPopup {
 
 impl HelpPopup {
     pub fn new() -> Self {
-        let rows = keymap::help_rows();
+        let rows = keymap::help_rows(crate::HELP_CONTEXTS);
         let filtered = (0..rows.len()).collect();
         let key_col_width = rows
             .iter()
@@ -549,9 +551,20 @@ fn popup_edit(kind: &PopupKind, item: &PopupItem) -> Option<lt_runtime::sync::se
 
 // -- Popup actions ----------------------------------------------------
 
-/// The `Popup` context's non-navigation action. Navigation actions never
-/// reach here: `resolve_and_apply` maps them to `ScrollMotion` and applies
-/// them through `View::scroll` instead.
+pub(crate) static POPUP_BINDINGS: keymap::Table = &[(
+    keymap::Binding::Single(keymap::Key::plain(KeyCode::Enter)),
+    keymap::Action::Confirm,
+)];
+
+pub(crate) static POPUP_KEYMAP: Keymap = Keymap {
+    layers: &[POPUP_BINDINGS, keymap::GLOBAL],
+    apply: Some(apply_popup),
+    unbound: Unbound::Cascade,
+};
+
+/// The state/priority/assignee popup's non-navigation action. Navigation
+/// actions never reach here: `handle_view_key` maps them to `ScrollMotion`
+/// and applies them through `View::scroll` instead.
 pub(crate) fn apply_popup(app: &mut App, i: usize, action: keymap::Action) {
     if let keymap::Action::Confirm = action {
         popup_confirm(app, i);
@@ -560,9 +573,37 @@ pub(crate) fn apply_popup(app: &mut App, i: usize, action: keymap::Action) {
 
 // -- Help popup ------------------------------------------------------
 
+/// The keyboard-shortcuts help popup. `j`/`k` stay untypeable in the filter
+/// bar -- an existing limitation, carried forward deliberately.
+pub(crate) static HELP_BINDINGS: keymap::Table = &[
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Down)),
+        keymap::Action::MoveDown,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('j')),
+        keymap::Action::MoveDown,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Up)),
+        keymap::Action::MoveUp,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('k')),
+        keymap::Action::MoveUp,
+    ),
+];
+
+pub(crate) static HELP_KEYMAP: Keymap = Keymap {
+    layers: &[HELP_BINDINGS],
+    apply: None,
+    unbound: Unbound::Forward(forward_help),
+};
+
 /// Forward an unbound key to the help popup's filter bar. `j`/`k` stay
 /// untypeable here (an existing limitation, carried forward deliberately):
-/// they resolve to `MoveDown`/`MoveUp` in `HELP` and never reach `Unbound`.
+/// they resolve to `MoveDown`/`MoveUp` in `HELP_BINDINGS` and never reach
+/// `Unbound`.
 pub(crate) fn forward_help(app: &mut App, i: usize, ev: KeyEvent) {
     if let Some(View::Help(popup)) = app.views.get_mut(i)
         && popup.search.handle_key(ev.code, ev.modifiers)
@@ -573,9 +614,57 @@ pub(crate) fn forward_help(app: &mut App, i: usize, ev: KeyEvent) {
 
 // -- FTS search overlay ------------------------------------------------
 
-/// The `Search` context's non-navigation actions. Navigation (`MoveDown`/
-/// `MoveUp`) never reaches here: `resolve_and_apply` maps it to
-/// `ScrollMotion` and applies it through `View::scroll` instead.
+/// The FTS search overlay. Plain `j`/`k` are deliberately unbound (typeable
+/// filter text); `tab`/`shift+tab` drive stem-key completion and must not
+/// reach the query bar.
+pub(crate) static SEARCH_BINDINGS: keymap::Table = &[
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Enter)),
+        keymap::Action::Confirm,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::ctrl('c')),
+        keymap::Action::ClearQuery,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Down)),
+        keymap::Action::MoveDown,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Up)),
+        keymap::Action::MoveUp,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::ctrl('n')),
+        keymap::Action::CompleteNext,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::ctrl('p')),
+        keymap::Action::CompletePrev,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::ctrl('y')),
+        keymap::Action::CompleteAccept,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Tab)),
+        keymap::Action::CompleteForward,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::shift_tab()),
+        keymap::Action::CompleteBackward,
+    ),
+];
+
+pub(crate) static SEARCH_KEYMAP: Keymap = Keymap {
+    layers: &[SEARCH_BINDINGS],
+    apply: Some(apply_search),
+    unbound: Unbound::Forward(forward_search),
+};
+
+/// The FTS search overlay's non-navigation actions. Navigation (`MoveDown`/
+/// `MoveUp`) never reaches here: `handle_view_key` maps it to `ScrollMotion`
+/// and applies it through `View::scroll` instead.
 pub(crate) fn apply_search(app: &mut App, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Confirm => confirm_search(app),
@@ -611,16 +700,16 @@ pub(crate) fn apply_search(app: &mut App, i: usize, action: keymap::Action) {
         }
         keymap::Action::CompleteForward => apply_completion_tab(app, i, true),
         keymap::Action::CompleteBackward => apply_completion_tab(app, i, false),
-        // Navigation and other contexts' actions never resolve to
-        // `Search`'s table; the match stays exhaustive over `Action`
+        // Navigation and other keymaps' actions never resolve to
+        // `SEARCH_BINDINGS`; the match stays exhaustive over `Action`
         // regardless.
         _ => {}
     }
 }
 
 /// Forward an unbound key to the query bar. `tab`/`shift+tab` never reach
-/// here (`SEARCH` binds them to completion); plain `j`/`k` are deliberately
-/// unbound so they land here as typeable filter text.
+/// here (`SEARCH_BINDINGS` binds them to completion); plain `j`/`k` are
+/// deliberately unbound so they land here as typeable filter text.
 pub(crate) fn forward_search(app: &mut App, i: usize, ev: KeyEvent) {
     if let Some(View::Search(overlay)) = app.views.get_mut(i)
         && overlay.query.handle_key(ev.code, ev.modifiers)

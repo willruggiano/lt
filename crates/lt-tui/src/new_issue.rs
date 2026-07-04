@@ -4,8 +4,8 @@ use lt_runtime::sync::service::Scope;
 use lt_types::types::User;
 
 use super::{
-    App, PopupItem, Scroll, StateCtx, StateEvent, TextInput, View, keymap, priority_popup_items,
-    state_items,
+    App, Keymap, PopupItem, Scroll, StateCtx, StateEvent, TextInput, Unbound, View, keymap,
+    priority_popup_items, state_items,
 };
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,19 @@ impl NewIssueModal {
                 self.loading = false;
             }
             _ => {}
+        }
+    }
+
+    /// This modal's declared keymap, by focused field: the text fields
+    /// (Title/Description) forward to their own editor; the picker fields
+    /// (Team/Priority/State/Assignee) navigate.
+    pub(crate) fn keymap(&self) -> &'static Keymap {
+        match self.focused_field {
+            NewIssueField::Title | NewIssueField::Description => &TEXT_KEYMAP,
+            NewIssueField::Team
+            | NewIssueField::Priority
+            | NewIssueField::State
+            | NewIssueField::Assignee => &PICKER_KEYMAP,
         }
     }
 }
@@ -395,11 +408,64 @@ pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) ->
 // Key handlers
 // ---------------------------------------------------------------------------
 
-/// The `NewIssuePicker`/`NewIssueText` contexts' actions
-/// (`docs/design/keybinds.md`, "New issue -- picker fields"/"-- text
-/// fields"): `Submit`/`NextField`/`PrevField` are shared by both; `Confirm`/
-/// `PickMe` only ever resolve from `NewIssuePicker` (`NewIssueText`'s table
-/// has no such rows).
+/// Shared by the picker and text keymaps: the submit chord plus Tab/Shift+Tab
+/// field navigation (`docs/design/keybinds.md`, "New issue -- picker
+/// fields"/"-- text fields"). The text keymap's own table *is* this layer
+/// (everything else forwards to the focused field's editor); the picker
+/// keymap layers it alongside its own Confirm/PickMe rows.
+pub(crate) static FORM_NAV: keymap::Table = &[
+    (
+        keymap::Binding::Single(keymap::Key::ctrl_code(KeyCode::Enter)),
+        keymap::Action::Submit,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::alt(KeyCode::Enter)),
+        keymap::Action::Submit,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Tab)),
+        keymap::Action::NextField,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::shift_tab()),
+        keymap::Action::PrevField,
+    ),
+];
+
+/// New-issue modal, picker fields (Team/Priority/State/Assignee): `FORM_NAV`
+/// plus GLOBAL's `j`/`k`/`down`/`up`, which move the focused picker's
+/// selection (`View::scroll`'s `NewIssue` override); `enter` advances like
+/// `Tab` (leaving Team swaps the watched scope).
+pub(crate) static PICKER_BINDINGS: keymap::Table = &[
+    (
+        keymap::Binding::Single(keymap::Key::plain(KeyCode::Enter)),
+        keymap::Action::Confirm,
+    ),
+    (
+        keymap::Binding::Single(keymap::Key::char('m')),
+        keymap::Action::PickMe,
+    ),
+];
+
+pub(crate) static PICKER_KEYMAP: Keymap = Keymap {
+    layers: &[PICKER_BINDINGS, FORM_NAV, keymap::GLOBAL],
+    apply: Some(apply_new_issue),
+    unbound: Unbound::Swallow,
+};
+
+/// New-issue modal, text fields (Title/Description): everything but
+/// `FORM_NAV`'s rows forwards to the focused field's editor (`enter` inserts
+/// a newline in Description).
+pub(crate) static TEXT_KEYMAP: Keymap = Keymap {
+    layers: &[FORM_NAV],
+    apply: Some(apply_new_issue),
+    unbound: Unbound::Forward(forward_text),
+};
+
+/// The new-issue modal's picker/text actions (`docs/design/keybinds.md`,
+/// "New issue -- picker fields"/"-- text fields"): `Submit`/`NextField`/
+/// `PrevField` are shared by both keymaps; `Confirm`/`PickMe` only ever
+/// resolve from `PICKER_KEYMAP` (`TEXT_KEYMAP`'s table has no such rows).
 pub(crate) fn apply_new_issue(app: &mut App, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Submit => app.new_issue_submit(i),
@@ -419,9 +485,9 @@ pub(crate) fn apply_new_issue(app: &mut App, i: usize, action: keymap::Action) {
                 modal.assignee_selected = 0;
             }
         }
-        // Navigation and other contexts' actions never resolve to
-        // `NewIssuePicker`/`NewIssueText`'s tables; the match stays
-        // exhaustive over `Action` regardless.
+        // Navigation and other keymaps' actions never resolve to
+        // `PICKER_BINDINGS`/`FORM_NAV`; the match stays exhaustive over
+        // `Action` regardless.
         _ => {}
     }
 }
@@ -442,10 +508,10 @@ fn new_issue_advance(app: &mut App, i: usize) {
     }
 }
 
-/// Forward an unbound key in the `NewIssueText` context to the focused text
-/// field's own editor: `TextInput::handle_key` for Title, the description's
-/// line-buffer logic (`enter`-as-newline, cursor always at the end) for
-/// Description. Uses the original crossterm event, not the normalized `Key`.
+/// Forward an unbound key from `TEXT_KEYMAP` to the focused text field's own
+/// editor: `TextInput::handle_key` for Title, the description's line-buffer
+/// logic (`enter`-as-newline, cursor always at the end) for Description. Uses
+/// the original crossterm event, not the normalized `Key`.
 pub(crate) fn forward_text(app: &mut App, i: usize, ev: KeyEvent) {
     let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
     let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
@@ -496,11 +562,12 @@ fn handle_description_key(modal: &mut NewIssueModal, code: KeyCode, ctrl: bool) 
     }
 }
 
-/// This view's scroll override, `NewIssuePicker` only (`NewIssueText` is a
-/// text context and never reaches `View::scroll`): `Down`/`Up` move the
-/// focused picker's selection; every other motion no-ops via `Scroll`'s
-/// defaults -- a form has no "half page" concept (`docs/design/keybinds.md`,
-/// "New issue -- picker fields").
+/// This view's scroll override, reached only through `PICKER_KEYMAP`
+/// (`TEXT_KEYMAP`'s layers skip GLOBAL, so its unbound keys forward instead
+/// of reaching `View::scroll`): `Down`/`Up` move the focused picker's
+/// selection; every other motion no-ops via `Scroll`'s defaults -- a form
+/// has no "half page" concept (`docs/design/keybinds.md`, "New issue --
+/// picker fields").
 impl Scroll for NewIssueModal {
     fn move_down(&mut self) {
         let field = self.focused_field.clone();
