@@ -254,7 +254,11 @@ impl Generator {
         let priority_idx = self.rng.random_range(0..PRIORITIES.len());
         let priority_label = PRIORITIES[priority_idx].to_string();
         let priority = u8::try_from(priority_idx).unwrap_or(0);
-        let state_name = (*self.pick(STATES)).to_string();
+        // `STATES` is ordered by workflow stage, so the picked index doubles
+        // as a stand-in for Linear's stored `position` -- same idiom as
+        // `priority_idx` above.
+        let state_idx = self.rng.random_range(0..STATES.len());
+        let state_name = STATES[state_idx].to_string();
         types::Issue {
             id: format!("sim-{:016x}-{index}", self.seed).into(),
             identifier,
@@ -265,7 +269,7 @@ impl Generator {
             state: types::WorkflowState {
                 id: state_name.clone().into(),
                 name: state_name,
-                position: None,
+                position: f64::from(u32::try_from(state_idx).unwrap_or(0)),
             },
             assignee,
             team: types::Team {

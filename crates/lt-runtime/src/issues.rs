@@ -25,7 +25,7 @@ fn transport_from_config() -> Result<HttpTransport> {
 /// A ready-to-drive new-issue session: a transport plus the viewer identity.
 pub struct NewIssueSession {
     transport: HttpTransport,
-    pub viewer: viewer::User,
+    pub viewer: viewer::Viewer,
 }
 
 impl NewIssueSession {

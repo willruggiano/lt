@@ -188,6 +188,19 @@ const MIGRATION_3: &str = "\
         url_key TEXT NOT NULL
     );";
 
+/// `WorkflowState.position` is non-null on the wire and became a required
+/// `f64` in the read model; a database from before that change can carry
+/// `position IS NULL` rows written by the old team-only upsert (an
+/// issue-driven write that knew no position). Backfilling to `0` (rather than
+/// deleting the rows) keeps every issue's inner join on `workflow_states`
+/// resolving -- deleting would drop those issues from every query until the
+/// next team-states sync re-creates the row. The next targeted team sync
+/// overwrites `0` with Linear's real position; until then, a backfilled state
+/// sorts by its arbitrary `0` among real positions in the state/assignee
+/// pickers -- a cosmetic, self-healing ordering effect only.
+const MIGRATION_4: &str = "\
+    UPDATE workflow_states SET position = 0 WHERE position IS NULL;";
+
 /// The migration list: the single schema source for both `open_db()` and the
 /// `sql_validation` gate (docs/design/type-safe-sql-adr.md, "Migrations").
 fn migrations() -> Migrations<'static> {
@@ -195,6 +208,7 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_1),
         M::up(MIGRATION_2),
         M::up(MIGRATION_3),
+        M::up(MIGRATION_4),
     ])
 }
 

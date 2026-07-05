@@ -255,7 +255,7 @@ impl Runtime {
     /// read). Ordinary sync cycles persist the viewer through the `Upsert`
     /// seam instead (`sync::persist_viewer`); the header subscribes to
     /// `ViewerQuery` and picks that up through propagation.
-    fn viewer_identity(&self) -> Option<viewer::User> {
+    fn viewer_identity(&self) -> Option<viewer::Viewer> {
         let transport = match self.transports.acquire() {
             Ok(t) => t,
             Err(e) => {
@@ -1010,6 +1010,6 @@ mod tests {
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
-        assert_eq!(sub.take().unwrap().unwrap().name, "Ada");
+        assert_eq!(sub.take().unwrap().unwrap().user.name, "Ada");
     }
 }

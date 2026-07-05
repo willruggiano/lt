@@ -271,15 +271,20 @@ fn optimistic_issue(conn: &Connection, input: &IssueCreateInput) -> Result<types
         .find(|t| t.id.inner() == input.team_id)
         .map_or_else(String::new, |t| t.name);
 
-    let (state_id, state_name) = match &input.state_id {
+    let (state_id, state_name, state_position) = match &input.state_id {
         Some(id) => {
-            let name = crate::db::teams::query_team_states(conn, &input.team_id)?
+            let cached = crate::db::teams::query_team_states(conn, &input.team_id)?
                 .into_iter()
-                .find(|s| s.id.inner() == id)
-                .map_or_else(|| id.clone(), |s| s.name);
-            (id.clone(), name)
+                .find(|s| s.id.inner() == id);
+            match cached {
+                Some(s) => (id.clone(), s.name, s.position),
+                // The offered id came from a stale/offline picker, not the
+                // cache; fall back to the id as the display name, same as
+                // before -- there is no real position to carry either.
+                None => (id.clone(), id.clone(), 0.0),
+            }
         }
-        None => ("Backlog".to_string(), "Backlog".to_string()),
+        None => ("Backlog".to_string(), "Backlog".to_string(), 0.0),
     };
 
     let assignee = match &input.assignee_id {
@@ -309,7 +314,7 @@ fn optimistic_issue(conn: &Connection, input: &IssueCreateInput) -> Result<types
         state: types::WorkflowState {
             id: state_id.into(),
             name: state_name,
-            position: None,
+            position: state_position,
         },
         assignee,
         team: types::Team {
@@ -399,7 +404,7 @@ impl Mutate for CommentCreateMutation {
             body: vars.input.body.clone(),
             created_at: now,
             updated_at: now,
-            user: crate::db::viewer::viewer(&tx)?.map(types::User::from),
+            user: crate::db::viewer::viewer(&tx)?.map(|v| v.user),
             issue_id: Some(vars.input.issue_id.clone()),
         };
         crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
@@ -515,7 +520,7 @@ pub fn sample_base_issue(id: &str) -> types::Issue {
         state: types::WorkflowState {
             id: "s-todo".into(),
             name: "Todo".to_string(),
-            position: None,
+            position: 1.0,
         },
         assignee: None,
         team: types::Team {
@@ -685,7 +690,7 @@ mod tests {
         server_issue.state = types::WorkflowState {
             id: "s-merged".into(),
             name: "Merged".to_string(),
-            position: None,
+            position: 2.0,
         };
         IssueUpdateMutation::ack(
             &conn,
@@ -798,9 +803,11 @@ mod tests {
         let conn = db_with_issue("1");
         crate::db::viewer::set_viewer(
             &conn,
-            &lt_types::viewer::User {
-                id: "u-ada".into(),
-                name: "Ada".to_string(),
+            &lt_types::viewer::Viewer {
+                user: types::User {
+                    id: "u-ada".into(),
+                    name: "Ada".to_string(),
+                },
                 organization: lt_types::viewer::Organization {
                     id: "org-1".into(),
                     name: "Acme".to_string(),

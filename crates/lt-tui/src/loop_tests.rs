@@ -80,7 +80,7 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
         state: types::WorkflowState {
             id: state.into(),
             name: state.to_string(),
-            position: None,
+            position: 1.0,
         },
         assignee: None,
         team: types::Team {
@@ -485,7 +485,7 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
         &lt_types::types::WorkflowState {
             id: "done-state".into(),
             name: "Done".to_string(),
-            position: None,
+            position: 1.0,
         },
     )
     .unwrap();
@@ -888,10 +888,12 @@ fn popup_scroll_supports_the_shared_motion_set() {
 
 // -- typestates: consume_sync_event / consume_login_event, L/refresh -----
 
-fn ada() -> lt_types::viewer::User {
-    lt_types::viewer::User {
-        id: "u1".into(),
-        name: "Ada".to_string(),
+fn ada() -> lt_types::viewer::Viewer {
+    lt_types::viewer::Viewer {
+        user: lt_types::types::User {
+            id: "u1".into(),
+            name: "Ada".to_string(),
+        },
         organization: lt_types::viewer::Organization {
             id: "o1".into(),
             name: "Acme".to_string(),
@@ -1038,7 +1040,7 @@ fn seed_team_states(conn: &lt_runtime::test_util::Connection, team_id: &str) -> 
         &lt_types::types::WorkflowState {
             id: "s-todo".into(),
             name: "Todo".to_string(),
-            position: Some(1.0),
+            position: 1.0,
         },
     )?;
     lt_runtime::test_util::upsert_team_state(
@@ -1047,7 +1049,7 @@ fn seed_team_states(conn: &lt_runtime::test_util::Connection, team_id: &str) -> 
         &lt_types::types::WorkflowState {
             id: "s-done".into(),
             name: "Done".to_string(),
-            position: Some(2.0),
+            position: 2.0,
         },
     )?;
     Ok(())
@@ -1135,8 +1137,8 @@ fn new_issue_team_change_drops_the_old_scoped_subscriptions_and_subscribes_new_o
 
 #[test]
 fn popup_team_scoped_construction_reads_the_current_states() {
-    // "Backlog", not "Todo"/"Done", so the issue's own state back-fill
-    // doesn't collide with the seeded positioned states below.
+    // "Backlog", not "Todo"/"Done", so the popup shows the issue's own
+    // state back-fill alongside the seeded, team-synced states below.
     let issue = db_issue("1", "ENG-1", "Backlog", 5);
     let (mut app, db) = app_with_db_and_handle(&[issue]).unwrap();
     fetch_base_list(&mut app, true);
@@ -1156,9 +1158,10 @@ fn popup_team_scoped_construction_reads_the_current_states() {
             .iter()
             .map(|i| i.label.as_str())
             .collect::<Vec<_>>(),
-        // Position order first; "Backlog" (the issue's own state
-        // back-fill, no recorded position) sorts last by name.
-        ["Todo", "Done", "Backlog"]
+        // Position order; "Backlog" carries `db_issue`'s fixed placeholder
+        // position (1.0), tying with "Todo" (also seeded at 1.0) and
+        // sorting first by name.
+        ["Backlog", "Todo", "Done"]
     );
 }
 

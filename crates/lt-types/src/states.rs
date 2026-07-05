@@ -135,7 +135,7 @@ mod tests {
                 .iter()
                 .map(|s| (s.name.as_str(), s.position))
                 .collect::<Vec<_>>(),
-            [("Todo", Some(1.0)), ("Done", Some(2.5))]
+            [("Todo", 1.0), ("Done", 2.5)]
         );
     }
 }

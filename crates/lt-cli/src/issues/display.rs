@@ -118,7 +118,7 @@ pub(crate) mod tests {
             state: WorkflowState {
                 id: "".into(),
                 name: "In Progress".into(),
-                position: None,
+                position: 1.0,
             },
             assignee: Some(User {
                 id: "".into(),

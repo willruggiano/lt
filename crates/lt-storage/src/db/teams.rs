@@ -1,8 +1,8 @@
 //! Team metadata: the team list, a team's workflow states (Linear's stored
 //! `position` order), and its memberships. `workflow_states` is scoped for
-//! free by every issue upsert (`db::issues::upsert_issue_tx`); only a
-//! targeted team refresh ([`TeamStatesQuery`]'s and [`TeamMembersQuery`]'s
-//! `Upsert` impls) writes memberships and positions.
+//! free by every issue upsert (`db::issues::upsert_issue_tx`), which also
+//! carries the state's real position -- `WorkflowState.position: Float!` is
+//! non-null on the wire, so every write here carries one.
 
 use anyhow::{Context, Result};
 use lt_types::members::TeamMembersQuery;
@@ -17,31 +17,13 @@ use crate::db::ops::{EntityKey, Read, Upsert};
 use crate::db::sql::{self, EntityTable, Sql};
 
 /// Upsert one workflow state scoped to its team, with Linear's stored
-/// position (a targeted team sync -- the only writer that knows it).
+/// position.
 pub fn upsert_team_state(conn: &Connection, team_id: &str, state: &WorkflowState) -> Result<()> {
     sql::execute(
         conn,
         sql::UPSERT_WORKFLOW_STATE_SCOPED,
         params![state.id.inner(), state.name, team_id, state.position],
         "upsert team-scoped workflow state",
-    )
-}
-
-/// Back-fill a workflow state's `team_id` from an issue upsert, which knows
-/// no position. Binds `UPSERT_WORKFLOW_STATE_SCOPED` directly with a SQL
-/// `NULL` position; its `COALESCE` keeps a position already recorded by a
-/// targeted team sync (see [`upsert_team_state`]).
-pub(crate) fn upsert_workflow_state_team_only(
-    conn: &Connection,
-    id: &str,
-    name: &str,
-    team_id: &str,
-) -> Result<()> {
-    sql::execute(
-        conn,
-        sql::UPSERT_WORKFLOW_STATE_SCOPED,
-        params![id, name, team_id, Option::<f64>::None],
-        "upsert workflow state team-only",
     )
 }
 
@@ -141,8 +123,7 @@ query_team_scoped_fn!(
 );
 
 /// A team's workflow states with Linear's stored `position`, in Linear's
-/// stored order first; a state known only from an issue upsert
-/// (`position IS NULL`) sorts last, by name, and carries `None`.
+/// stored order.
 pub fn query_team_states(conn: &Connection, team_id: &str) -> Result<Vec<WorkflowState>> {
     crate::db::query_rows_id_name_and(
         conn,
@@ -361,7 +342,7 @@ mod tests {
             &WorkflowState {
                 id: id.into(),
                 name: name.to_string(),
-                position: Some(position),
+                position,
             },
         )
         .unwrap();
@@ -392,13 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn query_team_states_orders_by_position_then_nulls_last_by_name() {
+    fn query_team_states_orders_by_position_then_name() {
         let conn = test_db();
         upsert_state(&conn, "t1", ("s-todo", "Todo", 1.0));
         upsert_state(&conn, "t1", ("s-done", "Done", 2.0));
-        // No position recorded yet -- an issue-driven upsert only.
-        upsert_workflow_state_team_only(&conn, "s-zeta", "Zeta", "t1").unwrap();
-        upsert_workflow_state_team_only(&conn, "s-alpha", "Alpha", "t1").unwrap();
+        // Equal position: tie-broken by name.
+        upsert_state(&conn, "t1", ("s-zeta", "Zeta", 3.0));
+        upsert_state(&conn, "t1", ("s-alpha", "Alpha", 3.0));
         // A different team's state must not leak in.
         upsert_state(&conn, "t2", ("s-other", "Other", 0.5));
 
@@ -410,29 +391,29 @@ mod tests {
     }
 
     #[test]
-    fn scoped_upsert_backfills_team_id_without_clobbering_position() {
+    fn scoped_upsert_overwrites_position_with_the_latest_write() {
         let conn = test_db();
-        // A targeted team sync records a real position.
         upsert_state(&conn, "t1", ("s1", "Todo", 3.5));
-        // An issue-driven upsert passes NULL and must not clobber it.
-        upsert_workflow_state_team_only(&conn, "s1", "Todo", "t1").unwrap();
+        // A later upsert of the same state (e.g. Linear reordered it) replaces
+        // the position outright -- no merge against the stored value.
+        upsert_state(&conn, "t1", ("s1", "Todo", 4.5));
 
-        let position: Option<f64> = conn
+        let position: f64 = conn
             .query_row(
                 "SELECT position FROM workflow_states WHERE id = 's1'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(position, Some(3.5));
+        assert_eq!(position.to_bits(), 4.5_f64.to_bits());
     }
 
     #[test]
-    fn issue_upsert_backfills_team_id() {
+    fn issue_upsert_backfills_team_id_and_position() {
         let conn = test_db();
         crate::db::upsert_issues(&conn, &[outbox::sample_base_issue("1")]).unwrap();
 
-        let (team_id, position): (Option<String>, Option<f64>) = conn
+        let (team_id, position): (Option<String>, f64) = conn
             .query_row(
                 "SELECT team_id, position FROM workflow_states WHERE id = \
                  (SELECT state_id FROM issues WHERE id = '1')",
@@ -441,7 +422,7 @@ mod tests {
             )
             .unwrap();
         assert!(team_id.is_some());
-        assert_eq!(position, None);
+        assert_eq!(position.to_bits(), 1.0_f64.to_bits());
     }
 
     #[test]
@@ -523,10 +504,10 @@ mod tests {
     }
 
     #[test]
-    fn team_states_query_read_maps_null_position_to_none_and_preserves_order() {
+    fn team_states_query_read_preserves_position_order() {
         let conn = test_db();
         upsert_state(&conn, "t1", ("s-todo", "Todo", 1.0));
-        upsert_workflow_state_team_only(&conn, "s-zeta", "Zeta", "t1").unwrap();
+        upsert_state(&conn, "t1", ("s-zeta", "Zeta", 2.0));
 
         let vars = StatesTeamVariables {
             team_id: "t1".to_string(),
@@ -537,7 +518,7 @@ mod tests {
                 .iter()
                 .map(|s| (s.name.as_str(), s.position))
                 .collect::<Vec<_>>(),
-            [("Todo", Some(1.0)), ("Zeta", None)]
+            [("Todo", 1.0), ("Zeta", 2.0)]
         );
     }
 
@@ -563,7 +544,7 @@ mod tests {
         let out = vec![WorkflowState {
             id: "s1".into(),
             name: "Todo".to_string(),
-            position: Some(1.0),
+            position: 1.0,
         }];
         let touched = TeamStatesQuery::upsert(&conn, &vars, &out).unwrap();
         assert_eq!(
@@ -701,7 +682,7 @@ mod tests {
             states: vec![WorkflowState {
                 id: "s1".into(),
                 name: "Todo".to_string(),
-                position: Some(1.0),
+                position: 1.0,
             }],
             members: vec![User {
                 id: "u1".into(),

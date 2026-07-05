@@ -152,10 +152,10 @@ statements! {
     INSERT_ISSUE_LABEL, 2,
         "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)";
 
-    /// Load every pending overlay row, resolving the state/assignee name
-    /// through the entity tables in one query.
+    /// Load every pending overlay row, resolving the state's name/position and
+    /// the assignee's name through the entity tables in one query.
     LOAD_OVERLAYS, 0,
-        "SELECT po.entity_id, po.field, po.value, ws.name, u.name \
+        "SELECT po.entity_id, po.field, po.value, ws.name, ws.position, u.name \
          FROM pending_overlay po \
          LEFT JOIN workflow_states ws ON po.field = 'state'    AND ws.id = po.value \
          LEFT JOIN users u           ON po.field = 'assignee' AND u.id  = po.value";
@@ -320,29 +320,28 @@ statements! {
     DELETE_COMMENTS_FOR_ISSUE, 1,
         "DELETE FROM issue_comments WHERE issue_id = ?1 AND id NOT LIKE 'local:%'";
 
-    /// Upsert one workflow state scoped to its team. `position` is `COALESCE`d
-    /// against the stored value so an issue-driven upsert (which knows only the
-    /// state's team) can pass `NULL` without clobbering a position recorded by
-    /// a targeted team sync.
+    /// Upsert one workflow state scoped to its team. Every caller -- a
+    /// targeted team sync or an issue upsert's state fragment -- carries the
+    /// state's real `position` (`WorkflowState.position: Float!` on the
+    /// wire), so no conflict-time merge is needed.
     UPSERT_WORKFLOW_STATE_SCOPED, 4,
         "INSERT INTO workflow_states (id, name, team_id, position) \
          VALUES (?1, ?2, ?3, ?4) \
          ON CONFLICT(id) DO UPDATE SET \
             name = excluded.name, \
             team_id = excluded.team_id, \
-            position = COALESCE(excluded.position, workflow_states.position)";
+            position = excluded.position";
 
     /// Every team, alphabetically by name.
     QUERY_TEAMS, 0,
         "SELECT id, name FROM teams ORDER BY name";
 
     /// A team's workflow states, carrying `position`, in Linear's stored
-    /// order; states known only from issue upserts (`position IS NULL`) sort
-    /// last, by name.
+    /// order (ties broken by name).
     QUERY_TEAM_STATES, 1,
         "SELECT id, name, position FROM workflow_states \
          WHERE team_id = ?1 \
-         ORDER BY position IS NULL, position, name";
+         ORDER BY position, name";
 
     /// A team's members, resolved through `team_memberships`, by name.
     QUERY_TEAM_MEMBERS, 1,

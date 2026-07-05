@@ -435,6 +435,6 @@ mod tests {
         let touched = refresh::<ViewerQuery>(&conn, &transport, ()).unwrap();
 
         assert_eq!(touched, vec![EntityKey::Viewer]);
-        assert_eq!(db::viewer(&conn).unwrap().unwrap().name, "Ada");
+        assert_eq!(db::viewer(&conn).unwrap().unwrap().user.name, "Ada");
     }
 }

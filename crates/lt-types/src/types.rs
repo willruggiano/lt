@@ -35,11 +35,9 @@ pub struct Parent {
 pub struct WorkflowState {
     pub id: cynic::Id,
     pub name: String,
-    /// Linear's stored ordering within the team's workflow. Non-null on the
-    /// wire (`WorkflowState.position: Float!`); `None` only for a row this
-    /// app has never team-synced (`workflow_states.position IS NULL` --
-    /// back-filled by an issue upsert that knows no position).
-    pub position: Option<f64>,
+    /// Linear's stored ordering within the team's workflow
+    /// (`WorkflowState.position: Float!`).
+    pub position: f64,
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]

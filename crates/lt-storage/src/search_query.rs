@@ -613,7 +613,7 @@ mod merged_read_tests {
         types::WorkflowState {
             id: name.into(),
             name: name.to_string(),
-            position: None,
+            position: 1.0,
         }
     }
 

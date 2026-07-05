@@ -3,7 +3,8 @@
 //! rather than duplicating the name/organization fields directly.
 
 use anyhow::{Context, Result};
-use lt_types::viewer::{Organization, User, ViewerQuery};
+use lt_types::types;
+use lt_types::viewer::{Organization, Viewer, ViewerQuery};
 use rusqlite::{Connection, params};
 
 use crate::db::issues::{get_meta, set_meta, upsert_named_entity};
@@ -19,12 +20,12 @@ const ORGANIZATION_ID_KEY: &str = "organization_id";
 /// Upsert the viewer's user row, their organization's row, then record both
 /// ids in `sync_meta` -- the keys [`viewer`] reads back to reconstruct the
 /// identity, rather than duplicating its name/organization fields.
-pub fn set_viewer(conn: &Connection, viewer: &User) -> Result<()> {
+pub fn set_viewer(conn: &Connection, viewer: &Viewer) -> Result<()> {
     upsert_named_entity(
         conn,
         EntityTable::Users,
-        viewer.id.inner(),
-        Some(&viewer.name),
+        viewer.user.id.inner(),
+        Some(&viewer.user.name),
     )?;
     sql::execute(
         conn,
@@ -36,7 +37,7 @@ pub fn set_viewer(conn: &Connection, viewer: &User) -> Result<()> {
         ],
         "upsert organization",
     )?;
-    set_meta(conn, VIEWER_ID_KEY, viewer.id.inner())?;
+    set_meta(conn, VIEWER_ID_KEY, viewer.user.id.inner())?;
     set_meta(conn, ORGANIZATION_ID_KEY, viewer.organization.id.inner())?;
     Ok(())
 }
@@ -72,7 +73,7 @@ fn query_organization(conn: &Connection, id: &str) -> Result<Option<Organization
 /// ids against `users`/`organizations`. `None` when sync has not yet recorded
 /// one (pre-first-sync), or -- never expected, since both rows are written
 /// together in [`set_viewer`] -- a stored id whose row is gone.
-pub fn viewer(conn: &Connection) -> Result<Option<User>> {
+pub fn viewer(conn: &Connection) -> Result<Option<Viewer>> {
     let Some(viewer_id) = get_meta(conn, VIEWER_ID_KEY)? else {
         return Ok(None);
     };
@@ -86,9 +87,11 @@ pub fn viewer(conn: &Connection) -> Result<Option<User>> {
         return Ok(None);
     };
 
-    Ok(Some(User {
-        id: viewer_id.into(),
-        name,
+    Ok(Some(Viewer {
+        user: types::User {
+            id: viewer_id.into(),
+            name,
+        },
         organization,
     }))
 }
@@ -125,10 +128,12 @@ mod tests {
         crate::db::Database::memory().unwrap().connect().unwrap()
     }
 
-    fn ada() -> User {
-        User {
-            id: "u1".into(),
-            name: "Ada".to_string(),
+    fn ada() -> Viewer {
+        Viewer {
+            user: types::User {
+                id: "u1".into(),
+                name: "Ada".to_string(),
+            },
             organization: Organization {
                 id: "o1".into(),
                 name: "Acme".to_string(),
@@ -144,8 +149,8 @@ mod tests {
 
         set_viewer(&conn, &ada()).unwrap();
         let viewer = viewer(&conn).unwrap().unwrap();
-        assert_eq!(viewer.id.inner(), "u1");
-        assert_eq!(viewer.name, "Ada");
+        assert_eq!(viewer.user.id.inner(), "u1");
+        assert_eq!(viewer.user.name, "Ada");
         assert_eq!(viewer.organization.id.inner(), "o1");
         assert_eq!(viewer.organization.name, "Acme");
         assert_eq!(viewer.organization.url_key, "acme");
@@ -185,7 +190,10 @@ mod tests {
         let out = Some(ada());
         let touched = ViewerQuery::upsert(&conn, &(), &out).unwrap();
         assert_eq!(touched, vec![EntityKey::Viewer]);
-        assert_eq!(ViewerQuery::read(&conn, &()).unwrap().unwrap().name, "Ada");
+        assert_eq!(
+            ViewerQuery::read(&conn, &()).unwrap().unwrap().user.name,
+            "Ada"
+        );
     }
 
     #[test]

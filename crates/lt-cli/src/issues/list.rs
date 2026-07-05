@@ -20,6 +20,7 @@ fn lower(args: &IssueArgs, conn: &db::Connection) -> Result<IssuesVariables> {
     {
         let name = db::viewer(conn)?
             .ok_or_else(|| anyhow!("`--assignee me` needs a synced viewer; run `lt sync` first"))?
+            .user
             .name;
         filter.assignee = Some(AssigneeFilter::Exact(name));
     }

@@ -40,9 +40,11 @@ pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
         // is real (a real assignee from the dataset).
         db::set_viewer(
             &conn,
-            &lt_types::viewer::User {
-                id: assignee.id,
-                name: assignee.name,
+            &lt_types::viewer::Viewer {
+                user: lt_types::types::User {
+                    id: assignee.id,
+                    name: assignee.name,
+                },
                 organization: lt_types::viewer::Organization {
                     id: String::new().into(),
                     name: String::new(),

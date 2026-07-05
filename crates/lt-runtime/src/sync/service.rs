@@ -42,7 +42,7 @@ pub enum LoginEvent {
     /// Login succeeded. `viewer` is not optional: either you log in as a
     /// user or you don't -- a post-login identity-fetch failure is `Error`.
     Success {
-        viewer: viewer::User,
+        viewer: viewer::Viewer,
     },
     Error(String),
 }

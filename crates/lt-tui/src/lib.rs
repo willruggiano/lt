@@ -269,7 +269,7 @@ pub enum AuthStatus {
     /// The OAuth login flow is in flight; gates `L`.
     Authenticating,
     Authenticated {
-        viewer: viewer::User,
+        viewer: viewer::Viewer,
     },
     /// The sync layer reported no stored token.
     Unauthenticated,
@@ -284,7 +284,7 @@ impl AuthStatus {
     /// `assignee:me` resolution. `None` on every non-`Authenticated` state.
     pub fn viewer_name(&self) -> Option<&str> {
         match self {
-            AuthStatus::Authenticated { viewer } => Some(&viewer.name),
+            AuthStatus::Authenticated { viewer } => Some(&viewer.user.name),
             _ => None,
         }
     }
@@ -345,7 +345,7 @@ pub struct App {
     /// it is not owned by any one view (docs/design/operation-seam-adr.md,
     /// Amendments). `apply` routes a matching `Updated` into `auth` before
     /// falling through to the view stack.
-    viewer_sub: Subscription<Option<viewer::User>>,
+    viewer_sub: Subscription<Option<viewer::Viewer>>,
 
     /// The single consumer of the app event queue, drained once per frame.
     events_rx: mpsc::Receiver<AppEvent>,
@@ -378,7 +378,7 @@ impl App {
     fn new(
         list: ListView,
         runtime: Arc<lt_runtime::Runtime>,
-        viewer_sub: Subscription<Option<viewer::User>>,
+        viewer_sub: Subscription<Option<viewer::Viewer>>,
         events_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
         Self {
@@ -759,7 +759,7 @@ pub fn run(
     let list = ListView::open(
         ListQuery::new(launch.filter, launch.limit),
         &runtime,
-        viewer.as_ref().map(|v| v.name.as_str()),
+        viewer.as_ref().map(|v| v.user.name.as_str()),
     );
     let mut app = App::new(list, runtime, viewer_sub, events_rx);
 

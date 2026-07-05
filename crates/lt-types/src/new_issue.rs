@@ -66,7 +66,7 @@ pub struct NewIssueData {
     pub teams: Vec<Team>,
     pub states: Vec<WorkflowState>,
     pub members: Vec<User>,
-    pub viewer: Option<viewer::User>,
+    pub viewer: Option<viewer::Viewer>,
 }
 
 impl GraphqlOperation for NewIssueQuery {

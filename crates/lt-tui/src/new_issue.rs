@@ -338,14 +338,14 @@ fn build_issue_create_input(
 /// The assignee popup items: "Me (name)" first if known, then "Unassigned",
 /// then the remaining team members (excluding the viewer).
 pub(crate) fn build_assignee_items(
-    viewer: Option<&lt_types::viewer::User>,
+    viewer: Option<&lt_types::viewer::Viewer>,
     members: Vec<User>,
 ) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = Vec::new();
     if let Some(v) = viewer {
         items.push(PopupItem {
-            label: format!("Me ({})", v.name),
-            id: Some(v.id.inner().to_string()),
+            label: format!("Me ({})", v.user.name),
+            id: Some(v.user.id.inner().to_string()),
         });
     }
     items.push(PopupItem {
@@ -354,7 +354,7 @@ pub(crate) fn build_assignee_items(
     });
     for m in members {
         // Skip the viewer entry since it is already at the top.
-        if viewer.is_some_and(|v| v.id.inner() == m.id.inner()) {
+        if viewer.is_some_and(|v| v.user.id.inner() == m.id.inner()) {
             continue;
         }
         items.push(m.into());

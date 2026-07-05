@@ -142,15 +142,10 @@ pub(crate) fn upsert_issue_tx(
         issue.team.id.inner(),
         Some(&issue.team.name),
     )?;
-    // Every issue upsert knows its state's team, so the team-scoped upsert
-    // back-fills `team_id` for free; `position` stays whatever a targeted
-    // team sync last recorded (`sql::UPSERT_WORKFLOW_STATE_SCOPED`).
-    crate::db::teams::upsert_workflow_state_team_only(
-        tx,
-        issue.state.id.inner(),
-        &issue.state.name,
-        issue.team.id.inner(),
-    )?;
+    // Every issue upsert knows its state's team and its real position
+    // (`WorkflowState.position: Float!` on the wire), so the team-scoped
+    // upsert back-fills `team_id` for free.
+    crate::db::teams::upsert_team_state(tx, issue.team.id.inner(), &issue.state)?;
     if let Some(a) = &issue.assignee {
         upsert_named_entity(tx, EntityTable::Users, a.id.inner(), Some(&a.name))?;
     }
@@ -210,12 +205,14 @@ struct OverlayApply {
     field: String,
     value: Option<String>,
     state_name: Option<String>,
+    state_position: Option<f64>,
     user_name: Option<String>,
 }
 
-/// Load every pending overlay row, resolving the state/assignee name through
-/// the entity tables in one query. The set is small (only un-synced edits), so
-/// it is read whole and grouped in memory rather than filtered per issue list.
+/// Load every pending overlay row, resolving the state's name/position and the
+/// assignee's name through the entity tables in one query. The set is small
+/// (only un-synced edits), so it is read whole and grouped in memory rather
+/// than filtered per issue list.
 fn load_overlays(conn: &Connection) -> Result<HashMap<String, Vec<OverlayApply>>> {
     let mut stmt =
         sql::prepare(conn, sql::LOAD_OVERLAYS).context("failed to prepare overlay merge query")?;
@@ -227,7 +224,8 @@ fn load_overlays(conn: &Connection) -> Result<HashMap<String, Vec<OverlayApply>>
                     field: r.get(1)?,
                     value: r.get(2)?,
                     state_name: r.get(3)?,
-                    user_name: r.get(4)?,
+                    state_position: r.get(4)?,
+                    user_name: r.get(5)?,
                 },
             ))
         })
@@ -259,7 +257,7 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
                         issue.state = types::WorkflowState {
                             id: id.clone().into(),
                             name: o.state_name.clone().unwrap_or_default(),
-                            position: None,
+                            position: o.state_position.unwrap_or_default(),
                         };
                     }
                 }
@@ -552,7 +550,7 @@ mod tests {
             state: types::WorkflowState {
                 id: state.into(),
                 name: state.to_string(),
-                position: None,
+                position: 1.0,
             },
             assignee: assignee.map(|n| types::User {
                 id: n.into(),
@@ -600,7 +598,7 @@ mod tests {
             state: types::WorkflowState {
                 id: "s1".into(),
                 name: "In Progress".to_string(),
-                position: None,
+                position: 1.0,
             },
             assignee: Some(types::User {
                 id: "u1".into(),
@@ -895,7 +893,7 @@ mod tests {
             &types::WorkflowState {
                 id: "s-done".into(),
                 name: "Done".to_string(),
-                position: None,
+                position: 2.0,
             },
         )
         .unwrap();
@@ -936,6 +934,7 @@ mod tests {
         .nodes;
         let issue = issues.iter().find(|i| i.id.inner() == "1").unwrap();
         assert_eq!(issue.state.name, "Done");
+        assert_eq!(issue.state.position.to_bits(), 2.0_f64.to_bits());
         assert!(issue.assignee.is_none());
 
         // The base row is untouched by the overlay.
@@ -963,7 +962,7 @@ mod tests {
         updated.state = types::WorkflowState {
             id: "s2".into(),
             name: "Canceled".to_string(),
-            position: None,
+            position: 3.0,
         };
         upsert_issues(&conn, &[updated]).unwrap();
 

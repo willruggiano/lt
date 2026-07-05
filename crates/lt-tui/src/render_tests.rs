@@ -25,9 +25,11 @@ fn draw(app: &mut App, w: u16, h: u16) -> String {
 /// A stable `Authenticated` fixture for a deterministic header identity.
 fn authenticated(name: &str, org: &str) -> AuthStatus {
     AuthStatus::Authenticated {
-        viewer: viewer::User {
-            id: "viewer-1".into(),
-            name: name.to_string(),
+        viewer: viewer::Viewer {
+            user: User {
+                id: "viewer-1".into(),
+                name: name.to_string(),
+            },
             organization: viewer::Organization {
                 id: "org-1".into(),
                 name: org.to_string(),
@@ -219,9 +221,11 @@ fn new_issue_field_cycles_both_directions() {
 
 #[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
-    let viewer = viewer::User {
-        id: "v".into(),
-        name: "Vic".to_string(),
+    let viewer = viewer::Viewer {
+        user: User {
+            id: "v".into(),
+            name: "Vic".to_string(),
+        },
         organization: viewer::Organization {
             id: "org-1".into(),
             name: "Acme".to_string(),
