@@ -1,17 +1,19 @@
 //! `lt-runtime`: the composition layer between the local store (`lt-storage`)
 //! and the Linear API edge (`lt-upstream`). It owns the sync engine, the
-//! [`SyncService`](sync::service::SyncService) port and its [`LinearSyncService`]
-//! adapter, the generic [`load`]/[`refresh`] operation drivers, and the CLI
-//! command orchestration, and re-exports the store read/write facade so
-//! `lt-tui`/`lt-cli` depend on this crate alone rather than reaching across
-//! the seam.
+//! concrete [`Runtime`] (subscriptions, entity-keyed propagation, writes,
+//! sync/login scheduling), the generic [`load`]/[`refresh`] operation
+//! drivers, and the CLI command orchestration, and re-exports the store
+//! read/write facade so `lt-tui`/`lt-cli` depend on this crate alone rather
+//! than reaching across the seam.
 
 pub mod ops;
+pub mod subscription;
 pub mod sync;
 
-mod adapter;
-pub use adapter::LinearSyncService;
+mod runtime;
 pub use ops::{load, refresh};
+pub use runtime::{HttpTransportSource, Runtime, TransportSource};
+pub use subscription::{SubId, Subscription};
 
 // Command orchestration for the CLI.
 pub mod auth;

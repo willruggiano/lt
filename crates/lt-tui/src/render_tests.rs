@@ -105,7 +105,9 @@ fn apply_fetched_selection_resets_or_clamps() {
 #[test]
 fn detail_scroll_saturates() {
     let issue = sim_issues(0, 1)[0].clone();
-    let mut detail = build_cached_detail(&issue, Vec::new());
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let runtime = test_runtime(lt_runtime::db::Database::memory().unwrap(), tx);
+    let mut detail = build_cached_detail(&issue, &runtime);
     detail.scroll(ScrollMotion::Down, 10);
     assert_eq!(detail.scroll, 1);
     detail.scroll(ScrollMotion::Up, 10);
@@ -135,6 +137,7 @@ fn popup_move_clamps_and_cancel_resets_stack() {
         items: vec![item("a", None), item("b", None), item("c", None)],
         selected: 0,
         anchor: Some(ratatui::layout::Rect::new(0, 0, 1, 1)),
+        sub: None,
     }));
 
     app.dispatch_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -161,7 +164,7 @@ fn close_detail_clears_pane_state() {
     // input's narrower Esc (cancel the draft) wins first.
     let mut app = app_with_issues(0, 1).unwrap();
     let issue = app.list_mut().issues[0].clone();
-    let mut detail = build_cached_detail(&issue, Vec::new());
+    let mut detail = build_cached_detail(&issue, &app.runtime);
     detail.scroll = 5;
     detail.comment_input = Some("draft".to_string());
     app.views.push(View::Detail(Box::new(detail)));
@@ -270,10 +273,8 @@ fn empty_list() {
 fn detail_overlay() {
     let mut app = app_with_issues(0, 12).unwrap();
     let issue = app.list_mut().issues[0].clone();
-    app.views.push(View::Detail(Box::new(build_cached_detail(
-        &issue,
-        Vec::new(),
-    ))));
+    let detail = build_cached_detail(&issue, &app.runtime);
+    app.views.push(View::Detail(Box::new(detail)));
     insta::assert_snapshot!(draw(&mut app, 100, 24));
 }
 
@@ -288,6 +289,7 @@ fn priority_popup() {
         items: priority_popup_items(),
         selected: 1,
         anchor: None,
+        sub: None,
     }));
     insta::assert_snapshot!(draw(&mut app, 100, 20));
 }
@@ -321,10 +323,8 @@ fn pending_chord_indicator_shows_at_list_top() {
 fn pending_chord_indicator_shows_over_detail_view() {
     let mut app = app_with_issues(0, 3).unwrap();
     let issue = app.list_mut().issues[0].clone();
-    app.views.push(View::Detail(Box::new(build_cached_detail(
-        &issue,
-        Vec::new(),
-    ))));
+    let detail = build_cached_detail(&issue, &app.runtime);
+    app.views.push(View::Detail(Box::new(detail)));
     app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
     assert!(app.pending_key.is_some());
     let out = draw(&mut app, 80, 10);
@@ -344,30 +344,25 @@ fn help_popup() {
 #[test]
 fn new_issue_modal() {
     let mut app = app_with_issues(0, 12).unwrap();
-    app.views.push(View::NewIssue(NewIssueModal {
-        focused_field: NewIssueField::Title,
-        title: TextInput::from("Fix the renderer".to_string()),
-        description: "Some description.".to_string(),
-        teams: vec![PopupItem {
-            label: "Engineering".to_string(),
-            id: Some("ENG".to_string()),
-        }],
-        team_selected: 0,
-        priorities: priority_popup_items(),
-        priority_selected: 0,
-        states: vec![PopupItem {
-            label: "Todo".to_string(),
-            id: Some("s1".to_string()),
-        }],
-        state_selected: 0,
-        assignees: vec![PopupItem {
-            label: "Ada Lovelace".to_string(),
-            id: Some("u1".to_string()),
-        }],
-        assignee_selected: 0,
-        loading: false,
-        error: String::new(),
-        watched_team_id: Some("ENG".to_string()),
-    }));
+    let mut modal = test_new_issue_modal(&app.runtime);
+    modal.focused_field = NewIssueField::Title;
+    modal.title = TextInput::from("Fix the renderer".to_string());
+    modal.description = "Some description.".to_string();
+    modal.teams = vec![PopupItem {
+        label: "Engineering".to_string(),
+        id: Some("ENG".to_string()),
+    }];
+    modal.team_selected = 0;
+    modal.priorities = priority_popup_items();
+    modal.states = vec![PopupItem {
+        label: "Todo".to_string(),
+        id: Some("s1".to_string()),
+    }];
+    modal.assignees = vec![PopupItem {
+        label: "Ada Lovelace".to_string(),
+        id: Some("u1".to_string()),
+    }];
+    modal.loading = false;
+    app.views.push(View::NewIssue(modal));
     insta::assert_snapshot!(draw(&mut app, 100, 30));
 }

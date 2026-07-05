@@ -1,8 +1,9 @@
 use anyhow::Result;
 use lt_storage::db;
+use lt_storage::db::EntityKey;
 use lt_types::issues::{IssueFilter, IssueSort, IssuesVariables};
 use lt_types::query::SortField;
-use lt_upstream::client::HttpTransport;
+use lt_upstream::client::GraphqlTransport;
 
 /// The variables for one page of the delta fetch: issues updated on or after
 /// `since` (an RFC3339 timestamp). Request all states including
@@ -23,31 +24,33 @@ fn variables(since: &str, after: Option<&str>) -> IssuesVariables {
     }
 }
 
-/// Run incremental (delta) sync.
+/// Run incremental (delta) sync over `conn`, using `transport` for every
+/// request.
 ///
 /// - If no `last_synced_at` is recorded, delegates to `sync full`.
 /// - Otherwise fetches issues where updatedAt > `last_synced_at`, upserts them,
 ///   and updates `last_synced_at`.
-pub fn run() -> Result<()> {
-    let conn = db::open_db(db::db_path()?)?;
-
-    let last_synced_at = db::get_meta(&conn, "last_synced_at")?;
+///
+/// Returns the union of entity keys the sync touched
+/// (docs/design/operation-seam-adr.md, "Decision 5").
+pub fn run(
+    conn: &rusqlite::Connection,
+    transport: &dyn GraphqlTransport,
+) -> Result<Vec<EntityKey>> {
+    let last_synced_at = db::get_meta(conn, "last_synced_at")?;
 
     // No previous sync -- fall back to full sync.
     let Some(since) = last_synced_at else {
-        return super::full::run();
+        return super::full::run(conn, transport);
     };
-
-    let token = lt_upstream::auth::refresh::load_or_refresh_token()?;
-    let transport = HttpTransport::new(token.access_token);
 
     // Drain queued local mutations first so the base reflects acked edits before
     // the delta fetch overwrites it.
-    super::drain::drain(&conn, &transport)?;
+    super::drain::drain(conn, transport)?;
     // Persist the viewer so cached reads can resolve `me` offline.
-    super::persist_viewer(&conn, &transport)?;
+    super::persist_viewer(conn, transport)?;
 
-    super::sync_pages(&conn, &transport, |after| variables(&since, after))
+    super::sync_pages(conn, transport, |after| variables(&since, after))
 }
 
 #[cfg(test)]

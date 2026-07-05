@@ -62,7 +62,8 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
             // persists the viewer identity that `resolve_assignee` reads below.
             info!("Cache empty -- running full sync...");
             drop(conn);
-            lt_runtime::sync::full::run()?;
+            let (sync_conn, transport) = lt_runtime::sync::open_production()?;
+            lt_runtime::sync::full::run(&sync_conn, transport.as_ref())?;
             // Re-open after sync.
             let conn2 = db::open_db(db::db_path()?)?;
             let vars = lower(args, &conn2)?;
@@ -89,7 +90,11 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
                 print_table(out, &page.nodes, &note)?;
 
                 std::thread::spawn(|| {
-                    if let Err(e) = lt_runtime::sync::delta::run() {
+                    let result =
+                        lt_runtime::sync::open_production().and_then(|(conn, transport)| {
+                            lt_runtime::sync::delta::run(&conn, transport.as_ref())
+                        });
+                    if let Err(e) = result {
                         error!("background sync error: {}", e);
                     }
                 });

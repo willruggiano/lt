@@ -218,8 +218,8 @@ impl Read for TeamsQuery {
         query_teams(conn)
     }
 
-    fn reads(_vars: &Self::Variables, key: &EntityKey) -> bool {
-        matches!(key, EntityKey::Teams)
+    fn reads(_vars: &Self::Variables) -> Vec<EntityKey> {
+        vec![EntityKey::Teams]
     }
 }
 
@@ -239,8 +239,10 @@ impl Read for TeamStatesQuery {
         query_team_states_with_position(conn, &vars.team_id)
     }
 
-    fn reads(vars: &Self::Variables, key: &EntityKey) -> bool {
-        matches!(key, EntityKey::WorkflowStates { team_id } if team_id == &vars.team_id)
+    fn reads(vars: &Self::Variables) -> Vec<EntityKey> {
+        vec![EntityKey::WorkflowStates {
+            team_id: vars.team_id.clone(),
+        }]
     }
 }
 
@@ -267,8 +269,10 @@ impl Read for TeamMembersQuery {
         query_team_members(conn, &vars.team_id)
     }
 
-    fn reads(vars: &Self::Variables, key: &EntityKey) -> bool {
-        matches!(key, EntityKey::TeamMemberships { team_id } if team_id == &vars.team_id)
+    fn reads(vars: &Self::Variables) -> Vec<EntityKey> {
+        vec![EntityKey::TeamMemberships {
+            team_id: vars.team_id.clone(),
+        }]
     }
 }
 
@@ -458,20 +462,8 @@ mod tests {
     }
 
     #[test]
-    fn teams_query_reads_matches_only_the_teams_key() {
-        let cases = [
-            (EntityKey::Teams, true),
-            (EntityKey::Issue, false),
-            (
-                EntityKey::WorkflowStates {
-                    team_id: "t1".to_string(),
-                },
-                false,
-            ),
-        ];
-        for (key, expected) in cases {
-            assert_eq!(TeamsQuery::reads(&(), &key), expected);
-        }
+    fn teams_query_reads_only_the_teams_key() {
+        assert_eq!(TeamsQuery::reads(&()), vec![EntityKey::Teams]);
     }
 
     #[test]
@@ -506,23 +498,16 @@ mod tests {
     }
 
     #[test]
-    fn team_states_query_reads_matches_the_team_id_in_variables() {
+    fn team_states_query_reads_the_team_id_in_variables() {
         let vars = StatesTeamVariables {
             team_id: "t1".to_string(),
         };
-        assert!(TeamStatesQuery::reads(
-            &vars,
-            &EntityKey::WorkflowStates {
+        assert_eq!(
+            TeamStatesQuery::reads(&vars),
+            vec![EntityKey::WorkflowStates {
                 team_id: "t1".to_string()
-            }
-        ));
-        assert!(!TeamStatesQuery::reads(
-            &vars,
-            &EntityKey::WorkflowStates {
-                team_id: "t2".to_string()
-            }
-        ));
-        assert!(!TeamStatesQuery::reads(&vars, &EntityKey::Teams));
+            }]
+        );
     }
 
     #[test]
@@ -548,22 +533,16 @@ mod tests {
     }
 
     #[test]
-    fn team_members_query_reads_matches_the_team_id_in_variables() {
+    fn team_members_query_reads_the_team_id_in_variables() {
         let vars = MembersTeamVariables {
             team_id: "t1".to_string(),
         };
-        assert!(TeamMembersQuery::reads(
-            &vars,
-            &EntityKey::TeamMemberships {
+        assert_eq!(
+            TeamMembersQuery::reads(&vars),
+            vec![EntityKey::TeamMemberships {
                 team_id: "t1".to_string()
-            }
-        ));
-        assert!(!TeamMembersQuery::reads(
-            &vars,
-            &EntityKey::TeamMemberships {
-                team_id: "t2".to_string()
-            }
-        ));
+            }]
+        );
     }
 
     #[test]

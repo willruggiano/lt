@@ -1,8 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::db::Database;
+use lt_runtime::{Runtime, SubId, Subscription};
+use lt_types::comments::{CommentConnection, CommentsQuery, CommentsVariables};
 use lt_types::types::Issue;
 
-use super::{App, Keymap, ScrollMotion, StateCtx, StateEvent, Unbound, View, keymap};
+use super::{App, Keymap, ScrollMotion, Unbound, View, keymap};
 
 /// The detail pane's complete state, owned here rather than on `App`.
 pub struct DetailView {
@@ -16,37 +18,18 @@ pub struct DetailView {
     /// cursor is always at the end (same model as the new-issue description
     /// field).
     pub comment_input: Option<String>,
+    comments_sub: Subscription<CommentConnection>,
 }
 
 impl DetailView {
-    /// This pane's `StateEvent` subscriptions: `Comments{issue_id}` matching
-    /// its own issue re-reads the thread; `Issues` re-reads the issue itself.
-    pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
-        match ev {
-            StateEvent::Comments { issue_id } if issue_id == self.issue.id.inner() => {
-                match ctx
-                    .db
-                    .connect()
-                    .and_then(|conn| lt_runtime::db::query_comments(&conn, issue_id))
-                {
-                    Ok(comments) => self.comments = comments,
-                    Err(e) => {
-                        tracing::warn!(error = %e, issue_id, "detail pane: failed to re-read comments");
-                    }
-                }
-            }
-            StateEvent::Issues => {
-                match ctx.db.connect().and_then(|conn| {
-                    lt_runtime::db::query_issue_by_id(&conn, self.issue.id.inner())
-                }) {
-                    Ok(Some(fresh)) => self.issue = fresh,
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, issue_id = self.issue.id.inner(), "detail pane: failed to re-read issue");
-                    }
-                }
-            }
-            _ => {}
+    /// A matching subscription update re-reads the comment thread. The
+    /// issue/parent/children stay direct cache-first reads until the
+    /// composed detail operation (Task 4) exists.
+    pub(crate) fn apply_update(&mut self, id: SubId) {
+        if self.comments_sub.id() == id
+            && let Some(page) = self.comments_sub.take()
+        {
+            self.comments = page.nodes;
         }
     }
 
@@ -69,41 +52,36 @@ impl DetailView {
 
 impl App {
     /// Open the detail pane for the currently selected issue, populated
-    /// instantly from local data; the network re-read happens later.
+    /// instantly from local data; the comment thread subscribes live.
     pub(crate) fn open_detail(&mut self) {
         let Some(issue) = self.selected_issue().cloned() else {
             return;
         };
 
-        let cached_comments = self
-            .db
-            .connect()
-            .and_then(|conn| lt_runtime::db::query_comments(&conn, issue.id.inner()))
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, issue_id = issue.id.inner(), "detail pane: failed to load cached comments");
-                Vec::new()
-            });
-
-        let mut detail = build_cached_detail(&issue, cached_comments);
+        let mut detail = build_cached_detail(&issue, &self.runtime);
         populate_relations(&self.db, &mut detail, &issue);
 
         self.push_view(View::Detail(Box::new(detail)));
     }
 }
 
-/// Build a detail view from a list `Issue` plus its comments. Parent/children
-/// are left empty; `populate_relations` fills them in.
-pub(crate) fn build_cached_detail(
-    issue: &Issue,
-    cached_comments: Vec<lt_types::comments::Comment>,
-) -> DetailView {
+/// Build a detail view from a list `Issue`, subscribing its comment thread
+/// (cache-first: the subscription's synchronous initial read populates
+/// `comments`). Parent/children are left empty; `populate_relations` fills
+/// them in.
+pub(crate) fn build_cached_detail(issue: &Issue, runtime: &Runtime) -> DetailView {
+    let (comments_sub, page) = runtime.subscribe::<CommentsQuery>(CommentsVariables {
+        id: issue.id.inner().to_string(),
+        after: None,
+    });
     DetailView {
         issue: issue.clone(),
-        comments: cached_comments,
+        comments: page.nodes,
         parent: None,
         children: Vec::new(),
         scroll: 0,
         comment_input: None,
+        comments_sub,
     }
 }
 
@@ -236,7 +214,7 @@ fn submit_comment(app: &mut App, i: usize) {
     detail.comment_input = None;
 
     let input = lt_types::inputs::CommentCreateInput { issue_id, body };
-    if let Err(e) = app.service.create_comment(&input) {
+    if let Err(e) = app.runtime.create_comment(&input) {
         app.footer_msg = Some(format!("Failed to save comment: {e}"));
     }
 }

@@ -26,9 +26,10 @@ pub enum EntityKey {
 pub trait Read: GraphqlOperation {
     fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output>;
 
-    /// Does this operation's result depend on `key`? Over-approximation is
-    /// safe: a spurious re-read is an idempotent projection of current truth.
-    fn reads(vars: &Self::Variables, key: &EntityKey) -> bool;
+    /// The entity slices this operation's result depends on, concrete for
+    /// `vars`. Over-approximation is safe: a spurious re-read is an
+    /// idempotent projection of current truth.
+    fn reads(vars: &Self::Variables) -> Vec<EntityKey>;
 }
 
 /// Writing an operation's fetched output into the cache.

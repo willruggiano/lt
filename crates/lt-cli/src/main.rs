@@ -12,7 +12,6 @@ use std::sync::{Arc, mpsc};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use lt_runtime::sync::service::SyncService;
 
 #[derive(Parser)]
 #[command(name = "lt", about = "Linear TUI for terminal power users", version)]
@@ -69,12 +68,12 @@ enum Commands {
     },
 }
 
-/// Launch the TUI with the `lt-runtime`-backed sync service injected.
+/// Launch the TUI with the `lt-runtime`-backed `Runtime` injected.
 ///
 /// `lt-cli` owns both ends of the `AppEvent` channel: the sender feeds both
-/// the TUI's input thread and the service's `OnEvent` callback, so a
+/// the TUI's input thread and the runtime's `OnEvent` callback, so a
 /// same-thread write and a background sync/login outcome land on the same
-/// queue; the receiver drives `lt_tui::run`'s loop. The service's blocking
+/// queue; the receiver drives `lt_tui::run`'s loop. The runtime's blocking
 /// `run` loop is spawned on a detached, process-lifetime background thread
 /// before the TUI starts.
 fn run_tui(
@@ -95,13 +94,14 @@ fn run_tui(
             tracing::debug!("runtime event: TUI is gone");
         }
     });
-    let service = Arc::new(lt_runtime::LinearSyncService::new(
+    let runtime = Arc::new(lt_runtime::Runtime::new(
         lt_runtime::db::Database::File,
+        Box::new(lt_runtime::HttpTransportSource),
         on_event,
     ));
-    let sync_service = Arc::clone(&service);
-    std::thread::spawn(move || sync_service.run());
-    lt_tui::run(launch, service, tx, rx)
+    let sync_runtime = Arc::clone(&runtime);
+    std::thread::spawn(move || sync_runtime.run());
+    lt_tui::run(launch, runtime, tx, rx)
 }
 
 fn main() -> Result<()> {

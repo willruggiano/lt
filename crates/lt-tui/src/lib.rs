@@ -26,22 +26,19 @@ pub use detail::DetailView;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
 pub use list::{ListLaunch, ListQuery, ListView};
-#[cfg(all(test, feature = "sim"))]
-use lt_runtime::sync::service::IssueEdit;
 pub use lt_runtime::sync::service::RuntimeEvent;
-pub(crate) use lt_runtime::sync::service::StateEvent;
-use lt_runtime::sync::service::{LoginEvent, Scope, SyncEvent, SyncService};
-use lt_runtime::{Clock, search_query};
+use lt_runtime::sync::service::{LoginEvent, SyncEvent};
+use lt_runtime::{Clock, SubId, search_query};
 use lt_types::types::Issue;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use lt_types::types::priority_label_to_u8;
 use lt_types::viewer;
-#[cfg(all(test, feature = "sim"))]
-pub(crate) use new_issue::build_assignee_items;
 pub(crate) use new_issue::{NewIssueField, NewIssueModal};
+#[cfg(all(test, feature = "sim"))]
+pub(crate) use new_issue::{build_assignee_items, test_new_issue_modal};
 pub(crate) use popup::{
     HelpPopup, PopupItem, PopupKind, PopupView, SearchOverlay, poll_search_debounce,
-    priority_popup_items, state_items,
+    priority_popup_items,
 };
 use ratatui::Terminal;
 use ratatui::backend::Backend;
@@ -100,37 +97,17 @@ pub(crate) enum Unbound {
 }
 
 impl View {
-    /// `focused` is true iff this is the top of the stack; Search/Help have
-    /// no `StateEvent` dependencies.
-    fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
+    /// `focused` is true iff this is the top of the stack; Search/Help hold
+    /// no subscription. Each view checks internally whether `id` matches
+    /// one of its own subscriptions -- there is no separate declared-scope
+    /// registry to keep in sync.
+    fn apply_update(&mut self, ctx: &StateCtx, focused: bool, id: SubId) {
         match self {
-            View::List(list) => list.consume(ctx, focused, ev),
-            View::Detail(detail) => detail.consume(ctx, focused, ev),
-            View::Popup(popup) => popup.consume(ctx, focused, ev),
-            View::NewIssue(modal) => modal.consume(ctx, focused, ev),
+            View::List(list) => list.apply_update(focused, id),
+            View::Detail(detail) => detail.apply_update(id),
+            View::Popup(popup) => popup.apply_update(id),
+            View::NewIssue(modal) => modal.apply_update(ctx, id),
             View::Search(_) | View::Help(_) => {}
-        }
-    }
-
-    /// The scopes this view displays, derived from its current state.
-    fn scopes(&self) -> Vec<Scope> {
-        match self {
-            View::Detail(d) => vec![Scope::Comments {
-                issue_id: d.issue.id.inner().to_string(),
-            }],
-            View::Popup(p) => p
-                .team_id
-                .iter()
-                .map(|t| Scope::Team { team_id: t.clone() })
-                .collect(),
-            View::NewIssue(m) => {
-                let mut scopes = vec![Scope::Teams];
-                if let Some(team_id) = m.selected_team_id() {
-                    scopes.push(Scope::Team { team_id });
-                }
-                scopes
-            }
-            View::List(_) | View::Search(_) | View::Help(_) => Vec::new(),
         }
     }
 
@@ -336,82 +313,6 @@ pub struct Session {
     pub keyboard_enhanced: bool,
 }
 
-/// A recording, thread-free fake [`SyncService`] for render/loop tests.
-/// Write methods delegate to a real `LinearSyncService` sharing the test's
-/// in-memory database, so they really enqueue; everything else just records
-/// the call for assertions. `run` is a no-op.
-#[cfg(all(test, feature = "sim"))]
-struct RecordingSyncService {
-    inner: lt_runtime::LinearSyncService,
-    watched: std::sync::Mutex<Vec<Scope>>,
-    unwatched: std::sync::Mutex<Vec<Scope>>,
-    request_sync_calls: std::sync::atomic::AtomicUsize,
-    login_calls: std::sync::atomic::AtomicUsize,
-}
-
-#[cfg(all(test, feature = "sim"))]
-impl RecordingSyncService {
-    fn new(db: &lt_runtime::db::Database, tx: mpsc::Sender<AppEvent>) -> Result<Self> {
-        let on_event: lt_runtime::sync::service::OnEvent = Box::new(move |ev| {
-            // Test fixture: the receiving `App` outlives every send in these
-            // tests, so a disconnect is not expected; drop rather than assert.
-            drop(tx.send(AppEvent::Runtime(ev)));
-        });
-        Ok(Self {
-            inner: lt_runtime::LinearSyncService::new(db.share()?, on_event),
-            watched: std::sync::Mutex::new(Vec::new()),
-            unwatched: std::sync::Mutex::new(Vec::new()),
-            request_sync_calls: std::sync::atomic::AtomicUsize::new(0),
-            login_calls: std::sync::atomic::AtomicUsize::new(0),
-        })
-    }
-}
-
-#[cfg(all(test, feature = "sim"))]
-impl SyncService for RecordingSyncService {
-    fn run(&self) {}
-
-    fn watch(&self, scope: Scope) {
-        self.watched
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(scope);
-    }
-
-    fn unwatch(&self, scope: Scope) {
-        self.unwatched
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(scope);
-    }
-
-    fn request_sync(&self) {
-        self.request_sync_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn login(&self) {
-        self.login_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn fetch_viewer(&self) -> Option<lt_types::viewer::User> {
-        None
-    }
-
-    fn create_comment(&self, input: &lt_types::inputs::CommentCreateInput) -> Result<()> {
-        self.inner.create_comment(input)
-    }
-
-    fn edit_issue(&self, issue_id: &str, edit: IssueEdit) -> Result<()> {
-        self.inner.edit_issue(issue_id, edit)
-    }
-
-    fn create_issue(&self, input: &lt_types::inputs::IssueCreateInput) -> Result<String> {
-        self.inner.create_issue(input)
-    }
-}
-
 pub struct App {
     /// The view stack, bottom to top; the top is focused. Never empty:
     /// `views[0]` is always the base view (today, the issue list).
@@ -446,12 +347,33 @@ pub struct App {
     /// clock so time-derived labels are deterministic.
     pub clock: Clock,
 
-    /// The sync/API edge. A trait object so the TUI has no direct
-    /// dependency on the sync implementation.
-    pub service: Arc<dyn SyncService>,
+    /// The data runtime: subscriptions, entity-keyed propagation, writes,
+    /// and sync/login scheduling.
+    pub runtime: Arc<lt_runtime::Runtime>,
 
     /// The single consumer of the app event queue, drained once per frame.
     events_rx: mpsc::Receiver<AppEvent>,
+}
+
+/// Wire a fresh [`lt_runtime::Runtime`] over `db`, its `OnEvent` callback
+/// feeding `tx`. Tests never start `run()`: initial reads and write
+/// propagation are synchronous, so loop tests stay thread-free while
+/// exercising the real runtime.
+#[cfg(all(test, feature = "sim"))]
+fn test_runtime(
+    db: lt_runtime::db::Database,
+    tx: mpsc::Sender<AppEvent>,
+) -> Arc<lt_runtime::Runtime> {
+    let on_event: lt_runtime::sync::service::OnEvent = Box::new(move |ev| {
+        // Test fixture: the receiving `App` outlives every send in these
+        // tests, so a disconnect is not expected; drop rather than assert.
+        drop(tx.send(AppEvent::Runtime(ev)));
+    });
+    Arc::new(lt_runtime::Runtime::new(
+        db,
+        Box::new(lt_runtime::HttpTransportSource),
+        on_event,
+    ))
 }
 
 impl App {
@@ -460,7 +382,7 @@ impl App {
     fn new(
         list: ListView,
         db: lt_runtime::db::Database,
-        service: Arc<dyn SyncService>,
+        runtime: Arc<lt_runtime::Runtime>,
         events_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
         Self {
@@ -477,50 +399,57 @@ impl App {
             last_esc_time: None,
             db,
             clock: Clock::System,
-            service,
+            runtime,
             events_rx,
         }
     }
 
     /// An `App` for rendering tests: a throwaway in-memory database and
-    /// event channel, backed by a [`RecordingSyncService`]. Seeds `issues`
-    /// directly rather than through `ListView::open`, since the memory db is
-    /// still empty at this point. Fallible (in-memory SQLite setup).
+    /// event channel, backed by a real [`lt_runtime::Runtime`] that never
+    /// starts `run()`. Seeds `issues` directly rather than through
+    /// `ListView::open`, since the memory db is still empty at this point.
+    /// Fallible (in-memory SQLite setup).
     #[cfg(all(test, feature = "sim"))]
     fn for_test(issues: Vec<Issue>) -> Result<Self> {
         let db = lt_runtime::db::Database::memory()?;
         let (tx, rx) = mpsc::channel();
-        let service = RecordingSyncService::new(&db, tx)?;
+        let runtime = test_runtime(db.share()?, tx);
         let query = ListQuery::new(
             search_query::parse_query_ast(search_query::DEFAULT_QUERY),
             50,
         );
-        let list = ListView::new(issues, query);
-        Ok(Self::new(list, db, Arc::new(service), rx))
+        // The memory db is still empty at this point, so the subscription's
+        // own initial read is discarded in favor of the given fixture rows.
+        let (sub, _) =
+            runtime.subscribe::<lt_types::issues::IssuesQuery>(lt_types::issues::IssuesVariables {
+                filter: None,
+                sort: None,
+                first: None,
+                after: None,
+            });
+        let list = ListView::new(issues, query, sub);
+        Ok(Self::new(list, db, runtime, rx))
     }
 
-    /// Swap in a fresh database, shared with a fresh [`RecordingSyncService`]
-    /// and event channel, so `db`/`service` agree on the same rows.
+    /// Swap in a fresh database, shared with a fresh [`lt_runtime::Runtime`]
+    /// and event channel, so `db`/`runtime` agree on the same rows.
     #[cfg(all(test, feature = "sim"))]
     fn install_db(&mut self, db: lt_runtime::db::Database) -> Result<()> {
-        self.install_recording_service(&db)?;
+        self.install_runtime(db.share()?);
         self.db = db;
         Ok(())
     }
 
-    /// Swap in a fresh `RecordingSyncService` (and its paired event channel)
-    /// sharing `db`, returning it so callers can assert on its recorded
-    /// calls.
+    /// Swap in a fresh `Runtime` (and its paired event channel) sharing
+    /// `db`, returning it so callers can drive its write methods and assert
+    /// on the resulting events/reads.
     #[cfg(all(test, feature = "sim"))]
-    fn install_recording_service(
-        &mut self,
-        db: &lt_runtime::db::Database,
-    ) -> Result<Arc<RecordingSyncService>> {
+    fn install_runtime(&mut self, db: lt_runtime::db::Database) -> Arc<lt_runtime::Runtime> {
         let (tx, rx) = mpsc::channel();
-        let service = Arc::new(RecordingSyncService::new(db, tx)?);
-        self.service = service.clone();
+        let runtime = test_runtime(db, tx);
+        self.runtime = runtime.clone();
         self.events_rx = rx;
-        Ok(service)
+        runtime
     }
 
     /// The base view (`views[0]`), always present.
@@ -550,45 +479,52 @@ impl App {
         }
     }
 
-    /// Push a view, watching the scopes it declares.
+    /// Push a view. RAII replaces the old watch/unwatch bookkeeping: a
+    /// pushed view's subscription(s) are already live from its own
+    /// construction, and dropping the view retracts them.
     fn push_view(&mut self, view: View) {
-        for scope in view.scopes() {
-            self.service.watch(scope);
-        }
         self.views.push(view);
     }
 
-    /// Pop the focused view, unwatching its scopes. The stack is never
-    /// empty: popping the base resets it to the default instead.
+    /// Pop the focused view. The stack is never empty: popping the base
+    /// resets it to the default instead. If List regains focus, it picks up
+    /// whatever its subscription accumulated while unfocused.
     fn pop_view(&mut self) {
         if self.views.len() > 1 {
             self.close_view_at(self.views.len() - 1);
         } else {
             self.reset_base_view();
         }
+        self.resume_list_focus();
     }
 
-    /// Remove the view at `i`, unwatching the scopes it declared, without
-    /// disturbing whatever else is on the stack.
+    /// Remove the view at `i` without disturbing whatever else is on the
+    /// stack; dropping it retracts its subscription(s).
     fn close_view_at(&mut self, i: usize) {
         if i < self.views.len() {
-            let view = self.views.remove(i);
-            for scope in view.scopes() {
-                self.service.unwatch(scope);
-            }
+            self.views.remove(i);
+        }
+        self.resume_list_focus();
+    }
+
+    /// If the base list is now the focused (only) view, replay whatever its
+    /// subscription accumulated while an overlay had focus.
+    fn resume_list_focus(&mut self) {
+        if self.views.len() == 1
+            && let View::List(list) = &mut self.views[0]
+        {
+            list.resume_focus();
         }
     }
 
     /// Full reset to the state the TUI was launched with: sort, filters,
     /// and search query.
     fn reset_base_view(&mut self) {
-        let ctx = StateCtx {
-            db: &self.db,
-            viewer_name: self.auth.viewer_name(),
-        };
+        let viewer_name = self.auth.viewer_name().map(str::to_string);
+        let runtime = self.runtime.clone();
         if let Some(View::List(list)) = self.views.first_mut() {
             list.query.reset();
-            list.refetch(&ctx, true);
+            list.resubscribe(&runtime, viewer_name.as_deref(), true);
         }
         self.last_esc_time = None;
     }
@@ -596,15 +532,13 @@ impl App {
     /// `r`: an immediate re-read plus a sync request. Pressed mid-cycle,
     /// this coalesces into a follow-up sync rather than being ignored.
     fn refresh(&mut self) {
-        let ctx = StateCtx {
-            db: &self.db,
-            viewer_name: self.auth.viewer_name(),
-        };
-        // immediate re-read for responsiveness
+        let viewer_name = self.auth.viewer_name().map(str::to_string);
+        let runtime = self.runtime.clone();
+        // immediate resubscribe for responsiveness
         if let Some(View::List(list)) = self.views.first_mut() {
-            list.refetch(&ctx, false);
+            list.resubscribe(&runtime, viewer_name.as_deref(), false);
         }
-        self.service.request_sync();
+        self.runtime.request_sync();
     }
 
     /// Downcast the view at `i` via `extract`.
@@ -628,12 +562,10 @@ impl App {
         } else {
             // First esc: standard refresh.
             self.last_esc_time = Some(now);
-            let ctx = StateCtx {
-                db: &self.db,
-                viewer_name: self.auth.viewer_name(),
-            };
+            let viewer_name = self.auth.viewer_name().map(str::to_string);
+            let runtime = self.runtime.clone();
             if let Some(View::List(list)) = self.views.first_mut() {
-                list.refetch(&ctx, true);
+                list.resubscribe(&runtime, viewer_name.as_deref(), true);
             }
         }
     }
@@ -664,7 +596,7 @@ impl App {
     fn apply(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.dispatch_key(key),
-            AppEvent::Runtime(RuntimeEvent::State(ev)) => self.route_state_event(&ev),
+            AppEvent::Runtime(RuntimeEvent::Updated(id)) => self.route_update(id),
             AppEvent::Runtime(RuntimeEvent::Sync(ev)) => self.consume_sync_event(ev),
             AppEvent::Runtime(RuntimeEvent::Login(ev)) => self.consume_login_event(ev),
         }
@@ -741,16 +673,18 @@ impl App {
         }
     }
 
-    /// Route a state invalidation down the stack, top first (order is
+    /// Route a subscription update down the stack, top first (order is
     /// semantically irrelevant; chosen for coherence with the key cascade).
-    fn route_state_event(&mut self, ev: &StateEvent) {
+    /// Exactly the view holding the matching subscription (if any) acts;
+    /// every other view's internal id check is a no-op.
+    fn route_update(&mut self, id: SubId) {
         let ctx = StateCtx {
             db: &self.db,
             viewer_name: self.auth.viewer_name(),
         };
         let len = self.views.len();
         for (i, view) in self.views.iter_mut().enumerate().rev() {
-            view.consume(&ctx, i + 1 == len, ev);
+            view.apply_update(&ctx, i + 1 == len, id);
         }
     }
 
@@ -825,25 +759,25 @@ impl App {
 
 pub fn run(
     launch: ListLaunch,
-    service: Arc<dyn SyncService>,
+    runtime: Arc<lt_runtime::Runtime>,
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
     let db = lt_runtime::db::Database::File;
 
-    // Fetch viewer identity before `service` moves into `App::new` (a
+    // Fetch viewer identity before `runtime` moves into `App::new` (a
     // shared read through the `Arc`, so ownership either order is fine).
-    let viewer = service.fetch_viewer();
+    let viewer = runtime.fetch_viewer();
 
     // The query defines the view's initial data (local-first UX): `open`
     // warns and starts empty on a failed/missing db read, same as every
-    // later refetch.
-    let ctx = StateCtx {
-        db: &db,
-        viewer_name: viewer.as_ref().map(|v| v.name.as_str()),
-    };
-    let list = ListView::open(ListQuery::new(launch.filter, launch.limit), &ctx);
-    let mut app = App::new(list, db, service, events_rx);
+    // later resubscribe.
+    let list = ListView::open(
+        ListQuery::new(launch.filter, launch.limit),
+        &runtime,
+        viewer.as_ref().map(|v| v.name.as_str()),
+    );
+    let mut app = App::new(list, db, runtime, events_rx);
 
     app.auth = match viewer {
         Some(viewer) => AuthStatus::Authenticated { viewer },

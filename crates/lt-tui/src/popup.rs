@@ -1,13 +1,16 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use lt_runtime::db::Connection;
-use lt_runtime::search_query;
-use lt_types::issues::{IssueFilter, IssueSort, IssuesVariables};
+use lt_runtime::{SubId, Subscription, search_query};
+use lt_types::issues::{IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
+use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
+use lt_types::states::{
+    TeamStatesQuery, TeamVariables as StatesTeamVariables, WorkflowStateWithPosition,
+};
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
-use super::{App, Keymap, ScrollMotion, StateCtx, StateEvent, TextInput, Unbound, View, keymap};
+use super::{App, Keymap, ScrollMotion, TextInput, Unbound, View, keymap};
 
 /// Identifies which field a popup is editing.
 #[derive(Clone)]
@@ -44,6 +47,15 @@ impl From<lt_types::types::WorkflowState> for PopupItem {
     }
 }
 
+impl From<WorkflowStateWithPosition> for PopupItem {
+    fn from(state: WorkflowStateWithPosition) -> Self {
+        Self {
+            label: state.name,
+            id: Some(state.id.into_inner()),
+        }
+    }
+}
+
 impl From<lt_types::types::User> for PopupItem {
     fn from(user: lt_types::types::User) -> Self {
         Self {
@@ -53,6 +65,14 @@ impl From<lt_types::types::User> for PopupItem {
     }
 }
 
+/// The state/assignee popups' live team-scoped subscription: the two kinds
+/// read different operations, so the slot is an enum over them rather than
+/// one generic field. `None` for the static priority popup.
+pub(crate) enum PopupSub {
+    States(Subscription<Vec<WorkflowStateWithPosition>>),
+    Members(Subscription<Vec<lt_types::types::User>>),
+}
+
 /// State/priority/assignee picker: the popup's items plus the target
 /// captured at open.
 pub struct PopupView {
@@ -60,14 +80,15 @@ pub struct PopupView {
     /// Target issue id, captured at open; confirm no longer depends on the
     /// list selection being unchanged.
     pub issue_id: String,
-    /// The issue's team -- the scope key for the `Team{team_id}` refresh
-    /// (state and assignee popups; `None` for the static priority popup).
+    /// The issue's team -- kept for display/consume-guard purposes (state
+    /// and assignee popups; `None` for the static priority popup).
     pub team_id: Option<String>,
     pub items: Vec<PopupItem>,
     pub selected: usize,
     /// Written by the renderer when this popup sits directly on the base
     /// table; `None` => `render_popup` centers.
     pub anchor: Option<ratatui::layout::Rect>,
+    pub(crate) sub: Option<PopupSub>,
 }
 
 /// Linear priority options as popup items.
@@ -208,10 +229,10 @@ impl SearchOverlay {
     }
 
     /// Run the structured search query and refresh results, capped to
-    /// `viewport_rows` so the overlay never grows taller than the list.
-    /// Reads through `db` rather than resolving `db_path()` directly, so
-    /// tests with an in-memory database are honored.
-    pub fn run_search(&mut self, db: &lt_runtime::db::Database, viewport_rows: u16) {
+    /// `viewport_rows` so the overlay never grows taller than the list. A
+    /// one-shot `load` over the runtime -- the search overlay's debounced
+    /// preview never registers a subscription.
+    pub fn run_search(&mut self, runtime: &lt_runtime::Runtime, viewport_rows: u16) {
         self.fts_unavailable = false;
         self.has_searched = true;
         let raw = self.query.value.trim().to_string();
@@ -243,10 +264,7 @@ impl SearchOverlay {
             first: i32::try_from(limit).ok(),
             after: None,
         };
-        match db
-            .connect()
-            .and_then(|conn| lt_runtime::db::query_issues(&conn, &vars))
-        {
+        match runtime.load::<IssuesQuery>(&vars) {
             Ok(page) => {
                 self.results = page.nodes;
                 if self.results.is_empty() {
@@ -285,28 +303,13 @@ impl SearchOverlay {
 // Popup open/move/confirm methods
 // ---------------------------------------------------------------------------
 
-/// A team's workflow states.
-pub(crate) fn state_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
-    lt_runtime::db::query_team_states(conn, team_id)
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, team_id, "failed to query team states");
-            Vec::new()
-        })
-        .into_iter()
-        .map(PopupItem::from)
-        .collect()
-}
-
 /// The assignee popup's items: "Unassign" plus a team's members.
-fn assignee_popup_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
+fn assignee_popup_items(members: Vec<lt_types::types::User>) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = vec![PopupItem {
         label: "Unassign".to_string(),
         id: None,
     }];
-    match lt_runtime::db::query_team_members(conn, team_id) {
-        Ok(members) => items.extend(members.into_iter().map(PopupItem::from)),
-        Err(e) => tracing::warn!(error = %e, team_id, "failed to query team members"),
-    }
+    items.extend(members.into_iter().map(PopupItem::from));
     items
 }
 
@@ -319,13 +322,12 @@ impl super::App {
         let team_id = issue.team.id.inner().to_string();
         let current_state_name = issue.state.name.clone();
 
-        let items = self.db.connect().map_or_else(
-            |e| {
-                tracing::warn!(error = %e, "state popup: failed to open db connection");
-                Vec::new()
-            },
-            |conn| state_items(&conn, &team_id),
-        );
+        let (sub, states) = self
+            .runtime
+            .subscribe::<TeamStatesQuery>(StatesTeamVariables {
+                team_id: team_id.clone(),
+            });
+        let items: Vec<PopupItem> = states.into_iter().map(PopupItem::from).collect();
         let selected = items
             .iter()
             .position(|item| item.label == current_state_name)
@@ -337,6 +339,7 @@ impl super::App {
             items,
             selected,
             anchor: None,
+            sub: Some(PopupSub::States(sub)),
         }));
         self.footer_msg = None;
     }
@@ -355,6 +358,7 @@ impl super::App {
             items: priority_popup_items(),
             selected,
             anchor: None,
+            sub: None,
         }));
         self.footer_msg = None;
     }
@@ -367,13 +371,12 @@ impl super::App {
         let team_id = issue.team.id.inner().to_string();
         let current_assignee = issue.assignee.as_ref().map(|a| a.id.inner().to_string());
 
-        let items = self.db.connect().map_or_else(
-            |e| {
-                tracing::warn!(error = %e, "assignee popup: failed to open db connection");
-                Vec::new()
-            },
-            |conn| assignee_popup_items(&conn, &team_id),
-        );
+        let (sub, members) = self
+            .runtime
+            .subscribe::<TeamMembersQuery>(MembersTeamVariables {
+                team_id: team_id.clone(),
+            });
+        let items = assignee_popup_items(members);
         let selected = current_assignee
             .and_then(|a| {
                 items
@@ -388,40 +391,41 @@ impl super::App {
             items,
             selected,
             anchor: None,
+            sub: Some(PopupSub::Members(sub)),
         }));
         self.footer_msg = None;
     }
 }
 
 impl PopupView {
-    /// A matching `Team{team_id}` rebuilds `items` and re-anchors the
-    /// selection by item id; the priority popup is static and never matches.
-    pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
-        let StateEvent::Team { team_id } = ev else {
-            return;
-        };
-        if self.team_id.as_deref() != Some(team_id.as_str()) {
-            return;
-        }
-        let conn = match ctx.db.connect() {
-            Ok(conn) => conn,
-            Err(e) => {
-                tracing::warn!(error = %e, "popup: failed to open db connection");
-                return;
-            }
-        };
-        let items = match &self.kind {
-            PopupKind::State => state_items(&conn, team_id),
-            PopupKind::Assignee => assignee_popup_items(&conn, team_id),
-            PopupKind::Priority => return,
-        };
+    /// A matching subscription update rebuilds `items` and re-anchors the
+    /// selection by id; the priority popup has no subscription and never
+    /// matches.
+    pub(crate) fn apply_update(&mut self, id: SubId) {
         let current_id = self.items.get(self.selected).and_then(|i| i.id.clone());
-        self.items = items;
-        self.selected = self
-            .items
-            .iter()
-            .position(|i| i.id.as_deref() == current_id.as_deref())
-            .unwrap_or(0);
+        match &self.sub {
+            Some(PopupSub::States(sub)) if sub.id() == id => {
+                if let Some(states) = sub.take() {
+                    self.items = states.into_iter().map(PopupItem::from).collect();
+                    self.selected = self
+                        .items
+                        .iter()
+                        .position(|i| i.id.as_deref() == current_id.as_deref())
+                        .unwrap_or(0);
+                }
+            }
+            Some(PopupSub::Members(sub)) if sub.id() == id => {
+                if let Some(members) = sub.take() {
+                    self.items = assignee_popup_items(members);
+                    self.selected = self
+                        .items
+                        .iter()
+                        .position(|i| i.id.as_deref() == current_id.as_deref())
+                        .unwrap_or(0);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Selection movement over the shared motion set.
@@ -444,7 +448,7 @@ fn popup_confirm(app: &mut App, i: usize) {
     let kind = popup.kind.clone();
     app.close_view_at(i);
     if let Some(edit) = popup_edit(&kind, &item)
-        && let Err(e) = app.service.edit_issue(&issue_id, edit)
+        && let Err(e) = app.runtime.edit_issue(&issue_id, edit)
     {
         app.footer_msg = Some(format!("Failed to save: {e}"));
     }
@@ -646,7 +650,7 @@ pub(crate) fn forward_search(app: &mut App, i: usize, ev: KeyEvent) {
 /// destroys the overlay anyway), flush any pending debounce, then hand the
 /// *query* -- not the overlay's viewport-capped `results` -- to the base
 /// list. The overlay's selected row is captured by identifier and set as
-/// `pending_select` so the refetch re-anchors the selection instead of
+/// `pending_select` so the resubscribe re-anchors the selection instead of
 /// reusing its (possibly stale) index.
 fn confirm_search(app: &mut App) {
     let Some(View::Search(mut overlay)) = app.views.pop() else {
@@ -656,17 +660,15 @@ fn confirm_search(app: &mut App) {
     // character the user typed before hitting Enter.
     if overlay.last_changed.is_some() {
         overlay.last_changed = None;
-        overlay.run_search(&app.db, app.viewport_height);
+        overlay.run_search(&app.runtime, app.viewport_height);
     }
     let anchor = overlay
         .table_state
         .selected()
         .and_then(|i| overlay.results.get(i))
         .map(|issue| issue.identifier.clone());
-    let ctx = StateCtx {
-        db: &app.db,
-        viewer_name: app.auth.viewer_name(),
-    };
+    let viewer_name = app.auth.viewer_name().map(str::to_string);
+    let runtime = app.runtime.clone();
     if let Some(View::List(list)) = app.views.first_mut() {
         // AST is the single source of truth.
         list.query.filter = overlay.ast;
@@ -674,7 +676,7 @@ fn confirm_search(app: &mut App) {
         list.query.pagination.cursor_stack.clear();
         list.query.pagination.current_cursor = None;
         list.pending_select = anchor;
-        list.refetch(&ctx, true);
+        list.resubscribe(&runtime, viewer_name.as_deref(), true);
     }
 }
 
@@ -693,12 +695,9 @@ fn apply_completion_tab(app: &mut App, i: usize, forward: bool) {
     }
 }
 
-/// Fire the FTS search once the 150ms debounce elapses. `viewport_height`/
-/// `&app.db` are captured before the `views.last_mut()` borrow, since
-/// `run_search` needs both simultaneously.
+/// Fire the FTS search once the 150ms debounce elapses.
 pub(crate) fn poll_search_debounce(app: &mut App) {
     let viewport_height = app.viewport_height;
-    let db = &app.db;
     let should_search = matches!(
         app.views.last(),
         Some(View::Search(overlay))
@@ -706,6 +705,6 @@ pub(crate) fn poll_search_debounce(app: &mut App) {
     );
     if should_search && let Some(View::Search(overlay)) = app.views.last_mut() {
         overlay.last_changed = None;
-        overlay.run_search(db, viewport_height);
+        overlay.run_search(&app.runtime, viewport_height);
     }
 }

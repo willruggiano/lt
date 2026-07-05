@@ -511,8 +511,8 @@ impl Read for IssuesQuery {
         query_issues(conn, vars)
     }
 
-    fn reads(_vars: &Self::Variables, key: &EntityKey) -> bool {
-        matches!(key, EntityKey::Issue)
+    fn reads(_vars: &Self::Variables) -> Vec<EntityKey> {
+        vec![EntityKey::Issue]
     }
 }
 
@@ -956,36 +956,14 @@ mod tests {
     }
 
     #[test]
-    fn issues_query_reads_matches_only_the_issue_key() {
+    fn issues_query_reads_only_the_issue_key() {
         let vars = IssuesVariables {
             filter: None,
             sort: None,
             first: None,
             after: None,
         };
-        let cases = [
-            (EntityKey::Issue, true),
-            (
-                EntityKey::Comment {
-                    issue_id: "1".to_string(),
-                },
-                false,
-            ),
-            (EntityKey::Teams, false),
-            (
-                EntityKey::WorkflowStates {
-                    team_id: "ENG".to_string(),
-                },
-                false,
-            ),
-        ];
-        for (key, expected) in cases {
-            assert_eq!(
-                IssuesQuery::reads(&vars, &key),
-                expected,
-                "key {key:?} should read = {expected}"
-            );
-        }
+        assert_eq!(IssuesQuery::reads(&vars), vec![EntityKey::Issue]);
     }
 
     #[test]

@@ -106,8 +106,10 @@ impl Read for CommentsQuery {
         })
     }
 
-    fn reads(vars: &Self::Variables, key: &EntityKey) -> bool {
-        matches!(key, EntityKey::Comment { issue_id } if issue_id == &vars.id)
+    fn reads(vars: &Self::Variables) -> Vec<EntityKey> {
+        vec![EntityKey::Comment {
+            issue_id: vars.id.clone(),
+        }]
     }
 }
 
@@ -245,25 +247,13 @@ mod tests {
     }
 
     #[test]
-    fn comments_query_reads_matches_only_its_own_issue() {
-        let cases = [
-            (
-                EntityKey::Comment {
-                    issue_id: "i1".to_string(),
-                },
-                true,
-            ),
-            (
-                EntityKey::Comment {
-                    issue_id: "i2".to_string(),
-                },
-                false,
-            ),
-            (EntityKey::Issue, false),
-        ];
-        for (key, expected) in cases {
-            assert_eq!(CommentsQuery::reads(&vars("i1"), &key), expected);
-        }
+    fn comments_query_reads_only_its_own_issue() {
+        assert_eq!(
+            CommentsQuery::reads(&vars("i1")),
+            vec![EntityKey::Comment {
+                issue_id: "i1".to_string()
+            }]
+        );
     }
 
     #[test]

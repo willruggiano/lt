@@ -5,7 +5,11 @@
 use anyhow::Result;
 use lt_storage::db::{Connection, EntityKey, Read, Upsert};
 use lt_types::comments::{CommentConnection, CommentsQuery, CommentsVariables};
+use lt_types::issues::IssuesQuery;
+use lt_types::members::TeamMembersQuery;
 use lt_types::pagination::PageInfo;
+use lt_types::states::TeamStatesQuery;
+use lt_types::teams::TeamsQuery;
 use lt_upstream::client::{GraphqlTransport, execute};
 
 /// One-shot local read: `Op::read` over `conn`. The search overlay's
@@ -55,6 +59,73 @@ pub fn refresh_comments(
         },
     };
     CommentsQuery::upsert(conn, &vars, &out)
+}
+
+/// How a live subscription's background freshness refresh
+/// (docs/design/operation-seam-adr.md, "Decision 6") brings its operation up
+/// to date from upstream. Distinct from [`Upsert`], which only knows how to
+/// write an already-fetched result into the cache: fetching needs
+/// `lt-upstream`, which `lt-storage` does not depend on, so this lives here
+/// rather than on the storage-side trait. Every operation [`crate::Runtime`]
+/// can `subscribe` to implements it: the generic single-page [`refresh`]
+/// driver for most operations, [`refresh_comments`]'s fetch-to-exhaustion for
+/// `CommentsQuery` (its thread's fetch-all semantics, ADR "Decision 3").
+pub trait Refresh: Upsert {
+    fn refresh(
+        conn: &Connection,
+        transport: &dyn GraphqlTransport,
+        vars: Self::Variables,
+    ) -> Result<Vec<EntityKey>>;
+}
+
+impl Refresh for IssuesQuery {
+    fn refresh(
+        conn: &Connection,
+        transport: &dyn GraphqlTransport,
+        vars: Self::Variables,
+    ) -> Result<Vec<EntityKey>> {
+        refresh::<IssuesQuery>(conn, transport, vars)
+    }
+}
+
+impl Refresh for TeamsQuery {
+    fn refresh(
+        conn: &Connection,
+        transport: &dyn GraphqlTransport,
+        vars: Self::Variables,
+    ) -> Result<Vec<EntityKey>> {
+        refresh::<TeamsQuery>(conn, transport, vars)
+    }
+}
+
+impl Refresh for TeamStatesQuery {
+    fn refresh(
+        conn: &Connection,
+        transport: &dyn GraphqlTransport,
+        vars: Self::Variables,
+    ) -> Result<Vec<EntityKey>> {
+        refresh::<TeamStatesQuery>(conn, transport, vars)
+    }
+}
+
+impl Refresh for TeamMembersQuery {
+    fn refresh(
+        conn: &Connection,
+        transport: &dyn GraphqlTransport,
+        vars: Self::Variables,
+    ) -> Result<Vec<EntityKey>> {
+        refresh::<TeamMembersQuery>(conn, transport, vars)
+    }
+}
+
+impl Refresh for CommentsQuery {
+    fn refresh(
+        conn: &Connection,
+        transport: &dyn GraphqlTransport,
+        vars: Self::Variables,
+    ) -> Result<Vec<EntityKey>> {
+        refresh_comments(conn, transport, &vars.id)
+    }
 }
 
 #[cfg(test)]
@@ -250,5 +321,32 @@ mod tests {
         let conn = conn();
         let transport = FakeTransport::new(vec![json!({ "issue": null })]);
         assert!(refresh_comments(&conn, &transport, "i1").is_err());
+    }
+
+    #[test]
+    fn refresh_trait_dispatches_comments_to_fetch_all() {
+        let conn = conn();
+        let transport = FakeTransport::new(vec![
+            json!({ "issue": { "comments": {
+                "nodes": [comment_node("c1", "2026-01-01T00:00:00Z")],
+                "pageInfo": { "hasNextPage": true, "endCursor": "cur" }
+            }}}),
+            json!({ "issue": { "comments": {
+                "nodes": [comment_node("c2", "2026-01-02T00:00:00Z")],
+                "pageInfo": { "hasNextPage": false, "endCursor": null }
+            }}}),
+        ]);
+        let vars = CommentsVariables {
+            id: "i1".to_string(),
+            after: None,
+        };
+
+        CommentsQuery::refresh(&conn, &transport, vars).unwrap();
+
+        let rows = db::query_comments(&conn, "i1").unwrap();
+        assert_eq!(
+            rows.iter().map(|c| c.id.inner()).collect::<Vec<_>>(),
+            ["c1", "c2"]
+        );
     }
 }

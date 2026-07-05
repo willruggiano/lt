@@ -47,7 +47,7 @@ pub struct IssueWithComments {
     pub comments: CommentConnection,
 }
 
-#[derive(cynic::QueryFragment)]
+#[derive(Default, cynic::QueryFragment)]
 pub struct CommentConnection {
     pub nodes: Vec<Comment>,
     pub page_info: PageInfo,

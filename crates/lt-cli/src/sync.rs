@@ -24,12 +24,14 @@ pub enum SyncCommands {
 pub fn run(out: &mut dyn Write, cmd: SyncCommands) -> Result<()> {
     match cmd {
         SyncCommands::Delta => {
-            sync::delta::run()?;
+            let (conn, transport) = sync::open_production()?;
+            sync::delta::run(&conn, transport.as_ref())?;
             writeln!(out, "Sync complete.")?;
             Ok(())
         }
         SyncCommands::Full => {
-            sync::full::run()?;
+            let (conn, transport) = sync::open_production()?;
+            sync::full::run(&conn, transport.as_ref())?;
             writeln!(out, "Sync complete.")?;
             Ok(())
         }

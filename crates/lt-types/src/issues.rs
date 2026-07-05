@@ -210,7 +210,7 @@ impl GraphqlOperation for IssuesQuery {
     }
 }
 
-#[derive(cynic::QueryFragment)]
+#[derive(Default, cynic::QueryFragment)]
 pub struct IssueConnection {
     pub nodes: Vec<Issue>,
     pub page_info: PageInfo,

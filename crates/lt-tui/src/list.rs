@@ -1,13 +1,12 @@
 use crossterm::event::KeyCode;
 use lt_runtime::query::SortField;
-use lt_runtime::search_query;
-use lt_types::issues::{IssueFilter, IssueSort, IssuesVariables};
+use lt_runtime::{Runtime, SubId, Subscription, search_query};
+use lt_types::issues::{IssueConnection, IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
 use lt_types::types::Issue;
 use ratatui::widgets::TableState;
 
 use super::{
-    App, AuthStatus, HelpPopup, Keymap, ScrollMotion, StateCtx, StateEvent, Unbound, View, keymap,
-    open_in_browser,
+    App, AuthStatus, HelpPopup, Keymap, ScrollMotion, Unbound, View, keymap, open_in_browser,
 };
 
 /// Forward/backward pagination state.
@@ -74,17 +73,16 @@ impl ListQuery {
         search_query::lower_ast(&self.filter).0.team
     }
 
-    /// The single local read behind the issue list: lowers the active filter
-    /// (resolving `assignee:me` against the viewer) and sort into
-    /// `IssuesVariables`, updating `pagination` from the result. Returns the
-    /// fetched rows, or an empty `Vec` (warning via `tracing`) on a query
-    /// failure.
-    fn fetch(&mut self, ctx: &StateCtx) -> Vec<Issue> {
+    /// Lower the active filter (resolving `assignee:me` against the viewer)
+    /// and sort into `IssuesVariables` -- the vars the base list subscribes
+    /// with. A filter/sort/pagination change is a new vars value: the caller
+    /// drops the old subscription and subscribes anew with it.
+    fn build_vars(&self, viewer_name: Option<&str>) -> IssuesVariables {
         let (mut filter, _) = search_query::lower_ast(&self.filter);
-        search_query::resolve_me(&mut filter, ctx.viewer_name);
+        search_query::resolve_me(&mut filter, viewer_name);
         let filter = (filter != IssueFilter::default()).then_some(filter);
 
-        let vars = IssuesVariables {
+        IssuesVariables {
             filter,
             sort: Some(IssueSort {
                 field: self.sort.clone(),
@@ -92,27 +90,11 @@ impl ListQuery {
             }),
             first: Some(i32::try_from(self.limit.min(250)).unwrap_or(250)),
             after: self.pagination.current_cursor.clone(),
-        };
-
-        match ctx
-            .db
-            .connect()
-            .and_then(|conn| lt_runtime::db::query_issues(&conn, &vars))
-        {
-            Ok(page) => {
-                self.pagination.has_next_page = page.page_info.has_next_page;
-                self.pagination.end_cursor = page.page_info.end_cursor;
-                page.nodes
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "issue list fetch failed");
-                Vec::new()
-            }
         }
     }
 
-    /// Advance the cursor stack to the next page. Returns whether a re-fetch
-    /// is needed (`false` when there is no next page).
+    /// Advance the cursor stack to the next page. Returns whether a
+    /// resubscribe is needed (`false` when there is no next page).
     pub(crate) fn next_page(&mut self) -> bool {
         if !self.pagination.has_next_page {
             return false;
@@ -126,7 +108,7 @@ impl ListQuery {
     }
 
     /// Pop the cursor stack back to the previous page. Returns whether a
-    /// re-fetch is needed (`false` when already at the first page).
+    /// resubscribe is needed (`false` when already at the first page).
     pub(crate) fn prev_page(&mut self) -> bool {
         let Some(cursor) = self.pagination.cursor_stack.pop() else {
             return false;
@@ -136,7 +118,7 @@ impl ListQuery {
     }
 
     /// `d`: toggle sort direction and rewrite `filter`'s `sort:` token to
-    /// match, resetting pagination cursors; the caller re-fetches.
+    /// match, resetting pagination cursors; the caller resubscribes.
     fn toggle_desc(&mut self) {
         self.desc = !self.desc;
         self.filter = self.replace_sort_in_filter();
@@ -178,18 +160,24 @@ impl ListQuery {
     }
 }
 
-/// The issue-list view: the base-list fields, owned.
+/// The issue-list view: the base-list fields, owned, plus its live
+/// `IssuesQuery` subscription.
 pub struct ListView {
     pub issues: Vec<Issue>,
     pub table_state: TableState,
-    /// An identifier to seek on the next `Issues` re-read; one-shot,
-    /// cleared whether or not that re-read finds a match.
+    /// An identifier to seek on the next subscription update; one-shot,
+    /// cleared whether or not that update finds a match.
     pub pending_select: Option<String>,
     pub query: ListQuery,
+    sub: Subscription<IssueConnection>,
 }
 
 impl ListView {
-    pub(crate) fn new(issues: Vec<Issue>, query: ListQuery) -> Self {
+    pub(crate) fn new(
+        issues: Vec<Issue>,
+        query: ListQuery,
+        sub: Subscription<IssueConnection>,
+    ) -> Self {
         let mut table_state = TableState::default();
         if !issues.is_empty() {
             table_state.select(Some(0));
@@ -199,15 +187,19 @@ impl ListView {
             table_state,
             pending_select: None,
             query,
+            sub,
         }
     }
 
-    /// Construct the view and populate it from `query`'s own fetch -- the
-    /// query defines the view's initial data, same as every later refetch.
-    pub(crate) fn open(query: ListQuery, ctx: &StateCtx) -> Self {
-        let mut view = Self::new(Vec::new(), query);
-        view.refetch(ctx, true); // reset_selection: select row 0 when non-empty
-        view
+    /// Subscribe to `query`'s vars and populate the view from the
+    /// subscription's synchronous initial read -- the query defines the
+    /// view's initial data, same as every later resubscribe.
+    pub(crate) fn open(mut query: ListQuery, runtime: &Runtime, viewer_name: Option<&str>) -> Self {
+        let vars = query.build_vars(viewer_name);
+        let (sub, page) = runtime.subscribe::<IssuesQuery>(vars);
+        query.pagination.has_next_page = page.page_info.has_next_page;
+        query.pagination.end_cursor = page.page_info.end_cursor;
+        Self::new(page.nodes, query, sub)
     }
 
     pub(crate) fn selected_issue(&self) -> Option<&Issue> {
@@ -219,18 +211,49 @@ impl ListView {
         motion.apply_table(&mut self.table_state, self.issues.len(), viewport_height);
     }
 
-    /// Only refetch while focused: a refresh must not swap the rows a popup
-    /// is anchored to or a search overlay covers.
-    pub(crate) fn consume(&mut self, ctx: &StateCtx, focused: bool, ev: &StateEvent) {
-        if matches!(ev, StateEvent::Issues) && focused {
-            self.refetch(ctx, false); // offset- and selection-preserving
+    /// Consume the subscription's latest and re-apply ui-state policy, if a
+    /// newer result has arrived. A no-op when nothing has -- safe to call
+    /// unconditionally on focus return.
+    fn sync_from_subscription(&mut self, reset_selection: bool) {
+        if let Some(page) = self.sub.take() {
+            self.issues = page.nodes;
+            self.query.pagination.has_next_page = page.page_info.has_next_page;
+            self.query.pagination.end_cursor = page.page_info.end_cursor;
+            self.apply_fetched_selection(reset_selection);
+            self.seek_pending_select();
         }
     }
 
-    /// Re-fetch through `query`, apply the fetched-selection policy, and
-    /// seek `pending_select` if set.
-    pub(crate) fn refetch(&mut self, ctx: &StateCtx, reset_selection: bool) {
-        self.issues = self.query.fetch(ctx);
+    /// Only consume while focused: a refresh must not swap the rows a popup
+    /// is anchored to or a search overlay covers. The slot holds the latest
+    /// for focus return (`resume_focus`).
+    pub(crate) fn apply_update(&mut self, focused: bool, id: SubId) {
+        if focused && self.sub.id() == id {
+            self.sync_from_subscription(false); // offset- and selection-preserving
+        }
+    }
+
+    /// Called when the list regains focus (an overlay above it popped):
+    /// pick up whatever the subscription accumulated while unfocused.
+    pub(crate) fn resume_focus(&mut self) {
+        self.sync_from_subscription(false);
+    }
+
+    /// Drop the current subscription and subscribe anew with `query`'s
+    /// current vars: a filter/sort/pagination change is a new vars value,
+    /// not a refetch.
+    pub(crate) fn resubscribe(
+        &mut self,
+        runtime: &Runtime,
+        viewer_name: Option<&str>,
+        reset_selection: bool,
+    ) {
+        let vars = self.query.build_vars(viewer_name);
+        let (sub, page) = runtime.subscribe::<IssuesQuery>(vars);
+        self.sub = sub;
+        self.issues = page.nodes;
+        self.query.pagination.has_next_page = page.page_info.has_next_page;
+        self.query.pagination.end_cursor = page.page_info.end_cursor;
         self.apply_fetched_selection(reset_selection);
         self.seek_pending_select();
     }
@@ -347,12 +370,10 @@ pub(crate) fn apply_list(app: &mut App, i: usize, action: keymap::Action) {
         Action::SetAssignee => app.open_assignee_popup(),
         Action::Refresh => app.refresh(),
         Action::ToggleSortDirection | Action::NextPage | Action::PrevPage => {
-            let ctx = StateCtx {
-                db: &app.db,
-                viewer_name: app.auth.viewer_name(),
-            };
+            let viewer_name = app.auth.viewer_name().map(str::to_string);
+            let runtime = app.runtime.clone();
             if let Some(View::List(list)) = app.views.get_mut(i) {
-                let refetch = if action == Action::ToggleSortDirection {
+                let resubscribe = if action == Action::ToggleSortDirection {
                     list.query.toggle_desc();
                     true
                 } else if action == Action::NextPage {
@@ -360,15 +381,15 @@ pub(crate) fn apply_list(app: &mut App, i: usize, action: keymap::Action) {
                 } else {
                     list.query.prev_page()
                 };
-                if refetch {
-                    list.refetch(&ctx, true);
+                if resubscribe {
+                    list.resubscribe(&runtime, viewer_name.as_deref(), true);
                 }
             }
         }
         // Re-authenticate: background OAuth login.
         Action::Login if !matches!(app.auth, AuthStatus::Authenticating) => {
             app.auth = AuthStatus::Authenticating;
-            app.service.login();
+            app.runtime.login();
         }
         Action::OpenInBrowser => {
             if let Some(issue) = app.selected_issue() {
