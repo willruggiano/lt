@@ -24,7 +24,7 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
 fi
 
 nix_bin=/nix/var/nix/profiles/default/bin
-project_dir="$CLAUDE_PROJECT_DIR"
+project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 
 log() { printf '[claude-setup] %s\n' "$*" >&2; }
 
