@@ -48,6 +48,12 @@ pub struct IssueDetailData {
     pub issue: Issue,
     pub comments: Vec<Comment>,
     pub children: Vec<Issue>,
+    /// The first comment page's continuation cursor, `None` once the first
+    /// page is the whole thread. Lets `lt-runtime`'s refresh page the
+    /// remainder to exhaustion after this page's upsert; a local
+    /// (already-exhaustive) read has no more pages to page, so it is always
+    /// `None` there.
+    pub comments_cursor: Option<String>,
 }
 
 impl GraphqlOperation for IssueDetailQuery {
@@ -60,10 +66,16 @@ impl GraphqlOperation for IssueDetailQuery {
     }
 
     fn extract(self) -> anyhow::Result<Self::Output> {
+        let page_info = self.issue.comments.page_info;
+        let comments_cursor = page_info
+            .has_next_page
+            .then_some(page_info.end_cursor)
+            .flatten();
         Ok(Some(IssueDetailData {
             issue: self.issue.base,
             comments: self.issue.comments.nodes,
             children: self.issue.children.nodes,
+            comments_cursor,
         }))
     }
 }
@@ -119,5 +131,48 @@ mod tests {
         assert_eq!(out.comments[0].body, "hi");
         assert_eq!(out.children.len(), 1);
         assert_eq!(out.children[0].identifier, "ENG-2");
+        assert!(out.comments_cursor.is_none());
+    }
+
+    /// A composed `IssueDetailQuery` wire response envelope with a single
+    /// comment page, whose `pageInfo` this test controls.
+    fn response_with_comment_page(
+        has_next_page: bool,
+        end_cursor: Option<&str>,
+    ) -> serde_json::Value {
+        let mut issue = sample_issue_node("1");
+        issue["comments"] = serde_json::json!({
+            "nodes": [],
+            "pageInfo": { "hasNextPage": has_next_page, "endCursor": end_cursor }
+        });
+        issue["children"] = serde_json::json!({
+            "nodes": [],
+            "pageInfo": { "hasNextPage": false, "endCursor": null }
+        });
+        serde_json::json!({ "issue": issue })
+    }
+
+    #[test]
+    fn extract_carries_the_comment_cursor_when_more_pages_remain() {
+        let data = response_with_comment_page(true, Some("cur"));
+        let out = serde_json::from_value::<IssueDetailQuery>(data)
+            .unwrap()
+            .extract()
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.comments_cursor.as_deref(), Some("cur"));
+    }
+
+    #[test]
+    fn extract_has_no_cursor_when_the_next_page_has_no_cursor() {
+        // Defensive: `hasNextPage: true` with a null cursor cannot be paged,
+        // so it is treated the same as no next page.
+        let data = response_with_comment_page(true, None);
+        let out = serde_json::from_value::<IssueDetailQuery>(data)
+            .unwrap()
+            .extract()
+            .unwrap()
+            .unwrap();
+        assert!(out.comments_cursor.is_none());
     }
 }

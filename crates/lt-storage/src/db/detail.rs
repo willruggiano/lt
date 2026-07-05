@@ -26,6 +26,9 @@ impl Read for IssueDetailQuery {
             issue,
             comments,
             children,
+            // The local cache always holds the whole thread (comments append
+            // to exhaustion on every refresh), so there is never a next page.
+            comments_cursor: None,
         }))
     }
 
@@ -161,6 +164,7 @@ mod tests {
                 issue_id: Some("1".to_string()),
             }],
             children: vec![sample_base_issue("2")],
+            comments_cursor: None,
         };
         let touched = IssueDetailQuery::upsert(&conn, &vars("1"), &Some(data)).unwrap();
         assert!(touched.contains(&EntityKey::Issue));
