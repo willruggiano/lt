@@ -1,15 +1,18 @@
 //! Team metadata: the team list, a team's workflow states (Linear's stored
 //! `position` order), and its memberships. `workflow_states` is scoped for
 //! free by every issue upsert (`db::issues::upsert_issue_tx`); only a
-//! targeted team sync (`lt-runtime/src/teams.rs`) writes memberships and
-//! positions.
+//! targeted team refresh ([`TeamStatesQuery`]'s and [`TeamMembersQuery`]'s
+//! `Upsert` impls) writes memberships and positions.
 
 use anyhow::{Context, Result};
-use lt_types::states::WorkflowStateWithPosition;
+use lt_types::members::TeamMembersQuery;
+use lt_types::states::{TeamStatesQuery, WorkflowStateWithPosition};
+use lt_types::teams::TeamsQuery;
 use lt_types::types;
 use lt_types::types::{User, WorkflowState};
 use rusqlite::{Connection, params};
 
+use crate::db::ops::{EntityKey, Read, Upsert};
 use crate::db::sql::{self, EntityTable, Sql};
 
 /// Upsert one workflow state scoped to its team, with Linear's stored
@@ -146,6 +149,33 @@ query_team_scoped_fn!(
     User
 );
 
+/// A team's workflow states with Linear's stored `position`, in the same
+/// order as [`query_team_states`]. A state known only from an issue upsert
+/// (`position IS NULL`) maps to `f64::MAX` so it keeps sorting last, matching
+/// the SQL `ORDER BY position IS NULL, position, name`.
+fn query_team_states_with_position(
+    conn: &Connection,
+    team_id: &str,
+) -> Result<Vec<WorkflowStateWithPosition>> {
+    let mut stmt = sql::prepare(conn, sql::QUERY_TEAM_STATES_WITH_POSITION)
+        .context("failed to prepare team states (with position) query statement")?;
+    let rows = stmt
+        .query_map(params![team_id], |row| {
+            let position: Option<f64> = row.get("position")?;
+            Ok(WorkflowStateWithPosition {
+                id: row.get::<_, String>("id")?.into(),
+                name: row.get("name")?,
+                position: position.unwrap_or(f64::MAX),
+            })
+        })
+        .context("failed to execute team states (with position) query")?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.context("failed to read team state (with position) row")?);
+    }
+    Ok(out)
+}
+
 /// Replace a team's membership set with `user_ids`: delete then insert in one
 /// transaction, so a member no longer on the team is removed rather than left
 /// stale.
@@ -183,8 +213,88 @@ pub fn derive_team_memberships_from_issues(conn: &Connection) -> Result<()> {
     )
 }
 
+impl Read for TeamsQuery {
+    fn read(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
+        query_teams(conn)
+    }
+
+    fn reads(_vars: &Self::Variables, key: &EntityKey) -> bool {
+        matches!(key, EntityKey::Teams)
+    }
+}
+
+impl Upsert for TeamsQuery {
+    fn upsert(
+        conn: &Connection,
+        _vars: &Self::Variables,
+        out: &Self::Output,
+    ) -> Result<Vec<EntityKey>> {
+        upsert_teams(conn, out)?;
+        Ok(vec![EntityKey::Teams])
+    }
+}
+
+impl Read for TeamStatesQuery {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+        query_team_states_with_position(conn, &vars.team_id)
+    }
+
+    fn reads(vars: &Self::Variables, key: &EntityKey) -> bool {
+        matches!(key, EntityKey::WorkflowStates { team_id } if team_id == &vars.team_id)
+    }
+}
+
+impl Upsert for TeamStatesQuery {
+    /// The team id must come from the variables, not `out`: a positioned
+    /// state carries only `{id, name, position}`, with no back-reference to
+    /// its team.
+    fn upsert(
+        conn: &Connection,
+        vars: &Self::Variables,
+        out: &Self::Output,
+    ) -> Result<Vec<EntityKey>> {
+        for state in out {
+            upsert_team_state(conn, &vars.team_id, state)?;
+        }
+        Ok(vec![EntityKey::WorkflowStates {
+            team_id: vars.team_id.clone(),
+        }])
+    }
+}
+
+impl Read for TeamMembersQuery {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+        query_team_members(conn, &vars.team_id)
+    }
+
+    fn reads(vars: &Self::Variables, key: &EntityKey) -> bool {
+        matches!(key, EntityKey::TeamMemberships { team_id } if team_id == &vars.team_id)
+    }
+}
+
+impl Upsert for TeamMembersQuery {
+    /// Replace-set semantics preserved: users are upserted, then the team's
+    /// membership rows are replaced wholesale so a member no longer on the
+    /// team is dropped rather than left stale.
+    fn upsert(
+        conn: &Connection,
+        vars: &Self::Variables,
+        out: &Self::Output,
+    ) -> Result<Vec<EntityKey>> {
+        upsert_users(conn, out)?;
+        let member_ids: Vec<&str> = out.iter().map(|u| u.id.inner()).collect();
+        replace_team_memberships(conn, &vars.team_id, &member_ids)?;
+        Ok(vec![EntityKey::TeamMemberships {
+            team_id: vars.team_id.clone(),
+        }])
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use lt_types::members::TeamVariables as MembersTeamVariables;
+    use lt_types::states::TeamVariables as StatesTeamVariables;
+
     use super::*;
     use crate::db::outbox;
 
@@ -345,5 +455,147 @@ mod tests {
         let mut names: Vec<&str> = members.iter().map(|u| u.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, ["Assignee", "Creator"]);
+    }
+
+    #[test]
+    fn teams_query_reads_matches_only_the_teams_key() {
+        let cases = [
+            (EntityKey::Teams, true),
+            (EntityKey::Issue, false),
+            (
+                EntityKey::WorkflowStates {
+                    team_id: "t1".to_string(),
+                },
+                false,
+            ),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(TeamsQuery::reads(&(), &key), expected);
+        }
+    }
+
+    #[test]
+    fn teams_query_upsert_writes_and_reports_teams() {
+        let conn = test_db();
+        let teams = vec![types::Team {
+            id: "t1".into(),
+            name: "Eng".to_string(),
+        }];
+        let touched = TeamsQuery::upsert(&conn, &(), &teams).unwrap();
+        assert_eq!(touched, vec![EntityKey::Teams]);
+        assert_eq!(query_teams(&conn).unwrap()[0].name, "Eng");
+    }
+
+    #[test]
+    fn team_states_query_read_maps_null_position_to_f64_max_and_preserves_order() {
+        let conn = test_db();
+        upsert_state(&conn, "t1", ("s-todo", "Todo", 1.0));
+        upsert_workflow_state_team_only(&conn, "s-zeta", "Zeta", "t1").unwrap();
+
+        let vars = StatesTeamVariables {
+            team_id: "t1".to_string(),
+        };
+        let states = TeamStatesQuery::read(&conn, &vars).unwrap();
+        assert_eq!(
+            states
+                .iter()
+                .map(|s| (s.name.as_str(), s.position))
+                .collect::<Vec<_>>(),
+            [("Todo", 1.0), ("Zeta", f64::MAX)]
+        );
+    }
+
+    #[test]
+    fn team_states_query_reads_matches_the_team_id_in_variables() {
+        let vars = StatesTeamVariables {
+            team_id: "t1".to_string(),
+        };
+        assert!(TeamStatesQuery::reads(
+            &vars,
+            &EntityKey::WorkflowStates {
+                team_id: "t1".to_string()
+            }
+        ));
+        assert!(!TeamStatesQuery::reads(
+            &vars,
+            &EntityKey::WorkflowStates {
+                team_id: "t2".to_string()
+            }
+        ));
+        assert!(!TeamStatesQuery::reads(&vars, &EntityKey::Teams));
+    }
+
+    #[test]
+    fn team_states_query_upsert_writes_positions_and_reports_the_team() {
+        let conn = test_db();
+        let vars = StatesTeamVariables {
+            team_id: "t1".to_string(),
+        };
+        let out = vec![WorkflowStateWithPosition {
+            id: "s1".into(),
+            name: "Todo".to_string(),
+            position: 1.0,
+        }];
+        let touched = TeamStatesQuery::upsert(&conn, &vars, &out).unwrap();
+        assert_eq!(
+            touched,
+            vec![EntityKey::WorkflowStates {
+                team_id: "t1".to_string()
+            }]
+        );
+        let states = query_team_states(&conn, "t1").unwrap();
+        assert_eq!(states[0].name, "Todo");
+    }
+
+    #[test]
+    fn team_members_query_reads_matches_the_team_id_in_variables() {
+        let vars = MembersTeamVariables {
+            team_id: "t1".to_string(),
+        };
+        assert!(TeamMembersQuery::reads(
+            &vars,
+            &EntityKey::TeamMemberships {
+                team_id: "t1".to_string()
+            }
+        ));
+        assert!(!TeamMembersQuery::reads(
+            &vars,
+            &EntityKey::TeamMemberships {
+                team_id: "t2".to_string()
+            }
+        ));
+    }
+
+    #[test]
+    fn team_members_query_upsert_is_a_replace_set_and_reports_the_team() {
+        let conn = test_db();
+        let vars = MembersTeamVariables {
+            team_id: "t1".to_string(),
+        };
+        let first = vec![
+            User {
+                id: "u1".into(),
+                name: "Ada".to_string(),
+            },
+            User {
+                id: "u2".into(),
+                name: "Grace".to_string(),
+            },
+        ];
+        let touched = TeamMembersQuery::upsert(&conn, &vars, &first).unwrap();
+        assert_eq!(
+            touched,
+            vec![EntityKey::TeamMemberships {
+                team_id: "t1".to_string()
+            }]
+        );
+        assert_eq!(query_team_members(&conn, "t1").unwrap().len(), 2);
+
+        let second = vec![User {
+            id: "u1".into(),
+            name: "Ada".to_string(),
+        }];
+        TeamMembersQuery::upsert(&conn, &vars, &second).unwrap();
+        assert_eq!(query_team_members(&conn, "t1").unwrap().len(), 1);
     }
 }

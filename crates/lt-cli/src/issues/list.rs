@@ -2,8 +2,8 @@ use std::io::Write;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use lt_runtime::db;
-use lt_types::issues::{AssigneeFilter, IssueFilter, IssueSort, IssuesVariables};
+use lt_runtime::{db, load};
+use lt_types::issues::{AssigneeFilter, IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
 use tracing::{error, info};
 
 use super::IssueArgs;
@@ -66,7 +66,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
             // Re-open after sync.
             let conn2 = db::open_db(db::db_path()?)?;
             let vars = lower(args, &conn2)?;
-            let page = db::query_issues(&conn2, &vars)?;
+            let page = load::<IssuesQuery>(&conn2, &vars)?;
             print_table(out, &page.nodes, "(cached)")?;
         }
         Some(ref ts) => {
@@ -79,12 +79,12 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
 
             if age_secs < CACHE_TTL_SECS {
                 // Fresh cache -- serve immediately.
-                let page = db::query_issues(&conn, &vars)?;
+                let page = load::<IssuesQuery>(&conn, &vars)?;
                 let note = format!("(cached, age {age_secs}s)");
                 print_table(out, &page.nodes, &note)?;
             } else {
                 // Stale cache -- serve immediately, then delta sync in background.
-                let page = db::query_issues(&conn, &vars)?;
+                let page = load::<IssuesQuery>(&conn, &vars)?;
                 let note = format!("(stale cache, age {age_secs}s -- syncing in background)");
                 print_table(out, &page.nodes, &note)?;
 

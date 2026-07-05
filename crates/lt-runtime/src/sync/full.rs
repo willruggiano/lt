@@ -3,7 +3,6 @@ use lt_storage::db;
 use lt_types::issues::{IssueSort, IssuesVariables};
 use lt_types::query::SortField;
 use lt_upstream::client::HttpTransport;
-use lt_upstream::issues::fetch;
 
 /// Fetch every page from the Linear API and upsert into SQLite.
 /// Sets `sync_meta` key='`last_synced_at`' to the current UTC timestamp on success.
@@ -19,15 +18,13 @@ pub fn run() -> Result<()> {
     super::persist_viewer(&conn, &transport)?;
 
     // No filter, max page size.
-    super::sync_pages(&conn, |after| {
-        fetch(IssuesVariables {
-            filter: None,
-            sort: Some(IssueSort {
-                field: SortField::Updated,
-                desc: true,
-            }),
-            first: Some(250),
-            after: after.map(ToOwned::to_owned),
-        })
+    super::sync_pages(&conn, &transport, |after| IssuesVariables {
+        filter: None,
+        sort: Some(IssueSort {
+            field: SortField::Updated,
+            desc: true,
+        }),
+        first: Some(250),
+        after: after.map(ToOwned::to_owned),
     })
 }

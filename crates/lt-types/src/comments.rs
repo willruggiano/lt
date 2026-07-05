@@ -13,7 +13,7 @@ use crate::scalars::DateTime;
 use crate::schema;
 use crate::types::User;
 
-#[derive(cynic::QueryVariables)]
+#[derive(cynic::QueryVariables, Clone)]
 pub struct CommentsVariables {
     pub id: String,
     pub after: Option<String>,

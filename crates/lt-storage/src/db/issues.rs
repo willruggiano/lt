@@ -2,13 +2,14 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use lt_types::issues::{IssueConnection, IssuesVariables};
+use lt_types::issues::{IssueConnection, IssuesQuery, IssuesVariables};
 use lt_types::pagination::PageInfo;
 use lt_types::query::SortField;
 use lt_types::scalars::Priority;
 use lt_types::types;
 use rusqlite::{Connection, params};
 
+use crate::db::ops::{EntityKey, Read, Upsert};
 use crate::db::parse_datetime_column;
 use crate::db::sql::{self, BindParams, EntityTable, Sql};
 
@@ -505,6 +506,48 @@ pub fn synced_viewer(conn: &Connection) -> Result<Option<types::User>> {
     }))
 }
 
+impl Read for IssuesQuery {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+        query_issues(conn, vars)
+    }
+
+    fn reads(_vars: &Self::Variables, key: &EntityKey) -> bool {
+        matches!(key, EntityKey::Issue)
+    }
+}
+
+impl Upsert for IssuesQuery {
+    /// An issue upsert also writes its referenced team and workflow-state
+    /// rows (`upsert_issue_tx`): every issue carries a team name and a
+    /// team-scoped state name, so the touched set reports `Teams` and one
+    /// `WorkflowStates{team_id}` per distinct team among the fetched nodes,
+    /// alongside `Issue` itself.
+    fn upsert(
+        conn: &Connection,
+        _vars: &Self::Variables,
+        out: &Self::Output,
+    ) -> Result<Vec<EntityKey>> {
+        upsert_issues(conn, &out.nodes)?;
+
+        let mut touched = Vec::new();
+        if !out.nodes.is_empty() {
+            touched.push(EntityKey::Issue);
+            touched.push(EntityKey::Teams);
+        }
+        let mut team_ids: Vec<&str> = out.nodes.iter().map(|i| i.team.id.inner()).collect();
+        team_ids.sort_unstable();
+        team_ids.dedup();
+        touched.extend(
+            team_ids
+                .into_iter()
+                .map(|team_id| EntityKey::WorkflowStates {
+                    team_id: team_id.to_string(),
+                }),
+        );
+        Ok(touched)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,5 +953,90 @@ mod tests {
             )
             .unwrap();
         assert_eq!(overlay, "Done");
+    }
+
+    #[test]
+    fn issues_query_reads_matches_only_the_issue_key() {
+        let vars = IssuesVariables {
+            filter: None,
+            sort: None,
+            first: None,
+            after: None,
+        };
+        let cases = [
+            (EntityKey::Issue, true),
+            (
+                EntityKey::Comment {
+                    issue_id: "1".to_string(),
+                },
+                false,
+            ),
+            (EntityKey::Teams, false),
+            (
+                EntityKey::WorkflowStates {
+                    team_id: "ENG".to_string(),
+                },
+                false,
+            ),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                IssuesQuery::reads(&vars, &key),
+                expected,
+                "key {key:?} should read = {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn issues_query_upsert_reports_issue_teams_and_workflow_states() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        let vars = IssuesVariables {
+            filter: None,
+            sort: None,
+            first: None,
+            after: None,
+        };
+        let out = IssueConnection {
+            nodes: vec![test_issue("1", Some("Alice"), "Todo")],
+            page_info: PageInfo {
+                has_next_page: false,
+                end_cursor: None,
+            },
+        };
+        let touched = IssuesQuery::upsert(&conn, &vars, &out).unwrap();
+        assert_eq!(
+            touched,
+            vec![
+                EntityKey::Issue,
+                EntityKey::Teams,
+                EntityKey::WorkflowStates {
+                    team_id: "ENG".to_string()
+                },
+            ]
+        );
+        assert_eq!(
+            query_issue_by_id(&conn, "1").unwrap().unwrap().id.inner(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn issues_query_upsert_reports_no_keys_for_an_empty_page() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        let vars = IssuesVariables {
+            filter: None,
+            sort: None,
+            first: None,
+            after: None,
+        };
+        let out = IssueConnection {
+            nodes: Vec::new(),
+            page_info: PageInfo {
+                has_next_page: false,
+                end_cursor: None,
+            },
+        };
+        assert!(IssuesQuery::upsert(&conn, &vars, &out).unwrap().is_empty());
     }
 }

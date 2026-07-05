@@ -181,7 +181,7 @@ impl schema::variable::Variable for IssueSort {
 }
 cynic::impl_coercions!(IssueSort, schema::IssueSortInput);
 
-#[derive(cynic::QueryVariables)]
+#[derive(cynic::QueryVariables, Clone)]
 pub struct IssuesVariables {
     pub filter: Option<IssueFilter>,
     pub sort: Option<IssueSort>,

@@ -335,6 +335,13 @@ statements! {
          WHERE team_id = ?1 \
          ORDER BY position IS NULL, position, name";
 
+    /// A team's workflow states, carrying `position`, in the same order as
+    /// [`QUERY_TEAM_STATES`].
+    QUERY_TEAM_STATES_WITH_POSITION, 1,
+        "SELECT id, name, position FROM workflow_states \
+         WHERE team_id = ?1 \
+         ORDER BY position IS NULL, position, name";
+
     /// A team's members, resolved through `team_memberships`, by name.
     QUERY_TEAM_MEMBERS, 1,
         "SELECT u.id AS id, u.name AS name \

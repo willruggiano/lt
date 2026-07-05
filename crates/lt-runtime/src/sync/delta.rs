@@ -1,18 +1,15 @@
 use anyhow::Result;
 use lt_storage::db;
-use lt_types::issues::{IssueConnection, IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
+use lt_types::issues::{IssueFilter, IssueSort, IssuesVariables};
 use lt_types::query::SortField;
-use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
+use lt_upstream::client::HttpTransport;
 
-/// Fetch one page of issues updated on or after `since` (an RFC3339
-/// timestamp). Request all states including completed/archived so delta
-/// picks up changes to previously-completed issues.
-fn fetch_page(
-    transport: &dyn GraphqlTransport,
-    since: &str,
-    after: Option<&str>,
-) -> Result<IssueConnection> {
-    let variables = IssuesVariables {
+/// The variables for one page of the delta fetch: issues updated on or after
+/// `since` (an RFC3339 timestamp). Request all states including
+/// completed/archived so delta picks up changes to previously-completed
+/// issues.
+fn variables(since: &str, after: Option<&str>) -> IssuesVariables {
+    IssuesVariables {
         filter: Some(IssueFilter {
             updated_after: Some(since.to_string()),
             ..IssueFilter::default()
@@ -23,9 +20,7 @@ fn fetch_page(
         }),
         first: Some(250),
         after: after.map(ToOwned::to_owned),
-    };
-
-    execute::<IssuesQuery>(transport, variables)
+    }
 }
 
 /// Run incremental (delta) sync.
@@ -52,34 +47,57 @@ pub fn run() -> Result<()> {
     // Persist the viewer so cached reads can resolve `me` offline.
     super::persist_viewer(&conn, &transport)?;
 
-    super::sync_pages(&conn, |after| fetch_page(&transport, &since, after))
+    super::sync_pages(&conn, &transport, |after| variables(&since, after))
 }
 
 #[cfg(test)]
 mod tests {
+    use lt_types::issues::sample_issue_node;
     use lt_upstream::client::FakeTransport;
-    use lt_upstream::issues::sample_issue_node;
     use serde_json::json;
 
     use super::*;
 
     #[test]
-    fn fetch_page_filters_by_since_and_extracts_page_info() {
+    fn variables_apply_the_since_filter_and_max_page_size() {
+        let vars = variables("2026-01-01T00:00:00Z", None);
+        assert_eq!(
+            vars.filter.as_ref().unwrap().updated_after.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(vars.first, Some(250));
+        assert!(vars.after.is_none());
+    }
+
+    #[test]
+    fn variables_carry_the_cursor_forward() {
+        let vars = variables("2026-01-01T00:00:00Z", Some("cur"));
+        assert_eq!(vars.after.as_deref(), Some("cur"));
+    }
+
+    #[test]
+    fn sync_pages_sends_the_since_filter_on_the_wire() {
+        let conn = lt_storage::db::Database::memory()
+            .unwrap()
+            .connect()
+            .unwrap();
         let transport = FakeTransport::new(vec![json!({
             "issues": {
                 "nodes": [sample_issue_node("1")],
                 "pageInfo": { "hasNextPage": false, "endCursor": null }
             }
         })]);
-        let page = fetch_page(&transport, "2026-01-01T00:00:00Z", None).unwrap();
-        assert_eq!(page.nodes.len(), 1);
-        assert!(!page.page_info.has_next_page);
 
-        let vars = transport.variables(0);
+        super::super::sync_pages(&conn, &transport, |after| {
+            variables("2026-01-01T00:00:00Z", after)
+        })
+        .unwrap();
+
+        let sent = transport.variables(0);
         assert_eq!(
-            vars["filter"]["updatedAt"]["gte"],
+            sent["filter"]["updatedAt"]["gte"],
             json!("2026-01-01T00:00:00Z")
         );
-        assert_eq!(vars["first"], json!(250));
+        assert_eq!(sent["first"], json!(250));
     }
 }

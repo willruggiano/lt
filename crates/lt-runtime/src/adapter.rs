@@ -14,6 +14,9 @@ use anyhow::Result;
 use lt_storage::db;
 use lt_storage::db::{Connection, Database};
 use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
+use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
+use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
+use lt_types::teams::TeamsQuery;
 use lt_types::viewer::ViewerQuery;
 use lt_types::{types, viewer};
 use lt_upstream::auth::login_non_interactive;
@@ -285,10 +288,30 @@ impl LinearSyncService {
         let conn = self.connect()?;
         let transport = Self::transport()?;
         match scope {
-            Scope::Comments { issue_id } => crate::comments::sync(&conn, &transport, issue_id),
-            Scope::Teams => crate::teams::sync_teams(&conn, &transport),
-            Scope::Team { team_id } => crate::teams::sync_team_data(&conn, &transport, team_id),
+            Scope::Comments { issue_id } => {
+                crate::ops::refresh_comments(&conn, &transport, issue_id)?;
+            }
+            Scope::Teams => {
+                crate::refresh::<TeamsQuery>(&conn, &transport, ())?;
+            }
+            Scope::Team { team_id } => {
+                crate::refresh::<TeamStatesQuery>(
+                    &conn,
+                    &transport,
+                    StatesTeamVariables {
+                        team_id: team_id.clone(),
+                    },
+                )?;
+                crate::refresh::<TeamMembersQuery>(
+                    &conn,
+                    &transport,
+                    MembersTeamVariables {
+                        team_id: team_id.clone(),
+                    },
+                )?;
+            }
         }
+        Ok(())
     }
 
     /// The login worker's body, run on its own thread. `Success` requires a

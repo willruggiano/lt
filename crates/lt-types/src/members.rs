@@ -7,7 +7,7 @@ use crate::graphql::GraphqlOperation;
 use crate::schema;
 use crate::types::User;
 
-#[derive(cynic::QueryVariables)]
+#[derive(cynic::QueryVariables, Clone)]
 pub struct TeamVariables {
     #[cynic(rename = "teamId")]
     pub team_id: String,
