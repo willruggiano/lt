@@ -2,7 +2,10 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use lt_runtime::{Subscription, SubscriptionKey, search_query};
-use lt_types::issues::{IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
+use lt_types::inputs::{Field, IssueUpdateInput};
+use lt_types::issues::{
+    IssueFilter, IssueSort, IssueUpdateVariables, IssuesQuery, IssuesVariables,
+};
 use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
 use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
 use ratatui::widgets::TableState;
@@ -412,35 +415,45 @@ fn popup_confirm(app: &mut App, i: usize) {
     let issue_id = popup.issue_id.clone();
     let kind = popup.kind.clone();
     app.close_view_at(i);
-    if let Some(edit) = popup_edit(&kind, &item)
-        && let Err(e) = app.runtime.edit_issue(&issue_id, edit)
+    if let Some(input) = popup_edit(&kind, &item)
+        && let Err(e) = app.runtime.update_issue(IssueUpdateVariables {
+            id: issue_id,
+            input,
+        })
     {
         app.footer_msg = Some(format!("Failed to save: {e}"));
     }
 }
 
 // ---------------------------------------------------------------------------
-// Popup selection -> IssueEdit mapping
+// Popup selection -> IssueUpdateInput mapping
 // ---------------------------------------------------------------------------
 
-/// Map a popup selection onto an `IssueEdit`. Unset choices (a priority/state
-/// item with no id) are no-ops (`None`); an assignee item with no id clears
-/// the assignee.
-fn popup_edit(kind: &PopupKind, item: &PopupItem) -> Option<lt_runtime::sync::service::IssueEdit> {
-    use lt_runtime::sync::service::IssueEdit;
+/// Map a popup selection onto an `IssueUpdateInput`. Unset choices (a
+/// priority/state item with no id) are no-ops (`None`); an assignee item with
+/// no id clears the assignee.
+fn popup_edit(kind: &PopupKind, item: &PopupItem) -> Option<IssueUpdateInput> {
     match kind {
-        PopupKind::State => item.id.clone().map(|id| IssueEdit::State {
-            id,
-            name: item.label.clone(),
+        PopupKind::State => item.id.clone().map(|id| IssueUpdateInput {
+            state_id: Some(id),
+            ..Default::default()
         }),
-        PopupKind::Priority => item
-            .id
-            .as_deref()
-            .and_then(|s| s.parse::<u8>().ok())
-            .map(IssueEdit::Priority),
-        PopupKind::Assignee => Some(IssueEdit::Assignee(
-            item.id.clone().map(|id| (id, item.label.clone())),
-        )),
+        PopupKind::Priority => {
+            item.id
+                .as_deref()
+                .and_then(|s| s.parse::<i32>().ok())
+                .map(|priority| IssueUpdateInput {
+                    priority: Some(priority),
+                    ..Default::default()
+                })
+        }
+        PopupKind::Assignee => Some(IssueUpdateInput {
+            assignee_id: match &item.id {
+                Some(id) => Field::Value(id.clone()),
+                None => Field::Null,
+            },
+            ..Default::default()
+        }),
     }
 }
 

@@ -11,17 +11,21 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use lt_storage::db;
-use lt_storage::db::{Connection, Database, EntityKey, Read, Upsert};
+use lt_storage::db::{Connection, Database, EntityKey, Mutate, Read, Upsert};
+use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
 use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
+use lt_types::issues::{
+    IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
+};
+use lt_types::viewer;
 use lt_types::viewer::ViewerQuery;
-use lt_types::{types, viewer};
 use lt_upstream::auth::login_non_interactive;
 use lt_upstream::auth::refresh::load_or_refresh_token;
 use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
 
 use crate::ops::Refresh;
 use crate::subscription::{Subscription, SubscriptionKey};
-use crate::sync::service::{IssueEdit, LoginEvent, OnEvent, RuntimeEvent, SyncEvent};
+use crate::sync::service::{LoginEvent, OnEvent, RuntimeEvent, SyncEvent};
 
 /// The loop's periodic delta-sync cadence.
 const SYNC_INTERVAL: Duration = Duration::from_secs(30);
@@ -506,73 +510,6 @@ impl Runtime {
             Err(e) => LoginEvent::Error(e.to_string()),
         }
     }
-
-    /// Build the optimistic issue fragment for a locally-created issue.
-    /// Display names are resolved from the same lookup tables the pickers
-    /// read (team, state, member); a `state_id` lookup miss or an absent
-    /// `state_id` falls back to a name-keyed id ("Backlog") so the
-    /// relational join still resolves a label offline.
-    fn optimistic_issue(conn: &Connection, input: &IssueCreateInput) -> Result<types::Issue> {
-        let team_name = db::query_teams(conn)?
-            .into_iter()
-            .find(|t| t.id.inner() == input.team_id)
-            .map_or_else(String::new, |t| t.name);
-
-        let (state_id, state_name) = match &input.state_id {
-            Some(id) => {
-                let name = db::query_team_states(conn, &input.team_id)?
-                    .into_iter()
-                    .find(|s| s.id.inner() == id)
-                    .map_or_else(|| id.clone(), |s| s.name);
-                (id.clone(), name)
-            }
-            None => ("Backlog".to_string(), "Backlog".to_string()),
-        };
-
-        let assignee = match &input.assignee_id {
-            Some(id) => Some(
-                db::query_team_members(conn, &input.team_id)?
-                    .into_iter()
-                    .find(|u| u.id.inner() == id)
-                    .unwrap_or_else(|| types::User {
-                        id: id.clone().into(),
-                        name: id.clone(),
-                    }),
-            ),
-            None => None,
-        };
-
-        let priority = input
-            .priority
-            .and_then(|p| u8::try_from(p).ok())
-            .unwrap_or(0);
-        let now = lt_types::scalars::DateTime(chrono::Utc::now());
-        Ok(types::Issue {
-            id: db::outbox::temp_id().into(),
-            identifier: "NEW".to_string(),
-            title: input.title.clone(),
-            priority: lt_types::scalars::Priority(priority),
-            priority_label: lt_types::scalars::Priority(priority).label().to_string(),
-            state: types::WorkflowState {
-                id: state_id.into(),
-                name: state_name,
-                position: None,
-            },
-            assignee,
-            team: types::Team {
-                id: input.team_id.clone().into(),
-                name: team_name,
-            },
-            description: input.description.clone(),
-            labels: types::IssueLabelConnection { nodes: Vec::new() },
-            project: None,
-            cycle: None,
-            creator: None,
-            parent: None,
-            created_at: now,
-            updated_at: now,
-        })
-    }
 }
 
 impl Runtime {
@@ -677,51 +614,43 @@ impl Runtime {
         }
     }
 
-    /// Transactional local enqueue, then propagation of the comment's
-    /// touched entity (the comment thread only -- creating a comment does
-    /// not touch the issues table).
+    /// Transactional local enqueue, then propagation of whatever
+    /// `CommentCreateMutation::enqueue` touched (the comment thread only --
+    /// creating a comment does not touch the issues table).
     pub fn create_comment(&self, input: &CommentCreateInput) -> Result<()> {
         let conn = self.connect()?;
-        db::outbox::enqueue_comment_create(&conn, &db::outbox::temp_id(), input)?;
-        self.propagate(&[EntityKey::Comment {
-            issue_id: input.issue_id.clone(),
-        }]);
+        let touched = CommentCreateMutation::enqueue(
+            &conn,
+            CommentCreateVariables {
+                input: input.clone(),
+            },
+        )?;
+        self.propagate(&touched);
         Ok(())
     }
 
-    /// Transactional local enqueue, then propagation of `Issue`.
-    pub fn edit_issue(&self, issue_id: &str, edit: IssueEdit) -> Result<()> {
+    /// Transactional local enqueue, then propagation of whatever
+    /// `IssueUpdateMutation::enqueue` touched.
+    pub fn update_issue(&self, vars: IssueUpdateVariables) -> Result<()> {
         let conn = self.connect()?;
-        match edit {
-            IssueEdit::State { id, name } => {
-                db::outbox::enqueue_state_change(&conn, issue_id, &id, &name)?;
-            }
-            IssueEdit::Priority(p) => {
-                db::outbox::enqueue_priority_change(&conn, issue_id, p)?;
-            }
-            IssueEdit::Assignee(assignee) => {
-                db::outbox::enqueue_assignee_change(
-                    &conn,
-                    issue_id,
-                    assignee
-                        .as_ref()
-                        .map(|(id, name)| (id.as_str(), name.as_str())),
-                )?;
-            }
-        }
-        self.propagate(&[EntityKey::Issue]);
+        let touched = IssueUpdateMutation::enqueue(&conn, vars)?;
+        self.propagate(&touched);
         Ok(())
     }
 
-    /// Builds the optimistic fragment, enqueues it, then propagates `Issue`.
-    /// Returns the optimistic identifier so the caller can seek to it.
+    /// Enqueues the optimistic create -- `IssueCreateMutation`'s own local
+    /// effect -- then propagates whatever it touched. Returns the optimistic
+    /// identifier so the caller can seek to it.
     pub fn create_issue(&self, input: &IssueCreateInput) -> Result<String> {
         let conn = self.connect()?;
-        let optimistic = Self::optimistic_issue(&conn, input)?;
-        let identifier = optimistic.identifier.clone();
-        db::outbox::enqueue_issue_create(&conn, &optimistic, input)?;
-        self.propagate(&[EntityKey::Issue]);
-        Ok(identifier)
+        let touched = IssueCreateMutation::enqueue(
+            &conn,
+            IssueCreateVariables {
+                input: input.clone(),
+            },
+        )?;
+        self.propagate(&touched);
+        Ok(db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER.to_string())
     }
 }
 
@@ -733,6 +662,7 @@ mod tests {
     use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
     use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
     use lt_types::teams::TeamsQuery;
+    use lt_types::types;
     use lt_upstream::client::FakeTransport;
     use serde_json::json;
 
@@ -935,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_issue_refreshes_an_open_detail_pane_for_a_different_issue() {
+    fn update_issue_refreshes_an_open_detail_pane_for_a_different_issue() {
         // Any `Issue`-touching write refreshes every open detail pane:
         // `IssueDetailQuery` reads `Issue` broadly, not scoped to its own id
         // (docs/design/operation-seam-adr.md, user-visible change 3).
@@ -959,7 +889,13 @@ mod tests {
         );
 
         runtime
-            .edit_issue("issue-2", IssueEdit::Priority(1))
+            .update_issue(IssueUpdateVariables {
+                id: "issue-2".to_string(),
+                input: lt_types::inputs::IssueUpdateInput {
+                    priority: Some(1),
+                    ..Default::default()
+                },
+            })
             .unwrap();
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();

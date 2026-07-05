@@ -49,15 +49,3 @@ pub enum LoginEvent {
 
 /// Invoked once per event, from the runtime's threads.
 pub type OnEvent = Box<dyn Fn(RuntimeEvent) + Send + Sync + 'static>;
-
-/// One issue-field edit, mirroring the outbox commands
-/// (`lt-storage/src/db/outbox.rs`).
-pub enum IssueEdit {
-    State {
-        id: String,
-        name: String,
-    },
-    Priority(u8),
-    /// `(id, name)`; `None` clears the assignee.
-    Assignee(Option<(String, String)>),
-}

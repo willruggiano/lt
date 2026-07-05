@@ -46,9 +46,9 @@ pub fn run(
 
     // Drain queued local mutations first so the base reflects acked edits before
     // the delta fetch overwrites it.
-    super::drain::drain(conn, transport)?;
+    let mut touched = super::drain::drain(conn, transport)?;
     // Persist the viewer so cached reads can resolve `me` offline.
-    let mut touched = super::persist_viewer(conn, transport)?;
+    touched.extend(super::persist_viewer(conn, transport)?);
 
     touched.extend(super::sync_pages(conn, transport, |after| {
         variables(&since, after)

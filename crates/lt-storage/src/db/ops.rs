@@ -41,3 +41,33 @@ pub trait Upsert: GraphqlOperation {
         out: &Self::Output,
     ) -> Result<Vec<EntityKey>>;
 }
+
+/// The drainer's ack context: the outbox row's own identity (`seq`,
+/// `entity_id`, as recorded by [`Mutate::enqueue`]) and the variables it
+/// replayed, grouped so [`Mutate::ack`] stays under the argument-count lint.
+pub struct AckContext<'a, V> {
+    pub seq: i64,
+    pub entity_id: &'a str,
+    pub vars: &'a V,
+}
+
+/// A local write: the outbox's mutation-side vocabulary, mirroring
+/// `Read`/`Upsert` on the query side (docs/design/operation-seam-adr.md,
+/// Non-goals: "Mutations" -- this trait systematizes that binding). The
+/// mutation's own wire name (`GraphqlOperation::NAME`) is the outbox's
+/// `op_type` discriminator, so no parallel constant exists.
+pub trait Mutate: GraphqlOperation {
+    /// Write the operation's local optimistic effect (a `pending_overlay`
+    /// row, an optimistic temp row, a local comment row, ...) and enqueue its
+    /// outbox command from `vars`, atomically. Returns the entity keys
+    /// touched.
+    fn enqueue(conn: &Connection, vars: Self::Variables) -> Result<Vec<EntityKey>>;
+
+    /// Reconcile the base and retire the command's local effect once the
+    /// drainer has `out`, the mutation's decoded response.
+    fn ack(
+        conn: &Connection,
+        ctx: AckContext<'_, Self::Variables>,
+        out: Self::Output,
+    ) -> Result<Vec<EntityKey>>;
+}

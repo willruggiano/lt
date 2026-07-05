@@ -79,7 +79,7 @@ impl Comment {
 // Mutation
 // ---------------------------------------------------------------------------
 
-#[derive(cynic::QueryVariables, serde::Deserialize)]
+#[derive(cynic::QueryVariables, Clone, serde::Deserialize)]
 pub struct CommentCreateVariables {
     pub input: CommentCreateInput,
 }

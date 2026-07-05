@@ -881,11 +881,49 @@ mod tests {
 
     #[test]
     fn read_model_merges_pending_overlay_over_base() {
+        use lt_types::inputs::{Field, IssueUpdateInput};
+        use lt_types::issues::{IssueUpdateMutation, IssueUpdateVariables};
+
+        use crate::db::ops::Mutate;
+
         let conn = graph_db();
+        // The state a picker offers is already cached by that picker's own
+        // `Upsert` (`TeamStatesQuery`); mirror that precondition here.
+        crate::db::teams::upsert_team_state(
+            &conn,
+            "ENG",
+            &types::WorkflowState {
+                id: "s-done".into(),
+                name: "Done".to_string(),
+                position: None,
+            },
+        )
+        .unwrap();
+
         // Enqueue a state + assignee-clear edit; the read model must render the
         // overlay values, not the base.
-        crate::db::outbox::enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
-        crate::db::outbox::enqueue_assignee_change(&conn, "1", None).unwrap();
+        IssueUpdateMutation::enqueue(
+            &conn,
+            IssueUpdateVariables {
+                id: "1".to_string(),
+                input: IssueUpdateInput {
+                    state_id: Some("s-done".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+        IssueUpdateMutation::enqueue(
+            &conn,
+            IssueUpdateVariables {
+                id: "1".to_string(),
+                input: IssueUpdateInput {
+                    assignee_id: Field::Null,
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
 
         let issues = query_issues(
             &conn,

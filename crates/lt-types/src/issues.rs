@@ -221,7 +221,7 @@ pub struct IssueConnection {
 // Mutations
 // ---------------------------------------------------------------------------
 
-#[derive(cynic::QueryVariables, serde::Deserialize)]
+#[derive(cynic::QueryVariables, Clone, serde::Deserialize)]
 pub struct IssueUpdateVariables {
     pub id: String,
     pub input: IssueUpdateInput,
@@ -252,7 +252,7 @@ impl GraphqlOperation for IssueUpdateMutation {
     }
 }
 
-#[derive(cynic::QueryVariables, serde::Deserialize)]
+#[derive(cynic::QueryVariables, Clone, serde::Deserialize)]
 pub struct IssueCreateVariables {
     pub input: IssueCreateInput,
 }

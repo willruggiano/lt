@@ -106,7 +106,6 @@ macro_rules! entity_upsert_sql {
 pub(crate) enum EntityTable {
     Teams,
     Users,
-    WorkflowStates,
     Projects,
     Cycles,
     Labels,
@@ -118,7 +117,6 @@ impl EntityTable {
         match self {
             EntityTable::Teams => UPSERT_TEAM,
             EntityTable::Users => UPSERT_USER,
-            EntityTable::WorkflowStates => UPSERT_WORKFLOW_STATE,
             EntityTable::Projects => UPSERT_PROJECT,
             EntityTable::Cycles => UPSERT_CYCLE,
             EntityTable::Labels => UPSERT_LABEL,
@@ -130,7 +128,6 @@ impl EntityTable {
         match self {
             EntityTable::Teams => "teams",
             EntityTable::Users => "users",
-            EntityTable::WorkflowStates => "workflow_states",
             EntityTable::Projects => "projects",
             EntityTable::Cycles => "cycles",
             EntityTable::Labels => "labels",
@@ -227,8 +224,6 @@ statements! {
     UPSERT_TEAM, 2, entity_upsert_sql!("teams");
     /// Upsert one `(id, name)` row into `users`.
     UPSERT_USER, 2, entity_upsert_sql!("users");
-    /// Upsert one `(id, name)` row into `workflow_states`.
-    UPSERT_WORKFLOW_STATE, 2, entity_upsert_sql!("workflow_states");
     /// Upsert one `(id, name)` row into `projects`.
     UPSERT_PROJECT, 2, entity_upsert_sql!("projects");
     /// Upsert one `(id, name)` row into `cycles`.

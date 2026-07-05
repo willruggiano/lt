@@ -1457,6 +1457,7 @@ dependencies = [
  "lt-types",
  "lt-upstream",
  "rusqlite",
+ "serde",
  "serde_json",
  "tracing",
  "ureq",

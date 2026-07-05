@@ -14,7 +14,8 @@
 
 use crossterm::event::KeyModifiers;
 use lt_runtime::test_util::Database;
-use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
+use lt_types::inputs::{CommentCreateInput, IssueCreateInput, IssueUpdateInput};
+use lt_types::issues::IssueUpdateVariables;
 use lt_types::teams::TeamsQuery;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -178,7 +179,13 @@ fn pending_select_seeks_identifier_on_next_issues_update() {
 
     // A write that touches `Issue` propagates to the live list subscription.
     app.runtime
-        .edit_issue("1", lt_runtime::sync::service::IssueEdit::Priority(0))
+        .update_issue(IssueUpdateVariables {
+            id: "1".to_string(),
+            input: IssueUpdateInput {
+                priority: Some(0),
+                ..Default::default()
+            },
+        })
         .unwrap();
     drain_events(&mut app);
 
@@ -465,9 +472,23 @@ fn route_update_issues_under_an_overlay_defers_and_resume_focus_replays() {
 fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let issue_id = issue.id.inner().to_string();
-    let mut app = app_with_db(&[issue]).unwrap();
+    let (mut app, db) = app_with_db_and_handle(&[issue]).unwrap();
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues[0].state.name, "Todo");
+
+    // The id a real popup offers is already cached under its name by that
+    // picker's own `TeamStatesQuery` subscription; mirror that precondition
+    // here rather than hand-placing a name at write time.
+    lt_runtime::test_util::upsert_team_state(
+        &db.connect().unwrap(),
+        "ENG",
+        &lt_types::types::WorkflowState {
+            id: "done-state".into(),
+            name: "Done".to_string(),
+            position: None,
+        },
+    )
+    .unwrap();
 
     app.views.push(View::Popup(PopupView {
         kind: PopupKind::State,

@@ -14,9 +14,9 @@ pub fn run(
     transport: &dyn GraphqlTransport,
 ) -> Result<Vec<EntityKey>> {
     // Drain queued local mutations before re-fetching the world.
-    super::drain::drain(conn, transport)?;
+    let mut touched = super::drain::drain(conn, transport)?;
     // Persist the viewer so cached reads can resolve `me` offline.
-    let mut touched = super::persist_viewer(conn, transport)?;
+    touched.extend(super::persist_viewer(conn, transport)?);
 
     // No filter, max page size.
     touched.extend(super::sync_pages(conn, transport, |after| {
