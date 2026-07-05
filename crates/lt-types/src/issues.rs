@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::graphql::{GraphqlOperation, ensure_success, extract_on_success};
 use crate::inputs::{IssueCreateInput, IssueUpdateInput};
 use crate::pagination::PageInfo;
-use crate::query::SortField;
+use crate::query::{SortDirection, SortField};
 use crate::scalars::Priority;
 use crate::schema;
 use crate::types::Issue;
@@ -164,7 +164,7 @@ cynic::impl_coercions!(IssueFilter, schema::IssueFilter);
 #[derive(Debug, Clone)]
 pub struct IssueSort {
     pub field: SortField,
-    pub desc: bool,
+    pub direction: SortDirection,
 }
 
 impl serde::Serialize for IssueSort {
@@ -172,7 +172,8 @@ impl serde::Serialize for IssueSort {
     where
         S: serde::Serializer,
     {
-        crate::query::build_sort(&self.field, self.desc).serialize(serializer)
+        let desc = self.direction == SortDirection::Descending;
+        crate::query::build_sort(&self.field, desc).serialize(serializer)
     }
 }
 
@@ -300,7 +301,7 @@ pub fn sample_issue_node(id: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id, "identifier": format!("ENG-{id}"), "title": "t",
         "priorityLabel": "High", "priority": 2,
-        "state": { "id": "s", "name": "Todo" },
+        "state": { "id": "s", "name": "Todo", "position": 1.0 },
         "assignee": null,
         "team": { "id": "ENG", "name": "Engineering" },
         "description": null,

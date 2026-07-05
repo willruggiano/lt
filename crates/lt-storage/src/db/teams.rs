@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use lt_types::members::TeamMembersQuery;
 use lt_types::new_issue::{NewIssueData, NewIssueQuery};
-use lt_types::states::{TeamStatesQuery, WorkflowStateWithPosition};
+use lt_types::states::TeamStatesQuery;
 use lt_types::teams::TeamsQuery;
 use lt_types::types;
 use lt_types::types::{User, WorkflowState};
@@ -18,11 +18,7 @@ use crate::db::sql::{self, EntityTable, Sql};
 
 /// Upsert one workflow state scoped to its team, with Linear's stored
 /// position (a targeted team sync -- the only writer that knows it).
-pub fn upsert_team_state(
-    conn: &Connection,
-    team_id: &str,
-    state: &WorkflowStateWithPosition,
-) -> Result<()> {
+pub fn upsert_team_state(conn: &Connection, team_id: &str, state: &WorkflowState) -> Result<()> {
     sql::execute(
         conn,
         sql::UPSERT_WORKFLOW_STATE_SCOPED,
@@ -117,8 +113,8 @@ pub fn query_teams(conn: &Connection) -> Result<Vec<types::Team>> {
 
 /// Generates `pub fn $fn_name(conn, team_id: &str) -> Result<Vec<$ty>>`, a
 /// team-scoped `(id, name)` query. A declarative macro rather than a shared
-/// generic helper, so the near-identical typed wrappers ([`query_team_states`],
-/// [`query_team_members`]) don't trip `cargo dupes`.
+/// generic helper, so the near-identical typed wrapper ([`query_team_members`])
+/// doesn't trip `cargo dupes`.
 macro_rules! query_team_scoped_fn {
     // `$ty` is an `ident` fragment (not `ty`/`path`): those fragments are
     // captured as opaque, already-parsed nodes that a following `{` cannot
@@ -138,43 +134,26 @@ macro_rules! query_team_scoped_fn {
 }
 
 query_team_scoped_fn!(
-    query_team_states,
-    "A team's workflow states, Linear's stored `position` order first; states known only from issue upserts (`position IS NULL`) sort last, by name.",
-    sql::QUERY_TEAM_STATES,
-    WorkflowState
-);
-query_team_scoped_fn!(
     query_team_members,
     "A team's members, resolved through `team_memberships`, by name.",
     sql::QUERY_TEAM_MEMBERS,
     User
 );
 
-/// A team's workflow states with Linear's stored `position`, in the same
-/// order as [`query_team_states`]. A state known only from an issue upsert
-/// (`position IS NULL`) maps to `f64::MAX` so it keeps sorting last, matching
-/// the SQL `ORDER BY position IS NULL, position, name`.
-fn query_team_states_with_position(
-    conn: &Connection,
-    team_id: &str,
-) -> Result<Vec<WorkflowStateWithPosition>> {
-    let mut stmt = sql::prepare(conn, sql::QUERY_TEAM_STATES_WITH_POSITION)
-        .context("failed to prepare team states (with position) query statement")?;
-    let rows = stmt
-        .query_map(params![team_id], |row| {
-            let position: Option<f64> = row.get("position")?;
-            Ok(WorkflowStateWithPosition {
-                id: row.get::<_, String>("id")?.into(),
-                name: row.get("name")?,
-                position: position.unwrap_or(f64::MAX),
-            })
-        })
-        .context("failed to execute team states (with position) query")?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.context("failed to read team state (with position) row")?);
-    }
-    Ok(out)
+/// A team's workflow states with Linear's stored `position`, in Linear's
+/// stored order first; a state known only from an issue upsert
+/// (`position IS NULL`) sorts last, by name, and carries `None`.
+pub fn query_team_states(conn: &Connection, team_id: &str) -> Result<Vec<WorkflowState>> {
+    crate::db::query_rows_id_name_and(
+        conn,
+        (sql::QUERY_TEAM_STATES, "position"),
+        params![team_id],
+        |id, name, position| WorkflowState {
+            id: id.into(),
+            name,
+            position,
+        },
+    )
 }
 
 /// Replace a team's membership set with `user_ids`: delete then insert in one
@@ -237,7 +216,7 @@ impl Upsert for TeamsQuery {
 
 impl Read for TeamStatesQuery {
     fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
-        query_team_states_with_position(conn, &vars.team_id)
+        query_team_states(conn, &vars.team_id)
     }
 
     fn reads(vars: &Self::Variables) -> Vec<EntityKey> {
@@ -248,9 +227,8 @@ impl Read for TeamStatesQuery {
 }
 
 impl Upsert for TeamStatesQuery {
-    /// The team id must come from the variables, not `out`: a positioned
-    /// state carries only `{id, name, position}`, with no back-reference to
-    /// its team.
+    /// The team id must come from the variables, not `out`: a `WorkflowState`
+    /// carries only `{id, name, position}`, with no back-reference to its team.
     fn upsert(
         conn: &Connection,
         vars: &Self::Variables,
@@ -300,13 +278,13 @@ impl Read for NewIssueQuery {
         let teams = query_teams(conn)?;
         let (states, members) = if vars.has_team {
             (
-                query_team_states_with_position(conn, &vars.team_id)?,
+                query_team_states(conn, &vars.team_id)?,
                 query_team_members(conn, &vars.team_id)?,
             )
         } else {
             (Vec::new(), Vec::new())
         };
-        let viewer = crate::db::issues::synced_viewer(conn)?;
+        let viewer = crate::db::viewer::viewer(conn)?;
         Ok(NewIssueData {
             teams,
             states,
@@ -380,10 +358,10 @@ mod tests {
         upsert_team_state(
             conn,
             team_id,
-            &WorkflowStateWithPosition {
+            &WorkflowState {
                 id: id.into(),
                 name: name.to_string(),
-                position,
+                position: Some(position),
             },
         )
         .unwrap();
@@ -545,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn team_states_query_read_maps_null_position_to_f64_max_and_preserves_order() {
+    fn team_states_query_read_maps_null_position_to_none_and_preserves_order() {
         let conn = test_db();
         upsert_state(&conn, "t1", ("s-todo", "Todo", 1.0));
         upsert_workflow_state_team_only(&conn, "s-zeta", "Zeta", "t1").unwrap();
@@ -559,7 +537,7 @@ mod tests {
                 .iter()
                 .map(|s| (s.name.as_str(), s.position))
                 .collect::<Vec<_>>(),
-            [("Todo", 1.0), ("Zeta", f64::MAX)]
+            [("Todo", Some(1.0)), ("Zeta", None)]
         );
     }
 
@@ -582,10 +560,10 @@ mod tests {
         let vars = StatesTeamVariables {
             team_id: "t1".to_string(),
         };
-        let out = vec![WorkflowStateWithPosition {
+        let out = vec![WorkflowState {
             id: "s1".into(),
             name: "Todo".to_string(),
-            position: 1.0,
+            position: Some(1.0),
         }];
         let touched = TeamStatesQuery::upsert(&conn, &vars, &out).unwrap();
         assert_eq!(
@@ -720,10 +698,10 @@ mod tests {
                 id: "t1".into(),
                 name: "Eng".to_string(),
             }],
-            states: vec![WorkflowStateWithPosition {
+            states: vec![WorkflowState {
                 id: "s1".into(),
                 name: "Todo".to_string(),
-                position: 1.0,
+                position: Some(1.0),
             }],
             members: vec![User {
                 id: "u1".into(),

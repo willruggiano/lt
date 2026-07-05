@@ -33,24 +33,14 @@
 /// `sort:updated-` so the first thing they see is the most recently
 /// updated issues in descending order.
 use lt_types::issues::{AssigneeFilter, IssueFilter};
-use lt_types::query::SortField;
+use lt_types::query::{SortDirection, SortField};
 
 // ---------------------------------------------------------------------------
 // Generated parser (bd-1pl): StemKey, StemKind, parse_query_ast_impl
 // ---------------------------------------------------------------------------
 
-// SortDir is referenced by StemKind::Sort in the generated file.
-// We forward-declare the sort direction enum here so it is in scope when
-// search_stems.rs is included below.
-
-/// Direction suffix on a sort stem.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SortDir {
-    /// Ascending ('+' suffix or no suffix).
-    Asc,
-    /// Descending ('-' suffix).
-    Desc,
-}
+// SortDirection is referenced by StemKind::Sort in the generated file; the
+// `use` above brings it into scope for search_stems.rs's `include!` below.
 
 // Include the generated enums (StemKey, StemKind) and parse_query_ast_impl().
 include!(concat!(env!("OUT_DIR"), "/search_stems.rs"));
@@ -146,15 +136,15 @@ pub fn parse_query_ast(raw: &str) -> QueryAst {
 /// present. Unknown stem keys and partially-typed stems are skipped (they
 /// carry no `StemKind`); free-text words join into `filter.term` with a
 /// trailing `*` for FTS5 prefix matching.
-pub fn lower_ast(ast: &QueryAst) -> (IssueFilter, Option<(SortField, SortDir)>) {
+pub fn lower_ast(ast: &QueryAst) -> (IssueFilter, Option<(SortField, SortDirection)>) {
     let mut filter = IssueFilter::default();
-    let mut sort: Option<(SortField, SortDir)> = None;
+    let mut sort: Option<(SortField, SortDirection)> = None;
     let mut fts_words: Vec<String> = Vec::new();
 
     for token in &ast.tokens {
         match token {
             Token::Stem { kind, .. } => match kind {
-                StemKind::Sort { field, dir } => sort = Some((field.clone(), dir.clone())),
+                StemKind::Sort { field, dir } => sort = Some((field.clone(), *dir)),
                 StemKind::Assignee { value } => {
                     filter.assignee = Some(AssigneeFilter::Contains(value.clone()));
                 }
@@ -215,7 +205,7 @@ pub const DEFAULT_QUERY: &str = "sort:updated-";
 /// state, and priority fields plus the sort field/direction, and passes it
 /// through `parse_query_ast()` so the resulting AST is always structurally
 /// valid.
-pub fn args_to_ast(filter: &IssueFilter, sort: &SortField, desc: bool) -> QueryAst {
+pub fn args_to_ast(filter: &IssueFilter, sort: &SortField, direction: SortDirection) -> QueryAst {
     let mut parts: Vec<String> = Vec::new();
     if let Some(t) = &filter.team {
         parts.push(format!("team:{t}"));
@@ -232,7 +222,11 @@ pub fn args_to_ast(filter: &IssueFilter, sort: &SortField, desc: bool) -> QueryA
     if let Some(p) = filter.priority {
         parts.push(format!("priority:{}", p.0));
     }
-    let dir = if desc { "-" } else { "+" };
+    let dir = if direction == SortDirection::Descending {
+        "-"
+    } else {
+        "+"
+    };
     parts.push(format!("sort:{}{}", sort.label(), dir));
     parse_query_ast(&parts.join(" "))
 }
@@ -250,8 +244,8 @@ pub fn render_filter_context(ast: &QueryAst) -> String {
             Token::Stem { kind, .. } => match kind {
                 StemKind::Sort { field, dir } => {
                     let d = match dir {
-                        SortDir::Desc => "-",
-                        SortDir::Asc => "+",
+                        SortDirection::Descending => "-",
+                        SortDirection::Ascending => "+",
                     };
                     parts.push(format!("sort:{}{}", field.label(), d));
                 }
@@ -341,7 +335,7 @@ mod tests {
                 assert_eq!((key_span.start, key_span.end), (0, 4));
                 assert_eq!((val_span.start, val_span.end), (5, 13));
                 assert!(matches!(field, SortField::Updated));
-                assert_eq!(*dir, SortDir::Desc);
+                assert_eq!(*dir, SortDirection::Descending);
             }
             other => panic!("expected Stem(Sort), got {other:?}"),
         }
@@ -460,7 +454,7 @@ mod tests {
         let (_, sort) = lower_ast(&ast);
         let (field, dir) = sort.unwrap();
         assert!(matches!(field, SortField::Updated));
-        assert_eq!(dir, SortDir::Desc);
+        assert_eq!(dir, SortDirection::Descending);
     }
 
     #[test]
@@ -469,7 +463,7 @@ mod tests {
         let (_, sort) = lower_ast(&ast);
         let (field, dir) = sort.unwrap();
         assert!(matches!(field, SortField::Priority));
-        assert_eq!(dir, SortDir::Asc);
+        assert_eq!(dir, SortDirection::Ascending);
     }
 
     #[test]
@@ -517,7 +511,7 @@ mod tests {
         let (filter, sort) = lower_ast(&ast);
         let (field, dir) = sort.unwrap();
         assert!(matches!(field, SortField::Updated));
-        assert_eq!(dir, SortDir::Desc);
+        assert_eq!(dir, SortDirection::Descending);
         assert_eq!(
             filter.assignee,
             Some(AssigneeFilter::Contains("me".to_string()))
@@ -619,6 +613,7 @@ mod merged_read_tests {
         types::WorkflowState {
             id: name.into(),
             name: name.to_string(),
+            position: None,
         }
     }
 
@@ -709,10 +704,7 @@ mod merged_read_tests {
         let (filter, sort) = lower_ast(&ast);
         let vars = IssuesVariables {
             filter: (filter != IssueFilter::default()).then_some(filter),
-            sort: sort.map(|(field, dir)| lt_types::issues::IssueSort {
-                field,
-                desc: dir == SortDir::Desc,
-            }),
+            sort: sort.map(|(field, direction)| lt_types::issues::IssueSort { field, direction }),
             first: Some(limit),
             after: None,
         };

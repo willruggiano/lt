@@ -2,7 +2,7 @@ use anyhow::Result;
 use lt_storage::db;
 use lt_storage::db::EntityKey;
 use lt_types::issues::{IssueFilter, IssueSort, IssuesVariables};
-use lt_types::query::SortField;
+use lt_types::query::{SortDirection, SortField};
 use lt_upstream::client::GraphqlTransport;
 
 /// The variables for one page of the delta fetch: issues updated on or after
@@ -17,7 +17,7 @@ fn variables(since: &str, after: Option<&str>) -> IssuesVariables {
         }),
         sort: Some(IssueSort {
             field: SortField::Updated,
-            desc: true,
+            direction: SortDirection::Descending,
         }),
         first: Some(250),
         after: after.map(ToOwned::to_owned),

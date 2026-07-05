@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use lt_types::inputs::{CommentCreateInput, Field, IssueCreateInput, IssueUpdateInput};
+use lt_types::scalars::Priority;
 use lt_types::types;
 use rusqlite::{Connection, params};
 use serde_json::json;
@@ -242,10 +243,7 @@ pub fn enqueue_comment_create(
         body: input.body.clone(),
         created_at: now,
         updated_at: now,
-        user: crate::db::synced_viewer(&tx)?.map(|v| types::User {
-            id: v.id,
-            name: v.name,
-        }),
+        user: crate::db::viewer::viewer(&tx)?.map(types::User::from),
         issue_id: Some(input.issue_id.clone()),
     };
     crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
@@ -330,7 +328,7 @@ pub fn ack_issue_update(
                     let label = value
                         .as_deref()
                         .and_then(|v| v.parse::<u8>().ok())
-                        .map_or("No priority", types::priority_u8_to_label);
+                        .map_or("No priority", |p| Priority(p).label());
                     sql::execute(
                         &tx,
                         sql::ACK_UPDATE_PRIORITY,
@@ -447,6 +445,7 @@ pub fn sample_base_issue(id: &str) -> types::Issue {
         state: types::WorkflowState {
             id: "s-todo".into(),
             name: "Todo".to_string(),
+            position: None,
         },
         assignee: None,
         team: types::Team {
@@ -536,6 +535,7 @@ mod tests {
         server_issue.state = types::WorkflowState {
             id: "s-merged".into(),
             name: "Merged".to_string(),
+            position: None,
         };
         ack_issue_update(&conn, seq, "1", Some(&server_issue)).unwrap();
 
@@ -621,9 +621,21 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_comment_tags_author_from_synced_viewer() {
+    fn enqueue_comment_tags_author_from_the_persisted_viewer() {
         let conn = db_with_issue("1");
-        crate::db::set_synced_viewer(&conn, "u-ada", "Ada", ("Acme", "acme")).unwrap();
+        crate::db::viewer::set_viewer(
+            &conn,
+            &lt_types::viewer::User {
+                id: "u-ada".into(),
+                name: "Ada".to_string(),
+                organization: lt_types::viewer::Organization {
+                    id: "org-1".into(),
+                    name: "Acme".to_string(),
+                    url_key: "acme".to_string(),
+                },
+            },
+        )
+        .unwrap();
         let input = CommentCreateInput {
             issue_id: "1".to_string(),
             body: "hi".to_string(),

@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lt_runtime::{SubId, Subscription};
+use lt_runtime::{Subscription, SubscriptionKey};
 use lt_types::new_issue::{NewIssueData, NewIssueQuery, NewIssueVariables};
 use lt_types::types::User;
 
@@ -90,8 +90,8 @@ impl NewIssueModal {
     /// A matching subscription update re-reads the whole form: teams
     /// re-anchored by id, states/assignees rebuilt from whatever the
     /// current vars' team scope produced, `loading` cleared.
-    pub(crate) fn apply_update(&mut self, id: SubId) {
-        if self.sub.id() != id {
+    pub(crate) fn apply_update(&mut self, key: SubscriptionKey) {
+        if self.sub.key() != key {
             return;
         }
         let Some(data) = self.sub.take() else {

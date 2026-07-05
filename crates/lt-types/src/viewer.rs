@@ -45,9 +45,22 @@ pub struct User {
 #[derive(cynic::QueryFragment, Debug, Clone)]
 #[cynic(graphql_type = "Organization")]
 pub struct Organization {
+    pub id: cynic::Id,
     pub name: String,
     #[cynic(rename = "urlKey")]
     pub url_key: String,
+}
+
+impl From<User> for crate::types::User {
+    /// Narrows the viewer identity to the shared entity fragment (drops
+    /// `organization`), for display contexts that need only `{id, name}`
+    /// (e.g. a locally authored comment's author).
+    fn from(user: User) -> Self {
+        Self {
+            id: user.id,
+            name: user.name,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -60,7 +73,7 @@ mod tests {
             "viewer": {
                 "id": "u1",
                 "name": "Ada",
-                "organization": { "name": "Acme", "urlKey": "acme" }
+                "organization": { "id": "o1", "name": "Acme", "urlKey": "acme" }
             }
         });
         let viewer = serde_json::from_value::<ViewerQuery>(data)
@@ -70,6 +83,7 @@ mod tests {
             .unwrap();
         assert_eq!(viewer.id.inner(), "u1");
         assert_eq!(viewer.name, "Ada");
+        assert_eq!(viewer.organization.id.inner(), "o1");
         assert_eq!(viewer.organization.name, "Acme");
         assert_eq!(viewer.organization.url_key, "acme");
     }

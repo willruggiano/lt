@@ -18,6 +18,15 @@ impl std::str::FromStr for SortField {
     }
 }
 
+/// A sort's direction: the one vocabulary crossing every seam that carries a
+/// [`SortField`] (the TUI's `sort:` stem, the wire `IssueSortInput`, and
+/// local SQL ordering).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
 /// Validate and normalise a `YYYY-MM-DD` date into an RFC3339 start-of-day
 /// timestamp for SQL/GraphQL comparison.
 pub fn parse_date(s: &str, field: &str) -> Result<String> {

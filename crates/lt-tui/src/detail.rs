@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lt_runtime::{Runtime, SubId, Subscription};
+use lt_runtime::{Runtime, Subscription, SubscriptionKey};
 use lt_types::detail::{IssueDetailData, IssueDetailQuery, IssueDetailVariables};
 use lt_types::types::Issue;
 
@@ -26,8 +26,8 @@ impl DetailView {
     /// one shot. A fresh read of `None` (the issue vanished locally) is
     /// idempotently ignored -- the pane keeps showing its last known state
     /// rather than blanking out.
-    pub(crate) fn apply_update(&mut self, id: SubId) {
-        if self.sub.id() == id
+    pub(crate) fn apply_update(&mut self, key: SubscriptionKey) {
+        if self.sub.key() == key
             && let Some(Some(data)) = self.sub.take()
         {
             self.issue = data.issue;

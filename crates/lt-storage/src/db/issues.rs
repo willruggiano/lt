@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use lt_types::issues::{IssueConnection, IssuesQuery, IssuesVariables};
 use lt_types::pagination::PageInfo;
-use lt_types::query::SortField;
+use lt_types::query::{SortDirection, SortField};
 use lt_types::scalars::Priority;
 use lt_types::types;
 use rusqlite::{Connection, params};
@@ -19,7 +19,7 @@ use crate::db::sql::{self, BindParams, EntityTable, Sql};
 /// column alias.
 pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Issue> {
     let priority_label: String = row.get("priority_label")?;
-    let priority = types::priority_label_to_u8(&priority_label);
+    let priority = Priority::from_label(&priority_label);
 
     let created_at: String = row.get("created_at")?;
     let updated_at: String = row.get("updated_at")?;
@@ -44,10 +44,11 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
         identifier: row.get("identifier")?,
         title: row.get("title")?,
         priority_label,
-        priority: Priority(priority),
+        priority,
         state: types::WorkflowState {
             id: state_id.into(),
             name: row.get("state_name")?,
+            position: row.get("state_position")?,
         },
         assignee: assignee_id.map(|id| types::User {
             id: id.into(),
@@ -258,13 +259,14 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
                         issue.state = types::WorkflowState {
                             id: id.clone().into(),
                             name: o.state_name.clone().unwrap_or_default(),
+                            position: None,
                         };
                     }
                 }
                 "priority" => {
                     if let Some(p) = o.value.as_deref().and_then(|v| v.parse::<u8>().ok()) {
                         issue.priority = Priority(p);
-                        issue.priority_label = types::priority_u8_to_label(p).to_string();
+                        issue.priority_label = Priority(p).label().to_string();
                     }
                 }
                 "assignee" => {
@@ -302,7 +304,12 @@ pub fn query_issues(conn: &Connection, vars: &IssuesVariables) -> Result<IssueCo
 
     let (order, desc) = vars.sort.as_ref().map_or(
         (crate::db::filters::sort_column(&SortField::Updated), true),
-        |s| (crate::db::filters::sort_column(&s.field), s.desc),
+        |s| {
+            (
+                crate::db::filters::sort_column(&s.field),
+                s.direction == SortDirection::Descending,
+            )
+        },
     );
 
     let cap = vars.first.unwrap_or(DEFAULT_PAGE_SIZE).clamp(0, 250);
@@ -442,8 +449,8 @@ pub fn query_children(conn: &Connection, parent_id: &str) -> Result<Vec<types::I
     )
 }
 
-/// Look up a single issue by id, for the detail pane's parent reference.
-/// Returns `None` when no issue with that id is cached.
+/// Look up a single issue by id, for the issue-detail operation's parent
+/// reference. Returns `None` when no issue with that id is cached.
 pub fn query_issue_by_id(conn: &Connection, id: &str) -> Result<Option<types::Issue>> {
     let mut issues = query_issues_one(
         conn,
@@ -479,53 +486,6 @@ pub fn count_issues(conn: &Connection) -> Result<i64> {
 /// empty or stale index and fall back to `LIKE` search (ADR decision 6).
 pub fn count_fts_rows(conn: &Connection) -> Result<i64> {
     count_rows(conn, sql::COUNT_FTS_ROWS, "count fts rows")
-}
-
-/// The `sync_meta` keys the synced viewer identity is stored under. Kept
-/// private so every reader/writer goes through [`synced_viewer`] /
-/// [`set_synced_viewer`] instead of the raw key strings.
-const VIEWER_ID_KEY: &str = "viewer_id";
-const VIEWER_NAME_KEY: &str = "viewer_name";
-const VIEWER_ORG_NAME_KEY: &str = "viewer_org_name";
-const VIEWER_ORG_URL_KEY_KEY: &str = "viewer_org_url_key";
-
-/// Persist the authenticated viewer's whole identity into `sync_meta`, so
-/// cached reads (the header, `assignee:me`) can resolve it without a network
-/// round-trip. `organization` is `(name, url_key)`, grouped so the function
-/// stays under clippy's too-many-arguments threshold.
-pub fn set_synced_viewer(
-    conn: &Connection,
-    id: &str,
-    name: &str,
-    organization: (&str, &str),
-) -> Result<()> {
-    let (org_name, org_url_key) = organization;
-    set_meta(conn, VIEWER_ID_KEY, id)?;
-    set_meta(conn, VIEWER_NAME_KEY, name)?;
-    set_meta(conn, VIEWER_ORG_NAME_KEY, org_name)?;
-    set_meta(conn, VIEWER_ORG_URL_KEY_KEY, org_url_key)?;
-    Ok(())
-}
-
-/// Look up the persisted viewer identity. `None` when sync has not yet
-/// recorded one (pre-first-sync): the honest "no viewer" shape, not an
-/// empty-string sentinel.
-pub fn synced_viewer(conn: &Connection) -> Result<Option<lt_types::viewer::User>> {
-    let id = get_meta(conn, VIEWER_ID_KEY)?;
-    let name = get_meta(conn, VIEWER_NAME_KEY)?;
-    let Some((id, name)) = id.zip(name) else {
-        return Ok(None);
-    };
-    let org_name = get_meta(conn, VIEWER_ORG_NAME_KEY)?.unwrap_or_default();
-    let org_url_key = get_meta(conn, VIEWER_ORG_URL_KEY_KEY)?.unwrap_or_default();
-    Ok(Some(lt_types::viewer::User {
-        id: id.into(),
-        name,
-        organization: lt_types::viewer::Organization {
-            name: org_name,
-            url_key: org_url_key,
-        },
-    }))
 }
 
 impl Read for IssuesQuery {
@@ -576,35 +536,6 @@ impl Upsert for IssuesQuery {
     }
 }
 
-impl Read for lt_types::viewer::ViewerQuery {
-    fn read(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
-        synced_viewer(conn)
-    }
-
-    fn reads(_vars: &Self::Variables) -> Vec<EntityKey> {
-        vec![EntityKey::Viewer]
-    }
-}
-
-impl Upsert for lt_types::viewer::ViewerQuery {
-    fn upsert(
-        conn: &Connection,
-        _vars: &Self::Variables,
-        out: &Self::Output,
-    ) -> Result<Vec<EntityKey>> {
-        let Some(viewer) = out else {
-            return Ok(Vec::new());
-        };
-        set_synced_viewer(
-            conn,
-            viewer.id.inner(),
-            &viewer.name,
-            (&viewer.organization.name, &viewer.organization.url_key),
-        )?;
-        Ok(vec![EntityKey::Viewer])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +552,7 @@ mod tests {
             state: types::WorkflowState {
                 id: state.into(),
                 name: state.to_string(),
+                position: None,
             },
             assignee: assignee.map(|n| types::User {
                 id: n.into(),
@@ -668,6 +600,7 @@ mod tests {
             state: types::WorkflowState {
                 id: "s1".into(),
                 name: "In Progress".to_string(),
+                position: None,
             },
             assignee: Some(types::User {
                 id: "u1".into(),
@@ -992,6 +925,7 @@ mod tests {
         updated.state = types::WorkflowState {
             id: "s2".into(),
             name: "Canceled".to_string(),
+            position: None,
         };
         upsert_issues(&conn, &[updated]).unwrap();
 
@@ -1073,68 +1007,5 @@ mod tests {
             },
         };
         assert!(IssuesQuery::upsert(&conn, &vars, &out).unwrap().is_empty());
-    }
-
-    #[test]
-    fn synced_viewer_round_trips_identity_and_organization() {
-        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
-        assert!(synced_viewer(&conn).unwrap().is_none());
-
-        set_synced_viewer(&conn, "u1", "Ada", ("Acme", "acme")).unwrap();
-        let viewer = synced_viewer(&conn).unwrap().unwrap();
-        assert_eq!(viewer.id.inner(), "u1");
-        assert_eq!(viewer.name, "Ada");
-        assert_eq!(viewer.organization.name, "Acme");
-        assert_eq!(viewer.organization.url_key, "acme");
-    }
-
-    #[test]
-    fn viewer_query_reads_only_the_viewer_key() {
-        assert_eq!(
-            lt_types::viewer::ViewerQuery::reads(&()),
-            vec![EntityKey::Viewer]
-        );
-    }
-
-    #[test]
-    fn viewer_query_read_is_none_before_any_sync() {
-        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
-        assert!(
-            lt_types::viewer::ViewerQuery::read(&conn, &())
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn viewer_query_upsert_persists_and_reports_viewer() {
-        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
-        let out = Some(lt_types::viewer::User {
-            id: "u1".into(),
-            name: "Ada".to_string(),
-            organization: lt_types::viewer::Organization {
-                name: "Acme".to_string(),
-                url_key: "acme".to_string(),
-            },
-        });
-        let touched = lt_types::viewer::ViewerQuery::upsert(&conn, &(), &out).unwrap();
-        assert_eq!(touched, vec![EntityKey::Viewer]);
-        assert_eq!(
-            lt_types::viewer::ViewerQuery::read(&conn, &())
-                .unwrap()
-                .unwrap()
-                .name,
-            "Ada"
-        );
-    }
-
-    #[test]
-    fn viewer_query_upsert_of_none_is_a_noop() {
-        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
-        assert!(
-            lt_types::viewer::ViewerQuery::upsert(&conn, &(), &None)
-                .unwrap()
-                .is_empty()
-        );
     }
 }

@@ -46,43 +46,25 @@ pub struct WorkflowStateConnection {
 }
 
 // ---------------------------------------------------------------------------
-// Team-scoped fetch with position (lt-runtime::teams::sync_team_data)
+// Team-scoped fetch (lt-runtime::teams::sync_team_data)
 // ---------------------------------------------------------------------------
 
-/// A workflow state carrying `position`, used only by [`TeamStatesQuery`] --
-/// the local cache's state/assignee pickers need Linear's stored ordering.
-/// The shared [`WorkflowState`] fragment used by the issue fragment stays
-/// `{ id, name }`.
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
-#[cynic(graphql_type = "WorkflowState")]
-pub struct WorkflowStateWithPosition {
-    pub id: cynic::Id,
-    pub name: String,
-    pub position: f64,
-}
-
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "Team")]
-pub struct TeamWithPositionedStates {
-    pub states: WorkflowStateWithPositionConnection,
-}
-
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "WorkflowStateConnection")]
-pub struct WorkflowStateWithPositionConnection {
-    pub nodes: Vec<WorkflowStateWithPosition>,
-}
-
+/// Team-scoped states, reusing [`TeamWithStates`]/[`WorkflowStateConnection`]:
+/// the shared [`WorkflowState`] fragment already carries `position`, so this
+/// is otherwise identical to [`WorkflowStatesQuery`] -- distinct because the
+/// local cache's state/assignee pickers (this query, synced) and the
+/// interactive new-issue session (that one, unsynced) are separate call
+/// sites.
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query", variables = "TeamVariables")]
 pub struct TeamStatesQuery {
     #[arguments(id: $team_id)]
-    pub team: TeamWithPositionedStates,
+    pub team: TeamWithStates,
 }
 
 impl GraphqlOperation for TeamStatesQuery {
     type Variables = TeamVariables;
-    type Output = Vec<WorkflowStateWithPosition>;
+    type Output = Vec<WorkflowState>;
     const NAME: &'static str = "teamStates";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
@@ -112,8 +94,8 @@ mod tests {
     fn extract_returns_state_nodes() {
         let data = serde_json::json!({
             "team": { "states": { "nodes": [
-                { "id": "s1", "name": "Todo" },
-                { "id": "s2", "name": "Done" }
+                { "id": "s1", "name": "Todo", "position": 1.0 },
+                { "id": "s2", "name": "Done", "position": 2.0 }
             ] } }
         });
         let states = serde_json::from_value::<WorkflowStatesQuery>(data)
@@ -153,7 +135,7 @@ mod tests {
                 .iter()
                 .map(|s| (s.name.as_str(), s.position))
                 .collect::<Vec<_>>(),
-            [("Todo", 1.0), ("Done", 2.5)]
+            [("Todo", Some(1.0)), ("Done", Some(2.5))]
         );
     }
 }

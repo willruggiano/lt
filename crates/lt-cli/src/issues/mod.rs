@@ -112,6 +112,15 @@ impl IssueArgs {
             term: None,
         })
     }
+
+    /// `--asc`'s typed direction (default is descending).
+    pub(crate) fn sort_direction(&self) -> lt_types::query::SortDirection {
+        if self.asc {
+            lt_types::query::SortDirection::Ascending
+        } else {
+            lt_types::query::SortDirection::Descending
+        }
+    }
 }
 
 #[derive(Subcommand)]

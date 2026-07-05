@@ -1,12 +1,10 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use lt_runtime::{SubId, Subscription, search_query};
+use lt_runtime::{Subscription, SubscriptionKey, search_query};
 use lt_types::issues::{IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
 use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
-use lt_types::states::{
-    TeamStatesQuery, TeamVariables as StatesTeamVariables, WorkflowStateWithPosition,
-};
+use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
@@ -47,15 +45,6 @@ impl From<lt_types::types::WorkflowState> for PopupItem {
     }
 }
 
-impl From<WorkflowStateWithPosition> for PopupItem {
-    fn from(state: WorkflowStateWithPosition) -> Self {
-        Self {
-            label: state.name,
-            id: Some(state.id.into_inner()),
-        }
-    }
-}
-
 impl From<lt_types::types::User> for PopupItem {
     fn from(user: lt_types::types::User) -> Self {
         Self {
@@ -69,7 +58,7 @@ impl From<lt_types::types::User> for PopupItem {
 /// read different operations, so the slot is an enum over them rather than
 /// one generic field. `None` for the static priority popup.
 pub(crate) enum PopupSub {
-    States(Subscription<Vec<WorkflowStateWithPosition>>),
+    States(Subscription<Vec<lt_types::types::WorkflowState>>),
     Members(Subscription<Vec<lt_types::types::User>>),
 }
 
@@ -239,10 +228,7 @@ impl SearchOverlay {
         };
         let vars = IssuesVariables {
             filter: (filter != IssueFilter::default()).then_some(filter),
-            sort: sort.map(|(field, dir)| IssueSort {
-                field,
-                desc: dir == search_query::SortDir::Desc,
-            }),
+            sort: sort.map(|(field, direction)| IssueSort { field, direction }),
             first: i32::try_from(limit).ok(),
             after: None,
         };
@@ -380,10 +366,10 @@ impl PopupView {
     /// A matching subscription update rebuilds `items` and re-anchors the
     /// selection by id; the priority popup has no subscription and never
     /// matches.
-    pub(crate) fn apply_update(&mut self, id: SubId) {
+    pub(crate) fn apply_update(&mut self, key: SubscriptionKey) {
         let current_id = self.items.get(self.selected).and_then(|i| i.id.clone());
         match &self.sub {
-            Some(PopupSub::States(sub)) if sub.id() == id => {
+            Some(PopupSub::States(sub)) if sub.key() == key => {
                 if let Some(states) = sub.take() {
                     self.items = states.into_iter().map(PopupItem::from).collect();
                     self.selected = self
@@ -393,7 +379,7 @@ impl PopupView {
                         .unwrap_or(0);
                 }
             }
-            Some(PopupSub::Members(sub)) if sub.id() == id => {
+            Some(PopupSub::Members(sub)) if sub.key() == key => {
                 if let Some(members) = sub.take() {
                     self.items = assignee_popup_items(members);
                     self.selected = self

@@ -79,11 +79,11 @@ enum Commands {
 fn run_tui(
     filter: &lt_types::issues::IssueFilter,
     sort: &lt_runtime::query::SortField,
-    desc: bool,
+    direction: lt_runtime::query::SortDirection,
     limit: u32,
 ) -> Result<()> {
     let launch = lt_tui::ListLaunch {
-        filter: lt_runtime::search_query::args_to_ast(filter, sort, desc),
+        filter: lt_runtime::search_query::args_to_ast(filter, sort, direction),
         limit,
     };
 
@@ -132,14 +132,19 @@ fn main() -> Result<()> {
         None => run_tui(
             &lt_types::issues::IssueFilter::default(),
             &lt_runtime::query::SortField::Updated,
-            true,
+            lt_runtime::query::SortDirection::Descending,
             50,
         )?,
         Some(Commands::Auth { command }) => auth::run(&mut out, &command)?,
         Some(Commands::Inbox { args }) => inbox::run(&mut out, &args)?,
         Some(Commands::Issues { args, subcommand }) => issues::run(&mut out, &args, subcommand)?,
         Some(Commands::Tui { args }) => {
-            run_tui(&args.literal_filter()?, &args.sort, !args.asc, args.limit)?;
+            run_tui(
+                &args.literal_filter()?,
+                &args.sort,
+                args.sort_direction(),
+                args.limit,
+            )?;
         }
         Some(Commands::Sync { command }) => {
             let cmd = command.unwrap_or(sync::SyncCommands::Delta);

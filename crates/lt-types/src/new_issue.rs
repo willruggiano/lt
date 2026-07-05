@@ -16,9 +16,9 @@ use cynic::QueryBuilder;
 
 use crate::graphql::GraphqlOperation;
 use crate::members::UserConnection;
-use crate::states::{WorkflowStateWithPosition, WorkflowStateWithPositionConnection};
+use crate::states::WorkflowStateConnection;
 use crate::teams::TeamConnection;
-use crate::types::{Team, User};
+use crate::types::{Team, User, WorkflowState};
 use crate::{schema, viewer};
 
 #[derive(cynic::QueryVariables, Clone)]
@@ -51,7 +51,7 @@ pub struct NewIssueQuery {
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Team")]
 pub struct TeamWithStatesAndMembers {
-    pub states: WorkflowStateWithPositionConnection,
+    pub states: WorkflowStateConnection,
     pub members: UserConnection,
 }
 
@@ -64,7 +64,7 @@ pub struct TeamWithStatesAndMembers {
 #[derive(Default)]
 pub struct NewIssueData {
     pub teams: Vec<Team>,
-    pub states: Vec<WorkflowStateWithPosition>,
+    pub states: Vec<WorkflowState>,
     pub members: Vec<User>,
     pub viewer: Option<viewer::User>,
 }

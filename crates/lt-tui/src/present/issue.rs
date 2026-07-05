@@ -1,3 +1,4 @@
+use lt_runtime::query::SortDirection;
 use lt_runtime::text;
 use lt_types::comments::Comment;
 use lt_types::types::Issue;
@@ -53,7 +54,7 @@ impl IssueRow<'_> {
 pub(crate) struct IssueTable<'a> {
     pub(crate) issues: &'a [Issue],
     pub(crate) sort_col: Option<usize>,
-    pub(crate) desc: bool,
+    pub(crate) direction: SortDirection,
 }
 
 impl IssueTable<'_> {
@@ -92,7 +93,11 @@ impl StatefulWidget for &IssueTable<'_> {
     type State = TableState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut TableState) {
-        let sort_marker = if self.desc { "-" } else { "+" };
+        let sort_marker = if self.direction == SortDirection::Descending {
+            "-"
+        } else {
+            "+"
+        };
         let headers: [String; 7] = std::array::from_fn(|i| {
             if Some(i) == self.sort_col {
                 format!("{} {}", HEADERS[i], sort_marker)

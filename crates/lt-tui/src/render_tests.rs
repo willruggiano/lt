@@ -29,6 +29,7 @@ fn authenticated(name: &str, org: &str) -> AuthStatus {
             id: "viewer-1".into(),
             name: name.to_string(),
             organization: viewer::Organization {
+                id: "org-1".into(),
                 name: org.to_string(),
                 url_key: org.to_lowercase(),
             },
@@ -185,18 +186,24 @@ fn filter_sort_sync_and_replacement() {
     app.list_mut().query.filter = search_query::parse_query_ast("sort:title+");
     app.list_mut().query.sync_sort_from_filter();
     assert!(matches!(
-        app.list_mut().query.sort,
+        app.list_mut().query.order.field,
         lt_runtime::query::SortField::Title
     ));
-    assert!(!app.list_mut().query.desc);
+    assert_eq!(
+        app.list_mut().query.order.direction,
+        lt_runtime::query::SortDirection::Ascending
+    );
 
     // replace_sort_in_filter rewrites the sort token, preserving other stems.
-    app.list_mut().query.sort = lt_runtime::query::SortField::Updated;
-    app.list_mut().query.desc = true;
+    app.list_mut().query.order.field = lt_runtime::query::SortField::Updated;
+    app.list_mut().query.order.direction = lt_runtime::query::SortDirection::Descending;
     app.list_mut().query.filter = search_query::parse_query_ast("state:todo sort:title+");
     let replaced = app.list_mut().query.replace_sort_in_filter();
     let (filter, sort) = search_query::lower_ast(&replaced);
-    assert_eq!(sort.map(|(_, d)| d), Some(search_query::SortDir::Desc));
+    assert_eq!(
+        sort.map(|(_, d)| d),
+        Some(lt_runtime::query::SortDirection::Descending)
+    );
     assert_eq!(filter.state.as_deref(), Some("todo"));
 }
 
@@ -211,21 +218,12 @@ fn new_issue_field_cycles_both_directions() {
 }
 
 #[test]
-fn priority_label_to_u8_maps_levels() {
-    assert_eq!(priority_label_to_u8("Urgent"), 1);
-    assert_eq!(priority_label_to_u8("high"), 2);
-    assert_eq!(priority_label_to_u8("normal"), 3);
-    assert_eq!(priority_label_to_u8("medium"), 3);
-    assert_eq!(priority_label_to_u8("low"), 4);
-    assert_eq!(priority_label_to_u8("No priority"), 0);
-}
-
-#[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
     let viewer = viewer::User {
         id: "v".into(),
         name: "Vic".to_string(),
         organization: viewer::Organization {
+            id: "org-1".into(),
             name: "Acme".to_string(),
             url_key: "acme".to_string(),
         },

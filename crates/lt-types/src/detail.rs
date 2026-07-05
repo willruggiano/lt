@@ -87,7 +87,7 @@ mod tests {
             "issue": {
                 "id": "1", "identifier": "ENG-1", "title": "t",
                 "priorityLabel": "High", "priority": 2,
-                "state": { "id": "s", "name": "Todo" },
+                "state": { "id": "s", "name": "Todo", "position": 1.0 },
                 "assignee": null,
                 "team": { "id": "ENG", "name": "Engineering" },
                 "description": null,

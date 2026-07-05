@@ -6,6 +6,7 @@ pub mod ops;
 pub mod outbox;
 pub(crate) mod sql;
 pub mod teams;
+pub mod viewer;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ use anyhow::{Context, Result, bail};
 pub use comments::{delete_comments_for_issue, query_comments, upsert_comments};
 pub use issues::{
     count_fts_rows, count_issues, get_meta, query_children, query_issue_by_id, query_issues,
-    search_issues, search_issues_like, set_meta, set_synced_viewer, synced_viewer, upsert_issues,
+    search_issues, search_issues_like, set_meta, upsert_issues,
 };
 pub use ops::{EntityKey, Read, Upsert};
 pub use rusqlite::Connection;
@@ -23,6 +24,7 @@ pub use teams::{
     derive_team_memberships_from_issues, query_team_members, query_team_states, query_teams,
     replace_team_memberships, upsert_team_state, upsert_teams, upsert_users,
 };
+pub use viewer::{set_viewer, viewer};
 
 /// Parse a stored RFC3339 timestamp column into the wire [`DateTime`](lt_types::scalars::DateTime)
 /// scalar via its `FromStr` impl. Storage always writes
@@ -34,6 +36,36 @@ pub(crate) fn parse_datetime_column(
 ) -> std::result::Result<lt_types::scalars::DateTime, rusqlite::types::FromSqlError> {
     s.parse()
         .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
+}
+
+/// Run a statement with `params`, mapping every `(id, name, <extra>)`-shaped
+/// result row through `ctor` -- the shape behind both a team-scoped workflow
+/// state (`position` as its extra column) and an organization (`url_key`), so
+/// the two near-identical row-mapping call sites share one body. `query` is
+/// `(statement, extra_column)`, grouped so the function stays under clippy's
+/// too-many-arguments threshold.
+pub(crate) fn query_rows_id_name_and<T, E: rusqlite::types::FromSql>(
+    conn: &Connection,
+    query: (sql::Sql, &str),
+    params: impl rusqlite::Params,
+    ctor: impl Fn(String, String, E) -> T,
+) -> Result<Vec<T>> {
+    let (stmt_sql, extra_column) = query;
+    let mut stmt = sql::prepare(conn, stmt_sql).context("failed to prepare statement")?;
+    let rows = stmt
+        .query_map(params, |row| {
+            Ok(ctor(
+                row.get("id")?,
+                row.get("name")?,
+                row.get(extra_column)?,
+            ))
+        })
+        .context("failed to execute query")?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.context("failed to read row")?);
+    }
+    Ok(out)
 }
 
 pub fn db_path() -> Result<PathBuf> {
@@ -147,10 +179,23 @@ const MIGRATION_2: &str = "\
         PRIMARY KEY (team_id, user_id)
     );";
 
+/// The viewer's organization, so `sync_meta` can key the viewer identity by
+/// `viewer_id`/`organization_id` rather than duplicating its name/url fields.
+const MIGRATION_3: &str = "\
+    CREATE TABLE organizations (
+        id      TEXT PRIMARY KEY,
+        name    TEXT NOT NULL,
+        url_key TEXT NOT NULL
+    );";
+
 /// The migration list: the single schema source for both `open_db()` and the
 /// `sql_validation` gate (docs/design/type-safe-sql-adr.md, "Migrations").
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(MIGRATION_1), M::up(MIGRATION_2)])
+    Migrations::new(vec![
+        M::up(MIGRATION_1),
+        M::up(MIGRATION_2),
+        M::up(MIGRATION_3),
+    ])
 }
 
 /// Refuse a pre-versioning database (`user_version` 0 but tables exist): delete it and re-sync.

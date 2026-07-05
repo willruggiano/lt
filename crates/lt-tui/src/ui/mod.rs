@@ -4,20 +4,20 @@ mod help;
 mod new_issue;
 mod popup;
 mod search;
-mod table;
+pub(crate) mod table;
 mod text_span;
 mod util;
 
 use chrome::{Footer, Header, HeaderWithSearch};
-use lt_runtime::query::SortField;
+use lt_runtime::query::{SortDirection, SortField};
 use new_issue::{NewIssueForm, submit_key_label};
 use popup::Popup;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::Paragraph;
 use search::{SearchResults, SortOrder};
-use table::TableGeometry;
 
+use crate::list::TableGeometry;
 use crate::{App, View, search_query, sync_status_label};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -117,14 +117,15 @@ fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Foo
 fn render_views(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
     let len = app.views.len();
     let mut list_geometry: Option<TableGeometry> = None;
-    let mut list_sort_field = SortField::Updated;
-    let mut list_sort_desc = true;
+    let mut list_order = crate::list::SortOrder {
+        field: SortField::Updated,
+        direction: SortDirection::Descending,
+    };
 
     for i in 0..len {
         match &mut app.views[i] {
             View::List(list) => {
-                list_sort_field = list.query.sort.clone();
-                list_sort_desc = list.query.desc;
+                list_order = list.query.order.clone();
                 list_geometry = list.render_table(chunks[2], frame.buffer_mut());
             }
             View::Detail(detail) => frame.render_widget(detail.as_ref(), chunks[2]),
@@ -157,8 +158,8 @@ fn render_views(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
             View::Help(popup) => frame.render_widget(&*popup, frame.area()),
             View::Search(overlay) => {
                 let sort = SortOrder {
-                    field: &list_sort_field,
-                    desc: list_sort_desc,
+                    field: &list_order.field,
+                    direction: list_order.direction,
                 };
                 frame.render_widget(&mut SearchResults { overlay, sort }, chunks[2]);
             }

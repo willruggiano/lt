@@ -249,8 +249,11 @@ impl Generator {
         let cycle = self.maybe_cycle();
         let creator = Self::user(Some(self.name()));
         let parent = self.maybe_parent(&team_key, existing);
-        let priority_label = (*self.pick(PRIORITIES)).to_string();
-        let priority = types::priority_label_to_u8(&priority_label);
+        // `PRIORITIES` is ordered by level, so the picked index is the level
+        // directly -- no label round trip needed.
+        let priority_idx = self.rng.random_range(0..PRIORITIES.len());
+        let priority_label = PRIORITIES[priority_idx].to_string();
+        let priority = u8::try_from(priority_idx).unwrap_or(0);
         let state_name = (*self.pick(STATES)).to_string();
         types::Issue {
             id: format!("sim-{:016x}-{index}", self.seed).into(),
@@ -262,6 +265,7 @@ impl Generator {
             state: types::WorkflowState {
                 id: state_name.clone().into(),
                 name: state_name,
+                position: None,
             },
             assignee,
             team: types::Team {

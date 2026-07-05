@@ -1,9 +1,8 @@
-//! The concrete data runtime: today's `LinearSyncService`, renamed and
-//! widened (docs/design/operation-seam-adr.md, "Decision 7"). It owns the
-//! sync/login loop, the live subscription registry, and every write; it is
-//! the only place in the TUI's runtime that touches `HttpTransport`/cynic
-//! directly (behind the injected [`TransportSource`]). `lt-cli` constructs it
-//! and injects it into `tui::run`.
+//! The concrete data runtime. It owns the sync/login loop, the live
+//! subscription registry, and every write; it is the only place in the
+//! TUI's runtime that touches `HttpTransport`/cynic directly (behind the
+//! injected [`TransportSource`]). `lt-cli` constructs it and injects it into
+//! `tui::run`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
@@ -21,7 +20,7 @@ use lt_upstream::auth::refresh::load_or_refresh_token;
 use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
 
 use crate::ops::Refresh;
-use crate::subscription::{SubId, Subscription};
+use crate::subscription::{Subscription, SubscriptionKey};
 use crate::sync::service::{IssueEdit, LoginEvent, OnEvent, RuntimeEvent, SyncEvent};
 
 /// The loop's periodic delta-sync cadence.
@@ -76,7 +75,7 @@ enum Command {
     /// beyond the delta cycle's baseline coverage (Decision 6); a no-op
     /// otherwise. Registration and the caller-side initial read already
     /// happened synchronously on `subscribe`'s caller thread.
-    Subscribe(SubId),
+    Subscribe(SubscriptionKey),
     RequestSync,
     Login,
     LoginFinished(bool),
@@ -87,7 +86,7 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Cycle { full: bool },
-    RefreshEntry(SubId),
+    RefreshEntry(SubscriptionKey),
     SpawnLogin,
 }
 
@@ -164,6 +163,20 @@ fn needs_freshness_refresh(reads: &[EntityKey]) -> bool {
     !reads.iter().all(|k| matches!(k, EntityKey::Issue))
 }
 
+/// A panicking closure's payload as text, for propagation into the emitted
+/// error event rather than a generic "panicked" string: `panic!("...")` and
+/// `.unwrap()`/`.expect("...")` payloads are `&str` or `String`; anything else
+/// falls back to a generic message.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panicked with a non-string payload".to_string()
+    }
+}
+
 /// A sync cycle's outcome, for the loop to update its pause bookkeeping.
 /// Distinct from [`SyncEvent`]: this is loop-internal, not the wire
 /// vocabulary `on_event` reports.
@@ -197,7 +210,7 @@ pub struct Runtime {
     /// The live subscription registry, reachable synchronously from both the
     /// caller thread (registration, write-path propagation, retraction) and
     /// the loop thread (freshness refresh, sync-cycle propagation).
-    entries: Arc<Mutex<HashMap<SubId, Entry>>>,
+    entries: Arc<Mutex<HashMap<SubscriptionKey, Entry>>>,
     commands_tx: mpsc::Sender<Command>,
     /// `run` takes this once, at the start of its loop; `None` after that
     /// signals a second call, which is a programming error (`run` is
@@ -256,15 +269,16 @@ impl Runtime {
     }
 
     /// `last_synced_at` for a `Sync(Done)` timestamp: the DB's own meta,
-    /// falling back to the wall clock when the read fails or is unparseable
-    /// (pre-first-sync, or a corrupt row -- never a panic path).
-    fn synced_at(&self) -> chrono::DateTime<chrono::Utc> {
+    /// `None` if it is absent, unreadable, or unparseable (pre-first-sync, or
+    /// a corrupt row -- never a panic path).
+    fn synced_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         let raw = self
             .connect()
             .ok()
-            .and_then(|conn| db::get_meta(&conn, "last_synced_at").ok().flatten());
-        raw.and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-            .map_or_else(chrono::Utc::now, |dt| dt.with_timezone(&chrono::Utc))
+            .and_then(|conn| db::get_meta(&conn, "last_synced_at").ok().flatten())?;
+        chrono::DateTime::parse_from_rfc3339(&raw)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
     }
 
     /// Synchronous cache-first subscribe: register the entry (before the
@@ -277,7 +291,7 @@ impl Runtime {
         Op::Variables: Clone + Send + Sync + 'static,
         Op::Output: Default + Send + 'static,
     {
-        let id = SubId::next();
+        let key = SubscriptionKey::next();
         let reads = Op::reads(&vars);
         let slot: Arc<Mutex<Option<Op::Output>>> = Arc::new(Mutex::new(None));
 
@@ -291,7 +305,7 @@ impl Runtime {
                         *slot_for_reread
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner) = Some(out);
-                        on_event(RuntimeEvent::Updated(id));
+                        on_event(RuntimeEvent::Updated(key));
                     }
                     Err(e) => tracing::warn!(error = %e, "subscription re-read failed"),
                 },
@@ -315,7 +329,7 @@ impl Runtime {
         {
             let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
             entries.insert(
-                id,
+                key,
                 Entry {
                     reads,
                     reread,
@@ -332,19 +346,19 @@ impl Runtime {
                 Op::Output::default()
             });
 
-        if self.commands_tx.send(Command::Subscribe(id)).is_err() {
+        if self.commands_tx.send(Command::Subscribe(key)).is_err() {
             tracing::debug!("subscribe: runtime loop is gone");
         }
 
         let entries_for_retract = Arc::clone(&self.entries);
         let sub = Subscription {
-            id,
+            key,
             latest: slot,
-            retract: Box::new(move |id| {
+            retract: Box::new(move |key| {
                 entries_for_retract
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&id);
+                    .remove(&key);
             }),
         };
         (sub, initial)
@@ -387,7 +401,7 @@ impl Runtime {
     /// Upstream-refresh one entry, if its `reads` extend beyond the delta
     /// cycle's baseline coverage, then propagate whatever it touched (or its
     /// own `reads`, on failure).
-    fn refresh_entry(&self, id: SubId) {
+    fn refresh_entry(&self, id: SubscriptionKey) {
         let entry = {
             let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
             entries.get(&id).cloned()
@@ -422,7 +436,7 @@ impl Runtime {
 
     /// Every registered entry whose `reads` extend beyond the delta cycle's
     /// baseline coverage -- the periodic tick's freshness fan-out.
-    fn entries_needing_freshness(&self) -> Vec<SubId> {
+    fn entries_needing_freshness(&self) -> Vec<SubscriptionKey> {
         self.entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -471,10 +485,10 @@ impl Runtime {
                 (self.on_event)(RuntimeEvent::Sync(SyncEvent::Error(brief)));
                 CycleOutcome::Error
             }
-            Err(_) => {
-                (self.on_event)(RuntimeEvent::Sync(SyncEvent::Error(
-                    "sync worker panicked".to_string(),
-                )));
+            Err(payload) => {
+                (self.on_event)(RuntimeEvent::Sync(SyncEvent::Error(panic_message(
+                    &*payload,
+                ))));
                 CycleOutcome::Error
             }
         }
@@ -516,16 +530,15 @@ impl Runtime {
         };
 
         let assignee = match &input.assignee_id {
-            Some(id) => {
-                let name = db::query_team_members(conn, &input.team_id)?
+            Some(id) => Some(
+                db::query_team_members(conn, &input.team_id)?
                     .into_iter()
                     .find(|u| u.id.inner() == id)
-                    .map_or_else(|| id.clone(), |u| u.name);
-                Some(types::User {
-                    id: id.clone().into(),
-                    name,
-                })
-            }
+                    .unwrap_or_else(|| types::User {
+                        id: id.clone().into(),
+                        name: id.clone(),
+                    }),
+            ),
             None => None,
         };
 
@@ -539,10 +552,11 @@ impl Runtime {
             identifier: "NEW".to_string(),
             title: input.title.clone(),
             priority: lt_types::scalars::Priority(priority),
-            priority_label: types::priority_u8_to_label(priority).to_string(),
+            priority_label: lt_types::scalars::Priority(priority).label().to_string(),
             state: types::WorkflowState {
                 id: state_id.into(),
                 name: state_name,
+                position: None,
             },
             assignee,
             team: types::Team {
@@ -595,7 +609,7 @@ impl Runtime {
         scope.spawn(move || {
             let event =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_login_body()))
-                    .unwrap_or_else(|_| LoginEvent::Error("login worker panicked".to_string()));
+                    .unwrap_or_else(|payload| LoginEvent::Error(panic_message(&*payload)));
             let success = matches!(event, LoginEvent::Success { .. });
             (self.on_event)(RuntimeEvent::Login(event));
             if self
@@ -724,8 +738,8 @@ mod tests {
 
     use super::*;
 
-    fn sub_id() -> SubId {
-        SubId::next()
+    fn sub_id() -> SubscriptionKey {
+        SubscriptionKey::next()
     }
 
     // -- LoopState (pure decisions) ------------------------------------
@@ -843,7 +857,7 @@ mod tests {
         let (runtime, _rx) = runtime_over(db);
 
         let (sub, _initial) = runtime.subscribe::<TeamsQuery>(());
-        let id = sub.id();
+        let id = sub.key();
         assert!(
             runtime
                 .entries
@@ -885,7 +899,7 @@ mod tests {
         let identifier = runtime.create_issue(&input).unwrap();
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
+        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
         let page = sub.take().unwrap();
         assert_eq!(page.nodes.len(), 1);
         assert_eq!(page.nodes[0].identifier, identifier);
@@ -914,7 +928,7 @@ mod tests {
             .unwrap();
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
+        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
         let data = sub.take().unwrap().unwrap();
         assert_eq!(data.comments.len(), 1);
         assert_eq!(data.comments[0].body, "hello");
@@ -949,7 +963,7 @@ mod tests {
             .unwrap();
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
+        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
     }
 
     // -- freshness refresh: beyond-Issue subscriptions refresh upstream ---
@@ -997,10 +1011,10 @@ mod tests {
 
         // Call the loop's private entry point directly rather than starting
         // the (unbounded) `run` loop, so the test stays thread-free.
-        runtime.refresh_entry(sub.id());
+        runtime.refresh_entry(sub.key());
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
+        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
         let states = sub.take().unwrap();
         assert_eq!(states[0].name, "Todo");
     }
@@ -1016,7 +1030,7 @@ mod tests {
             after: None,
         });
 
-        runtime.refresh_entry(sub.id());
+        runtime.refresh_entry(sub.key());
 
         // No upstream refresh attempted (would need a real transport), and
         // no propagate -- only the `Subscribe` command's send happened.
@@ -1035,10 +1049,10 @@ mod tests {
             team_id: "t1".to_string(),
         });
 
-        runtime.refresh_entry(sub.id());
+        runtime.refresh_entry(sub.key());
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
+        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
         assert_eq!(sub.take().unwrap()[0].name, "Ada");
     }
 
@@ -1049,17 +1063,17 @@ mod tests {
         // freshness refresh every other composed subscription uses.
         let db = Database::memory().unwrap();
         let fake = FakeTransport::new(vec![json!({
-            "viewer": { "id": "u1", "name": "Ada", "organization": { "name": "Acme", "urlKey": "acme" } }
+            "viewer": { "id": "u1", "name": "Ada", "organization": { "id": "o1", "name": "Acme", "urlKey": "acme" } }
         })]);
         let (on_event, rx) = on_event_channel();
         let runtime = Runtime::new(db, Box::new(FakeSource::new(fake)), on_event);
         let (sub, initial) = runtime.subscribe::<lt_types::viewer::ViewerQuery>(());
         assert!(initial.is_none());
 
-        runtime.refresh_entry(sub.id());
+        runtime.refresh_entry(sub.key());
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
+        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
         assert_eq!(sub.take().unwrap().unwrap().name, "Ada");
     }
 }

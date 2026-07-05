@@ -35,10 +35,21 @@ pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     // compatibility").
     db::derive_team_memberships_from_issues(&conn)?;
     db::set_meta(&conn, "last_synced_at", &Utc::now().to_rfc3339())?;
-    if let Some(viewer) = dataset.issues.iter().find_map(|i| i.assignee.clone()) {
+    if let Some(assignee) = dataset.issues.iter().find_map(|i| i.assignee.clone()) {
         // `lt sim` has no organization concept to seed; the identity itself
         // is real (a real assignee from the dataset).
-        db::set_synced_viewer(&conn, viewer.id.inner(), &viewer.name, ("", ""))?;
+        db::set_viewer(
+            &conn,
+            &lt_types::viewer::User {
+                id: assignee.id,
+                name: assignee.name,
+                organization: lt_types::viewer::Organization {
+                    id: String::new().into(),
+                    name: String::new(),
+                    url_key: String::new(),
+                },
+            },
+        )?;
     }
     writeln!(
         out,

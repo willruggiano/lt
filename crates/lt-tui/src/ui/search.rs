@@ -1,4 +1,4 @@
-use lt_runtime::query::SortField;
+use lt_runtime::query::{SortDirection, SortField};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Clear, Paragraph, StatefulWidget, Widget};
@@ -12,7 +12,7 @@ use crate::present::issue::IssueTable;
 /// data as a render parameter, never stored on either view.
 pub(super) struct SortOrder<'a> {
     pub(super) field: &'a SortField,
-    pub(super) desc: bool,
+    pub(super) direction: SortDirection,
 }
 
 /// Render input for the FTS search overlay's results: its own rows/table
@@ -54,7 +54,7 @@ impl Widget for &mut SearchResults<'_> {
         let table = IssueTable {
             issues: &overlay.results,
             sort_col: sort_col_index(self.sort.field),
-            desc: self.sort.desc,
+            direction: self.sort.direction,
         };
         StatefulWidget::render(&table, area, buf, &mut overlay.table_state);
     }

@@ -5,8 +5,8 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, StatefulWidget, Widget,
 };
 
-use super::table::TableGeometry;
 use super::util::to_u16;
+use crate::list::TableGeometry;
 use crate::{PopupItem, PopupKind};
 
 /// Render input for the generic list-picker popup: its own items/selection,

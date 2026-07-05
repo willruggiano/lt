@@ -3,7 +3,8 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Result, anyhow};
 use lt_runtime::issues::NewIssueSession;
 use lt_types::inputs::IssueCreateInput;
-use lt_types::types::{Team, User as Member, WorkflowState, priority_u8_to_label};
+use lt_types::scalars::Priority;
+use lt_types::types::{Team, User as Member, WorkflowState};
 use lt_types::viewer::User as Viewer;
 
 #[derive(Debug, Clone)]
@@ -291,11 +292,7 @@ fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
     } else {
         writeln!(out, "  Description: (none)")?;
     }
-    writeln!(
-        out,
-        "  Priority:    {}",
-        priority_u8_to_label(summary.priority)
-    )?;
+    writeln!(out, "  Priority:    {}", Priority(summary.priority).label())?;
     if let Some(sid) = summary.state_id {
         let sname = summary
             .states
@@ -421,6 +418,7 @@ mod tests {
         WorkflowState {
             id: id.into(),
             name: name.to_string(),
+            position: None,
         }
     }
 
@@ -436,6 +434,7 @@ mod tests {
             id: "viewer-id".into(),
             name: "Vic Viewer".to_string(),
             organization: lt_types::viewer::Organization {
+                id: "org-1".into(),
                 name: "Acme".to_string(),
                 url_key: "acme".to_string(),
             },

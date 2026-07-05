@@ -13,7 +13,7 @@ pub mod sync;
 mod runtime;
 pub use ops::{load, refresh};
 pub use runtime::{HttpTransportSource, Runtime, TransportSource};
-pub use subscription::{SubId, Subscription};
+pub use subscription::{Subscription, SubscriptionKey};
 
 // Command orchestration for the CLI.
 pub mod auth;
@@ -34,7 +34,5 @@ pub use lt_types::query;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util {
     pub use lt_storage::db::outbox::sample_base_issue;
-    pub use lt_storage::db::{
-        Connection, Database, set_synced_viewer, upsert_issues, upsert_team_state,
-    };
+    pub use lt_storage::db::{Connection, Database, set_viewer, upsert_issues, upsert_team_state};
 }

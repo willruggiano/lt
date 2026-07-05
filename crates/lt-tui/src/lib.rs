@@ -29,10 +29,8 @@ pub(crate) use detail::build_cached_detail;
 pub use list::{ListLaunch, ListQuery, ListView};
 pub use lt_runtime::sync::service::RuntimeEvent;
 use lt_runtime::sync::service::{LoginEvent, SyncEvent};
-use lt_runtime::{Clock, SubId, Subscription, search_query};
+use lt_runtime::{Clock, Subscription, SubscriptionKey, search_query};
 use lt_types::types::Issue;
-#[cfg(all(test, feature = "sim"))]
-pub(crate) use lt_types::types::priority_label_to_u8;
 use lt_types::viewer;
 use lt_types::viewer::ViewerQuery;
 pub(crate) use new_issue::{NewIssueField, NewIssueModal};
@@ -100,15 +98,15 @@ pub(crate) enum Unbound {
 
 impl View {
     /// `focused` is true iff this is the top of the stack; Search/Help hold
-    /// no subscription. Each view checks internally whether `id` matches
+    /// no subscription. Each view checks internally whether `key` matches
     /// one of its own subscriptions -- there is no separate declared-scope
     /// registry to keep in sync.
-    fn apply_update(&mut self, focused: bool, id: SubId) {
+    fn apply_update(&mut self, focused: bool, key: SubscriptionKey) {
         match self {
-            View::List(list) => list.apply_update(focused, id),
-            View::Detail(detail) => detail.apply_update(id),
-            View::Popup(popup) => popup.apply_update(id),
-            View::NewIssue(modal) => modal.apply_update(id),
+            View::List(list) => list.apply_update(focused, key),
+            View::Detail(detail) => detail.apply_update(key),
+            View::Popup(popup) => popup.apply_update(key),
+            View::NewIssue(modal) => modal.apply_update(key),
             View::Search(_) | View::Help(_) => {}
         }
     }
@@ -251,8 +249,10 @@ pub enum SyncStatus {
     Idle,
     /// The loop announced a cycle (`Sync(Started)`).
     Syncing,
+    /// A cycle finished. `synced_at` is `None` if no prior sync has ever
+    /// completed (the runtime's `sync_meta` read found nothing).
     Synced {
-        synced_at: chrono::DateTime<chrono::Utc>,
+        synced_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     Failed {
         message: String,
@@ -593,9 +593,9 @@ impl App {
     fn apply(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.dispatch_key(key),
-            AppEvent::Runtime(RuntimeEvent::Updated(id)) => {
-                self.apply_viewer_update(id);
-                self.route_update(id);
+            AppEvent::Runtime(RuntimeEvent::Updated(key)) => {
+                self.apply_viewer_update(key);
+                self.route_update(key);
             }
             AppEvent::Runtime(RuntimeEvent::Sync(ev)) => self.consume_sync_event(ev),
             AppEvent::Runtime(RuntimeEvent::Login(ev)) => self.consume_login_event(ev),
@@ -607,8 +607,8 @@ impl App {
     /// that touches `Viewer` (docs/design/operation-seam-adr.md,
     /// Amendments). A fresh read of `None` (no viewer persisted yet) is a
     /// no-op -- `auth` keeps whatever it already reflected.
-    fn apply_viewer_update(&mut self, id: SubId) {
-        if self.viewer_sub.id() == id
+    fn apply_viewer_update(&mut self, key: SubscriptionKey) {
+        if self.viewer_sub.key() == key
             && let Some(Some(viewer)) = self.viewer_sub.take()
         {
             self.auth = AuthStatus::Authenticated { viewer };
@@ -689,11 +689,11 @@ impl App {
     /// Route a subscription update down the stack, top first (order is
     /// semantically irrelevant; chosen for coherence with the key cascade).
     /// Exactly the view holding the matching subscription (if any) acts;
-    /// every other view's internal id check is a no-op.
-    fn route_update(&mut self, id: SubId) {
+    /// every other view's internal key check is a no-op.
+    fn route_update(&mut self, key: SubscriptionKey) {
         let len = self.views.len();
         for (i, view) in self.views.iter_mut().enumerate().rev() {
-            view.apply_update(i + 1 == len, id);
+            view.apply_update(i + 1 == len, key);
         }
     }
 

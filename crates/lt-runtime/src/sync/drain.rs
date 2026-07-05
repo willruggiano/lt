@@ -121,7 +121,7 @@ mod tests {
         // The server returns full truth, including a state the overlay never
         // recorded (e.g. a workflow automation moved it further).
         let mut server_issue = lt_upstream::issues::sample_issue_node("1");
-        server_issue["state"] = json!({ "id": "s-merged", "name": "Merged" });
+        server_issue["state"] = json!({ "id": "s-merged", "name": "Merged", "position": 3.0 });
         let transport = FakeTransport::new(vec![
             json!({ "issueUpdate": { "success": true, "issue": server_issue } }),
         ]);

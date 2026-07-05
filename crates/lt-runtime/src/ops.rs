@@ -430,12 +430,12 @@ mod tests {
     fn refresh_viewer_persists_and_reports_viewer() {
         let conn = conn();
         let transport = FakeTransport::new(vec![json!({
-            "viewer": { "id": "u1", "name": "Ada", "organization": { "name": "Acme", "urlKey": "acme" } }
+            "viewer": { "id": "u1", "name": "Ada", "organization": { "id": "o1", "name": "Acme", "urlKey": "acme" } }
         })]);
 
         let touched = refresh::<ViewerQuery>(&conn, &transport, ()).unwrap();
 
         assert_eq!(touched, vec![EntityKey::Viewer]);
-        assert_eq!(db::synced_viewer(&conn).unwrap().unwrap().name, "Ada");
+        assert_eq!(db::viewer(&conn).unwrap().unwrap().name, "Ada");
     }
 }

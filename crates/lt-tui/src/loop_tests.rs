@@ -79,6 +79,7 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
         state: types::WorkflowState {
             id: state.into(),
             name: state.to_string(),
+            position: None,
         },
         assignee: None,
         team: types::Team {
@@ -227,9 +228,9 @@ fn toggle_desc_refetches() {
         db_issue("2", "ENG-2", "Todo", 4),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    let desc_before = app.list_mut().query.desc;
+    let direction_before = app.list_mut().query.order.direction;
     app.dispatch_key(key('d'));
-    assert_ne!(app.list_mut().query.desc, desc_before);
+    assert_ne!(app.list_mut().query.order.direction, direction_before);
     assert_eq!(app.list_mut().issues.len(), 2);
 }
 
@@ -540,15 +541,15 @@ fn run_app_errs_when_events_exhausted_without_quit() {
 fn double_esc_resets_to_initial_filter() {
     let rows = [db_issue("1", "ENG-1", "Todo", 5)];
     let mut app = app_with_db(&rows).unwrap();
-    let initial_sort = app.list_mut().query.sort.clone();
-    let next_sort = app.list_mut().query.sort.next();
-    app.list_mut().query.sort = next_sort;
+    let initial_sort = app.list_mut().query.order.field.clone();
+    let next_sort = app.list_mut().query.order.field.next();
+    app.list_mut().query.order.field = next_sort;
     let replaced = app.list_mut().query.replace_sort_in_filter();
     app.list_mut().query.filter = replaced;
     app.last_esc_time = Some(Instant::now()); // within the 500ms window
 
     app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.list_mut().query.sort, initial_sort);
+    assert_eq!(app.list_mut().query.order.field, initial_sort);
     assert!(app.last_esc_time.is_none());
 }
 
@@ -712,12 +713,12 @@ fn cascade_unbound_key_in_an_overlay_reaches_the_base() {
     // 'd' (toggle sort direction) is unbound in the popup's own context; it
     // should fall through the cascade to the list's binding underneath.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let before = app.list_mut().query.desc;
+    let before = app.list_mut().query.order.direction;
     push_priority_popup(&mut app, priority_popup_items());
 
     app.dispatch_key(key('d'));
 
-    assert_ne!(app.list_mut().query.desc, before);
+    assert_ne!(app.list_mut().query.order.direction, before);
 }
 
 #[test]
@@ -781,12 +782,12 @@ fn printable_key_in_search_never_reaches_the_list_beneath() {
     // direction) must stay text in the Search overlay: text contexts skip
     // GLOBAL, and forwarding always consumes, so the cascade never resumes.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let before = app.list_mut().query.desc;
+    let before = app.list_mut().query.order.direction;
     app.views.push(View::Search(SearchOverlay::new()));
 
     app.dispatch_key(key('d'));
 
-    assert_eq!(app.list_mut().query.desc, before);
+    assert_eq!(app.list_mut().query.order.direction, before);
     let Some(View::Search(overlay)) = app.views.last() else {
         unreachable!("search view expected")
     };
@@ -871,6 +872,7 @@ fn ada() -> lt_types::viewer::User {
         id: "u1".into(),
         name: "Ada".to_string(),
         organization: lt_types::viewer::Organization {
+            id: "o1".into(),
             name: "Acme".to_string(),
             url_key: "acme".to_string(),
         },
@@ -898,10 +900,10 @@ fn consume_sync_event_done_sets_synced_at_from_the_payload() {
         .unwrap()
         .with_timezone(&chrono::Utc);
 
-    app.consume_sync_event(SyncEvent::Done(now));
+    app.consume_sync_event(SyncEvent::Done(Some(now)));
 
     match &app.sync {
-        SyncStatus::Synced { synced_at } => assert_eq!(*synced_at, now),
+        SyncStatus::Synced { synced_at } => assert_eq!(*synced_at, Some(now)),
         SyncStatus::Idle | SyncStatus::Syncing | SyncStatus::Failed { .. } => {
             unreachable!("expected Synced")
         }
@@ -923,7 +925,7 @@ fn apply_viewer_update_leaves_auth_unchanged_without_a_fresh_slot_value() {
     let mut app = app_with_db(&[]).unwrap();
     app.auth = AuthStatus::Unauthenticated;
 
-    app.apply_viewer_update(app.viewer_sub.id());
+    app.apply_viewer_update(app.viewer_sub.key());
 
     assert!(matches!(app.auth, AuthStatus::Unauthenticated));
 }
@@ -1012,19 +1014,19 @@ fn seed_team_states(conn: &lt_runtime::test_util::Connection, team_id: &str) -> 
     lt_runtime::test_util::upsert_team_state(
         conn,
         team_id,
-        &lt_types::states::WorkflowStateWithPosition {
+        &lt_types::types::WorkflowState {
             id: "s-todo".into(),
             name: "Todo".to_string(),
-            position: 1.0,
+            position: Some(1.0),
         },
     )?;
     lt_runtime::test_util::upsert_team_state(
         conn,
         team_id,
-        &lt_types::states::WorkflowStateWithPosition {
+        &lt_types::types::WorkflowState {
             id: "s-done".into(),
             name: "Done".to_string(),
-            position: 2.0,
+            position: Some(2.0),
         },
     )?;
     Ok(())
@@ -1034,7 +1036,7 @@ fn seed_team_states(conn: &lt_runtime::test_util::Connection, team_id: &str) -> 
 fn route_update_with_no_matching_view_is_a_noop() {
     let mut app = app_with_db(&[]).unwrap();
     let (sub, _) = app.runtime.subscribe::<TeamsQuery>(());
-    app.route_update(sub.id());
+    app.route_update(sub.key());
     assert_eq!(app.views.len(), 1);
 }
 

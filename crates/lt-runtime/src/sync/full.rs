@@ -1,7 +1,7 @@
 use anyhow::Result;
 use lt_storage::db::EntityKey;
 use lt_types::issues::{IssueSort, IssuesVariables};
-use lt_types::query::SortField;
+use lt_types::query::{SortDirection, SortField};
 use lt_upstream::client::GraphqlTransport;
 
 /// Fetch every page from the Linear API and upsert into SQLite over `conn`,
@@ -24,7 +24,7 @@ pub fn run(
             filter: None,
             sort: Some(IssueSort {
                 field: SortField::Updated,
-                desc: true,
+                direction: SortDirection::Descending,
             }),
             first: Some(250),
             after: after.map(ToOwned::to_owned),

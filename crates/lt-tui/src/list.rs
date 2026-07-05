@@ -1,13 +1,17 @@
 use crossterm::event::KeyCode;
-use lt_runtime::query::SortField;
-use lt_runtime::{Runtime, SubId, Subscription, search_query};
+use lt_runtime::query::{SortDirection, SortField};
+use lt_runtime::{Runtime, Subscription, SubscriptionKey, search_query};
 use lt_types::issues::{IssueConnection, IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
 use lt_types::types::Issue;
-use ratatui::widgets::TableState;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::widgets::{Paragraph, StatefulWidget, TableState, Widget};
 
 use super::{
     App, AuthStatus, HelpPopup, Keymap, ScrollMotion, Unbound, View, keymap, open_in_browser,
 };
+use crate::present::issue::IssueTable;
+use crate::ui::table::sort_col_index;
 
 /// Forward/backward pagination state.
 pub struct Pagination {
@@ -17,12 +21,24 @@ pub struct Pagination {
     pub end_cursor: Option<String>,
 }
 
-/// The active filter's sort field/direction, derived from its `sort:` token
-/// (or `Updated`/desc if absent).
-fn sort_from_filter(filter: &search_query::QueryAst) -> (SortField, bool) {
-    match search_query::lower_ast(filter).1 {
-        Some((field, dir)) => (field, dir == search_query::SortDir::Desc),
-        None => (SortField::Updated, true),
+/// A sort field paired with its direction -- the one value `ListQuery` keeps
+/// in sync with its filter's `sort:` token.
+#[derive(Clone)]
+pub struct SortOrder {
+    pub field: SortField,
+    pub direction: SortDirection,
+}
+
+impl From<&search_query::QueryAst> for SortOrder {
+    /// Derived from `filter`'s `sort:` token, or `Updated`/descending if absent.
+    fn from(filter: &search_query::QueryAst) -> Self {
+        match search_query::lower_ast(filter).1 {
+            Some((field, direction)) => Self { field, direction },
+            None => Self {
+                field: SortField::Updated,
+                direction: SortDirection::Descending,
+            },
+        }
     }
 }
 
@@ -41,8 +57,7 @@ pub struct ListQuery {
     /// Enter (confirm search), double-esc (reset), and sort shortcuts.
     pub filter: search_query::QueryAst,
     /// Kept in sync with `filter`'s `sort:` token.
-    pub sort: SortField,
-    pub desc: bool,
+    pub order: SortOrder,
     /// Page size, fixed for the view's lifetime.
     pub limit: u32,
     pub pagination: Pagination,
@@ -51,12 +66,11 @@ pub struct ListQuery {
 
 impl ListQuery {
     pub fn new(filter: search_query::QueryAst, limit: u32) -> Self {
-        let (sort, desc) = sort_from_filter(&filter);
+        let order = SortOrder::from(&filter);
         Self {
             initial_filter: filter.clone(),
             filter,
-            sort,
-            desc,
+            order,
             limit,
             pagination: Pagination {
                 has_next_page: false,
@@ -85,8 +99,8 @@ impl ListQuery {
         IssuesVariables {
             filter,
             sort: Some(IssueSort {
-                field: self.sort.clone(),
-                desc: self.desc,
+                field: self.order.field.clone(),
+                direction: self.order.direction,
             }),
             first: Some(i32::try_from(self.limit.min(250)).unwrap_or(250)),
             after: self.pagination.current_cursor.clone(),
@@ -119,25 +133,29 @@ impl ListQuery {
 
     /// `d`: toggle sort direction and rewrite `filter`'s `sort:` token to
     /// match, resetting pagination cursors; the caller resubscribes.
-    fn toggle_desc(&mut self) {
-        self.desc = !self.desc;
+    fn toggle_direction(&mut self) {
+        self.order.direction = match self.order.direction {
+            SortDirection::Ascending => SortDirection::Descending,
+            SortDirection::Descending => SortDirection::Ascending,
+        };
         self.filter = self.replace_sort_in_filter();
         self.pagination.cursor_stack.clear();
         self.pagination.current_cursor = None;
     }
 
-    /// Keep `sort`/`desc` in sync with `filter`.
+    /// Keep `order` in sync with `filter`.
     pub(crate) fn sync_sort_from_filter(&mut self) {
-        let (sort, desc) = sort_from_filter(&self.filter);
-        self.sort = sort;
-        self.desc = desc;
+        self.order = SortOrder::from(&self.filter);
     }
 
-    /// Produce a new `QueryAst` with the `sort:` token replaced to match
-    /// `sort`/`desc`.
+    /// Produce a new `QueryAst` with the `sort:` token replaced to match `order`.
     pub(crate) fn replace_sort_in_filter(&self) -> search_query::QueryAst {
-        let dir = if self.desc { "-" } else { "+" };
-        let new_sort = format!("sort:{}{}", self.sort.label(), dir);
+        let dir = if self.order.direction == SortDirection::Descending {
+            "-"
+        } else {
+            "+"
+        };
+        let new_sort = format!("sort:{}{}", self.order.field.label(), dir);
         let mut parts: Vec<String> = self
             .filter
             .raw
@@ -152,12 +170,19 @@ impl ListQuery {
     /// Restore the launch snapshot and clear pagination cursors.
     pub(crate) fn reset(&mut self) {
         self.filter = self.initial_filter.clone();
-        let (sort, desc) = sort_from_filter(&self.filter);
-        self.sort = sort;
-        self.desc = desc;
+        self.order = SortOrder::from(&self.filter);
         self.pagination.cursor_stack.clear();
         self.pagination.current_cursor = None;
     }
+}
+
+/// The base issue table's rendered layout: the popup widget's anchor point
+/// derives from these without the renderer writing anchor state onto either
+/// view (docs/design/operation-seam-adr.md, Decision 9).
+pub(crate) struct TableGeometry {
+    pub(crate) area: Rect,
+    pub(crate) widths: [usize; 7],
+    pub(crate) selected_row: usize,
 }
 
 /// The issue-list view: the base-list fields, owned, plus its live
@@ -227,8 +252,8 @@ impl ListView {
     /// Only consume while focused: a refresh must not swap the rows a popup
     /// is anchored to or a search overlay covers. The slot holds the latest
     /// for focus return (`resume_focus`).
-    pub(crate) fn apply_update(&mut self, focused: bool, id: SubId) {
-        if focused && self.sub.id() == id {
+    pub(crate) fn apply_update(&mut self, focused: bool, key: SubscriptionKey) {
+        if focused && self.sub.key() == key {
             self.sync_from_subscription(false); // offset- and selection-preserving
         }
     }
@@ -281,6 +306,36 @@ impl ListView {
         {
             self.table_state.select(Some(idx));
         }
+    }
+
+    /// Render the base issue table into `area`, returning its layout for the
+    /// popup widget's anchor -- `None` when the empty-list message was shown
+    /// instead, since `TableGeometry` only applies over a rendered table.
+    pub(crate) fn render_table(&mut self, area: Rect, buf: &mut Buffer) -> Option<TableGeometry> {
+        if self.issues.is_empty() {
+            Paragraph::new("No issues found.").render(area, buf);
+            return None;
+        }
+
+        let table = IssueTable {
+            issues: &self.issues,
+            sort_col: sort_col_index(&self.query.order.field),
+            direction: self.query.order.direction,
+        };
+        let widths = table.widths(area.width);
+        StatefulWidget::render(&table, area, buf, &mut self.table_state);
+
+        Some(TableGeometry {
+            area,
+            widths,
+            selected_row: self.table_state.selected().unwrap_or(0),
+        })
+    }
+}
+
+impl Widget for &mut ListView {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.render_table(area, buf);
     }
 }
 
@@ -374,7 +429,7 @@ pub(crate) fn apply_list(app: &mut App, i: usize, action: keymap::Action) {
             let runtime = app.runtime.clone();
             if let Some(View::List(list)) = app.views.get_mut(i) {
                 let resubscribe = if action == Action::ToggleSortDirection {
-                    list.query.toggle_desc();
+                    list.query.toggle_direction();
                     true
                 } else if action == Action::NextPage {
                     list.query.next_page()

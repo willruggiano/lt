@@ -1,4 +1,4 @@
-//! `Read`/`Upsert` for the detail pane's composed operation
+//! `Read`/`Upsert` for the composed issue-detail operation
 //! (`lt_types::detail::IssueDetailQuery`): joins today's
 //! `query_issue_by_id` + `query_comments` + `query_children` for the read
 //! side, and the issue-upsert path plus the comment replace-set for the

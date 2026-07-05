@@ -7,14 +7,14 @@
 
 use lt_types::viewer;
 
-use crate::subscription::SubId;
+use crate::subscription::SubscriptionKey;
 
 /// Everything the runtime reports, delivered through the [`OnEvent`] callback
 /// the runtime is constructed with.
 pub enum RuntimeEvent {
     /// A live subscription's slot has a fresh result; the view holding it
     /// should `take` and re-apply its ui-state policy.
-    Updated(SubId),
+    Updated(SubscriptionKey),
     /// Sync-cycle progress and outcome -- scheduling and error text, not an
     /// invalidation.
     Sync(SyncEvent),
@@ -28,11 +28,11 @@ pub enum SyncEvent {
     /// own spawn, so the producer announces it.
     Started,
     /// Sync succeeded, stamped with `last_synced_at` (the runtime's own
-    /// `sync_meta` read, falling back to the wall clock). The viewer
-    /// identity is not carried here: a sync cycle persists it through the
-    /// same `Upsert` seam as everything else it touches, so a live
+    /// `sync_meta` read), or `None` if that read finds no prior sync. The
+    /// viewer identity is not carried here: a sync cycle persists it through
+    /// the same `Upsert` seam as everything else it touches, so a live
     /// `ViewerQuery` subscription picks it up through propagation instead.
-    Done(chrono::DateTime<chrono::Utc>),
+    Done(Option<chrono::DateTime<chrono::Utc>>),
     Error(String),
     NotAuthenticated,
 }

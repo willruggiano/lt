@@ -57,7 +57,7 @@ macro_rules! issue_columns {
         "i.id AS id, i.identifier AS identifier, i.title AS title, \
          i.priority_label AS priority_label, i.description AS description, \
          i.created_at AS created_at, i.updated_at AS updated_at, \
-         i.state_id AS state_id, s.name AS state_name, \
+         i.state_id AS state_id, s.name AS state_name, s.position AS state_position, \
          i.assignee_id AS assignee_id, ua.name AS assignee_name, \
          i.team_id AS team_id, t.name AS team_name, \
          i.project_id AS project_id, p.name AS project_name, \
@@ -236,6 +236,19 @@ statements! {
     /// Upsert one `(id, name)` row into `labels`.
     UPSERT_LABEL, 2, entity_upsert_sql!("labels");
 
+    /// Upsert the viewer's organization row.
+    UPSERT_ORGANIZATION, 3,
+        "INSERT INTO organizations (id, name, url_key) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, url_key = excluded.url_key";
+
+    /// Look up a single `users` row by id, for viewer reconstruction.
+    QUERY_USER_BY_ID, 1,
+        "SELECT id, name FROM users WHERE id = ?1";
+
+    /// Look up a single `organizations` row by id, for viewer reconstruction.
+    QUERY_ORGANIZATION_BY_ID, 1,
+        "SELECT id, name, url_key FROM organizations WHERE id = ?1";
+
     /// Upsert one `(entity_id, field)` pending-overlay row.
     SET_OVERLAY, 3,
         "INSERT INTO pending_overlay (entity_id, field, value) VALUES (?1, ?2, ?3) \
@@ -328,16 +341,10 @@ statements! {
     QUERY_TEAMS, 0,
         "SELECT id, name FROM teams ORDER BY name";
 
-    /// A team's workflow states in Linear's stored order; states known only
-    /// from issue upserts (`position IS NULL`) sort last, by name.
+    /// A team's workflow states, carrying `position`, in Linear's stored
+    /// order; states known only from issue upserts (`position IS NULL`) sort
+    /// last, by name.
     QUERY_TEAM_STATES, 1,
-        "SELECT id, name FROM workflow_states \
-         WHERE team_id = ?1 \
-         ORDER BY position IS NULL, position, name";
-
-    /// A team's workflow states, carrying `position`, in the same order as
-    /// [`QUERY_TEAM_STATES`].
-    QUERY_TEAM_STATES_WITH_POSITION, 1,
         "SELECT id, name, position FROM workflow_states \
          WHERE team_id = ?1 \
          ORDER BY position IS NULL, position, name";
@@ -552,7 +559,7 @@ pub(crate) fn prepare_composed<'c>(
     conn.prepare(&sql.0)
 }
 
-/// The 22 names `ISSUE_COLUMNS` aliases to, in order -- the shape
+/// The 23 names `ISSUE_COLUMNS` aliases to, in order -- the shape
 /// [`crate::db::issues::issue_from_row`] reads by name. Validator-only.
 #[cfg(test)]
 pub(crate) const ISSUE_COLUMN_NAMES: &[&str] = &[
@@ -565,6 +572,7 @@ pub(crate) const ISSUE_COLUMN_NAMES: &[&str] = &[
     "updated_at",
     "state_id",
     "state_name",
+    "state_position",
     "assignee_id",
     "assignee_name",
     "team_id",

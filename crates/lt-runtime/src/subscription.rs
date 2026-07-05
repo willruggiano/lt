@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// holding the matching [`Subscription`], and lets `Drop` retract its own
 /// registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SubId(u64);
+pub struct SubscriptionKey(u64);
 
-impl SubId {
+impl SubscriptionKey {
     pub(crate) fn next() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
@@ -22,11 +22,11 @@ impl SubId {
 /// arrived since the last call -- last-write-wins of the whole result, so a
 /// late or duplicate wake is an idempotent re-read of current truth.
 pub struct Subscription<T> {
-    pub(crate) id: SubId,
+    pub(crate) key: SubscriptionKey,
     pub(crate) latest: Arc<Mutex<Option<T>>>,
     /// Retracts this subscription's registry entry; boxed so the registry's
     /// entry type (private to `crate::runtime`) never needs naming here.
-    pub(crate) retract: Box<dyn Fn(SubId) + Send + Sync>,
+    pub(crate) retract: Box<dyn Fn(SubscriptionKey) + Send + Sync>,
 }
 
 impl<T> Subscription<T> {
@@ -38,13 +38,13 @@ impl<T> Subscription<T> {
             .take()
     }
 
-    pub fn id(&self) -> SubId {
-        self.id
+    pub fn key(&self) -> SubscriptionKey {
+        self.key
     }
 }
 
 impl<T> Drop for Subscription<T> {
     fn drop(&mut self) {
-        (self.retract)(self.id);
+        (self.retract)(self.key);
     }
 }

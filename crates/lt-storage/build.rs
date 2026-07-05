@@ -77,7 +77,7 @@ fn gen_stem_kind_enum(fields: &[FieldSpec]) -> TokenStream {
         /// The fully-parsed meaning of a recognised stem.
         #[derive(Debug, Clone, PartialEq)]
         pub enum StemKind {
-            Sort { field: SortField, dir: SortDir },
+            Sort { field: SortField, dir: SortDirection },
             #( #variants { value: String }, )*
         }
     }
@@ -324,7 +324,7 @@ fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
 // Code generation (quote-based) -- sort field
 // ---------------------------------------------------------------------------
 
-/// Generate `parse_sort_value(value: &str) -> Option<(SortField, SortDir)>`.
+/// Generate `parse_sort_value(value: &str) -> Option<(SortField, SortDirection)>`.
 ///
 /// Strips an optional '+' or '-' suffix, then matches the field name.
 fn gen_parse_sort_value(sort_fields: &[SortFieldSpec]) -> TokenStream {
@@ -348,13 +348,13 @@ fn gen_parse_sort_value(sort_fields: &[SortFieldSpec]) -> TokenStream {
 
     quote! {
         #[doc = #doc_str]
-        fn parse_sort_value(value: &str) -> Option<(SortField, SortDir)> {
+        fn parse_sort_value(value: &str) -> Option<(SortField, SortDirection)> {
             let (field_str, dir) = if let Some(s) = value.strip_suffix('-') {
-                (s, SortDir::Desc)
+                (s, SortDirection::Descending)
             } else if let Some(s) = value.strip_suffix('+') {
-                (s, SortDir::Asc)
+                (s, SortDirection::Ascending)
             } else {
-                (value, SortDir::Asc)
+                (value, SortDirection::Ascending)
             };
 
             let field = match field_str.to_lowercase().as_str() {

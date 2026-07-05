@@ -4,13 +4,10 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use lt_runtime::{db, load};
 use lt_types::issues::{AssigneeFilter, IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
-use tracing::{error, info};
+use tracing::info;
 
 use super::IssueArgs;
 use super::display::print_table;
-
-/// Cache TTL in seconds (5 minutes).
-const CACHE_TTL_SECS: i64 = 300;
 
 /// Lower `args` into the typed variables shared by the cached and `--live`
 /// reads, resolving `--assignee=me` against the persisted viewer identity
@@ -21,7 +18,7 @@ fn lower(args: &IssueArgs, conn: &db::Connection) -> Result<IssuesVariables> {
     if let Some(AssigneeFilter::Contains(value)) = &filter.assignee
         && value.eq_ignore_ascii_case("me")
     {
-        let name = db::synced_viewer(conn)?
+        let name = db::viewer(conn)?
             .ok_or_else(|| anyhow!("`--assignee me` needs a synced viewer; run `lt sync` first"))?
             .name;
         filter.assignee = Some(AssigneeFilter::Exact(name));
@@ -29,7 +26,7 @@ fn lower(args: &IssueArgs, conn: &db::Connection) -> Result<IssuesVariables> {
     let filter = (filter != IssueFilter::default()).then_some(filter);
     let sort = Some(IssueSort {
         field: args.sort.clone(),
-        desc: !args.asc,
+        direction: args.sort_direction(),
     });
     Ok(IssuesVariables {
         filter,
@@ -78,27 +75,9 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
                 Utc::now().signed_duration_since(t).num_seconds()
             });
 
-            if age_secs < CACHE_TTL_SECS {
-                // Fresh cache -- serve immediately.
-                let page = load::<IssuesQuery>(&conn, &vars)?;
-                let note = format!("(cached, age {age_secs}s)");
-                print_table(out, &page.nodes, &note)?;
-            } else {
-                // Stale cache -- serve immediately, then delta sync in background.
-                let page = load::<IssuesQuery>(&conn, &vars)?;
-                let note = format!("(stale cache, age {age_secs}s -- syncing in background)");
-                print_table(out, &page.nodes, &note)?;
-
-                std::thread::spawn(|| {
-                    let result =
-                        lt_runtime::sync::open_production().and_then(|(conn, transport)| {
-                            lt_runtime::sync::delta::run(&conn, transport.as_ref())
-                        });
-                    if let Err(e) = result {
-                        error!("background sync error: {}", e);
-                    }
-                });
-            }
+            let page = load::<IssuesQuery>(&conn, &vars)?;
+            let note = format!("(cached, age {age_secs}s)");
+            print_table(out, &page.nodes, &note)?;
         }
     }
 
