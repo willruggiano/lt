@@ -75,11 +75,8 @@ fn build_detail_lines(d: &DetailView) -> Vec<Line<'static>> {
         issue.state.name, issue.priority_label, assignee, issue.team.name
     )));
 
-    if let Some(ref parent) = d.parent {
-        lines.push(Line::from(format!(
-            "Parent: {} - {}",
-            parent.identifier, parent.title
-        )));
+    if let Some(parent) = &issue.parent {
+        lines.push(Line::from(format!("Parent: {}", parent.identifier)));
     }
 
     if !issue.labels.nodes.is_empty() {

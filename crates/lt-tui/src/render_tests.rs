@@ -106,7 +106,7 @@ fn apply_fetched_selection_resets_or_clamps() {
 fn detail_scroll_saturates() {
     let issue = sim_issues(0, 1)[0].clone();
     let (tx, _rx) = std::sync::mpsc::channel();
-    let runtime = test_runtime(lt_runtime::db::Database::memory().unwrap(), tx);
+    let runtime = test_runtime(lt_runtime::test_util::Database::memory().unwrap(), tx);
     let mut detail = build_cached_detail(&issue, &runtime);
     detail.scroll(ScrollMotion::Down, 10);
     assert_eq!(detail.scroll, 1);
@@ -223,11 +223,13 @@ fn priority_label_to_u8_maps_levels() {
 
 #[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
-    // `viewer` here is the persisted-db shape, distinct from the live API
-    // `viewer::User`.
-    let viewer = User {
+    let viewer = viewer::User {
         id: "v".into(),
         name: "Vic".to_string(),
+        organization: viewer::Organization {
+            name: "Acme".to_string(),
+            url_key: "acme".to_string(),
+        },
     };
     let members = || {
         vec![
@@ -276,6 +278,23 @@ fn detail_overlay() {
     let detail = build_cached_detail(&issue, &app.runtime);
     app.views.push(View::Detail(Box::new(detail)));
     insta::assert_snapshot!(draw(&mut app, 100, 24));
+}
+
+#[test]
+fn detail_overlay_shows_parent_reference() {
+    let mut app = app_with_issues(0, 12).unwrap();
+    let mut issue = app.list_mut().issues[0].clone();
+    issue.parent = Some(lt_types::types::Parent {
+        id: "parent-1".into(),
+        identifier: "ENG-1".to_string(),
+    });
+    let detail = build_cached_detail(&issue, &app.runtime);
+    app.views.push(View::Detail(Box::new(detail)));
+    let out = draw(&mut app, 100, 24);
+    assert!(
+        out.contains("Parent: ENG-1"),
+        "expected parent reference line, got:\n{out}"
+    );
 }
 
 #[test]

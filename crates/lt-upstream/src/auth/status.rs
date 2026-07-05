@@ -11,5 +11,8 @@ pub fn viewer_from_config() -> Result<lt_types::viewer::User> {
         .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
 
     let transport = HttpTransport::new(token.access_token);
-    execute::<ViewerQuery>(&transport, ())
+    // `Query.viewer` is non-null on the wire; `ViewerQuery::Output` is
+    // `Option` only for the local cache read's missing-row case.
+    execute::<ViewerQuery>(&transport, ())?
+        .ok_or_else(|| anyhow!("viewer query returned no viewer"))
 }

@@ -24,15 +24,16 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 pub use detail::DetailView;
 #[cfg(all(test, feature = "sim"))]
-pub(crate) use detail::{build_cached_detail, populate_relations};
+pub(crate) use detail::build_cached_detail;
 pub use list::{ListLaunch, ListQuery, ListView};
 pub use lt_runtime::sync::service::RuntimeEvent;
 use lt_runtime::sync::service::{LoginEvent, SyncEvent};
-use lt_runtime::{Clock, SubId, search_query};
+use lt_runtime::{Clock, SubId, Subscription, search_query};
 use lt_types::types::Issue;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use lt_types::types::priority_label_to_u8;
 use lt_types::viewer;
+use lt_types::viewer::ViewerQuery;
 pub(crate) use new_issue::{NewIssueField, NewIssueModal};
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use new_issue::{build_assignee_items, test_new_issue_modal};
@@ -101,12 +102,12 @@ impl View {
     /// no subscription. Each view checks internally whether `id` matches
     /// one of its own subscriptions -- there is no separate declared-scope
     /// registry to keep in sync.
-    fn apply_update(&mut self, ctx: &StateCtx, focused: bool, id: SubId) {
+    fn apply_update(&mut self, focused: bool, id: SubId) {
         match self {
             View::List(list) => list.apply_update(focused, id),
             View::Detail(detail) => detail.apply_update(id),
             View::Popup(popup) => popup.apply_update(id),
-            View::NewIssue(modal) => modal.apply_update(ctx, id),
+            View::NewIssue(modal) => modal.apply_update(id),
             View::Search(_) | View::Help(_) => {}
         }
     }
@@ -225,14 +226,6 @@ fn scroll_motion(action: keymap::Action) -> Option<ScrollMotion> {
     })
 }
 
-/// Read-only context a view's consume/re-query needs. Built inline from
-/// disjoint `App` field borrows: an accessor method would borrow all of
-/// `self` and conflict with a simultaneous `&mut self.views`.
-pub struct StateCtx<'a> {
-    pub db: &'a lt_runtime::db::Database,
-    pub viewer_name: Option<&'a str>,
-}
-
 /// `Pass` cascades to the next layer, then the Esc/q floor. A `Pass`
 /// handler must not mutate anything (in particular the stack), so the
 /// walk's indices stay valid.
@@ -339,10 +332,6 @@ pub struct App {
     /// Timestamp of the last Esc keypress (used to detect double-esc).
     pub last_esc_time: Option<Instant>,
 
-    /// Database handle. Defaults to the per-profile SQLite file; tests install
-    /// an in-memory database via `Database::memory`.
-    pub db: lt_runtime::db::Database,
-
     /// Wall-clock source. Defaults to the system clock; tests install a fixed
     /// clock so time-derived labels are deterministic.
     pub clock: Clock,
@@ -350,6 +339,12 @@ pub struct App {
     /// The data runtime: subscriptions, entity-keyed propagation, writes,
     /// and sync/login scheduling.
     pub runtime: Arc<lt_runtime::Runtime>,
+
+    /// The header identity: an app-level (not per-view) subscription, since
+    /// it is not owned by any one view (docs/design/operation-seam-adr.md,
+    /// Amendments). `apply` routes a matching `Updated` into `auth` before
+    /// falling through to the view stack.
+    viewer_sub: Subscription<Option<viewer::User>>,
 
     /// The single consumer of the app event queue, drained once per frame.
     events_rx: mpsc::Receiver<AppEvent>,
@@ -361,7 +356,7 @@ pub struct App {
 /// exercising the real runtime.
 #[cfg(all(test, feature = "sim"))]
 fn test_runtime(
-    db: lt_runtime::db::Database,
+    db: lt_runtime::test_util::Database,
     tx: mpsc::Sender<AppEvent>,
 ) -> Arc<lt_runtime::Runtime> {
     let on_event: lt_runtime::sync::service::OnEvent = Box::new(move |ev| {
@@ -381,8 +376,8 @@ impl App {
     // the loop's own events arrive.
     fn new(
         list: ListView,
-        db: lt_runtime::db::Database,
         runtime: Arc<lt_runtime::Runtime>,
+        viewer_sub: Subscription<Option<viewer::User>>,
         events_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
         Self {
@@ -397,9 +392,9 @@ impl App {
                 keyboard_enhanced: false,
             },
             last_esc_time: None,
-            db,
             clock: Clock::System,
             runtime,
+            viewer_sub,
             events_rx,
         }
     }
@@ -411,7 +406,7 @@ impl App {
     /// Fallible (in-memory SQLite setup).
     #[cfg(all(test, feature = "sim"))]
     fn for_test(issues: Vec<Issue>) -> Result<Self> {
-        let db = lt_runtime::db::Database::memory()?;
+        let db = lt_runtime::test_util::Database::memory()?;
         let (tx, rx) = mpsc::channel();
         let runtime = test_runtime(db.share()?, tx);
         let query = ListQuery::new(
@@ -428,15 +423,15 @@ impl App {
                 after: None,
             });
         let list = ListView::new(issues, query, sub);
-        Ok(Self::new(list, db, runtime, rx))
+        let (viewer_sub, _) = runtime.subscribe::<ViewerQuery>(());
+        Ok(Self::new(list, runtime, viewer_sub, rx))
     }
 
     /// Swap in a fresh database, shared with a fresh [`lt_runtime::Runtime`]
     /// and event channel, so `db`/`runtime` agree on the same rows.
     #[cfg(all(test, feature = "sim"))]
-    fn install_db(&mut self, db: lt_runtime::db::Database) -> Result<()> {
+    fn install_db(&mut self, db: &lt_runtime::test_util::Database) -> Result<()> {
         self.install_runtime(db.share()?);
-        self.db = db;
         Ok(())
     }
 
@@ -444,7 +439,7 @@ impl App {
     /// `db`, returning it so callers can drive its write methods and assert
     /// on the resulting events/reads.
     #[cfg(all(test, feature = "sim"))]
-    fn install_runtime(&mut self, db: lt_runtime::db::Database) -> Arc<lt_runtime::Runtime> {
+    fn install_runtime(&mut self, db: lt_runtime::test_util::Database) -> Arc<lt_runtime::Runtime> {
         let (tx, rx) = mpsc::channel();
         let runtime = test_runtime(db, tx);
         self.runtime = runtime.clone();
@@ -591,14 +586,31 @@ impl App {
     }
 
     /// Apply a queued app event: a key cascades through `dispatch_key`; a
-    /// state invalidation walks the view stack; a sync/login outcome
-    /// transitions the typestates.
+    /// state invalidation updates the header identity (if it is the match)
+    /// and walks the view stack; a sync/login outcome transitions the
+    /// typestates.
     fn apply(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.dispatch_key(key),
-            AppEvent::Runtime(RuntimeEvent::Updated(id)) => self.route_update(id),
+            AppEvent::Runtime(RuntimeEvent::Updated(id)) => {
+                self.apply_viewer_update(id);
+                self.route_update(id);
+            }
             AppEvent::Runtime(RuntimeEvent::Sync(ev)) => self.consume_sync_event(ev),
             AppEvent::Runtime(RuntimeEvent::Login(ev)) => self.consume_login_event(ev),
+        }
+    }
+
+    /// The header identity's own subscription: a matching update populates
+    /// `auth` from the cache, instantly at startup and live on every sync
+    /// that touches `Viewer` (docs/design/operation-seam-adr.md,
+    /// Amendments). A fresh read of `None` (no viewer persisted yet) is a
+    /// no-op -- `auth` keeps whatever it already reflected.
+    fn apply_viewer_update(&mut self, id: SubId) {
+        if self.viewer_sub.id() == id
+            && let Some(Some(viewer)) = self.viewer_sub.take()
+        {
+            self.auth = AuthStatus::Authenticated { viewer };
         }
     }
 
@@ -678,52 +690,23 @@ impl App {
     /// Exactly the view holding the matching subscription (if any) acts;
     /// every other view's internal id check is a no-op.
     fn route_update(&mut self, id: SubId) {
-        let ctx = StateCtx {
-            db: &self.db,
-            viewer_name: self.auth.viewer_name(),
-        };
         let len = self.views.len();
         for (i, view) in self.views.iter_mut().enumerate().rev() {
-            view.apply_update(&ctx, i + 1 == len, id);
+            view.apply_update(i + 1 == len, id);
         }
     }
 
-    /// `synced_at` for a `Done` transition: the DB's `last_synced_at` meta,
-    /// falling back to the clock when the read fails or is unparseable.
-    fn synced_at_now(&self) -> chrono::DateTime<chrono::Utc> {
-        let raw = match self.db.connect() {
-            Ok(conn) => match lt_runtime::db::get_meta(&conn, "last_synced_at") {
-                Ok(ts) => ts,
-                Err(e) => {
-                    tracing::warn!(error = %e, "synced_at: failed to read last_synced_at meta");
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, "synced_at: failed to open db connection");
-                None
-            }
-        };
-        raw.and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-            .map_or_else(|| self.clock.now(), |dt| dt.with_timezone(&chrono::Utc))
-    }
-
-    /// Transition the `sync` typestate, and `auth` if a cycle delivered an
-    /// identity.
+    /// Transition the `sync` typestate. `auth` is no longer touched here: the
+    /// viewer identity flows through the header's own `ViewerQuery`
+    /// subscription (`apply_viewer_update`), propagated the same as every
+    /// other entity a sync cycle touches.
     fn consume_sync_event(&mut self, ev: SyncEvent) {
         match ev {
             SyncEvent::Started => {
                 self.sync = SyncStatus::Syncing;
             }
-            SyncEvent::Done(viewer) => {
-                // A freshly-fetched identity implies authentication; absence
-                // means it wasn't requested, so `auth` is left unchanged.
-                if let Some(viewer) = viewer {
-                    self.auth = AuthStatus::Authenticated { viewer };
-                }
-                self.sync = SyncStatus::Synced {
-                    synced_at: self.synced_at_now(),
-                };
+            SyncEvent::Done(synced_at) => {
+                self.sync = SyncStatus::Synced { synced_at };
             }
             SyncEvent::Error(message) => {
                 self.sync = SyncStatus::Failed { message };
@@ -763,11 +746,11 @@ pub fn run(
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
-    let db = lt_runtime::db::Database::File;
-
-    // Fetch viewer identity before `runtime` moves into `App::new` (a
-    // shared read through the `Arc`, so ownership either order is fine).
-    let viewer = runtime.fetch_viewer();
+    // Cache-first header identity: no blocking network fetch at startup
+    // (docs/design/operation-seam-adr.md, user-visible change 2). Absence
+    // pre-first-sync keeps `AuthStatus::Unknown`; the first sync's
+    // propagation (or an existing cache) updates it live.
+    let (viewer_sub, viewer) = runtime.subscribe::<ViewerQuery>(());
 
     // The query defines the view's initial data (local-first UX): `open`
     // warns and starts empty on a failed/missing db read, same as every
@@ -777,7 +760,7 @@ pub fn run(
         &runtime,
         viewer.as_ref().map(|v| v.name.as_str()),
     );
-    let mut app = App::new(list, db, runtime, events_rx);
+    let mut app = App::new(list, runtime, viewer_sub, events_rx);
 
     app.auth = match viewer {
         Some(viewer) => AuthStatus::Authenticated { viewer },

@@ -486,23 +486,45 @@ pub fn count_fts_rows(conn: &Connection) -> Result<i64> {
 /// [`set_synced_viewer`] instead of the raw key strings.
 const VIEWER_ID_KEY: &str = "viewer_id";
 const VIEWER_NAME_KEY: &str = "viewer_name";
+const VIEWER_ORG_NAME_KEY: &str = "viewer_org_name";
+const VIEWER_ORG_URL_KEY_KEY: &str = "viewer_org_url_key";
 
-/// Persist the authenticated viewer's identity into `sync_meta`, so cached
-/// reads can resolve "me" without a network round-trip.
-pub fn set_synced_viewer(conn: &Connection, id: &str, name: &str) -> Result<()> {
+/// Persist the authenticated viewer's whole identity into `sync_meta`, so
+/// cached reads (the header, `assignee:me`) can resolve it without a network
+/// round-trip. `organization` is `(name, url_key)`, grouped so the function
+/// stays under clippy's too-many-arguments threshold.
+pub fn set_synced_viewer(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    organization: (&str, &str),
+) -> Result<()> {
+    let (org_name, org_url_key) = organization;
     set_meta(conn, VIEWER_ID_KEY, id)?;
     set_meta(conn, VIEWER_NAME_KEY, name)?;
+    set_meta(conn, VIEWER_ORG_NAME_KEY, org_name)?;
+    set_meta(conn, VIEWER_ORG_URL_KEY_KEY, org_url_key)?;
     Ok(())
 }
 
-/// Look up the persisted viewer identity (id, name). `None` when sync has not
-/// yet recorded one.
-pub fn synced_viewer(conn: &Connection) -> Result<Option<types::User>> {
+/// Look up the persisted viewer identity. `None` when sync has not yet
+/// recorded one (pre-first-sync): the honest "no viewer" shape, not an
+/// empty-string sentinel.
+pub fn synced_viewer(conn: &Connection) -> Result<Option<lt_types::viewer::User>> {
     let id = get_meta(conn, VIEWER_ID_KEY)?;
     let name = get_meta(conn, VIEWER_NAME_KEY)?;
-    Ok(id.zip(name).map(|(id, name)| types::User {
+    let Some((id, name)) = id.zip(name) else {
+        return Ok(None);
+    };
+    let org_name = get_meta(conn, VIEWER_ORG_NAME_KEY)?.unwrap_or_default();
+    let org_url_key = get_meta(conn, VIEWER_ORG_URL_KEY_KEY)?.unwrap_or_default();
+    Ok(Some(lt_types::viewer::User {
         id: id.into(),
         name,
+        organization: lt_types::viewer::Organization {
+            name: org_name,
+            url_key: org_url_key,
+        },
     }))
 }
 
@@ -516,35 +538,70 @@ impl Read for IssuesQuery {
     }
 }
 
+/// The entity keys an issue-fragment upsert touches: `Issue`/`Teams` when
+/// `nodes` is non-empty, plus one `WorkflowStates{team_id}` per distinct team
+/// among them -- every issue carries a team name and a team-scoped state name
+/// (`upsert_issue_tx`). Shared by [`IssuesQuery`]'s and
+/// [`lt_types::detail::IssueDetailQuery`]'s `Upsert` impls so both report the
+/// same honest set for the same kind of write.
+pub(crate) fn issue_upsert_touched(nodes: &[types::Issue]) -> Vec<EntityKey> {
+    let mut touched = Vec::new();
+    if !nodes.is_empty() {
+        touched.push(EntityKey::Issue);
+        touched.push(EntityKey::Teams);
+    }
+    let mut team_ids: Vec<&str> = nodes.iter().map(|i| i.team.id.inner()).collect();
+    team_ids.sort_unstable();
+    team_ids.dedup();
+    touched.extend(
+        team_ids
+            .into_iter()
+            .map(|team_id| EntityKey::WorkflowStates {
+                team_id: team_id.to_string(),
+            }),
+    );
+    touched
+}
+
 impl Upsert for IssuesQuery {
     /// An issue upsert also writes its referenced team and workflow-state
-    /// rows (`upsert_issue_tx`): every issue carries a team name and a
-    /// team-scoped state name, so the touched set reports `Teams` and one
-    /// `WorkflowStates{team_id}` per distinct team among the fetched nodes,
-    /// alongside `Issue` itself.
+    /// rows; see [`issue_upsert_touched`].
     fn upsert(
         conn: &Connection,
         _vars: &Self::Variables,
         out: &Self::Output,
     ) -> Result<Vec<EntityKey>> {
         upsert_issues(conn, &out.nodes)?;
+        Ok(issue_upsert_touched(&out.nodes))
+    }
+}
 
-        let mut touched = Vec::new();
-        if !out.nodes.is_empty() {
-            touched.push(EntityKey::Issue);
-            touched.push(EntityKey::Teams);
-        }
-        let mut team_ids: Vec<&str> = out.nodes.iter().map(|i| i.team.id.inner()).collect();
-        team_ids.sort_unstable();
-        team_ids.dedup();
-        touched.extend(
-            team_ids
-                .into_iter()
-                .map(|team_id| EntityKey::WorkflowStates {
-                    team_id: team_id.to_string(),
-                }),
-        );
-        Ok(touched)
+impl Read for lt_types::viewer::ViewerQuery {
+    fn read(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
+        synced_viewer(conn)
+    }
+
+    fn reads(_vars: &Self::Variables) -> Vec<EntityKey> {
+        vec![EntityKey::Viewer]
+    }
+}
+
+impl Upsert for lt_types::viewer::ViewerQuery {
+    fn upsert(
+        conn: &Connection,
+        _vars: &Self::Variables,
+        out: &Self::Output,
+    ) -> Result<Vec<EntityKey>> {
+        let Some(viewer) = out else {
+            return Ok(Vec::new());
+        };
+        set_synced_viewer(
+            conn,
+            viewer.id.inner(),
+            &viewer.name,
+            (&viewer.organization.name, &viewer.organization.url_key),
+        )?;
+        Ok(vec![EntityKey::Viewer])
     }
 }
 
@@ -1016,5 +1073,68 @@ mod tests {
             },
         };
         assert!(IssuesQuery::upsert(&conn, &vars, &out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn synced_viewer_round_trips_identity_and_organization() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        assert!(synced_viewer(&conn).unwrap().is_none());
+
+        set_synced_viewer(&conn, "u1", "Ada", ("Acme", "acme")).unwrap();
+        let viewer = synced_viewer(&conn).unwrap().unwrap();
+        assert_eq!(viewer.id.inner(), "u1");
+        assert_eq!(viewer.name, "Ada");
+        assert_eq!(viewer.organization.name, "Acme");
+        assert_eq!(viewer.organization.url_key, "acme");
+    }
+
+    #[test]
+    fn viewer_query_reads_only_the_viewer_key() {
+        assert_eq!(
+            lt_types::viewer::ViewerQuery::reads(&()),
+            vec![EntityKey::Viewer]
+        );
+    }
+
+    #[test]
+    fn viewer_query_read_is_none_before_any_sync() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        assert!(
+            lt_types::viewer::ViewerQuery::read(&conn, &())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn viewer_query_upsert_persists_and_reports_viewer() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        let out = Some(lt_types::viewer::User {
+            id: "u1".into(),
+            name: "Ada".to_string(),
+            organization: lt_types::viewer::Organization {
+                name: "Acme".to_string(),
+                url_key: "acme".to_string(),
+            },
+        });
+        let touched = lt_types::viewer::ViewerQuery::upsert(&conn, &(), &out).unwrap();
+        assert_eq!(touched, vec![EntityKey::Viewer]);
+        assert_eq!(
+            lt_types::viewer::ViewerQuery::read(&conn, &())
+                .unwrap()
+                .unwrap()
+                .name,
+            "Ada"
+        );
+    }
+
+    #[test]
+    fn viewer_query_upsert_of_none_is_a_noop() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        assert!(
+            lt_types::viewer::ViewerQuery::upsert(&conn, &(), &None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

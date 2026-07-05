@@ -4,12 +4,13 @@
 
 use anyhow::Result;
 use lt_storage::db::{Connection, EntityKey, Read, Upsert};
-use lt_types::comments::{CommentConnection, CommentsQuery, CommentsVariables};
+use lt_types::detail::{IssueDetailQuery, IssueDetailVariables};
 use lt_types::issues::IssuesQuery;
 use lt_types::members::TeamMembersQuery;
-use lt_types::pagination::PageInfo;
+use lt_types::new_issue::NewIssueQuery;
 use lt_types::states::TeamStatesQuery;
 use lt_types::teams::TeamsQuery;
+use lt_types::viewer::ViewerQuery;
 use lt_upstream::client::{GraphqlTransport, execute};
 
 /// One-shot local read: `Op::read` over `conn`. The search overlay's
@@ -34,31 +35,36 @@ where
     Op::upsert(conn, &vars, &out)
 }
 
-/// Refresh an issue's comment thread to exhaustion: a composed operation's
-/// refresh may paginate nested connections across multiple wire requests
-/// while staying one operation type
-/// (docs/design/operation-seam-adr.md, "Decision 3"). Pages via
-/// [`lt_upstream::comments::fetch_all`], then upserts the merged thread once
-/// through [`CommentsQuery`]'s replace-set semantics -- upserting per page
-/// would have each page's delete wipe the previous page's inserts.
-pub fn refresh_comments(
+/// Refresh the detail pane's composed document: one wire request for the
+/// issue plus its first page of comments/children, then
+/// [`lt_upstream::comments::fetch_all`] pages the comment thread to
+/// exhaustion -- multiple wire requests, one operation type
+/// (docs/design/operation-seam-adr.md, "Decision 3"). Children stay a single
+/// first-page fetch (capped at 250 by the document itself): never fetched
+/// upstream at all before this operation existed, so this is an upgrade, not
+/// a regression. Upserts once through [`IssueDetailQuery`]'s replace-set
+/// comment semantics -- upserting per page would have each page's delete
+/// wipe the previous page's inserts.
+pub fn refresh_issue_detail(
     conn: &Connection,
     transport: &dyn GraphqlTransport,
     issue_id: &str,
 ) -> Result<Vec<EntityKey>> {
-    let nodes = lt_upstream::comments::fetch_all(transport, issue_id)?;
-    let vars = CommentsVariables {
+    let vars = IssueDetailVariables {
         id: issue_id.to_string(),
-        after: None,
     };
-    let out = CommentConnection {
-        nodes,
-        page_info: PageInfo {
-            has_next_page: false,
-            end_cursor: None,
-        },
+    let out = execute::<IssueDetailQuery>(transport, vars.clone())?;
+    let out = match out {
+        Some(mut data) => {
+            data.comments = lt_upstream::comments::fetch_all(transport, issue_id)?;
+            Some(data)
+        }
+        // `Query.issue(id:)` is non-null on the wire; a missing payload here
+        // would be a deserialization bug elsewhere, not a real outcome to
+        // paginate comments for.
+        None => None,
     };
-    CommentsQuery::upsert(conn, &vars, &out)
+    IssueDetailQuery::upsert(conn, &vars, &out)
 }
 
 /// How a live subscription's background freshness refresh
@@ -68,8 +74,8 @@ pub fn refresh_comments(
 /// `lt-upstream`, which `lt-storage` does not depend on, so this lives here
 /// rather than on the storage-side trait. Every operation [`crate::Runtime`]
 /// can `subscribe` to implements it: the generic single-page [`refresh`]
-/// driver for most operations, [`refresh_comments`]'s fetch-to-exhaustion for
-/// `CommentsQuery` (its thread's fetch-all semantics, ADR "Decision 3").
+/// driver for most operations, [`refresh_issue_detail`]'s fetch-to-exhaustion
+/// for `IssueDetailQuery`'s comment thread (ADR "Decision 3").
 pub trait Refresh: Upsert {
     fn refresh(
         conn: &Connection,
@@ -118,13 +124,33 @@ impl Refresh for TeamMembersQuery {
     }
 }
 
-impl Refresh for CommentsQuery {
+impl Refresh for IssueDetailQuery {
     fn refresh(
         conn: &Connection,
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
     ) -> Result<Vec<EntityKey>> {
-        refresh_comments(conn, transport, &vars.id)
+        refresh_issue_detail(conn, transport, &vars.id)
+    }
+}
+
+impl Refresh for NewIssueQuery {
+    fn refresh(
+        conn: &Connection,
+        transport: &dyn GraphqlTransport,
+        vars: Self::Variables,
+    ) -> Result<Vec<EntityKey>> {
+        refresh::<NewIssueQuery>(conn, transport, vars)
+    }
+}
+
+impl Refresh for ViewerQuery {
+    fn refresh(
+        conn: &Connection,
+        transport: &dyn GraphqlTransport,
+        vars: Self::Variables,
+    ) -> Result<Vec<EntityKey>> {
+        refresh::<ViewerQuery>(conn, transport, vars)
     }
 }
 
@@ -253,8 +279,27 @@ mod tests {
         })
     }
 
+    /// A composed `IssueDetailQuery` wire response envelope: the shared issue
+    /// fixture plus its comments/children connections.
+    fn issue_detail_response(
+        id: &str,
+        comments: &[serde_json::Value],
+        children: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let mut issue = lt_types::issues::sample_issue_node(id);
+        issue["comments"] = json!({
+            "nodes": comments,
+            "pageInfo": { "hasNextPage": false, "endCursor": null }
+        });
+        issue["children"] = json!({
+            "nodes": children,
+            "pageInfo": { "hasNextPage": false, "endCursor": null }
+        });
+        json!({ "issue": issue })
+    }
+
     #[test]
-    fn refresh_comments_replaces_existing_with_the_fetched_set() {
+    fn refresh_issue_detail_writes_the_issue_children_and_comments() {
         let conn = conn();
         db::upsert_comments(
             &conn,
@@ -269,33 +314,41 @@ mod tests {
         )
         .unwrap();
 
-        let transport = FakeTransport::new(vec![json!({ "issue": { "comments": {
-            "nodes": [
-                comment_node("c1", "2026-01-01T00:00:00Z"),
-                comment_node("c2", "2026-01-02T00:00:00Z")
-            ],
-            "pageInfo": { "hasNextPage": false, "endCursor": null }
-        }}})]);
+        let transport = FakeTransport::new(vec![
+            issue_detail_response(
+                "i1",
+                &[comment_node("stale-page", "2025-06-01T00:00:00Z")],
+                &[lt_types::issues::sample_issue_node("child-1")],
+            ),
+            // `fetch_all`'s own (single-page) pagination.
+            json!({ "issue": { "comments": {
+                "nodes": [comment_node("c1", "2026-01-01T00:00:00Z")],
+                "pageInfo": { "hasNextPage": false, "endCursor": null }
+            }}}),
+        ]);
 
-        let touched = refresh_comments(&conn, &transport, "i1").unwrap();
-        assert_eq!(
-            touched,
-            vec![EntityKey::Comment {
-                issue_id: "i1".to_string()
-            }]
-        );
+        let touched = refresh_issue_detail(&conn, &transport, "i1").unwrap();
+        assert!(touched.contains(&EntityKey::Issue));
+        assert!(touched.contains(&EntityKey::Comment {
+            issue_id: "i1".to_string()
+        }));
 
+        assert!(db::query_issue_by_id(&conn, "i1").unwrap().is_some());
+        assert!(db::query_issue_by_id(&conn, "child-1").unwrap().is_some());
         let rows = db::query_comments(&conn, "i1").unwrap();
         assert_eq!(
             rows.iter().map(|c| c.id.inner()).collect::<Vec<_>>(),
-            ["c1", "c2"]
+            ["c1"]
         );
     }
 
     #[test]
-    fn refresh_comments_paginates_to_exhaustion() {
+    fn refresh_issue_detail_paginates_comments_to_exhaustion() {
         let conn = conn();
         let transport = FakeTransport::new(vec![
+            // The composed document's own (first-page) fetch.
+            issue_detail_response("i1", &[comment_node("stale", "2025-01-01T00:00:00Z")], &[]),
+            // `fetch_all`'s own pagination, from scratch.
             json!({ "issue": { "comments": {
                 "nodes": [comment_node("c1", "2026-01-01T00:00:00Z")],
                 "pageInfo": { "hasNextPage": true, "endCursor": "cur" }
@@ -306,47 +359,83 @@ mod tests {
             }}}),
         ]);
 
-        refresh_comments(&conn, &transport, "i1").unwrap();
+        refresh_issue_detail(&conn, &transport, "i1").unwrap();
 
         let rows = db::query_comments(&conn, "i1").unwrap();
         assert_eq!(
             rows.iter().map(|c| c.id.inner()).collect::<Vec<_>>(),
             ["c1", "c2"]
         );
-        assert_eq!(transport.variables(1)["after"], json!("cur"));
+        assert_eq!(transport.variables(2)["after"], json!("cur"));
     }
 
     #[test]
-    fn refresh_comments_missing_issue_returns_error() {
+    fn refresh_issue_detail_wire_decode_error_propagates() {
         let conn = conn();
         let transport = FakeTransport::new(vec![json!({ "issue": null })]);
-        assert!(refresh_comments(&conn, &transport, "i1").is_err());
+        assert!(refresh_issue_detail(&conn, &transport, "i1").is_err());
     }
 
     #[test]
-    fn refresh_trait_dispatches_comments_to_fetch_all() {
+    fn refresh_trait_dispatches_issue_detail_through_refresh_issue_detail() {
         let conn = conn();
         let transport = FakeTransport::new(vec![
+            issue_detail_response("i1", &[], &[]),
             json!({ "issue": { "comments": {
                 "nodes": [comment_node("c1", "2026-01-01T00:00:00Z")],
-                "pageInfo": { "hasNextPage": true, "endCursor": "cur" }
-            }}}),
-            json!({ "issue": { "comments": {
-                "nodes": [comment_node("c2", "2026-01-02T00:00:00Z")],
                 "pageInfo": { "hasNextPage": false, "endCursor": null }
             }}}),
         ]);
-        let vars = CommentsVariables {
+        let vars = IssueDetailVariables {
             id: "i1".to_string(),
-            after: None,
         };
 
-        CommentsQuery::refresh(&conn, &transport, vars).unwrap();
+        IssueDetailQuery::refresh(&conn, &transport, vars).unwrap();
 
+        assert!(db::query_issue_by_id(&conn, "i1").unwrap().is_some());
         let rows = db::query_comments(&conn, "i1").unwrap();
         assert_eq!(
             rows.iter().map(|c| c.id.inner()).collect::<Vec<_>>(),
-            ["c1", "c2"]
+            ["c1"]
         );
+    }
+
+    #[test]
+    fn refresh_new_issue_upserts_teams_and_team_scoped_data() {
+        let conn = conn();
+        let transport = FakeTransport::new(vec![json!({
+            "teams": { "nodes": [{ "id": "t1", "name": "Eng" }] },
+            "team": {
+                "states": { "nodes": [{ "id": "s1", "name": "Todo", "position": 1.0 }] },
+                "members": { "nodes": [{ "id": "u1", "name": "Ada" }] }
+            }
+        })]);
+
+        let touched = refresh::<NewIssueQuery>(
+            &conn,
+            &transport,
+            lt_types::new_issue::NewIssueVariables::new(Some("t1".to_string())),
+        )
+        .unwrap();
+
+        assert!(touched.contains(&EntityKey::Teams));
+        assert!(touched.contains(&EntityKey::WorkflowStates {
+            team_id: "t1".to_string()
+        }));
+        assert_eq!(db::query_teams(&conn).unwrap()[0].name, "Eng");
+        assert_eq!(db::query_team_members(&conn, "t1").unwrap()[0].name, "Ada");
+    }
+
+    #[test]
+    fn refresh_viewer_persists_and_reports_viewer() {
+        let conn = conn();
+        let transport = FakeTransport::new(vec![json!({
+            "viewer": { "id": "u1", "name": "Ada", "organization": { "name": "Acme", "urlKey": "acme" } }
+        })]);
+
+        let touched = refresh::<ViewerQuery>(&conn, &transport, ()).unwrap();
+
+        assert_eq!(touched, vec![EntityKey::Viewer]);
+        assert_eq!(db::synced_viewer(&conn).unwrap().unwrap().name, "Ada");
     }
 }

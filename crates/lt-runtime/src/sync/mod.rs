@@ -24,12 +24,15 @@ pub fn open_production() -> Result<(Connection, Box<dyn GraphqlTransport>)> {
 }
 
 /// Persist the authenticated viewer's identity into `sync_meta` so cached reads
-/// can resolve `me` without a network round-trip. A database tracks exactly one
-/// viewer by definition, so this is an upsert of a stable identity.
-fn persist_viewer(conn: &rusqlite::Connection, transport: &dyn GraphqlTransport) -> Result<()> {
-    let viewer = execute::<ViewerQuery>(transport, ())?;
-    db::set_synced_viewer(conn, viewer.id.inner(), &viewer.name)?;
-    Ok(())
+/// can resolve `me` without a network round-trip. Goes through the same
+/// `Upsert` seam every other operation does, so its touched `Viewer` key
+/// folds into the cycle's own propagation instead of being a side effect
+/// nothing downstream hears about.
+fn persist_viewer(
+    conn: &rusqlite::Connection,
+    transport: &dyn GraphqlTransport,
+) -> Result<Vec<EntityKey>> {
+    crate::ops::refresh::<ViewerQuery>(conn, transport, ())
 }
 
 /// Paginate an `IssuesQuery` refresh to exhaustion, upserting each page as it

@@ -27,9 +27,12 @@ pub enum SyncEvent {
     /// A sync cycle began. The TUI can no longer infer "in flight" from its
     /// own spawn, so the producer announces it.
     Started,
-    /// Sync succeeded; carries a freshly-fetched identity when the loop
-    /// decided one was needed (see `Runtime::run`).
-    Done(Option<viewer::User>),
+    /// Sync succeeded, stamped with `last_synced_at` (the runtime's own
+    /// `sync_meta` read, falling back to the wall clock). The viewer
+    /// identity is not carried here: a sync cycle persists it through the
+    /// same `Upsert` seam as everything else it touches, so a live
+    /// `ViewerQuery` subscription picks it up through propagation instead.
+    Done(chrono::DateTime<chrono::Utc>),
     Error(String),
     NotAuthenticated,
 }

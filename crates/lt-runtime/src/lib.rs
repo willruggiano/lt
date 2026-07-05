@@ -26,3 +26,15 @@ pub use lt_storage::sim;
 pub use lt_storage::{db, search_query, text};
 pub use lt_types::clock::Clock;
 pub use lt_types::query;
+
+/// Test-only seam for constructing/seeding an in-memory database without
+/// naming `lt_runtime::db` (docs/design/operation-seam-adr.md, "Decision 4":
+/// the TUI holds no `Database`/`Connection`). `lt-tui`'s tests route their
+/// fixture setup through this module instead of the `db` re-export above.
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_util {
+    pub use lt_storage::db::outbox::sample_base_issue;
+    pub use lt_storage::db::{
+        Connection, Database, set_synced_viewer, upsert_issues, upsert_team_state,
+    };
+}

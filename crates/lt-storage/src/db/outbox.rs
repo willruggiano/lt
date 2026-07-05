@@ -242,7 +242,10 @@ pub fn enqueue_comment_create(
         body: input.body.clone(),
         created_at: now,
         updated_at: now,
-        user: crate::db::synced_viewer(&tx)?,
+        user: crate::db::synced_viewer(&tx)?.map(|v| types::User {
+            id: v.id,
+            name: v.name,
+        }),
         issue_id: Some(input.issue_id.clone()),
     };
     crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
@@ -620,7 +623,7 @@ mod tests {
     #[test]
     fn enqueue_comment_tags_author_from_synced_viewer() {
         let conn = db_with_issue("1");
-        crate::db::set_synced_viewer(&conn, "u-ada", "Ada").unwrap();
+        crate::db::set_synced_viewer(&conn, "u-ada", "Ada", ("Acme", "acme")).unwrap();
         let input = CommentCreateInput {
             issue_id: "1".to_string(),
             body: "hi".to_string(),

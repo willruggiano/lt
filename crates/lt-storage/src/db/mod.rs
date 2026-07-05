@@ -1,4 +1,5 @@
 pub mod comments;
+pub mod detail;
 pub mod filters;
 pub mod issues;
 pub mod ops;

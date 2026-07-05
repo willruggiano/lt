@@ -32,7 +32,10 @@ impl NewIssueSession {
     /// Open a session: build the transport and fetch the viewer up front.
     pub fn open() -> Result<Self> {
         let transport = transport_from_config()?;
-        let viewer = execute::<ViewerQuery>(&transport, ())?;
+        // `Query.viewer` is non-null on the wire; `ViewerQuery::Output` is
+        // `Option` only for the local cache read's missing-row case.
+        let viewer = execute::<ViewerQuery>(&transport, ())?
+            .ok_or_else(|| anyhow!("viewer query returned no viewer"))?;
         Ok(Self { transport, viewer })
     }
 

@@ -1,15 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::{SubId, Subscription};
-use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
-use lt_types::states::{
-    TeamStatesQuery, TeamVariables as StatesTeamVariables, WorkflowStateWithPosition,
-};
-use lt_types::teams::TeamsQuery;
-use lt_types::types::{Team, User};
+use lt_types::new_issue::{NewIssueData, NewIssueQuery, NewIssueVariables};
+use lt_types::types::User;
 
 use super::{
-    App, Keymap, PopupItem, ScrollMotion, StateCtx, TextInput, Unbound, View, keymap,
-    priority_popup_items,
+    App, Keymap, PopupItem, ScrollMotion, TextInput, Unbound, View, keymap, priority_popup_items,
 };
 
 // ---------------------------------------------------------------------------
@@ -50,15 +45,11 @@ impl NewIssueField {
     }
 }
 
-/// The team-scoped subscriptions live while a team is selected; a team
-/// change drops the old pair and subscribes a new one (replacing the
-/// hand-diffed `watched_team_id` bookkeeping).
-struct TeamScopedSubs {
-    states: Subscription<Vec<WorkflowStateWithPosition>>,
-    members: Subscription<Vec<User>>,
-}
-
-/// All mutable state for the new-issue modal form.
+/// All mutable state for the new-issue modal form: one `NewIssueQuery`
+/// subscription is the whole data contract
+/// (docs/design/operation-seam-adr.md, "Decision 3"); a team change is a new
+/// vars value, so the view drops the old subscription and subscribes anew
+/// (replacing the old hand-diffed `watched_team_id` bookkeeping).
 pub struct NewIssueModal {
     pub focused_field: NewIssueField,
 
@@ -85,8 +76,7 @@ pub struct NewIssueModal {
     /// surfaced here (offline, every targeted refresh would fail, making the
     /// field constant noise); those go to `tracing`.
     pub error: String,
-    teams_sub: Subscription<Vec<Team>>,
-    team_scoped: Option<TeamScopedSubs>,
+    sub: Subscription<NewIssueData>,
 }
 
 impl NewIssueModal {
@@ -97,43 +87,36 @@ impl NewIssueModal {
             .and_then(|t| t.id.clone())
     }
 
-    /// A matching subscription update: `teams_sub` re-reads the list,
-    /// re-anchoring by id; the team-scoped pair re-reads states/members and
-    /// clears `loading`. The viewer lookup for "Me (...)" stays a direct
-    /// cache read (not itself a subscribed operation).
-    pub(crate) fn apply_update(&mut self, ctx: &StateCtx, id: SubId) {
-        if self.teams_sub.id() == id {
-            if let Some(teams) = self.teams_sub.take() {
-                let current_id = self.selected_team_id();
-                self.teams = teams.into_iter().map(PopupItem::from).collect();
-                self.team_selected = reanchor(&self.teams, current_id.as_deref());
-            }
+    /// A matching subscription update re-reads the whole form: teams
+    /// re-anchored by id, states/assignees rebuilt from whatever the
+    /// current vars' team scope produced, `loading` cleared.
+    pub(crate) fn apply_update(&mut self, id: SubId) {
+        if self.sub.id() != id {
             return;
         }
-        let Some(scoped) = &self.team_scoped else {
+        let Some(data) = self.sub.take() else {
             return;
         };
-        if scoped.states.id() == id {
-            if let Some(states) = scoped.states.take() {
-                let current_state = self
-                    .states
-                    .get(self.state_selected)
-                    .and_then(|s| s.id.clone());
-                self.states = states.into_iter().map(PopupItem::from).collect();
-                self.state_selected = reanchor(&self.states, current_state.as_deref());
-                self.loading = false;
-            }
-        } else if scoped.members.id() == id
-            && let Some(members) = scoped.members.take()
-        {
-            let current_assignee = self
-                .assignees
-                .get(self.assignee_selected)
-                .and_then(|a| a.id.clone());
-            self.assignees = build_assignee_items(synced_viewer(ctx).as_ref(), members);
-            self.assignee_selected = reanchor(&self.assignees, current_assignee.as_deref());
-            self.loading = false;
-        }
+
+        let current_team = self.selected_team_id();
+        self.teams = data.teams.into_iter().map(PopupItem::from).collect();
+        self.team_selected = reanchor(&self.teams, current_team.as_deref());
+
+        let current_state = self
+            .states
+            .get(self.state_selected)
+            .and_then(|s| s.id.clone());
+        self.states = data.states.into_iter().map(PopupItem::from).collect();
+        self.state_selected = reanchor(&self.states, current_state.as_deref());
+
+        let current_assignee = self
+            .assignees
+            .get(self.assignee_selected)
+            .and_then(|a| a.id.clone());
+        self.assignees = build_assignee_items(data.viewer.as_ref(), data.members);
+        self.assignee_selected = reanchor(&self.assignees, current_assignee.as_deref());
+
+        self.loading = false;
     }
 
     /// This modal's declared keymap, by focused field: the text fields
@@ -150,22 +133,13 @@ impl NewIssueModal {
     }
 }
 
-/// The persisted viewer identity, for the assignee picker's "Me (...)"
-/// entry -- a direct cache read, not itself a subscribed operation.
-fn synced_viewer(ctx: &StateCtx) -> Option<User> {
-    ctx.db
-        .connect()
-        .ok()
-        .and_then(|conn| lt_runtime::db::synced_viewer(&conn).ok().flatten())
-}
-
 /// A bare modal fixture for tests that only need `NewIssueModal`'s shape,
-/// not live updates: a throwaway `TeamsQuery` subscription over `runtime`,
-/// every picker empty. Callers mutate the `pub` fields to set up their
-/// scenario.
+/// not live updates: a throwaway team-less `NewIssueQuery` subscription over
+/// `runtime`, every picker empty. Callers mutate the `pub` fields to set up
+/// their scenario.
 #[cfg(all(test, feature = "sim"))]
 pub(crate) fn test_new_issue_modal(runtime: &lt_runtime::Runtime) -> NewIssueModal {
-    let (teams_sub, _) = runtime.subscribe::<TeamsQuery>(());
+    let (sub, _) = runtime.subscribe::<NewIssueQuery>(NewIssueVariables::new(None));
     NewIssueModal {
         focused_field: NewIssueField::Team,
         title: TextInput::from(String::new()),
@@ -180,33 +154,8 @@ pub(crate) fn test_new_issue_modal(runtime: &lt_runtime::Runtime) -> NewIssueMod
         assignee_selected: 0,
         loading: true,
         error: String::new(),
-        teams_sub,
-        team_scoped: None,
+        sub,
     }
-}
-
-/// Subscribe a team's states/members and build the picker items for it.
-fn subscribe_team_scoped(
-    runtime: &lt_runtime::Runtime,
-    viewer: Option<&User>,
-    team_id: &str,
-) -> (TeamScopedSubs, Vec<PopupItem>, Vec<PopupItem>) {
-    let (states_sub, states) = runtime.subscribe::<TeamStatesQuery>(StatesTeamVariables {
-        team_id: team_id.to_string(),
-    });
-    let (members_sub, members) = runtime.subscribe::<TeamMembersQuery>(MembersTeamVariables {
-        team_id: team_id.to_string(),
-    });
-    let states_items = states.into_iter().map(PopupItem::from).collect();
-    let assignee_items = build_assignee_items(viewer, members);
-    (
-        TeamScopedSubs {
-            states: states_sub,
-            members: members_sub,
-        },
-        states_items,
-        assignee_items,
-    )
 }
 
 /// Find `id`'s position in `items`, falling back to index 0 when it is gone
@@ -230,8 +179,16 @@ impl super::App {
             _ => None,
         };
 
-        let (teams_sub, teams) = self.runtime.subscribe::<TeamsQuery>(());
-        let teams: Vec<PopupItem> = teams.into_iter().map(PopupItem::from).collect();
+        // Team-less first: the initial vars don't know the team id until the
+        // subscription's own team list resolves the preset.
+        let (teamless_sub, teamless_data) = self
+            .runtime
+            .subscribe::<NewIssueQuery>(NewIssueVariables::new(None));
+        let teams: Vec<PopupItem> = teamless_data
+            .teams
+            .into_iter()
+            .map(PopupItem::from)
+            .collect();
 
         let team_selected = preset_team
             .as_ref()
@@ -243,17 +200,19 @@ impl super::App {
             .unwrap_or(0);
         let team_id = teams.get(team_selected).and_then(|t| t.id.clone());
 
-        let viewer = synced_viewer(&StateCtx {
-            db: &self.db,
-            viewer_name: self.auth.viewer_name(),
-        });
-        let (team_scoped, states, assignees) = match &team_id {
+        // A resolved team is a new vars value: drop the team-less
+        // subscription and subscribe anew with it (the same pattern a later
+        // team change reuses).
+        let (sub, states, assignees) = match team_id {
             Some(id) => {
-                let (scoped, states, assignees) =
-                    subscribe_team_scoped(&self.runtime, viewer.as_ref(), id);
-                (Some(scoped), states, assignees)
+                let (sub, data) = self
+                    .runtime
+                    .subscribe::<NewIssueQuery>(NewIssueVariables::new(Some(id)));
+                let states = data.states.into_iter().map(PopupItem::from).collect();
+                let assignees = build_assignee_items(data.viewer.as_ref(), data.members);
+                (sub, states, assignees)
             }
-            None => (None, Vec::new(), Vec::new()),
+            None => (teamless_sub, Vec::new(), Vec::new()),
         };
 
         self.push_view(View::NewIssue(NewIssueModal {
@@ -270,42 +229,31 @@ impl super::App {
             assignee_selected: 0,
             loading: true,
             error: String::new(),
-            teams_sub,
-            team_scoped,
+            sub,
         }));
     }
 
-    /// Leaving the Team field: drop the old team-scoped subscriptions and
-    /// subscribe new ones for the newly-selected team (RAII replaces the
-    /// old hand-diffed watch/unwatch).
+    /// Leaving the Team field: drop the old subscription and subscribe anew
+    /// for the newly-selected team (RAII replaces the old hand-diffed
+    /// watch/unwatch).
     fn new_issue_team_changed(&mut self, i: usize) {
         let new_team_id = match self.views.get(i) {
             Some(View::NewIssue(modal)) => modal.selected_team_id(),
             _ => return,
         };
-        let viewer = synced_viewer(&StateCtx {
-            db: &self.db,
-            viewer_name: self.auth.viewer_name(),
-        });
-        let subscribed = new_team_id
-            .as_deref()
-            .map(|id| subscribe_team_scoped(&self.runtime, viewer.as_ref(), id));
+        let (sub, data) = self
+            .runtime
+            .subscribe::<NewIssueQuery>(NewIssueVariables::new(new_team_id));
+        let states: Vec<PopupItem> = data.states.into_iter().map(PopupItem::from).collect();
+        let assignees = build_assignee_items(data.viewer.as_ref(), data.members);
 
         if let Some(View::NewIssue(modal)) = self.views.get_mut(i) {
-            if let Some((scoped, states, assignees)) = subscribed {
-                modal.team_scoped = Some(scoped);
-                modal.states = states;
-                modal.state_selected = 0;
-                modal.assignees = assignees;
-                modal.assignee_selected = 0;
-                modal.loading = true;
-            } else {
-                modal.team_scoped = None;
-                modal.states = Vec::new();
-                modal.state_selected = 0;
-                modal.assignees = Vec::new();
-                modal.assignee_selected = 0;
-            }
+            modal.sub = sub;
+            modal.states = states;
+            modal.state_selected = 0;
+            modal.assignees = assignees;
+            modal.assignee_selected = 0;
+            modal.loading = true;
         }
     }
 
@@ -389,7 +337,10 @@ fn build_issue_create_input(
 
 /// The assignee popup items: "Me (name)" first if known, then "Unassigned",
 /// then the remaining team members (excluding the viewer).
-pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) -> Vec<PopupItem> {
+pub(crate) fn build_assignee_items(
+    viewer: Option<&lt_types::viewer::User>,
+    members: Vec<User>,
+) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = Vec::new();
     if let Some(v) = viewer {
         items.push(PopupItem {

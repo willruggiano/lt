@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use lt_types::members::TeamMembersQuery;
+use lt_types::new_issue::{NewIssueData, NewIssueQuery};
 use lt_types::states::{TeamStatesQuery, WorkflowStateWithPosition};
 use lt_types::teams::TeamsQuery;
 use lt_types::types;
@@ -294,6 +295,71 @@ impl Upsert for TeamMembersQuery {
     }
 }
 
+impl Read for NewIssueQuery {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+        let teams = query_teams(conn)?;
+        let (states, members) = if vars.has_team {
+            (
+                query_team_states_with_position(conn, &vars.team_id)?,
+                query_team_members(conn, &vars.team_id)?,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let viewer = crate::db::issues::synced_viewer(conn)?;
+        Ok(NewIssueData {
+            teams,
+            states,
+            members,
+            viewer,
+        })
+    }
+
+    fn reads(vars: &Self::Variables) -> Vec<EntityKey> {
+        let mut keys = vec![EntityKey::Teams, EntityKey::Viewer];
+        if vars.has_team {
+            keys.push(EntityKey::WorkflowStates {
+                team_id: vars.team_id.clone(),
+            });
+            keys.push(EntityKey::TeamMemberships {
+                team_id: vars.team_id.clone(),
+            });
+        }
+        keys
+    }
+}
+
+impl Upsert for NewIssueQuery {
+    /// `out.viewer` is never persisted here: it is always `None` from the
+    /// wire (`NewIssueQuery`'s document does not select it, see
+    /// `lt_types::new_issue`), and the display value is sourced from the
+    /// cache via `Read` instead.
+    fn upsert(
+        conn: &Connection,
+        vars: &Self::Variables,
+        out: &Self::Output,
+    ) -> Result<Vec<EntityKey>> {
+        upsert_teams(conn, &out.teams)?;
+        let mut touched = vec![EntityKey::Teams];
+        if vars.has_team {
+            for state in &out.states {
+                upsert_team_state(conn, &vars.team_id, state)?;
+            }
+            touched.push(EntityKey::WorkflowStates {
+                team_id: vars.team_id.clone(),
+            });
+
+            upsert_users(conn, &out.members)?;
+            let member_ids: Vec<&str> = out.members.iter().map(|u| u.id.inner()).collect();
+            replace_team_memberships(conn, &vars.team_id, &member_ids)?;
+            touched.push(EntityKey::TeamMemberships {
+                team_id: vars.team_id.clone(),
+            });
+        }
+        Ok(touched)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use lt_types::members::TeamVariables as MembersTeamVariables;
@@ -576,5 +642,127 @@ mod tests {
         }];
         TeamMembersQuery::upsert(&conn, &vars, &second).unwrap();
         assert_eq!(query_team_members(&conn, "t1").unwrap().len(), 1);
+    }
+
+    fn new_issue_vars(team_id: Option<&str>) -> lt_types::new_issue::NewIssueVariables {
+        lt_types::new_issue::NewIssueVariables::new(team_id.map(str::to_string))
+    }
+
+    #[test]
+    fn new_issue_query_reads_teams_and_viewer_without_a_team() {
+        assert_eq!(
+            NewIssueQuery::reads(&new_issue_vars(None)),
+            vec![EntityKey::Teams, EntityKey::Viewer]
+        );
+    }
+
+    #[test]
+    fn new_issue_query_reads_team_scoped_keys_when_a_team_is_set() {
+        assert_eq!(
+            NewIssueQuery::reads(&new_issue_vars(Some("t1"))),
+            vec![
+                EntityKey::Teams,
+                EntityKey::Viewer,
+                EntityKey::WorkflowStates {
+                    team_id: "t1".to_string()
+                },
+                EntityKey::TeamMemberships {
+                    team_id: "t1".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn new_issue_query_read_without_a_team_leaves_states_and_members_empty() {
+        let conn = test_db();
+        upsert_teams(
+            &conn,
+            &[types::Team {
+                id: "t1".into(),
+                name: "Eng".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let data = NewIssueQuery::read(&conn, &new_issue_vars(None)).unwrap();
+        assert_eq!(data.teams.len(), 1);
+        assert!(data.states.is_empty());
+        assert!(data.members.is_empty());
+        assert!(data.viewer.is_none());
+    }
+
+    #[test]
+    fn new_issue_query_read_with_a_team_includes_its_states_and_members() {
+        let conn = test_db();
+        upsert_state(&conn, "t1", ("s1", "Todo", 1.0));
+        upsert_users(
+            &conn,
+            &[User {
+                id: "u1".into(),
+                name: "Ada".to_string(),
+            }],
+        )
+        .unwrap();
+        replace_team_memberships(&conn, "t1", &["u1"]).unwrap();
+
+        let data = NewIssueQuery::read(&conn, &new_issue_vars(Some("t1"))).unwrap();
+        assert_eq!(data.states.len(), 1);
+        assert_eq!(data.members.len(), 1);
+    }
+
+    #[test]
+    fn new_issue_query_upsert_writes_teams_and_team_scoped_data() {
+        let conn = test_db();
+        let vars = new_issue_vars(Some("t1"));
+        let out = NewIssueData {
+            teams: vec![types::Team {
+                id: "t1".into(),
+                name: "Eng".to_string(),
+            }],
+            states: vec![WorkflowStateWithPosition {
+                id: "s1".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            }],
+            members: vec![User {
+                id: "u1".into(),
+                name: "Ada".to_string(),
+            }],
+            viewer: None,
+        };
+        let touched = NewIssueQuery::upsert(&conn, &vars, &out).unwrap();
+        assert_eq!(
+            touched,
+            vec![
+                EntityKey::Teams,
+                EntityKey::WorkflowStates {
+                    team_id: "t1".to_string()
+                },
+                EntityKey::TeamMemberships {
+                    team_id: "t1".to_string()
+                },
+            ]
+        );
+        assert_eq!(query_teams(&conn).unwrap()[0].name, "Eng");
+        assert_eq!(query_team_states(&conn, "t1").unwrap()[0].name, "Todo");
+        assert_eq!(query_team_members(&conn, "t1").unwrap()[0].name, "Ada");
+    }
+
+    #[test]
+    fn new_issue_query_upsert_without_a_team_only_writes_teams() {
+        let conn = test_db();
+        let vars = new_issue_vars(None);
+        let out = NewIssueData {
+            teams: vec![types::Team {
+                id: "t1".into(),
+                name: "Eng".to_string(),
+            }],
+            states: Vec::new(),
+            members: Vec::new(),
+            viewer: None,
+        };
+        let touched = NewIssueQuery::upsert(&conn, &vars, &out).unwrap();
+        assert_eq!(touched, vec![EntityKey::Teams]);
     }
 }

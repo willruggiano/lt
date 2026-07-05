@@ -48,9 +48,12 @@ pub fn run(
     // the delta fetch overwrites it.
     super::drain::drain(conn, transport)?;
     // Persist the viewer so cached reads can resolve `me` offline.
-    super::persist_viewer(conn, transport)?;
+    let mut touched = super::persist_viewer(conn, transport)?;
 
-    super::sync_pages(conn, transport, |after| variables(&since, after))
+    touched.extend(super::sync_pages(conn, transport, |after| {
+        variables(&since, after)
+    })?);
+    Ok(touched)
 }
 
 #[cfg(test)]

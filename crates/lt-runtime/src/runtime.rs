@@ -164,11 +164,11 @@ fn needs_freshness_refresh(reads: &[EntityKey]) -> bool {
     !reads.iter().all(|k| matches!(k, EntityKey::Issue))
 }
 
-/// A sync cycle's outcome, for the loop to update its identity/pause
-/// bookkeeping. Distinct from [`SyncEvent`]: this is loop-internal, not the
-/// wire vocabulary `on_event` reports.
+/// A sync cycle's outcome, for the loop to update its pause bookkeeping.
+/// Distinct from [`SyncEvent`]: this is loop-internal, not the wire
+/// vocabulary `on_event` reports.
 enum CycleOutcome {
-    Done { got_identity: bool },
+    Done,
     Error,
     NotAuthenticated,
 }
@@ -178,9 +178,6 @@ enum CycleOutcome {
 struct RunLoop {
     state: LoopState,
     deadline: Instant,
-    /// Whether a cycle has delivered the viewer identity since the last
-    /// `NotAuthenticated` (or since process start).
-    identity_delivered: bool,
 }
 
 impl RunLoop {
@@ -189,7 +186,6 @@ impl RunLoop {
             state: LoopState::new(),
             // Timing out immediately performs the startup sync.
             deadline: Instant::now(),
-            identity_delivered: false,
         }
     }
 }
@@ -237,7 +233,11 @@ impl Runtime {
             .connect()
     }
 
-    /// Best-effort viewer identity via the injected transport source.
+    /// Best-effort viewer identity via the injected transport source, for the
+    /// login worker's direct report (`LoginEvent::Success`, not a cache
+    /// read). Ordinary sync cycles persist the viewer through the `Upsert`
+    /// seam instead (`sync::persist_viewer`); the header subscribes to
+    /// `ViewerQuery` and picks that up through propagation.
     fn viewer_identity(&self) -> Option<viewer::User> {
         let transport = match self.transports.acquire() {
             Ok(t) => t,
@@ -247,12 +247,24 @@ impl Runtime {
             }
         };
         match execute::<ViewerQuery>(transport.as_ref(), ()) {
-            Ok(viewer) => Some(viewer),
+            Ok(viewer) => viewer,
             Err(e) => {
                 tracing::debug!(error = %e, "viewer_identity: viewer query failed");
                 None
             }
         }
+    }
+
+    /// `last_synced_at` for a `Sync(Done)` timestamp: the DB's own meta,
+    /// falling back to the wall clock when the read fails or is unparseable
+    /// (pre-first-sync, or a corrupt row -- never a panic path).
+    fn synced_at(&self) -> chrono::DateTime<chrono::Utc> {
+        let raw = self
+            .connect()
+            .ok()
+            .and_then(|conn| db::get_meta(&conn, "last_synced_at").ok().flatten());
+        raw.and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
+            .map_or_else(chrono::Utc::now, |dt| dt.with_timezone(&chrono::Utc))
     }
 
     /// Synchronous cache-first subscribe: register the entry (before the
@@ -421,10 +433,13 @@ impl Runtime {
     }
 
     /// One full or delta sync cycle: emits `Sync(Started)`, then the cycle's
-    /// outcome, then propagates whatever it touched on success.
+    /// outcome, then propagates whatever it touched on success (the viewer
+    /// identity flows through this same propagation -- `sync::persist_viewer`
+    /// touches `Viewer` every cycle, so a live `ViewerQuery` subscription
+    /// picks it up without this loop separately fetching or reporting it).
     /// `catch_unwind`-guarded so a panicking sync body surfaces as
     /// `Sync(Error)` and the loop survives.
-    fn cycle(&self, full: bool, fetch_identity: bool) -> CycleOutcome {
+    fn cycle(&self, full: bool) -> CycleOutcome {
         (self.on_event)(RuntimeEvent::Sync(SyncEvent::Started));
 
         if matches!(lt_config::load_token(), Ok(None) | Err(_)) {
@@ -446,15 +461,9 @@ impl Runtime {
 
         match result {
             Ok(Ok(touched)) => {
-                let viewer = if fetch_identity {
-                    self.viewer_identity()
-                } else {
-                    None
-                };
-                let got_identity = viewer.is_some();
-                (self.on_event)(RuntimeEvent::Sync(SyncEvent::Done(viewer)));
+                (self.on_event)(RuntimeEvent::Sync(SyncEvent::Done(self.synced_at())));
                 self.propagate(&touched);
-                CycleOutcome::Done { got_identity }
+                CycleOutcome::Done
             }
             Ok(Err(e)) => {
                 let msg = e.to_string();
@@ -568,16 +577,12 @@ impl Runtime {
         }
     }
 
-    /// Run one cycle and fold its outcome into `run`'s identity/pause
-    /// bookkeeping, then push the deadline out another interval.
+    /// Run one cycle and fold its outcome into `run`'s pause bookkeeping,
+    /// then push the deadline out another interval.
     fn run_cycle(&self, full: bool, run: &mut RunLoop) {
-        match self.cycle(full, !run.identity_delivered) {
-            CycleOutcome::Done { got_identity } => run.identity_delivered |= got_identity,
-            CycleOutcome::NotAuthenticated => {
-                run.state.mark_not_authenticated();
-                run.identity_delivered = false;
-            }
-            CycleOutcome::Error => {}
+        match self.cycle(full) {
+            CycleOutcome::NotAuthenticated => run.state.mark_not_authenticated(),
+            CycleOutcome::Done | CycleOutcome::Error => {}
         }
         run.deadline = Instant::now() + SYNC_INTERVAL;
     }
@@ -656,11 +661,6 @@ impl Runtime {
         if self.commands_tx.send(Command::Login).is_err() {
             tracing::debug!("login: runtime loop is gone");
         }
-    }
-
-    /// Startup header identity, before the loop's first `Sync(Done)`.
-    pub fn fetch_viewer(&self) -> Option<viewer::User> {
-        self.viewer_identity()
     }
 
     /// Transactional local enqueue, then propagation of the comment's
@@ -892,16 +892,19 @@ mod tests {
     }
 
     #[test]
-    fn create_comment_propagates_to_a_live_comments_subscription() {
+    fn create_comment_propagates_to_a_live_issue_detail_subscription() {
         let db = Database::memory().unwrap();
+        {
+            let conn = db.connect().unwrap();
+            db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
+        }
         let (runtime, rx) = runtime_over(db);
-        let (sub, initial) = runtime.subscribe::<lt_types::comments::CommentsQuery>(
-            lt_types::comments::CommentsVariables {
+        let (sub, initial) = runtime.subscribe::<lt_types::detail::IssueDetailQuery>(
+            lt_types::detail::IssueDetailVariables {
                 id: "issue-1".to_string(),
-                after: None,
             },
         );
-        assert!(initial.nodes.is_empty());
+        assert!(initial.unwrap().comments.is_empty());
 
         runtime
             .create_comment(&CommentCreateInput {
@@ -912,25 +915,41 @@ mod tests {
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
-        let page = sub.take().unwrap();
-        assert_eq!(page.nodes.len(), 1);
-        assert_eq!(page.nodes[0].body, "hello");
+        let data = sub.take().unwrap().unwrap();
+        assert_eq!(data.comments.len(), 1);
+        assert_eq!(data.comments[0].body, "hello");
     }
 
     #[test]
-    fn edit_issue_does_not_propagate_to_an_unrelated_comments_subscription() {
+    fn edit_issue_refreshes_an_open_detail_pane_for_a_different_issue() {
+        // Any `Issue`-touching write refreshes every open detail pane:
+        // `IssueDetailQuery` reads `Issue` broadly, not scoped to its own id
+        // (docs/design/operation-seam-adr.md, user-visible change 3).
         let db = Database::memory().unwrap();
+        {
+            let conn = db.connect().unwrap();
+            db::upsert_issues(
+                &conn,
+                &[
+                    db::outbox::sample_base_issue("issue-1"),
+                    db::outbox::sample_base_issue("issue-2"),
+                ],
+            )
+            .unwrap();
+        }
         let (runtime, rx) = runtime_over(db);
-        let (_sub, _initial) = runtime.subscribe::<lt_types::comments::CommentsQuery>(
-            lt_types::comments::CommentsVariables {
+        let (sub, _initial) = runtime.subscribe::<lt_types::detail::IssueDetailQuery>(
+            lt_types::detail::IssueDetailVariables {
                 id: "issue-1".to_string(),
-                after: None,
             },
         );
 
-        drop(runtime.edit_issue("issue-1", IssueEdit::Priority(1)));
+        runtime
+            .edit_issue("issue-2", IssueEdit::Priority(1))
+            .unwrap();
 
-        assert!(rx.try_recv().is_err());
+        let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
     }
 
     // -- freshness refresh: beyond-Issue subscriptions refresh upstream ---
@@ -1021,5 +1040,26 @@ mod tests {
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
         assert_eq!(sub.take().unwrap()[0].name, "Ada");
+    }
+
+    #[test]
+    fn viewer_query_subscription_refreshes_and_updates_the_header() {
+        // The header's `ViewerQuery` subscription lives at the App level,
+        // not on a view; its live-update path is the same beyond-Issue
+        // freshness refresh every other composed subscription uses.
+        let db = Database::memory().unwrap();
+        let fake = FakeTransport::new(vec![json!({
+            "viewer": { "id": "u1", "name": "Ada", "organization": { "name": "Acme", "urlKey": "acme" } }
+        })]);
+        let (on_event, rx) = on_event_channel();
+        let runtime = Runtime::new(db, Box::new(FakeSource::new(fake)), on_event);
+        let (sub, initial) = runtime.subscribe::<lt_types::viewer::ViewerQuery>(());
+        assert!(initial.is_none());
+
+        runtime.refresh_entry(sub.id());
+
+        let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.id()));
+        assert_eq!(sub.take().unwrap().unwrap().name, "Ada");
     }
 }

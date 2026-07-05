@@ -16,16 +16,19 @@ pub fn run(
     // Drain queued local mutations before re-fetching the world.
     super::drain::drain(conn, transport)?;
     // Persist the viewer so cached reads can resolve `me` offline.
-    super::persist_viewer(conn, transport)?;
+    let mut touched = super::persist_viewer(conn, transport)?;
 
     // No filter, max page size.
-    super::sync_pages(conn, transport, |after| IssuesVariables {
-        filter: None,
-        sort: Some(IssueSort {
-            field: SortField::Updated,
-            desc: true,
-        }),
-        first: Some(250),
-        after: after.map(ToOwned::to_owned),
-    })
+    touched.extend(super::sync_pages(conn, transport, |after| {
+        IssuesVariables {
+            filter: None,
+            sort: Some(IssueSort {
+                field: SortField::Updated,
+                desc: true,
+            }),
+            first: Some(250),
+            after: after.map(ToOwned::to_owned),
+        }
+    })?);
+    Ok(touched)
 }

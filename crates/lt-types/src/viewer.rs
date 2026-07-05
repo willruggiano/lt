@@ -14,7 +14,11 @@ pub struct ViewerQuery {
 
 impl GraphqlOperation for ViewerQuery {
     type Variables = ();
-    type Output = User;
+    /// `Option`-shaped so the local (cache) read can honestly report "no
+    /// viewer persisted yet" (pre-first-sync) without an empty-string
+    /// sentinel; the wire side (`Query.viewer` is non-null) always extracts
+    /// `Some`.
+    type Output = Option<User>;
     const NAME: &'static str = "viewer";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
@@ -22,7 +26,7 @@ impl GraphqlOperation for ViewerQuery {
     }
 
     fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(self.viewer)
+        Ok(Some(self.viewer))
     }
 }
 
@@ -62,6 +66,7 @@ mod tests {
         let viewer = serde_json::from_value::<ViewerQuery>(data)
             .unwrap()
             .extract()
+            .unwrap()
             .unwrap();
         assert_eq!(viewer.id.inner(), "u1");
         assert_eq!(viewer.name, "Ada");

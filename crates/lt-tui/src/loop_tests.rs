@@ -13,7 +13,7 @@
 // drop/resubscribe, and the pure `reanchor` helper.
 
 use crossterm::event::KeyModifiers;
-use lt_runtime::db::Database;
+use lt_runtime::test_util::Database;
 use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
 use lt_types::teams::TeamsQuery;
 use ratatui::Terminal;
@@ -97,16 +97,25 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
 }
 
 /// Build an `App` backed by a fresh in-memory `Database` seeded with `rows`,
-/// with its `Runtime` sharing that same database.
-fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
+/// with its `Runtime` sharing that same database, returning the database
+/// handle too so a test can seed further rows later (shared-cache: any
+/// connection off this handle reaches the same rows the app's `Runtime`
+/// reads/writes).
+fn app_with_db_and_handle(rows: &[lt_types::types::Issue]) -> Result<(App, Database)> {
     let db = Database::memory()?;
     {
         let conn = db.connect()?;
-        lt_runtime::db::upsert_issues(&conn, rows)?;
+        lt_runtime::test_util::upsert_issues(&conn, rows)?;
     }
     let mut app = App::for_test(Vec::new())?;
-    app.install_db(db)?;
-    Ok(app)
+    app.install_db(&db)?;
+    Ok((app, db))
+}
+
+/// [`app_with_db_and_handle`], for the (common) case where the test never
+/// needs to seed further rows after construction.
+fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
+    Ok(app_with_db_and_handle(rows)?.0)
 }
 
 /// Push a `Detail` view for `issue`, subscribing its comment thread.
@@ -236,7 +245,7 @@ fn open_with_filterful_query_matches_post_sync_resubscribe() {
     let db = Database::memory().unwrap();
     {
         let conn = db.connect().unwrap();
-        lt_runtime::db::upsert_issues(&conn, &rows).unwrap();
+        lt_runtime::test_util::upsert_issues(&conn, &rows).unwrap();
     }
     let (tx, _rx) = mpsc::channel();
     let runtime = test_runtime(db, tx);
@@ -297,10 +306,10 @@ fn confirm_search_hands_off_the_query_not_the_viewport_capped_rows() {
     assert_eq!(app.list_mut().issues[selected].identifier, anchor);
 }
 
-// -- populate_relations ---------------------------------------------------
+// -- build_cached_detail: children come through the composed subscription --
 
 #[test]
-fn populate_relations_fills_parent_and_children() {
+fn build_cached_detail_populates_children_from_the_subscription() {
     let mut parent = db_issue("p1", "ENG-9", "Todo", 9);
     parent.title = "the parent".to_string();
     let mut child = db_issue("c1", "ENG-10", "Done", 8);
@@ -308,15 +317,10 @@ fn populate_relations_fills_parent_and_children() {
         id: "p1".into(),
         identifier: "ENG-9".to_string(),
     });
-    let app = app_with_db(&[parent, child]).unwrap();
+    let app = app_with_db(&[parent.clone(), child]).unwrap();
 
-    // The issue whose relations we resolve; populate_relations keys off its id.
-    let mut issue: lt_types::types::Issue = db_issue("c1", "ENG-10", "Done", 8);
-    let mut detail = build_cached_detail(&issue, &app.runtime);
+    let detail = build_cached_detail(&parent, &app.runtime);
 
-    // Seed the issue under a parent so query_children finds it.
-    issue.id = "p1".into();
-    populate_relations(&app.db, &mut detail, &issue);
     assert_eq!(detail.children.len(), 1);
     assert_eq!(detail.children[0].identifier, "ENG-10");
 }
@@ -886,58 +890,17 @@ fn consume_sync_event_started_sets_syncing() {
 }
 
 #[test]
-fn consume_sync_event_done_sets_identity_and_synced() {
-    // `Sync(Done)` only transitions the typestate; a routed `Updated` the
-    // loop emits alongside is a separate queued event.
+fn consume_sync_event_done_sets_synced_at_from_the_payload() {
+    // `Sync(Done)` carries the runtime's own `synced_at` timestamp and only
+    // transitions the `sync` typestate; the viewer identity flows through
+    // the header's own `ViewerQuery` subscription instead (`apply_viewer_update`).
     let mut app = app_with_db(&[]).unwrap();
     app.sync = SyncStatus::Syncing;
-
-    app.consume_sync_event(SyncEvent::Done(Some(ada())));
-
-    assert_eq!(app.auth.viewer_name(), Some("Ada"));
-    assert!(matches!(app.sync, SyncStatus::Synced { .. }));
-}
-
-#[test]
-fn consume_sync_event_done_without_identity_leaves_auth_unchanged() {
-    let mut app = app_with_db(&[]).unwrap();
-    app.auth = AuthStatus::Unauthenticated;
-
-    app.consume_sync_event(SyncEvent::Done(None));
-
-    assert!(matches!(app.auth, AuthStatus::Unauthenticated));
-    assert!(matches!(app.sync, SyncStatus::Synced { .. }));
-}
-
-#[test]
-fn consume_sync_event_done_reads_synced_at_from_db_meta() {
-    let mut app = app_with_db(&[]).unwrap();
-    {
-        let conn = app.db.connect().unwrap();
-        lt_runtime::db::set_meta(&conn, "last_synced_at", "2026-01-10T12:00:00Z").unwrap();
-    }
-
-    app.consume_sync_event(SyncEvent::Done(None));
-
-    match &app.sync {
-        SyncStatus::Synced { synced_at } => {
-            assert_eq!(synced_at.to_rfc3339(), "2026-01-10T12:00:00+00:00");
-        }
-        SyncStatus::Idle | SyncStatus::Syncing | SyncStatus::Failed { .. } => {
-            unreachable!("expected Synced")
-        }
-    }
-}
-
-#[test]
-fn consume_sync_event_done_falls_back_to_the_clock_without_meta() {
-    let mut app = app_with_db(&[]).unwrap();
-    let now = chrono::DateTime::parse_from_rfc3339("2026-02-01T00:00:00Z")
+    let now = chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
-    app.clock = Clock::Fixed(now);
 
-    app.consume_sync_event(SyncEvent::Done(None));
+    app.consume_sync_event(SyncEvent::Done(now));
 
     match &app.sync {
         SyncStatus::Synced { synced_at } => assert_eq!(*synced_at, now),
@@ -945,6 +908,26 @@ fn consume_sync_event_done_falls_back_to_the_clock_without_meta() {
             unreachable!("expected Synced")
         }
     }
+}
+
+// A live `ViewerQuery` update (`apply_viewer_update` setting `Authenticated`
+// from a fresh slot value) needs an upstream refresh no `Runtime` write
+// method can synthesize -- like the team-scoped subscriptions above, that
+// path is exercised at the `lt-runtime` layer instead
+// (`crates/lt-runtime/src/runtime.rs`, `refresh_entry_*`,
+// `crates/lt-runtime/src/ops.rs`, `refresh_viewer_persists_and_reports_viewer`).
+
+#[test]
+fn apply_viewer_update_leaves_auth_unchanged_without_a_fresh_slot_value() {
+    // No propagation has touched `Viewer` since subscribing: `take()` finds
+    // nothing new, so a matching update is a no-op -- safe to call
+    // unconditionally.
+    let mut app = app_with_db(&[]).unwrap();
+    app.auth = AuthStatus::Unauthenticated;
+
+    app.apply_viewer_update(app.viewer_sub.id());
+
+    assert!(matches!(app.auth, AuthStatus::Unauthenticated));
 }
 
 #[test]
@@ -1014,11 +997,11 @@ fn l_key_gates_on_authenticating() {
 fn refresh_key_resubscribes_the_base_list_immediately() {
     // `ctrl+r` doesn't gate on `Syncing`: an immediate resubscribe runs
     // before the sync request goes out.
-    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    let (mut app, db) = app_with_db_and_handle(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     fetch_base_list(&mut app, true);
     {
-        let conn = app.db.connect().unwrap();
-        lt_runtime::db::upsert_issues(&conn, &[db_issue("2", "ENG-2", "Todo", 4)]).unwrap();
+        let conn = db.connect().unwrap();
+        lt_runtime::test_util::upsert_issues(&conn, &[db_issue("2", "ENG-2", "Todo", 4)]).unwrap();
     }
 
     app.dispatch_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
@@ -1027,8 +1010,8 @@ fn refresh_key_resubscribes_the_base_list_immediately() {
 }
 
 /// Seed `team_id` with two ordered workflow states ("Todo" @1.0, "Done" @2.0).
-fn seed_team_states(conn: &lt_runtime::db::Connection, team_id: &str) -> Result<()> {
-    lt_runtime::db::upsert_team_state(
+fn seed_team_states(conn: &lt_runtime::test_util::Connection, team_id: &str) -> Result<()> {
+    lt_runtime::test_util::upsert_team_state(
         conn,
         team_id,
         &lt_types::states::WorkflowStateWithPosition {
@@ -1037,7 +1020,7 @@ fn seed_team_states(conn: &lt_runtime::db::Connection, team_id: &str) -> Result<
             position: 1.0,
         },
     )?;
-    lt_runtime::db::upsert_team_state(
+    lt_runtime::test_util::upsert_team_state(
         conn,
         team_id,
         &lt_types::states::WorkflowStateWithPosition {
@@ -1086,9 +1069,9 @@ fn new_issue_team_change_drops_the_old_scoped_subscriptions_and_subscribes_new_o
     // Leaving the Team field with a different team selected re-subscribes
     // states/members for the new team (RAII replaces the old hand-diffed
     // `watched_team_id` bookkeeping) and marks `loading`.
-    let mut app = app_with_db(&[]).unwrap();
+    let (mut app, db) = app_with_db_and_handle(&[]).unwrap();
     {
-        let conn = app.db.connect().unwrap();
+        let conn = db.connect().unwrap();
         seed_team_states(&conn, "t2").unwrap();
     }
     let mut modal = test_new_issue_modal(&app.runtime);
@@ -1134,10 +1117,10 @@ fn popup_team_scoped_construction_reads_the_current_states() {
     // "Backlog", not "Todo"/"Done", so the issue's own state back-fill
     // doesn't collide with the seeded positioned states below.
     let issue = db_issue("1", "ENG-1", "Backlog", 5);
-    let mut app = app_with_db(&[issue]).unwrap();
+    let (mut app, db) = app_with_db_and_handle(&[issue]).unwrap();
     fetch_base_list(&mut app, true);
     {
-        let conn = app.db.connect().unwrap();
+        let conn = db.connect().unwrap();
         seed_team_states(&conn, "ENG").unwrap();
     }
 
