@@ -320,6 +320,18 @@ mod tests {
     #[test]
     fn refresh_writes_the_issue_children_and_the_first_comment_page() {
         let conn = conn();
+        // `sample_issue_node`'s state must already be locally known (sync owns
+        // workflow states; issue upserts never write them).
+        db::upsert_team_state(
+            &conn,
+            "ENG",
+            &lt_types::types::WorkflowState {
+                id: "s".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
         db::upsert_comments(
             &conn,
             &[lt_types::comments::Comment {

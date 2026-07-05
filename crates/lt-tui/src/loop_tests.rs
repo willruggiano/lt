@@ -98,6 +98,27 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
     }
 }
 
+/// Seed every `(team_id, state)` pair `rows` reference -- sync owns workflow
+/// states (issue upserts never write them), so a fixture's issues must have
+/// their states already locally known for the read model's `JOIN` to
+/// resolve them, deduplicated by `(team_id, state_id)`.
+fn seed_states_from(
+    conn: &lt_runtime::test_util::Connection,
+    rows: &[lt_types::types::Issue],
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for issue in rows {
+        let key = (
+            issue.team.id.inner().to_string(),
+            issue.state.id.inner().to_string(),
+        );
+        if seen.insert(key) {
+            lt_runtime::test_util::upsert_team_state(conn, issue.team.id.inner(), &issue.state)?;
+        }
+    }
+    Ok(())
+}
+
 /// Build an `App` backed by a fresh in-memory `Database` seeded with `rows`,
 /// with its `Runtime` sharing that same database, returning the database
 /// handle too so a test can seed further rows later (shared-cache: any
@@ -107,6 +128,7 @@ fn app_with_db_and_handle(rows: &[lt_types::types::Issue]) -> Result<(App, Datab
     let db = Database::memory()?;
     {
         let conn = db.connect()?;
+        seed_states_from(&conn, rows)?;
         lt_runtime::test_util::upsert_issues(&conn, rows)?;
     }
     let mut app = App::for_test(Vec::new())?;
@@ -253,6 +275,7 @@ fn open_with_filterful_query_matches_post_sync_resubscribe() {
     let db = Database::memory().unwrap();
     {
         let conn = db.connect().unwrap();
+        seed_states_from(&conn, &rows).unwrap();
         lt_runtime::test_util::upsert_issues(&conn, &rows).unwrap();
     }
     let (tx, _rx) = mpsc::channel();

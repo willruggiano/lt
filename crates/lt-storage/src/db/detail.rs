@@ -80,7 +80,20 @@ mod tests {
     use crate::db::outbox::sample_base_issue;
 
     fn test_db() -> Connection {
-        crate::db::Database::memory().unwrap().connect().unwrap()
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        // `sample_base_issue`'s state must already be locally known (sync
+        // owns workflow states; issue upserts never write them).
+        crate::db::teams::upsert_team_state(
+            &conn,
+            "ENG",
+            &types::WorkflowState {
+                id: "s-todo".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
+        conn
     }
 
     fn vars(id: &str) -> IssueDetailVariables {

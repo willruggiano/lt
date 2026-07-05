@@ -1,13 +1,13 @@
 //! Team metadata: the team list, a team's workflow states (Linear's stored
-//! `position` order), and its memberships. `workflow_states` is scoped for
-//! free by every issue upsert (`db::issues::upsert_issue_tx`), which also
-//! carries the state's real position -- `WorkflowState.position: Float!` is
-//! non-null on the wire, so every write here carries one.
+//! `position` order), and its memberships. The sync cycle owns
+//! `workflow_states`: it fetches every team, then every workflow state across
+//! every team (`AllWorkflowStatesQuery`), before any issue page, so an issue's
+//! `state_id` always references an already-known row.
 
 use anyhow::{Context, Result};
 use lt_types::members::TeamMembersQuery;
 use lt_types::new_issue::{NewIssueData, NewIssueQuery};
-use lt_types::states::TeamStatesQuery;
+use lt_types::states::{AllWorkflowStatesQuery, TeamStatesQuery};
 use lt_types::teams::TeamsQuery;
 use lt_types::types;
 use lt_types::types::{User, WorkflowState};
@@ -224,6 +224,38 @@ impl Upsert for TeamStatesQuery {
     }
 }
 
+impl Upsert for AllWorkflowStatesQuery {
+    /// Unlike [`TeamStatesQuery`], each node carries its own team id, so one
+    /// page can span every team; reports one `WorkflowStates` key per
+    /// distinct team the page touched, not per row.
+    fn upsert(
+        conn: &Connection,
+        _vars: &Self::Variables,
+        out: &Self::Output,
+    ) -> Result<Vec<EntityKey>> {
+        let mut touched = Vec::new();
+        for state in &out.nodes {
+            let team_id = state.team.id.inner();
+            upsert_team_state(
+                conn,
+                team_id,
+                &WorkflowState {
+                    id: state.id.clone(),
+                    name: state.name.clone(),
+                    position: state.position,
+                },
+            )?;
+            let key = EntityKey::WorkflowStates {
+                team_id: team_id.to_string(),
+            };
+            if !touched.contains(&key) {
+                touched.push(key);
+            }
+        }
+        Ok(touched)
+    }
+}
+
 impl Read for TeamMembersQuery {
     fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
         query_team_members(conn, &vars.team_id)
@@ -409,23 +441,6 @@ mod tests {
     }
 
     #[test]
-    fn issue_upsert_backfills_team_id_and_position() {
-        let conn = test_db();
-        crate::db::upsert_issues(&conn, &[outbox::sample_base_issue("1")]).unwrap();
-
-        let (team_id, position): (Option<String>, f64) = conn
-            .query_row(
-                "SELECT team_id, position FROM workflow_states WHERE id = \
-                 (SELECT state_id FROM issues WHERE id = '1')",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert!(team_id.is_some());
-        assert_eq!(position.to_bits(), 1.0_f64.to_bits());
-    }
-
-    #[test]
     fn replace_team_memberships_is_replace_set() {
         let conn = test_db();
         upsert_users(
@@ -555,6 +570,67 @@ mod tests {
         );
         let states = query_team_states(&conn, "t1").unwrap();
         assert_eq!(states[0].name, "Todo");
+    }
+
+    #[test]
+    fn all_workflow_states_query_upsert_scopes_each_state_to_its_own_team_and_dedups_keys() {
+        use lt_types::states::{
+            AllWorkflowStatesVariables, TeamRef, WorkflowStateWithTeam,
+            WorkflowStateWithTeamConnection,
+        };
+
+        let conn = test_db();
+        let out = WorkflowStateWithTeamConnection {
+            nodes: vec![
+                WorkflowStateWithTeam {
+                    id: "s1".into(),
+                    name: "Todo".to_string(),
+                    position: 1.0,
+                    team: TeamRef { id: "t1".into() },
+                },
+                WorkflowStateWithTeam {
+                    id: "s2".into(),
+                    name: "Done".to_string(),
+                    position: 2.0,
+                    team: TeamRef { id: "t1".into() },
+                },
+                WorkflowStateWithTeam {
+                    id: "s3".into(),
+                    name: "Backlog".to_string(),
+                    position: 1.0,
+                    team: TeamRef { id: "t2".into() },
+                },
+            ],
+            page_info: lt_types::pagination::PageInfo::default(),
+        };
+
+        let vars = AllWorkflowStatesVariables {
+            first: 250,
+            after: None,
+        };
+        let touched = lt_types::states::AllWorkflowStatesQuery::upsert(&conn, &vars, &out).unwrap();
+        assert_eq!(
+            touched,
+            vec![
+                EntityKey::WorkflowStates {
+                    team_id: "t1".to_string()
+                },
+                EntityKey::WorkflowStates {
+                    team_id: "t2".to_string()
+                },
+            ]
+        );
+
+        let t1_states = query_team_states(&conn, "t1").unwrap();
+        assert_eq!(
+            t1_states
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Todo", "Done"]
+        );
+        let t2_states = query_team_states(&conn, "t2").unwrap();
+        assert_eq!(t2_states[0].name, "Backlog");
     }
 
     #[test]

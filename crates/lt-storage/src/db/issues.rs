@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::{Context, Result};
 use chrono::Utc;
 use lt_types::issues::{IssueConnection, IssuesQuery, IssuesVariables};
@@ -142,10 +140,6 @@ pub(crate) fn upsert_issue_tx(
         issue.team.id.inner(),
         Some(&issue.team.name),
     )?;
-    // Every issue upsert knows its state's team and its real position
-    // (`WorkflowState.position: Float!` on the wire), so the team-scoped
-    // upsert back-fills `team_id` for free.
-    crate::db::teams::upsert_team_state(tx, issue.team.id.inner(), &issue.state)?;
     if let Some(a) = &issue.assignee {
         upsert_named_entity(tx, EntityTable::Users, a.id.inner(), Some(&a.name))?;
     }
@@ -196,86 +190,6 @@ pub(crate) fn upsert_issue_tx(
             params![issue.id.inner(), label.id.inner()],
             "link issue label",
         )?;
-    }
-    Ok(())
-}
-
-/// One pending-overlay row resolved against its referenced entity name.
-struct OverlayApply {
-    field: String,
-    value: Option<String>,
-    state_name: Option<String>,
-    state_position: Option<f64>,
-    user_name: Option<String>,
-}
-
-/// Load every pending overlay row, resolving the state's name/position and the
-/// assignee's name through the entity tables in one query. The set is small
-/// (only un-synced edits), so it is read whole and grouped in memory rather
-/// than filtered per issue list.
-fn load_overlays(conn: &Connection) -> Result<HashMap<String, Vec<OverlayApply>>> {
-    let mut stmt =
-        sql::prepare(conn, sql::LOAD_OVERLAYS).context("failed to prepare overlay merge query")?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                OverlayApply {
-                    field: r.get(1)?,
-                    value: r.get(2)?,
-                    state_name: r.get(3)?,
-                    state_position: r.get(4)?,
-                    user_name: r.get(5)?,
-                },
-            ))
-        })
-        .context("failed to query overlays")?;
-    let mut map: HashMap<String, Vec<OverlayApply>> = HashMap::new();
-    for row in rows {
-        let (id, apply) = row.context("failed to read overlay row")?;
-        map.entry(id).or_default().push(apply);
-    }
-    Ok(map)
-}
-
-/// Merge the pending overlay over the base issues: overlay wins per field. This
-/// is the read half of the base/overlay split -- un-synced local intent renders
-/// immediately without ever being written into the base.
-fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> {
-    let map = load_overlays(conn)?;
-    if map.is_empty() {
-        return Ok(());
-    }
-    for issue in issues {
-        let Some(rows) = map.get(issue.id.inner()) else {
-            continue;
-        };
-        for o in rows {
-            match o.field.as_str() {
-                "state" => {
-                    if let Some(id) = &o.value {
-                        issue.state = types::WorkflowState {
-                            id: id.clone().into(),
-                            name: o.state_name.clone().unwrap_or_default(),
-                            position: o.state_position.unwrap_or_default(),
-                        };
-                    }
-                }
-                "priority" => {
-                    if let Some(p) = o.value.as_deref().and_then(|v| v.parse::<u8>().ok()) {
-                        issue.priority = Priority(p);
-                        issue.priority_label = Priority(p).label().to_string();
-                    }
-                }
-                "assignee" => {
-                    issue.assignee = o.value.as_ref().map(|id| types::User {
-                        id: id.clone().into(),
-                        name: o.user_name.clone().unwrap_or_default(),
-                    });
-                }
-                _ => {}
-            }
-        }
     }
     Ok(())
 }
@@ -349,7 +263,6 @@ pub fn query_issues(conn: &Connection, vars: &IssuesVariables) -> Result<IssueCo
     if has_next_page {
         issues.truncate(cap_rows);
     }
-    apply_overlays(conn, &mut issues)?;
 
     let end_cursor = has_next_page.then(|| (offset + i64::from(cap)).to_string());
     Ok(IssueConnection {
@@ -382,7 +295,6 @@ fn query_issues_one(
     for row in rows {
         issues.push(row.context("failed to read issue row")?);
     }
-    apply_overlays(conn, &mut issues)?;
     Ok(issues)
 }
 
@@ -571,9 +483,28 @@ mod tests {
         }
     }
 
+    /// Seed a team-scoped workflow state (`id`/`name` share the given
+    /// value) -- sync owns workflow states, so every state a fixture's
+    /// issues reference must already be locally known (issue upserts never
+    /// write them) for the read model's `JOIN` to resolve the row.
+    fn seed_state(conn: &Connection, team_id: &str, name: &str, position: f64) {
+        crate::db::teams::upsert_team_state(
+            conn,
+            team_id,
+            &types::WorkflowState {
+                id: name.into(),
+                name: name.to_string(),
+                position,
+            },
+        )
+        .unwrap();
+    }
+
     fn test_db() -> Connection {
         let db = crate::db::Database::memory().unwrap();
         let conn = db.connect().unwrap();
+        seed_state(&conn, "ENG", "Todo", 1.0);
+        seed_state(&conn, "ENG", "In Progress", 2.0);
         upsert_issues(
             &conn,
             &[
@@ -645,6 +576,16 @@ mod tests {
     fn graph_db() -> Connection {
         let db = crate::db::Database::memory().unwrap();
         let conn = db.connect().unwrap();
+        crate::db::teams::upsert_team_state(
+            &conn,
+            "ENG",
+            &types::WorkflowState {
+                id: "s1".into(),
+                name: "In Progress".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
         // The parent referenced by sample_api_issue must exist for the parent
         // self-join to resolve its identifier.
         let mut parent = sample_api_issue();
@@ -947,6 +888,54 @@ mod tests {
     }
 
     #[test]
+    fn state_filter_matches_an_issue_whose_overlay_moved_it_into_the_filtered_state() {
+        use lt_types::inputs::IssueUpdateInput;
+        use lt_types::issues::{IssueUpdateMutation, IssueUpdateVariables};
+
+        use crate::db::ops::Mutate;
+
+        let conn = graph_db();
+        // The issue's base state is "In Progress" (graph_db/sample_api_issue);
+        // a state overlay moves it to "Done".
+        seed_state(&conn, "ENG", "Done", 2.0);
+        IssueUpdateMutation::enqueue(
+            &conn,
+            IssueUpdateVariables {
+                id: "1".to_string(),
+                input: IssueUpdateInput {
+                    state_id: Some("Done".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+
+        // A `state:done` filter must match the overlaid state, not the base.
+        let matched = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                state: Some("done".to_string()),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
+        assert!(matched.iter().any(|i| i.id.inner() == "1"));
+
+        // The old base state no longer matches.
+        let stale = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                state: Some("in progress".to_string()),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
+        assert!(!stale.iter().any(|i| i.id.inner() == "1"));
+    }
+
+    #[test]
     fn delta_base_write_leaves_pending_overlay_intact() {
         let conn = graph_db();
 
@@ -997,6 +986,9 @@ mod tests {
     #[test]
     fn issues_query_upsert_reports_issue_teams_and_workflow_states() {
         let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        // The invariant this reports on: sync established the state before
+        // the issue page lands.
+        seed_state(&conn, "ENG", "Todo", 1.0);
         let vars = IssuesVariables {
             filter: None,
             sort: None,

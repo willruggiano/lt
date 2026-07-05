@@ -320,6 +320,18 @@ mod tests {
     fn query_issue_by_id_resolves_and_misses() {
         let db = Database::memory().unwrap();
         let conn = db.connect().unwrap();
+        // `sample_base_issue`'s state must already be locally known (sync
+        // owns workflow states; issue upserts never write them).
+        teams::upsert_team_state(
+            &conn,
+            "ENG",
+            &lt_types::types::WorkflowState {
+                id: "s-todo".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
         upsert_issues(&conn, &[outbox::sample_base_issue("9")]).unwrap();
 
         let found = query_issue_by_id(&conn, "9").unwrap().unwrap();

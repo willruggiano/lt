@@ -331,6 +331,29 @@ pub fn generate(seed: u64, size: usize) -> Dataset {
     Dataset { issues, comments }
 }
 
+/// Every `(team_id, WorkflowState)` pair a generated dataset's issues
+/// reference, deduplicated by `(team_id, state_id)`. Sync owns workflow
+/// states in production (issue upserts never write them), and `lt sim` has no
+/// sync cycle or per-team states API to seed from offline, so this mirrors
+/// [`derive_team_memberships_from_issues`](crate::db::derive_team_memberships_from_issues)'s
+/// ADR "Sim compatibility" rationale for the workflow-states invariant
+/// instead.
+#[must_use]
+pub fn derive_workflow_states(issues: &[types::Issue]) -> Vec<(String, types::WorkflowState)> {
+    let mut seen = HashSet::new();
+    let mut states = Vec::new();
+    for issue in issues {
+        let key = (
+            issue.team.id.inner().to_string(),
+            issue.state.id.inner().to_string(),
+        );
+        if seen.insert(key) {
+            states.push((issue.team.id.inner().to_string(), issue.state.clone()));
+        }
+    }
+    states
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -392,6 +415,9 @@ mod tests {
         let d = generate(5, 30);
         let database = crate::db::Database::memory().unwrap();
         let conn = database.connect().unwrap();
+        for (team_id, state) in derive_workflow_states(&d.issues) {
+            db::upsert_team_state(&conn, &team_id, &state).unwrap();
+        }
         db::upsert_issues(&conn, &d.issues).unwrap();
         db::upsert_comments(&conn, &d.comments).unwrap();
         // sanity: relational base reconstructs the rows.

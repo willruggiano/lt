@@ -689,6 +689,13 @@ mod merged_read_tests {
         r3.state = state("Done");
         r3.updated_at = "2026-01-03T00:00:00Z".parse().unwrap();
 
+        // Sync owns workflow states -- issue upserts never write them, so
+        // every state a fixture's issues reference must already be locally
+        // known for the read model's `JOIN` to resolve the row.
+        db::upsert_team_state(&conn, "ENG", &state("Todo")).unwrap();
+        db::upsert_team_state(&conn, "DES", &state("In Progress")).unwrap();
+        db::upsert_team_state(&conn, "ENG", &state("Done")).unwrap();
+
         db::upsert_issues(&conn, &[r1, r2, r3]).unwrap();
         conn
     }

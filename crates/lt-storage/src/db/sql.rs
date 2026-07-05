@@ -47,18 +47,52 @@ macro_rules! statements {
     };
 }
 
+/// The effective state id: a state overlay's value is never NULL (there is
+/// no "clear the state" edit), so `COALESCE` picks the overlay's id when a
+/// pending row exists.
+macro_rules! effective_state_id {
+    () => {
+        "COALESCE(po_state.value, i.state_id)"
+    };
+}
+
+/// The effective assignee id. Unlike state, a `NULL` overlay value here means
+/// "cleared", so `COALESCE` would wrongly fall through to the base id; the
+/// `CASE` distinguishes "no overlay row" from "overlay clears it".
+macro_rules! effective_assignee_id {
+    () => {
+        "CASE WHEN po_assignee.entity_id IS NOT NULL THEN po_assignee.value ELSE i.assignee_id END"
+    };
+}
+
+/// The effective priority label. The overlay stores the label directly
+/// (`Priority::label`, the one source of truth for the mapping), so no SQL
+/// re-derives it from the numeric level.
+macro_rules! effective_priority_label {
+    () => {
+        "COALESCE(po_priority.value, i.priority_label)"
+    };
+}
+
 /// The fragment-typed read model's column list: every field
 /// [`crate::types::Issue`](lt_types::types::Issue) selects, every column
 /// explicitly aliased so [`crate::db::issues::issue_from_row`] reads by name
 /// (ADR decision 4) rather than positional index. Labels are aggregated by a
-/// correlated subquery.
+/// correlated subquery. `state_id`/`assignee_id`/`priority_label` select the
+/// *effective* value -- the pending overlay merged over the base, via
+/// [`issue_joins`] -- so every issue-shaped statement renders un-synced local
+/// edits without a separate in-memory merge.
 macro_rules! issue_columns {
     () => {
-        "i.id AS id, i.identifier AS identifier, i.title AS title, \
-         i.priority_label AS priority_label, i.description AS description, \
-         i.created_at AS created_at, i.updated_at AS updated_at, \
-         i.state_id AS state_id, s.name AS state_name, s.position AS state_position, \
-         i.assignee_id AS assignee_id, ua.name AS assignee_name, \
+        concat!(
+            "i.id AS id, i.identifier AS identifier, i.title AS title, ",
+            effective_priority_label!(),
+            " AS priority_label, i.description AS description, \
+         i.created_at AS created_at, i.updated_at AS updated_at, ",
+            effective_state_id!(),
+            " AS state_id, s.name AS state_name, s.position AS state_position, ",
+            effective_assignee_id!(),
+            " AS assignee_id, ua.name AS assignee_name, \
          i.team_id AS team_id, t.name AS team_name, \
          i.project_id AS project_id, p.name AS project_name, \
          i.cycle_id AS cycle_id, c.name AS cycle_name, \
@@ -66,21 +100,35 @@ macro_rules! issue_columns {
          i.parent_id AS parent_id, pp.identifier AS parent_identifier, \
          (SELECT GROUP_CONCAT(l.name, ',') FROM issue_labels il \
             JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id) AS labels"
+        )
     };
 }
 
-/// The entity joins that reconstruct an issue's referenced rows. The base
-/// table is aliased `i`; callers prepend `FROM issues i` (optionally with an
-/// FTS join) before this fragment.
+/// The entity joins that reconstruct an issue's referenced rows, resolving
+/// `state`/`assignee`/`priority` through their overlay-effective ids (see
+/// [`issue_columns`]). The base table is aliased `i`; callers prepend `FROM
+/// issues i` (optionally with an FTS join) before this fragment.
 macro_rules! issue_joins {
     () => {
-        "JOIN workflow_states s ON s.id = i.state_id \
-         JOIN teams t            ON t.id = i.team_id \
-         LEFT JOIN users ua      ON ua.id = i.assignee_id \
-         LEFT JOIN projects p    ON p.id = i.project_id \
-         LEFT JOIN cycles c      ON c.id = i.cycle_id \
-         LEFT JOIN users uc      ON uc.id = i.creator_id \
-         LEFT JOIN issues pp     ON pp.id = i.parent_id"
+        concat!(
+            "LEFT JOIN pending_overlay po_state ON po_state.entity_id = i.id \
+                AND po_state.field = 'state' \
+             JOIN workflow_states s ON s.id = ",
+            effective_state_id!(),
+            " \
+             JOIN teams t ON t.id = i.team_id \
+             LEFT JOIN pending_overlay po_assignee ON po_assignee.entity_id = i.id \
+                AND po_assignee.field = 'assignee' \
+             LEFT JOIN users ua ON ua.id = ",
+            effective_assignee_id!(),
+            " \
+             LEFT JOIN pending_overlay po_priority ON po_priority.entity_id = i.id \
+                AND po_priority.field = 'priority' \
+             LEFT JOIN projects p    ON p.id = i.project_id \
+             LEFT JOIN cycles c      ON c.id = i.cycle_id \
+             LEFT JOIN users uc      ON uc.id = i.creator_id \
+             LEFT JOIN issues pp     ON pp.id = i.parent_id"
+        )
     };
 }
 
@@ -151,14 +199,6 @@ statements! {
     /// Link one label to an issue; a no-op if the link already exists.
     INSERT_ISSUE_LABEL, 2,
         "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)";
-
-    /// Load every pending overlay row, resolving the state's name/position and
-    /// the assignee's name through the entity tables in one query.
-    LOAD_OVERLAYS, 0,
-        "SELECT po.entity_id, po.field, po.value, ws.name, ws.position, u.name \
-         FROM pending_overlay po \
-         LEFT JOIN workflow_states ws ON po.field = 'state'    AND ws.id = po.value \
-         LEFT JOIN users u           ON po.field = 'assignee' AND u.id  = po.value";
 
     /// Read one `sync_meta` value by key.
     GET_META, 1,
@@ -427,12 +467,13 @@ fragments! {
     FRAG_ASSIGNEE_EQ, 1, "ua.name = ?";
     /// `assignee`, substring: case-insensitive match against the name.
     FRAG_ASSIGNEE_LOWER_LIKE, 1, "LOWER(COALESCE(ua.name,'')) LIKE ?";
-    /// `assignee`, null: no assignee.
-    FRAG_NO_ASSIGNEE, 0, "i.assignee_id IS NULL";
+    /// `assignee`, null: no assignee (the overlay-effective id, not the base).
+    FRAG_NO_ASSIGNEE, 0, concat!(effective_assignee_id!(), " IS NULL");
     /// `state`: case-insensitive substring match.
     FRAG_STATE_LOWER_LIKE, 1, "LOWER(s.name) LIKE ?";
-    /// `priority`: exact match against the normalised label.
-    FRAG_PRIORITY_EQ, 1, "i.priority_label = ?";
+    /// `priority`: exact match against the normalised label (the
+    /// overlay-effective label, not the base).
+    FRAG_PRIORITY_EQ, 1, concat!(effective_priority_label!(), " = ?");
     /// `title`: case-insensitive substring match.
     FRAG_TITLE_LIKE, 1, "i.title LIKE ?";
     /// `created_after`.
@@ -487,8 +528,10 @@ sort_cols! {
     SORT_CREATED_AT, "i.created_at";
     /// `sort:updated` / `--sort updated` (the default).
     SORT_UPDATED_AT, "i.updated_at";
-    /// `sort:priority` / `--sort priority`.
-    SORT_PRIORITY_LABEL, "i.priority_label";
+    /// `sort:priority` / `--sort priority` (the overlay-effective label, for
+    /// parity with `sort:state`/`sort:assignee`, which pick up the effective
+    /// value for free through their joined aliases).
+    SORT_PRIORITY_LABEL, effective_priority_label!();
     /// `sort:title` / `--sort title`.
     SORT_TITLE, "i.title";
     /// `sort:assignee` / `--sort assignee`.

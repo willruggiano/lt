@@ -171,6 +171,18 @@ mod tests {
     fn drains_issue_create_and_rewrites_temp_id() {
         let db = lt_storage::db::Database::memory().unwrap();
         let conn = db.connect().unwrap();
+        // The optimistic create defaults to the team's first cached state
+        // (sync owns workflow states; issue upserts never write them).
+        lt_storage::db::upsert_team_state(
+            &conn,
+            "ENG",
+            &lt_types::types::WorkflowState {
+                id: "s-todo".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
         let input = IssueCreateInput {
             title: "New".to_string(),
             team_id: "ENG".to_string(),

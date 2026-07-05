@@ -63,7 +63,8 @@ pub struct PendingOp {
 // ---------------------------------------------------------------------------
 
 /// Upsert one `(entity_id, field)` overlay row. `value` is the referenced id,
-/// the priority number, or `None` to mean "clear" (e.g. unassign).
+/// the priority label (`Priority::label`), or `None` to mean "clear" (e.g.
+/// unassign).
 fn set_overlay(
     tx: &Connection,
     entity_id: &str,
@@ -132,13 +133,20 @@ fn overlay_rows(conn: &Connection, issue_id: &str) -> Result<Vec<(String, Option
     Ok(out)
 }
 
-/// Fold an issue's overlay rows into one coalesced `IssueUpdateInput`.
+/// Fold an issue's overlay rows into one coalesced `IssueUpdateInput`. The
+/// priority overlay stores the label (`Priority::label`, the one source of
+/// truth), so rebuilding the wire's numeric level inverts it via
+/// `Priority::from_label`.
 fn issue_update_input(conn: &Connection, issue_id: &str) -> Result<IssueUpdateInput> {
     let mut input = IssueUpdateInput::default();
     for (field, value) in overlay_rows(conn, issue_id)? {
         match field.as_str() {
             "state" => input.state_id = value,
-            "priority" => input.priority = value.as_deref().and_then(|v| v.parse().ok()),
+            "priority" => {
+                input.priority = value
+                    .as_deref()
+                    .map(|label| i32::from(Priority::from_label(label).0));
+            }
             "assignee" => {
                 input.assignee_id = match value {
                     Some(id) => Field::Value(id),
@@ -176,12 +184,8 @@ impl Mutate for IssueUpdateMutation {
             set_overlay(&tx, &vars.id, OverlayField::State, Some(state_id))?;
         }
         if let Some(priority) = vars.input.priority {
-            set_overlay(
-                &tx,
-                &vars.id,
-                OverlayField::Priority,
-                Some(&priority.to_string()),
-            )?;
+            let label = Priority(u8::try_from(priority).unwrap_or(0)).label();
+            set_overlay(&tx, &vars.id, OverlayField::Priority, Some(label))?;
         }
         match &vars.input.assignee_id {
             Field::Value(id) => set_overlay(&tx, &vars.id, OverlayField::Assignee, Some(id))?,
@@ -229,10 +233,7 @@ impl Mutate for IssueUpdateMutation {
                         )?;
                     }
                     "priority" => {
-                        let label = value
-                            .as_deref()
-                            .and_then(|v| v.parse::<u8>().ok())
-                            .map_or("No priority", |p| Priority(p).label());
+                        let label = value.as_deref().unwrap_or("No priority");
                         sql::execute(
                             &tx,
                             sql::ACK_UPDATE_PRIORITY,
@@ -262,29 +263,37 @@ impl Mutate for IssueUpdateMutation {
 
 /// Build the optimistic issue fragment for a locally-created issue. Display
 /// names are resolved from the same lookup tables the pickers read (team,
-/// state, member); a `state_id` lookup miss or an absent `state_id` falls
-/// back to a name-keyed id ("Backlog") so the relational join still resolves
-/// a label offline.
+/// state, member). Sync owns workflow states (issue upserts never write
+/// them), so an absent `state_id` cannot fabricate one: it defaults to the
+/// team's first cached state (`query_team_states` order), erroring if the
+/// team has no cached states (a never-synced cache). A `state_id` lookup miss
+/// falls back to the id as its own display name -- the offered id came from a
+/// stale/offline picker, not the cache, so there is no real position to carry.
 fn optimistic_issue(conn: &Connection, input: &IssueCreateInput) -> Result<types::Issue> {
     let team_name = crate::db::teams::query_teams(conn)?
         .into_iter()
         .find(|t| t.id.inner() == input.team_id)
         .map_or_else(String::new, |t| t.name);
 
-    let (state_id, state_name, state_position) = match &input.state_id {
-        Some(id) => {
-            let cached = crate::db::teams::query_team_states(conn, &input.team_id)?
-                .into_iter()
-                .find(|s| s.id.inner() == id);
-            match cached {
-                Some(s) => (id.clone(), s.name, s.position),
-                // The offered id came from a stale/offline picker, not the
-                // cache; fall back to the id as the display name, same as
-                // before -- there is no real position to carry either.
-                None => (id.clone(), id.clone(), 0.0),
-            }
+    let (state_id, state_name, state_position) = if let Some(id) = &input.state_id {
+        let cached = crate::db::teams::query_team_states(conn, &input.team_id)?
+            .into_iter()
+            .find(|s| s.id.inner() == id);
+        match cached {
+            Some(s) => (id.clone(), s.name, s.position),
+            None => (id.clone(), id.clone(), 0.0),
         }
-        None => ("Backlog".to_string(), "Backlog".to_string(), 0.0),
+    } else {
+        let first = crate::db::teams::query_team_states(conn, &input.team_id)?
+            .into_iter()
+            .next()
+            .with_context(|| {
+                format!(
+                    "no workflow states cached for team {} -- run `lt sync`",
+                    input.team_id
+                )
+            })?;
+        (first.id.inner().to_string(), first.name, first.position)
     };
 
     let assignee = match &input.assignee_id {
@@ -746,6 +755,18 @@ mod tests {
     fn ack_create_rewrites_temp_id_to_server_id() {
         let db = crate::db::Database::memory().unwrap();
         let conn = db.connect().unwrap();
+        // The optimistic create defaults to the team's first cached state
+        // (sync owns workflow states; issue upserts never write them).
+        crate::db::teams::upsert_team_state(
+            &conn,
+            "ENG",
+            &types::WorkflowState {
+                id: "s-todo".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
         let input = IssueCreateInput {
             title: "New".to_string(),
             team_id: "ENG".to_string(),

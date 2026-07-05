@@ -810,6 +810,21 @@ mod tests {
     #[test]
     fn create_issue_propagates_to_a_live_issues_subscription() {
         let db = Database::memory().unwrap();
+        {
+            let conn = db.connect().unwrap();
+            // The optimistic create defaults to the team's first cached state
+            // (sync owns workflow states; issue upserts never write them).
+            db::upsert_team_state(
+                &conn,
+                "t1",
+                &types::WorkflowState {
+                    id: "s-todo".into(),
+                    name: "Todo".to_string(),
+                    position: 1.0,
+                },
+            )
+            .unwrap();
+        }
         let (runtime, rx) = runtime_over(db);
         let (sub, _initial) = runtime.subscribe::<IssuesQuery>(IssuesVariables {
             filter: None,
@@ -840,6 +855,18 @@ mod tests {
         let db = Database::memory().unwrap();
         {
             let conn = db.connect().unwrap();
+            // `sample_base_issue`'s state must already be locally known (sync
+            // owns workflow states; issue upserts never write them).
+            db::upsert_team_state(
+                &conn,
+                "ENG",
+                &types::WorkflowState {
+                    id: "s-todo".into(),
+                    name: "Todo".to_string(),
+                    position: 1.0,
+                },
+            )
+            .unwrap();
             db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
         }
         let (runtime, rx) = runtime_over(db);

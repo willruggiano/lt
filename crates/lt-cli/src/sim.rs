@@ -28,6 +28,11 @@ pub struct SimArgs {
 pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     let dataset = generate(args.seed, args.size);
     let conn = db::open_db(db::db_path()?)?;
+    // No sync cycle to establish workflow states offline: derive them from
+    // the seeded issues' own state fragments (ADR "Sim compatibility").
+    for (team_id, state) in lt_runtime::sim::derive_workflow_states(&dataset.issues) {
+        db::upsert_team_state(&conn, &team_id, &state)?;
+    }
     db::upsert_issues(&conn, &dataset.issues)?;
     db::upsert_comments(&conn, &dataset.comments)?;
     // No team-membership API to seed from offline: derive it from the

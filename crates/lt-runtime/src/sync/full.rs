@@ -17,6 +17,9 @@ pub fn run(
     let mut touched = super::drain::drain(conn, transport)?;
     // Persist the viewer so cached reads can resolve `me` offline.
     touched.extend(super::persist_viewer(conn, transport)?);
+    // Teams, then every workflow state across every team, before any issue
+    // page: an issue's `state_id` must already be locally known.
+    touched.extend(super::sync_reference_data(conn, transport)?);
 
     // No filter, max page size.
     touched.extend(super::sync_pages(conn, transport, |after| {

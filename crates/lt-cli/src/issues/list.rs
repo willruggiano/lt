@@ -4,7 +4,6 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use lt_runtime::{db, load};
 use lt_types::issues::{AssigneeFilter, IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
-use tracing::info;
 
 use super::IssueArgs;
 use super::display::print_table;
@@ -56,17 +55,7 @@ pub fn run(out: &mut dyn Write, args: &IssueArgs) -> Result<()> {
 
     match last_synced_at {
         None => {
-            // Cache is empty (never synced). Run full sync first -- this also
-            // persists the viewer identity that `resolve_assignee` reads below.
-            info!("Cache empty -- running full sync...");
-            drop(conn);
-            let (sync_conn, transport) = lt_runtime::sync::open_production()?;
-            lt_runtime::sync::full::run(&sync_conn, transport.as_ref())?;
-            // Re-open after sync.
-            let conn2 = db::open_db(db::db_path()?)?;
-            let vars = lower(args, &conn2)?;
-            let page = load::<IssuesQuery>(&conn2, &vars)?;
-            print_table(out, &page.nodes, "(cached)")?;
+            writeln!(out, "No local cache yet -- run `lt sync` first.")?;
         }
         Some(ref ts) => {
             let vars = lower(args, &conn)?;
