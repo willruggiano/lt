@@ -1,8 +1,8 @@
-use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Widget};
 
 use super::text_span::append_text_input_spans;
 use super::util::to_u16;
@@ -25,86 +25,98 @@ fn identity_label(auth: &AuthStatus) -> String {
     }
 }
 
-pub(super) fn render_header(frame: &mut Frame, area: Rect, context: &str, auth: &AuthStatus) {
-    let identity = identity_label(auth);
-    let text = if context.is_empty() {
-        identity
-    } else {
-        format!("{identity}  {context}")
-    };
-    frame.render_widget(
-        Paragraph::new(text).style(Style::new().add_modifier(Modifier::BOLD)),
-        area,
-    );
+/// The header identity, plus the base list's active filter context (when
+/// not searching).
+pub(super) struct Header<'a> {
+    pub(super) context: &'a str,
+    pub(super) auth: &'a AuthStatus,
 }
 
-pub(super) fn render_header_with_search(
-    frame: &mut Frame,
-    area: Rect,
-    auth: &AuthStatus,
-    overlay: &SearchOverlay,
-) {
-    let mut line = Line::default();
-
-    let identity = identity_label(auth);
-
-    if overlay.fts_unavailable {
-        let prefix = format!("{identity}  ");
-        line.spans.push(Span::styled(
-            format!("{prefix}Search unavailable: run lt sync first"),
-            Style::new().add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        line.spans.push(Span::styled(
-            format!("{identity}  "),
-            Style::new().add_modifier(Modifier::BOLD),
-        ));
-        append_text_input_spans(&mut line, &overlay.query, &overlay.ast.errors);
-        // Append inline ghost-text suffix hint.
-        if let Some(suffix) = overlay.completer.hint_suffix() {
-            line.spans.push(Span::styled(
-                suffix.to_owned(),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
+impl Widget for &Header<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let identity = identity_label(self.auth);
+        let text = if self.context.is_empty() {
+            identity
+        } else {
+            format!("{identity}  {}", self.context)
+        };
+        Paragraph::new(text)
+            .style(Style::new().add_modifier(Modifier::BOLD))
+            .render(area, buf);
     }
+}
 
-    frame.render_widget(Paragraph::new(line), area);
+/// The header identity with the search overlay's query bar appended inline.
+pub(super) struct HeaderWithSearch<'a> {
+    pub(super) auth: &'a AuthStatus,
+    pub(super) overlay: &'a SearchOverlay,
+}
+
+impl Widget for &HeaderWithSearch<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let mut line = Line::default();
+        let identity = identity_label(self.auth);
+
+        if self.overlay.fts_unavailable {
+            let prefix = format!("{identity}  ");
+            line.spans.push(Span::styled(
+                format!("{prefix}Search unavailable: run lt sync first"),
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            line.spans.push(Span::styled(
+                format!("{identity}  "),
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+            append_text_input_spans(&mut line, &self.overlay.query, &self.overlay.ast.errors);
+            // Append inline ghost-text suffix hint.
+            if let Some(suffix) = self.overlay.completer.hint_suffix() {
+                line.spans.push(Span::styled(
+                    suffix.to_owned(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
+
+        Paragraph::new(line).render(area, buf);
+    }
 }
 
 /// Pagination and sync state shown in the list-mode footer.
-pub(super) struct FooterState<'a> {
+pub(super) struct Footer<'a> {
     pub(super) has_next: bool,
     pub(super) has_prev: bool,
     pub(super) page: usize,
     pub(super) sync_label: &'a str,
 }
 
-pub(super) fn render_footer(frame: &mut Frame, area: Rect, state: &FooterState) {
-    let mut parts: Vec<&str> = vec![
-        "q quit",
-        "/ search",
-        "ctrl+/ help",
-        "j/k nav",
-        "<space> detail",
-        "c new",
-    ];
-    if state.has_prev {
-        parts.push("ctrl+p prev");
-    }
-    if state.has_next {
-        parts.push("ctrl+n next");
-    }
+impl Widget for &Footer<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let mut parts: Vec<&str> = vec![
+            "q quit",
+            "/ search",
+            "ctrl+/ help",
+            "j/k nav",
+            "<space> detail",
+            "c new",
+        ];
+        if self.has_prev {
+            parts.push("ctrl+p prev");
+        }
+        if self.has_next {
+            parts.push("ctrl+n next");
+        }
 
-    let page_str = format!("[{}]", state.page);
-    // Show sync status on the right side, separated from page indicator.
-    let sync_str = format!("  {}  {page_str}", state.sync_label);
-    let chunks = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(to_u16(sync_str.len())),
-    ])
-    .split(area);
+        let page_str = format!("[{}]", self.page);
+        // Show sync status on the right side, separated from page indicator.
+        let sync_str = format!("  {}  {page_str}", self.sync_label);
+        let chunks = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(to_u16(sync_str.len())),
+        ])
+        .split(area);
 
-    frame.render_widget(Paragraph::new(parts.join("  ")), chunks[0]);
-    frame.render_widget(Paragraph::new(sync_str), chunks[1]);
+        Paragraph::new(parts.join("  ")).render(chunks[0], buf);
+        Paragraph::new(sync_str).render(chunks[1], buf);
+    }
 }

@@ -136,7 +136,6 @@ fn popup_move_clamps_and_cancel_resets_stack() {
         team_id: None,
         items: vec![item("a", None), item("b", None), item("c", None)],
         selected: 0,
-        anchor: Some(ratatui::layout::Rect::new(0, 0, 1, 1)),
         sub: None,
     }));
 
@@ -307,7 +306,6 @@ fn priority_popup() {
         team_id: None,
         items: priority_popup_items(),
         selected: 1,
-        anchor: None,
         sub: None,
     }));
     insta::assert_snapshot!(draw(&mut app, 100, 20));

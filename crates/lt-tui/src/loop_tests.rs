@@ -477,7 +477,6 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
             id: Some("done-state".to_string()),
         }],
         selected: 0,
-        anchor: None,
         sub: None,
     }));
 
@@ -642,7 +641,6 @@ fn push_priority_popup(app: &mut App, items: Vec<PopupItem>) {
         team_id: None,
         items,
         selected: 0,
-        anchor: None,
         sub: None,
     }));
 }

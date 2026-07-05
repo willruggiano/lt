@@ -85,9 +85,6 @@ pub struct PopupView {
     pub team_id: Option<String>,
     pub items: Vec<PopupItem>,
     pub selected: usize,
-    /// Written by the renderer when this popup sits directly on the base
-    /// table; `None` => `render_popup` centers.
-    pub anchor: Option<ratatui::layout::Rect>,
     pub(crate) sub: Option<PopupSub>,
 }
 
@@ -132,32 +129,17 @@ pub struct HelpPopup {
     /// Indices into `rows` that match the current search.
     pub filtered: Vec<usize>,
     pub selected: usize,
-    /// The three help-panel columns' max width across every row, computed
-    /// once since `rows` is immutable after construction.
-    pub(crate) key_col_width: usize,
-    pub(crate) context_col_width: usize,
-    pub(crate) label_col_width: usize,
 }
 
 impl HelpPopup {
     pub fn new() -> Self {
         let rows = keymap::help_rows(crate::HELP_CONTEXTS);
         let filtered = (0..rows.len()).collect();
-        let key_col_width = rows
-            .iter()
-            .map(|r| r.binding_form.len())
-            .max()
-            .unwrap_or(10);
-        let context_col_width = rows.iter().map(|r| r.context.len()).max().unwrap_or(6);
-        let label_col_width = rows.iter().map(|r| r.label.len()).max().unwrap_or(10);
         Self {
             search: TextInput::new(),
             rows,
             filtered,
             selected: 0,
-            key_col_width,
-            context_col_width,
-            label_col_width,
         }
     }
 
@@ -338,7 +320,6 @@ impl super::App {
             team_id: Some(team_id),
             items,
             selected,
-            anchor: None,
             sub: Some(PopupSub::States(sub)),
         }));
         self.footer_msg = None;
@@ -357,7 +338,6 @@ impl super::App {
             team_id: None,
             items: priority_popup_items(),
             selected,
-            anchor: None,
             sub: None,
         }));
         self.footer_msg = None;
@@ -390,7 +370,6 @@ impl super::App {
             team_id: Some(team_id),
             items,
             selected,
-            anchor: None,
             sub: Some(PopupSub::Members(sub)),
         }));
         self.footer_msg = None;

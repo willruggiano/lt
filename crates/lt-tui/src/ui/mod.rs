@@ -8,17 +8,15 @@ mod table;
 mod text_span;
 mod util;
 
-use chrome::{FooterState, render_footer, render_header, render_header_with_search};
-use detail::{render_detail_footer, render_detail_overlay};
-use help::render_help_popup;
+use chrome::{Footer, Header, HeaderWithSearch};
 use lt_runtime::query::SortField;
-use new_issue::{render_new_issue_modal, submit_key_label};
-use popup::{Popup, render_popup};
+use new_issue::{NewIssueForm, submit_key_label};
+use popup::Popup;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::Paragraph;
-use search::{SortOrder, render_search_overlay};
-use table::{popup_anchor, render_table};
+use search::{SearchResults, SortOrder};
+use table::TableGeometry;
 
 use crate::{App, View, search_query, sync_status_label};
 
@@ -38,13 +36,25 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Always render the header with user/org context. In search mode, append
     // the search query inline so the identity is always visible.
     if let Some(View::Search(overlay)) = app.views.last() {
-        render_header_with_search(frame, chunks[0], &app.auth, overlay);
+        frame.render_widget(
+            &HeaderWithSearch {
+                auth: &app.auth,
+                overlay,
+            },
+            chunks[0],
+        );
     } else {
         let context = match app.base() {
             View::List(list) => search_query::render_filter_context(&list.query.filter),
             _ => String::new(),
         };
-        render_header(frame, chunks[0], &context, &app.auth);
+        frame.render_widget(
+            &Header {
+                context: &context,
+                auth: &app.auth,
+            },
+            chunks[0],
+        );
     }
 
     // Render the spacer row between the issue table and the statusbar so the
@@ -61,7 +71,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     };
 
     let sync_label = sync_status_label(&app.sync, &app.auth, &app.clock);
-    let footer = FooterState {
+    let footer = Footer {
         has_next,
         has_prev,
         page,
@@ -75,7 +85,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 /// Render the bottom status row (chunk 4), which switches between the detail
 /// footer, a transient footer message, the pending-chord indicator, and the
 /// list footer, matching on the stack top.
-fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &FooterState) {
+fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Footer) {
     if let Some(pending) = &app.pending_key {
         // Highest priority: a pending prefix can never coexist with the
         // comment-input hint below, since text contexts never start chords.
@@ -92,12 +102,12 @@ fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Foo
         } else if let Some(msg) = &app.footer_msg {
             frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
         } else {
-            render_detail_footer(frame, chunks[4]);
+            frame.render_widget(Paragraph::new(detail::footer_hint()), chunks[4]);
         }
     } else if let Some(msg) = &app.footer_msg {
         frame.render_widget(Paragraph::new(format!("[!] {msg}")), chunks[4]);
     } else {
-        render_footer(frame, chunks[4], footer);
+        frame.render_widget(footer, chunks[4]);
     }
 }
 
@@ -106,52 +116,51 @@ fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Foo
 /// where every view would pay for it.
 fn render_views(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
     let len = app.views.len();
-    let mut list_widths: Option<[usize; 7]> = None;
-    let mut list_selected = 0usize;
+    let mut list_geometry: Option<TableGeometry> = None;
     let mut list_sort_field = SortField::Updated;
     let mut list_sort_desc = true;
 
     for i in 0..len {
         match &mut app.views[i] {
             View::List(list) => {
-                list_selected = list.table_state.selected().unwrap_or(0);
                 list_sort_field = list.query.sort.clone();
                 list_sort_desc = list.query.desc;
-                list_widths = render_table(frame, chunks[2], list);
+                list_geometry = list.render_table(chunks[2], frame.buffer_mut());
             }
-            View::Detail(detail) => render_detail_overlay(frame, chunks[2], detail),
+            View::Detail(detail) => frame.render_widget(detail.as_ref(), chunks[2]),
             View::Popup(popup) => {
                 // Anchor to the base table's geometry only when the popup
                 // sits directly on it (an exact two-view stack); otherwise
-                // `render_popup` centers.
-                if len == 2
-                    && i == 1
-                    && let Some(widths) = &list_widths
-                {
-                    popup.anchor =
-                        Some(popup_anchor(chunks[2], widths, list_selected, &popup.kind));
-                }
-                render_popup(
-                    frame,
-                    frame.area(),
+                // the popup widget centers.
+                let base = (len == 2 && i == 1)
+                    .then_some(list_geometry.as_ref())
+                    .flatten();
+                frame.render_widget(
                     &Popup {
-                        anchor: popup.anchor,
+                        base,
                         kind: &popup.kind,
                         items: &popup.items,
                         selected: popup.selected,
                     },
+                    frame.area(),
                 );
             }
             View::NewIssue(modal) => {
-                render_new_issue_modal(frame, frame.area(), modal, app.session.keyboard_enhanced);
+                frame.render_widget(
+                    &NewIssueForm {
+                        modal,
+                        keyboard_enhanced: app.session.keyboard_enhanced,
+                    },
+                    frame.area(),
+                );
             }
-            View::Help(popup) => render_help_popup(frame, frame.area(), popup),
+            View::Help(popup) => frame.render_widget(&*popup, frame.area()),
             View::Search(overlay) => {
-                let sort_order = SortOrder {
+                let sort = SortOrder {
                     field: &list_sort_field,
                     desc: list_sort_desc,
                 };
-                render_search_overlay(frame, chunks, overlay, &sort_order);
+                frame.render_widget(&mut SearchResults { overlay, sort }, chunks[2]);
             }
         }
     }

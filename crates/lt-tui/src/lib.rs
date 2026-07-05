@@ -4,6 +4,7 @@ mod list;
 mod markdown;
 mod new_issue;
 mod popup;
+mod present;
 mod search_completer;
 mod sync;
 mod text_input;

@@ -1,28 +1,29 @@
-use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 
-use crate::{DetailView, markdown};
+use crate::DetailView;
+use crate::present::issue::IssueDetail;
 
 /// Render the issue detail as a floating overlay over the right ~60% of the
 /// content area. The underlying issue list is drawn at full width first, so
 /// column widths are never affected by opening the detail view.
-pub(super) fn render_detail_overlay(frame: &mut Frame, area: Rect, detail: &DetailView) {
-    let overlay_width = area.width * 3 / 5;
-    let overlay_x = area.x + area.width - overlay_width;
-    let overlay_area = Rect::new(overlay_x, area.y, overlay_width, area.height);
+impl Widget for &DetailView {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let overlay_width = area.width * 3 / 5;
+        let overlay_x = area.x + area.width - overlay_width;
+        let overlay_area = Rect::new(overlay_x, area.y, overlay_width, area.height);
 
-    // Clear the background so the list does not bleed through.
-    frame.render_widget(Clear, overlay_area);
-    render_detail(frame, overlay_area, detail);
+        // Clear the background so the list does not bleed through.
+        Clear.render(overlay_area, buf);
+        render_pane(self, overlay_area, buf);
+    }
 }
 
-fn render_detail(frame: &mut Frame, area: Rect, detail: &DetailView) {
+fn render_pane(detail: &DetailView, area: Rect, buf: &mut Buffer) {
     let block = Block::default().borders(Borders::LEFT);
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    block.render(area, buf);
 
     // Reserve the bottom rows for the comment input box when it is open.
     let (content_area, comment_area) = if detail.comment_input.is_some() {
@@ -32,116 +33,33 @@ fn render_detail(frame: &mut Frame, area: Rect, detail: &DetailView) {
         (inner, None)
     };
 
-    let lines = build_detail_lines(detail);
-    let para = Paragraph::new(lines)
+    let lines = IssueDetail {
+        issue: &detail.issue,
+        comments: &detail.comments,
+        children: &detail.children,
+    }
+    .lines();
+    Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((detail.scroll, 0));
-    frame.render_widget(para, content_area);
+        .scroll((detail.scroll, 0))
+        .render(content_area, buf);
 
-    if let (Some(buf), Some(area)) = (&detail.comment_input, comment_area) {
+    if let (Some(draft), Some(area)) = (&detail.comment_input, comment_area) {
         let block = Block::default()
             .title(" New Comment ")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
         let box_inner = block.inner(area);
-        frame.render_widget(Clear, area);
-        frame.render_widget(block, area);
+        Clear.render(area, buf);
+        block.render(area, buf);
         // Cursor is always at the end.
-        frame.render_widget(
-            Paragraph::new(format!("{buf}_")).wrap(Wrap { trim: false }),
-            box_inner,
-        );
+        Paragraph::new(format!("{draft}_"))
+            .wrap(Wrap { trim: false })
+            .render(box_inner, buf);
     }
 }
 
-fn build_detail_lines(d: &DetailView) -> Vec<Line<'static>> {
-    let issue = &d.issue;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    lines.push(Line::from(vec![
-        Span::styled(
-            issue.identifier.clone(),
-            Style::new().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(" - {}", issue.title)),
-    ]));
-
-    let assignee = issue
-        .assignee
-        .as_ref()
-        .map_or_else(|| "unassigned".to_string(), |u| u.name.clone());
-    lines.push(Line::from(format!(
-        "[{}]  {}  {}  {}",
-        issue.state.name, issue.priority_label, assignee, issue.team.name
-    )));
-
-    if let Some(parent) = &issue.parent {
-        lines.push(Line::from(format!("Parent: {}", parent.identifier)));
-    }
-
-    if !issue.labels.nodes.is_empty() {
-        let names = issue
-            .labels
-            .nodes
-            .iter()
-            .map(|l| l.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        lines.push(Line::from(vec![
-            Span::styled("Labels: ", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(names),
-        ]));
-    }
-
-    if !d.children.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Sub-issues",
-            Style::new().add_modifier(Modifier::UNDERLINED),
-        )));
-        for child in &d.children {
-            lines.push(Line::from(format!(
-                "  [{}] {} - {}",
-                child.state.name, child.identifier, child.title
-            )));
-        }
-    }
-
-    lines.push(Line::from(""));
-
-    if let Some(desc) = &issue.description
-        && !desc.is_empty()
-    {
-        lines.push(Line::from(Span::styled(
-            "Description",
-            Style::new().add_modifier(Modifier::UNDERLINED),
-        )));
-        lines.push(Line::from(""));
-        lines.extend(markdown::render(desc));
-        lines.push(Line::from(""));
-    }
-
-    if !d.comments.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "Comments",
-            Style::new().add_modifier(Modifier::UNDERLINED),
-        )));
-        for comment in &d.comments {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                format!("{} on {}", comment.author(), comment.created_at.date()),
-                Style::new().add_modifier(Modifier::BOLD),
-            )));
-            lines.extend(markdown::render(&comment.body));
-        }
-    }
-
-    lines
-}
-
-pub(super) fn render_detail_footer(frame: &mut Frame, area: Rect) {
-    frame.render_widget(
-        Paragraph::new("j/k scroll  c comment  o b open in browser  Esc/q close"),
-        area,
-    );
+/// The detail pane's status-row hint text.
+pub(super) fn footer_hint() -> &'static str {
+    "j/k scroll  c comment  o b open in browser  Esc/q close"
 }

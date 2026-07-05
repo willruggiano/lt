@@ -1,80 +1,50 @@
 use lt_runtime::query::SortField;
-use lt_types::types::Issue;
-use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 
-use super::util::{TableSpec, render_issue_table, to_u16};
-use crate::{ListView, PopupKind};
+use crate::ListView;
+use crate::present::issue::IssueTable;
 
-/// Render the base issue table into `area`. Returns the rendered column
-/// widths, or `None` when the empty-list message was shown instead --
-/// `popup_anchor` only applies over a rendered table.
-pub(super) fn render_table(
-    frame: &mut Frame,
-    area: Rect,
-    list: &mut ListView,
-) -> Option<[usize; 7]> {
-    if list.issues.is_empty() {
-        frame.render_widget(Paragraph::new("No issues found."), area);
-        return None;
+/// The base issue table's rendered layout: the popup widget's anchor point
+/// derives from these without the renderer writing anchor state onto either
+/// view (docs/design/operation-seam-adr.md, Decision 9).
+pub(super) struct TableGeometry {
+    pub(super) area: Rect,
+    pub(super) widths: [usize; 7],
+    pub(super) selected_row: usize,
+}
+
+impl ListView {
+    /// Render the base issue table into `area`, returning its layout for the
+    /// popup widget's anchor -- `None` when the empty-list message was shown
+    /// instead, since `TableGeometry` only applies over a rendered table.
+    pub(super) fn render_table(&mut self, area: Rect, buf: &mut Buffer) -> Option<TableGeometry> {
+        if self.issues.is_empty() {
+            Paragraph::new("No issues found.").render(area, buf);
+            return None;
+        }
+
+        let table = IssueTable {
+            issues: &self.issues,
+            sort_col: sort_col_index(&self.query.sort),
+            desc: self.query.desc,
+        };
+        let widths = table.widths(area.width);
+        StatefulWidget::render(&table, area, buf, &mut self.table_state);
+
+        Some(TableGeometry {
+            area,
+            widths,
+            selected_row: self.table_state.selected().unwrap_or(0),
+        })
     }
-
-    let sort_col = sort_col_index(&list.query.sort);
-    let desc = list.query.desc;
-    let widths = render_issue_table(
-        frame,
-        area,
-        &TableSpec {
-            issues: &list.issues,
-            sort_col,
-            desc,
-            cells: row_cells,
-        },
-        &mut list.table_state,
-    );
-    Some(widths)
 }
 
-/// The state/priority/assignee popup's anchor when it sits directly on the
-/// base list: the target column's x offset plus the row below the selected
-/// issue, from the base table's rendered column widths.
-pub(super) fn popup_anchor(
-    area: Rect,
-    widths: &[usize],
-    selected: usize,
-    kind: &PopupKind,
-) -> Rect {
-    let col_idx: usize = match kind {
-        PopupKind::State => 2,
-        PopupKind::Priority => 3,
-        PopupKind::Assignee => 4,
-    };
-    // Compute x offset of the target column (each column is widths[i] + 2 spacing).
-    let col_x: u16 = widths[..col_idx]
-        .iter()
-        .map(|w| to_u16(*w) + 2)
-        .sum::<u16>()
-        + area.x;
-    let col_w = to_u16(widths[col_idx]);
-    // Row y: area.y + 1 (header) + selected index + 1 (below row).
-    let row_y = area.y + 1 + to_u16(selected) + 1;
-    Rect::new(col_x, row_y, col_w, 1)
-}
-
-pub(super) fn row_cells(issue: &Issue) -> [String; 7] {
-    [
-        issue.identifier.clone(),
-        issue.title.clone(),
-        issue.state.name.clone(),
-        issue.priority_label.clone(),
-        issue
-            .assignee
-            .as_ref()
-            .map_or_else(|| "-".to_string(), |u| u.name.clone()),
-        issue.team.name.clone(),
-        issue.updated_at.date(),
-    ]
+impl Widget for &mut ListView {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.render_table(area, buf);
+    }
 }
 
 pub(super) fn sort_col_index(field: &SortField) -> Option<usize> {
