@@ -80,6 +80,23 @@ impl std::str::FromStr for Priority {
     }
 }
 
+/// The Linear API's `priorityLabel` string for each level, indexed by `.0`
+/// (out-of-range levels cannot occur: `priorityLabel` is the wire source of
+/// truth this scalar is decoded alongside).
+const LABELS: [&str; 5] = ["No priority", "Urgent", "High", "Medium", "Low"];
+
+impl Priority {
+    /// The `priorityLabel` string this level matches on the wire, used to
+    /// filter the local `priority_label` column by an equivalent level.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        LABELS
+            .get(usize::from(self.0))
+            .copied()
+            .unwrap_or(LABELS[0])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

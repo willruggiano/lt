@@ -335,10 +335,11 @@ fn stem_key_candidates(prefix: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use lt_runtime::query::{IssueQuery, SortField};
+    use lt_runtime::query::SortField;
     use lt_runtime::search_query::{
         SortDir, StemKind, Token, args_to_ast, parse_query_ast, render_filter_context,
     };
+    use lt_types::issues::{AssigneeFilter, IssueFilter};
 
     use super::*;
     use crate::text_input::TextInput;
@@ -504,8 +505,7 @@ mod tests {
 
     #[test]
     fn args_to_ast_default_produces_sort_updated_desc() {
-        let args = IssueQuery::default();
-        let ast = args_to_ast(&args);
+        let ast = args_to_ast(&IssueFilter::default(), &SortField::Updated, true);
         assert_eq!(ast.raw, "sort:updated-");
         assert_eq!(ast.tokens.len(), 1);
         match &ast.tokens[0] {
@@ -522,12 +522,12 @@ mod tests {
 
     #[test]
     fn args_to_ast_team_and_assignee() {
-        let args = IssueQuery {
+        let filter = IssueFilter {
             team: Some("eng".to_string()),
-            assignee: Some("me".to_string()),
-            ..IssueQuery::default()
+            assignee: Some(AssigneeFilter::Contains("me".to_string())),
+            ..Default::default()
         };
-        let ast = args_to_ast(&args);
+        let ast = args_to_ast(&filter, &SortField::Updated, true);
         assert!(ast.raw.contains("team:eng"));
         assert!(ast.raw.contains("assignee:me"));
         assert!(ast.raw.contains("sort:"));
@@ -550,12 +550,7 @@ mod tests {
 
     #[test]
     fn args_to_ast_asc_sort() {
-        let args = IssueQuery {
-            sort: SortField::Priority,
-            desc: false,
-            ..IssueQuery::default()
-        };
-        let ast = args_to_ast(&args);
+        let ast = args_to_ast(&IssueFilter::default(), &SortField::Priority, false);
         assert!(ast.raw.ends_with("sort:priority+"));
         match &ast.tokens[0] {
             Token::Stem {
@@ -603,12 +598,12 @@ mod tests {
 
     #[test]
     fn render_filter_context_round_trip() {
-        let args = IssueQuery {
+        let filter = IssueFilter {
             team: Some("eng".to_string()),
-            assignee: Some("me".to_string()),
-            ..IssueQuery::default()
+            assignee: Some(AssigneeFilter::Contains("me".to_string())),
+            ..Default::default()
         };
-        let ast = args_to_ast(&args);
+        let ast = args_to_ast(&filter, &SortField::Updated, true);
         let s = render_filter_context(&ast);
         assert_eq!(s, "team:eng  assignee:me  sort:updated-");
     }

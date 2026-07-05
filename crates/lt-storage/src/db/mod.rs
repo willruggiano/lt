@@ -10,11 +10,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 pub use comments::{delete_comments_for_issue, query_comments, upsert_comments};
-pub(crate) use issues::issue_from_row;
 pub use issues::{
     count_fts_rows, count_issues, get_meta, query_children, query_issue_by_id, query_issues,
-    query_issues_page, search_issues, search_issues_like, set_meta, set_synced_viewer,
-    synced_viewer, upsert_issues,
+    search_issues, search_issues_like, set_meta, set_synced_viewer, synced_viewer, upsert_issues,
 };
 pub use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};

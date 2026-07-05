@@ -1,28 +1,26 @@
 use anyhow::Result;
 use lt_storage::db;
-use lt_types::issues::{
-    IssueConnection, IssueFilterValue, IssueSortValue, IssuesQuery, IssuesVariables,
-};
+use lt_types::issues::{IssueConnection, IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
+use lt_types::query::SortField;
 use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
-use serde_json::json;
 
-/// Fetch one page of issues updated after `since` (an RFC3339 timestamp).
+/// Fetch one page of issues updated on or after `since` (an RFC3339
+/// timestamp). Request all states including completed/archived so delta
+/// picks up changes to previously-completed issues.
 fn fetch_page(
     transport: &dyn GraphqlTransport,
     since: &str,
     after: Option<&str>,
 ) -> Result<IssueConnection> {
-    // Request all states including completed/archived so delta picks up
-    // changes to previously-completed issues.
-    let filter = json!({
-        "updatedAt": { "gt": since }
-    });
-
-    let sort = json!([{ "updatedAt": { "order": "Descending" } }]);
-
     let variables = IssuesVariables {
-        filter: Some(IssueFilterValue(filter)),
-        sort: Some(IssueSortValue(sort)),
+        filter: Some(IssueFilter {
+            updated_after: Some(since.to_string()),
+            ..IssueFilter::default()
+        }),
+        sort: Some(IssueSort {
+            field: SortField::Updated,
+            desc: true,
+        }),
         first: Some(250),
         after: after.map(ToOwned::to_owned),
     };
@@ -61,6 +59,7 @@ pub fn run() -> Result<()> {
 mod tests {
     use lt_upstream::client::FakeTransport;
     use lt_upstream::issues::sample_issue_node;
+    use serde_json::json;
 
     use super::*;
 
@@ -78,7 +77,7 @@ mod tests {
 
         let vars = transport.variables(0);
         assert_eq!(
-            vars["filter"]["updatedAt"]["gt"],
+            vars["filter"]["updatedAt"]["gte"],
             json!("2026-01-01T00:00:00Z")
         );
         assert_eq!(vars["first"], json!(250));

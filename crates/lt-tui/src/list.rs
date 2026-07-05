@@ -1,6 +1,7 @@
 use crossterm::event::KeyCode;
-use lt_runtime::query::IssueQuery;
+use lt_runtime::query::SortField;
 use lt_runtime::search_query;
+use lt_types::issues::{IssueFilter, IssueSort, IssuesVariables};
 use lt_types::types::Issue;
 use ratatui::widgets::TableState;
 
@@ -17,27 +18,47 @@ pub struct Pagination {
     pub end_cursor: Option<String>,
 }
 
-/// The issue-list query: inputs, the active filter, pagination cursor
-/// state, and the launch snapshot the double-esc reset restores.
+/// The active filter's sort field/direction, derived from its `sort:` token
+/// (or `Updated`/desc if absent).
+fn sort_from_filter(filter: &search_query::QueryAst) -> (SortField, bool) {
+    match search_query::lower_ast(filter).1 {
+        Some((field, dir)) => (field, dir == search_query::SortDir::Desc),
+        None => (SortField::Updated, true),
+    }
+}
+
+/// The base list view's initial spec: the starting filter/sort state and
+/// page size, built by the caller (`lt-cli`, from `IssueArgs`) and passed to
+/// [`crate::run`].
+pub struct ListLaunch {
+    pub filter: search_query::QueryAst,
+    pub limit: u32,
+}
+
+/// The issue-list query: the active filter, sort, pagination cursor state,
+/// and the launch snapshot the double-esc reset restores.
 pub struct ListQuery {
-    /// The issue-list query, kept in sync with `filter`'s `sort:` token.
-    pub args: IssueQuery,
     /// Single source of truth for the active filter/search state. Updated on
     /// Enter (confirm search), double-esc (reset), and sort shortcuts.
     pub filter: search_query::QueryAst,
+    /// Kept in sync with `filter`'s `sort:` token.
+    pub sort: SortField,
+    pub desc: bool,
+    /// Page size, fixed for the view's lifetime.
+    pub limit: u32,
     pub pagination: Pagination,
-    initial_args: IssueQuery,
     initial_filter: search_query::QueryAst,
 }
 
-impl From<IssueQuery> for ListQuery {
-    fn from(args: IssueQuery) -> Self {
-        let filter = search_query::args_to_ast(&args);
+impl ListQuery {
+    pub fn new(filter: search_query::QueryAst, limit: u32) -> Self {
+        let (sort, desc) = sort_from_filter(&filter);
         Self {
-            initial_args: args.clone(),
             initial_filter: filter.clone(),
-            args,
             filter,
+            sort,
+            desc,
+            limit,
             pagination: Pagination {
                 has_next_page: false,
                 current_cursor: None,
@@ -46,63 +67,46 @@ impl From<IssueQuery> for ListQuery {
             },
         }
     }
-}
 
-impl ListQuery {
-    /// Both branches of the issue-list fetch -- `run_query` when the parsed
-    /// filter has constraints beyond sort, else the paginated
-    /// `query_issues_page` -- updating `pagination`. Returns the fetched
-    /// rows, or an empty `Vec` (warning via `tracing`) on a query failure.
+    /// The active filter's `team:` value, if set -- used to pre-fill the
+    /// new-issue modal's team field.
+    pub(crate) fn team_filter(&self) -> Option<String> {
+        search_query::lower_ast(&self.filter).0.team
+    }
+
+    /// The single local read behind the issue list: lowers the active filter
+    /// (resolving `assignee:me` against the viewer) and sort into
+    /// `IssuesVariables`, updating `pagination` from the result. Returns the
+    /// fetched rows, or an empty `Vec` (warning via `tracing`) on a query
+    /// failure.
     fn fetch(&mut self, ctx: &StateCtx) -> Vec<Issue> {
-        let mut parsed = search_query::ParsedQuery::from(&self.filter);
-        search_query::resolve_me(&mut parsed, ctx.viewer_name);
+        let (mut filter, _) = search_query::lower_ast(&self.filter);
+        search_query::resolve_me(&mut filter, ctx.viewer_name);
+        let filter = (filter != IssueFilter::default()).then_some(filter);
 
-        if parsed.has_filters() {
-            // Active filter has constraints beyond sort -- use run_query to
-            // preserve them.
-            let limit = self.args.limit.min(250) as usize;
-            match ctx
-                .db
-                .connect()
-                .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
-            {
-                Ok(issues) => {
-                    self.pagination.has_next_page = false; // run_query has no pagination
-                    self.pagination.end_cursor = None;
-                    issues
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "issue list fetch failed");
-                    Vec::new()
-                }
+        let vars = IssuesVariables {
+            filter,
+            sort: Some(IssueSort {
+                field: self.sort.clone(),
+                desc: self.desc,
+            }),
+            first: Some(i32::try_from(self.limit.min(250)).unwrap_or(250)),
+            after: self.pagination.current_cursor.clone(),
+        };
+
+        match ctx
+            .db
+            .connect()
+            .and_then(|conn| lt_runtime::db::query_issues(&conn, &vars))
+        {
+            Ok(page) => {
+                self.pagination.has_next_page = page.page_info.has_next_page;
+                self.pagination.end_cursor = page.page_info.end_cursor;
+                page.nodes
             }
-        } else {
-            // No active filters: use the paginated query.
-            let offset: i64 = self
-                .pagination
-                .current_cursor
-                .as_deref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            match ctx
-                .db
-                .connect()
-                .and_then(|conn| lt_runtime::db::query_issues_page(&conn, &self.args, offset))
-            {
-                Ok((issues, has_next_page)) => {
-                    self.pagination.has_next_page = has_next_page;
-                    let limit = i64::from(self.args.limit.min(250));
-                    self.pagination.end_cursor = if has_next_page {
-                        Some((offset + limit).to_string())
-                    } else {
-                        None
-                    };
-                    issues
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "issue list fetch failed");
-                    Vec::new()
-                }
+            Err(e) => {
+                tracing::warn!(error = %e, "issue list fetch failed");
+                Vec::new()
             }
         }
     }
@@ -134,26 +138,24 @@ impl ListQuery {
     /// `d`: toggle sort direction and rewrite `filter`'s `sort:` token to
     /// match, resetting pagination cursors; the caller re-fetches.
     fn toggle_desc(&mut self) {
-        self.args.desc = !self.args.desc;
+        self.desc = !self.desc;
         self.filter = self.replace_sort_in_filter();
         self.pagination.cursor_stack.clear();
         self.pagination.current_cursor = None;
     }
 
-    /// Keep `args.sort`/`args.desc` in sync with `filter`.
-    pub(crate) fn sync_args_from_filter(&mut self) {
-        let parsed = search_query::ParsedQuery::from(&self.filter);
-        if let Some((field, dir)) = parsed.sort {
-            self.args.sort = field;
-            self.args.desc = dir == search_query::SortDir::Desc;
-        }
+    /// Keep `sort`/`desc` in sync with `filter`.
+    pub(crate) fn sync_sort_from_filter(&mut self) {
+        let (sort, desc) = sort_from_filter(&self.filter);
+        self.sort = sort;
+        self.desc = desc;
     }
 
     /// Produce a new `QueryAst` with the `sort:` token replaced to match
-    /// `args.sort`/`args.desc`.
+    /// `sort`/`desc`.
     pub(crate) fn replace_sort_in_filter(&self) -> search_query::QueryAst {
-        let dir = if self.args.desc { "-" } else { "+" };
-        let new_sort = format!("sort:{}{}", self.args.sort.label(), dir);
+        let dir = if self.desc { "-" } else { "+" };
+        let new_sort = format!("sort:{}{}", self.sort.label(), dir);
         let mut parts: Vec<String> = self
             .filter
             .raw
@@ -167,8 +169,10 @@ impl ListQuery {
 
     /// Restore the launch snapshot and clear pagination cursors.
     pub(crate) fn reset(&mut self) {
-        self.args = self.initial_args.clone();
         self.filter = self.initial_filter.clone();
+        let (sort, desc) = sort_from_filter(&self.filter);
+        self.sort = sort;
+        self.desc = desc;
         self.pagination.cursor_stack.clear();
         self.pagination.current_cursor = None;
     }

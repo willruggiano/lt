@@ -83,73 +83,6 @@ fn gen_stem_kind_enum(fields: &[FieldSpec]) -> TokenStream {
     }
 }
 
-/// Generate `impl From<&QueryAst> for ParsedQuery`.
-///
-/// Emits one match arm per TOML field.  The `sort:` arm is hard-coded.
-fn gen_from_ast(fields: &[FieldSpec]) -> TokenStream {
-    let variants = field_variants(fields);
-
-    let field_idents: Vec<proc_macro2::Ident> =
-        fields.iter().map(|f| format_ident!("{}", f.key)).collect();
-
-    // let mut <field>: Option<String> = None; declarations
-    let field_decls = field_idents.iter().map(|id| {
-        quote! { let mut #id: Option<String> = None; }
-    });
-
-    // StemKind::<Variant> { value } => { <field> = Some(value.clone()); }
-    let stem_arms = variants
-        .iter()
-        .zip(field_idents.iter())
-        .map(|(variant, field_id)| {
-            quote! {
-                StemKind::#variant { value } => {
-                    #field_id = Some(value.clone());
-                }
-            }
-        });
-
-    // ParsedQuery { <field>, ... } struct literal fields
-    let struct_fields = field_idents.iter().map(|id| {
-        quote! { #id, }
-    });
-
-    quote! {
-        impl From<&QueryAst> for ParsedQuery {
-            /// Derive a SQL-ready `ParsedQuery` from the AST.
-            ///
-            /// Generated from the TOML allowlist by build.rs (bd-1pl).
-            /// One match arm per allowlist entry.  sort: is hard-coded.
-            fn from(ast: &QueryAst) -> Self {
-                let mut sort: Option<(SortField, SortDir)> = None;
-                #( #field_decls )*
-                let mut fts_words: Vec<String> = Vec::new();
-
-                for token in &ast.tokens {
-                    match token {
-                        Token::Stem { kind, .. } => match kind {
-                            StemKind::Sort { field, dir } => {
-                                sort = Some((field.clone(), dir.clone()));
-                            }
-                            #( #stem_arms )*
-                        },
-                        Token::PartialStem { .. } => {}
-                        Token::Word { text, .. } => {
-                            fts_words.push(format!("{text}*"));
-                        }
-                    }
-                }
-
-                ParsedQuery {
-                    sort,
-                    #( #struct_fields )*
-                    fts_terms: fts_words.join(" "),
-                }
-            }
-        }
-    }
-}
-
 /// Generate `parse_query_ast_impl(raw: &str) -> (Vec<Token>, Vec<ParseError>)`.
 ///
 /// The function uses a Chumsky 0.9 parser to tokenise the raw query string.
@@ -524,7 +457,6 @@ fn main() {
     let stem_kind_enum = gen_stem_kind_enum(fields);
     let parse_sort_value_fn = gen_parse_sort_value(sort_fields);
     let parser_fn = gen_parser_fn(fields);
-    let from_ast_impl = gen_from_ast(fields);
 
     // Combine all fragments into a single TokenStream.
     // parse_sort_value must come before parser_fn, which calls it.
@@ -533,7 +465,6 @@ fn main() {
         #stem_kind_enum
         #parse_sort_value_fn
         #parser_fn
-        #from_ast_impl
     };
 
     // Parse and pretty-print via prettyplease.

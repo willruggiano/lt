@@ -7,13 +7,12 @@
 //! statement cannot exist. Production code executes fixed statements only
 //! through [`prepare`] / [`execute`], which take `Sql`, never `&str`.
 //!
-//! The two dynamic builders (`filters.rs::build_sql_filter`,
-//! `search_query.rs::build_conditions`) select a runtime slice of registered
-//! [`Frag`] conditions and a registered [`SortCol`]; the only way to turn
-//! those into SQL text is [`select_issues`] / [`select_issues_page`], which
-//! produce a private [`ComposedSql`] executed only through
-//! [`prepare_composed`]. There is no free-form SQL text splicing anywhere in
-//! `lt-storage`'s production code.
+//! The one dynamic builder (`filters.rs::build_sql_filter`) selects a runtime
+//! slice of registered [`Frag`] conditions and a registered [`SortCol`]; the
+//! only way to turn those into SQL text is [`select_issues`], which produces
+//! a private [`ComposedSql`] executed only through [`prepare_composed`].
+//! There is no free-form SQL text splicing anywhere in `lt-storage`'s
+//! production code.
 //!
 //! See docs/design/type-safe-sql-adr.md ("Statement registry", "Enforcement:
 //! the `Sql` newtype", decisions 2-3).
@@ -413,52 +412,38 @@ macro_rules! fragments {
 }
 
 fragments! {
-    // -- filters.rs::build_sql_filter --
-    /// `--team`: match the team name or its exact key.
-    FRAG_TEAM_OR_ID, 2, "(t.name LIKE ? OR i.team_id = ?)";
-    /// `--assignee=me` (or case-insensitive): exact match against the
-    /// caller-resolved viewer name.
-    FRAG_ASSIGNEE_EQ, 1, "ua.name = ?";
-    /// `--assignee`: substring match.
-    FRAG_ASSIGNEE_LIKE, 1, "ua.name LIKE ?";
-    /// `--no-assignee`.
-    FRAG_NO_ASSIGNEE, 0, "i.assignee_id IS NULL";
-    /// `--state`: substring match.
-    FRAG_STATE_LIKE, 1, "s.name LIKE ?";
-    /// `--priority`: exact match against the normalised label. Shared by
-    /// `filters.rs` and `search_query.rs`'s `priority:` stem.
-    FRAG_PRIORITY_EQ, 1, "i.priority_label = ?";
-    /// `--title`: substring match.
-    FRAG_TITLE_LIKE, 1, "i.title LIKE ?";
-    /// `--created-after`.
-    FRAG_CREATED_AFTER, 1, "i.created_at >= ?";
-    /// `--created-before`.
-    FRAG_CREATED_BEFORE, 1, "i.created_at < ?";
-    /// `--updated-after`.
-    FRAG_UPDATED_AFTER, 1, "i.updated_at >= ?";
-    /// `--updated-before`.
-    FRAG_UPDATED_BEFORE, 1, "i.updated_at < ?";
-
-    // -- search_query.rs::build_conditions --
-    /// `assignee:me` in the TUI search bar: matched without caller
-    /// resolution (an unresolved "me" therefore matches nothing).
-    FRAG_ASSIGNEE_ME, 0, "LOWER(ua.name) = 'me'";
-    /// `assignee:<name>`: case-insensitive substring match.
-    FRAG_ASSIGNEE_LOWER_LIKE, 1, "LOWER(COALESCE(ua.name,'')) LIKE ?";
-    /// `state:<name>`: case-insensitive substring match.
-    FRAG_STATE_LOWER_LIKE, 1, "LOWER(s.name) LIKE ?";
-    /// `team:<name>`: case-insensitive match against the team name or key.
+    /// `team`: case-insensitive match against the team name or key.
     FRAG_TEAM_LOWER_OR_ID, 2,
         "(LOWER(t.name) LIKE ? OR LOWER(COALESCE(i.team_id,'')) LIKE ?)";
-    /// `label:<name>`: any linked label whose name matches.
+    /// `assignee`, exact: resolved-viewer or literal-`me` match.
+    FRAG_ASSIGNEE_EQ, 1, "ua.name = ?";
+    /// `assignee`, substring: case-insensitive match against the name.
+    FRAG_ASSIGNEE_LOWER_LIKE, 1, "LOWER(COALESCE(ua.name,'')) LIKE ?";
+    /// `assignee`, null: no assignee.
+    FRAG_NO_ASSIGNEE, 0, "i.assignee_id IS NULL";
+    /// `state`: case-insensitive substring match.
+    FRAG_STATE_LOWER_LIKE, 1, "LOWER(s.name) LIKE ?";
+    /// `priority`: exact match against the normalised label.
+    FRAG_PRIORITY_EQ, 1, "i.priority_label = ?";
+    /// `title`: case-insensitive substring match.
+    FRAG_TITLE_LIKE, 1, "i.title LIKE ?";
+    /// `created_after`.
+    FRAG_CREATED_AFTER, 1, "i.created_at >= ?";
+    /// `created_before`.
+    FRAG_CREATED_BEFORE, 1, "i.created_at < ?";
+    /// `updated_after`.
+    FRAG_UPDATED_AFTER, 1, "i.updated_at >= ?";
+    /// `updated_before`.
+    FRAG_UPDATED_BEFORE, 1, "i.updated_at < ?";
+    /// `label`: any linked label whose name matches.
     FRAG_LABEL_EXISTS, 1,
         "EXISTS (SELECT 1 FROM issue_labels il JOIN labels lb ON lb.id = il.label_id \
          WHERE il.issue_id = i.id AND LOWER(lb.name) LIKE ?)";
-    /// `project:<name>`: case-insensitive substring match.
+    /// `project`: case-insensitive substring match.
     FRAG_PROJECT_LOWER_LIKE, 1, "LOWER(COALESCE(p.name,'')) LIKE ?";
-    /// `cycle:<name>`: case-insensitive substring match.
+    /// `cycle`: case-insensitive substring match.
     FRAG_CYCLE_LOWER_LIKE, 1, "LOWER(COALESCE(c.name,'')) LIKE ?";
-    /// `creator:<name>`: case-insensitive substring match.
+    /// `creator`: case-insensitive substring match.
     FRAG_CREATOR_LOWER_LIKE, 1, "LOWER(COALESCE(uc.name,'')) LIKE ?";
 }
 
@@ -512,14 +497,13 @@ sort_cols! {
 /// [`select_issues`] / [`select_issues_page`] in this module.
 pub(crate) struct ComposedSql(String);
 
-/// Build the issue-shaped `SELECT` behind `query_issues` (`db/issues.rs`) and
-/// the TUI structured search (`search_query.rs::run_query`).
+/// Build the issue-shaped, offset-paginated `SELECT` behind `db::issues::query_issues`.
 ///
 /// `conditions` are AND-joined after `WHERE`. When `fts` is set, the query
 /// joins `issues_fts` and `issues_fts MATCH ?` is the first `WHERE` clause
 /// (so its bind param precedes `conditions`' binds), with `conditions`
-/// AND-joined after it. `LIMIT` is always a single trailing bound param the
-/// caller supplies last.
+/// AND-joined after it. `LIMIT ? OFFSET ?` are always the two trailing bound
+/// params the caller supplies last, in that order.
 pub(crate) fn select_issues(
     fts: bool,
     conditions: &[Frag],
@@ -545,19 +529,7 @@ pub(crate) fn select_issues(
     };
 
     ComposedSql(format!(
-        "SELECT {cols} FROM issues i{fts_join} {joins}{where_sql} ORDER BY {order} {dir} LIMIT ?",
-        cols = issue_columns!(),
-        joins = issue_joins!(),
-        order = order.0,
-    ))
-}
-
-/// Build the offset-paginated `SELECT` behind `query_issues_page`
-/// (`db/issues.rs`): no `WHERE`, `LIMIT ?1 OFFSET ?2`.
-pub(crate) fn select_issues_page(order: SortCol, desc: bool) -> ComposedSql {
-    let dir = if desc { "DESC" } else { "ASC" };
-    ComposedSql(format!(
-        "SELECT {cols} FROM issues i {joins} ORDER BY {order} {dir} LIMIT ?1 OFFSET ?2",
+        "SELECT {cols} FROM issues i{fts_join} {joins}{where_sql} ORDER BY {order} {dir} LIMIT ? OFFSET ?",
         cols = issue_columns!(),
         joins = issue_joins!(),
         order = order.0,
@@ -691,43 +663,33 @@ mod tests {
                 .unwrap_or_else(|e| panic!("failed to prepare fragment {name}: {e}"));
             assert_eq!(
                 stmt.parameter_count(),
-                *declared_params + 1,
-                "{name}: declared param count + 1 (LIMIT) does not match the composed statement"
+                *declared_params + 2,
+                "{name}: declared param count + 2 (LIMIT, OFFSET) does not match the composed statement"
             );
         }
     }
 
     /// The FTS template: `select_issues(true, &[], ...)` must prepare with
-    /// exactly the `MATCH` and `LIMIT` binds (no conditions).
+    /// exactly the `MATCH`, `LIMIT`, and `OFFSET` binds (no conditions).
     #[test]
-    fn fts_template_prepares_with_match_and_limit_params() {
+    fn fts_template_prepares_with_match_limit_and_offset_params() {
         let conn = migrated_conn();
         let composed = select_issues(true, &[], SORT_UPDATED_AT, true);
         let stmt = conn.prepare(&composed.0).unwrap();
-        assert_eq!(stmt.parameter_count(), 2);
+        assert_eq!(stmt.parameter_count(), 3);
     }
 
-    /// Every registered sort column must prepare through both composers.
+    /// Every registered sort column must prepare, with `LIMIT`/`OFFSET` as
+    /// the only params when there are no conditions.
     #[test]
-    fn every_sort_col_prepares_through_both_composers() {
+    fn every_sort_col_prepares_with_limit_and_offset_params() {
         let conn = migrated_conn();
         for (name, col) in SORT_COLS {
-            let list = select_issues(false, &[], *col, true);
-            conn.prepare(&list.0)
+            let composed = select_issues(false, &[], *col, true);
+            let stmt = conn
+                .prepare(&composed.0)
                 .unwrap_or_else(|e| panic!("failed to prepare {name} via select_issues: {e}"));
-
-            let page = select_issues_page(*col, false);
-            conn.prepare(&page.0)
-                .unwrap_or_else(|e| panic!("failed to prepare {name} via select_issues_page: {e}"));
+            assert_eq!(stmt.parameter_count(), 2);
         }
-    }
-
-    /// `select_issues_page` has no conditions: only `LIMIT` and `OFFSET`.
-    #[test]
-    fn select_issues_page_has_limit_and_offset_params() {
-        let conn = migrated_conn();
-        let composed = select_issues_page(SORT_UPDATED_AT, true);
-        let stmt = conn.prepare(&composed.0).unwrap();
-        assert_eq!(stmt.parameter_count(), 2);
     }
 }

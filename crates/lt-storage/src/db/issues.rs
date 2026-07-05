@@ -2,13 +2,15 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use lt_types::query::IssueQuery;
+use lt_types::issues::{IssueConnection, IssuesVariables};
+use lt_types::pagination::PageInfo;
+use lt_types::query::SortField;
 use lt_types::scalars::Priority;
 use lt_types::types;
 use rusqlite::{Connection, params};
 
 use crate::db::parse_datetime_column;
-use crate::db::sql::{self, EntityTable, Sql};
+use crate::db::sql::{self, BindParams, EntityTable, Sql};
 
 /// Reconstruct a [`types::Issue`] from a row selected by
 /// [`sql::QUERY_ISSUE_BY_ID`] (or any other statement or composed query built
@@ -277,57 +279,59 @@ fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> 
     Ok(())
 }
 
-/// Query issues from the local DB, applying the WHERE clause built from the
-/// `IssueQuery` filter fields (bd-2km) and ORDER BY from the sort fields.
+/// The default page size when `vars.first` is absent.
+const DEFAULT_PAGE_SIZE: i32 = 50;
+
+/// Query issues from the local DB: applies the WHERE clause built from
+/// `vars.filter` (and its FTS5 term, if set) and the ORDER BY from
+/// `vars.sort`, defaulting to `updated DESC`. `vars.after` is a stringified
+/// row offset (defaulting to 0); `vars.first` caps the page (defaulting to
+/// [`DEFAULT_PAGE_SIZE`], capped at 250). Fetches one extra row to detect
+/// `has_next_page`, so filtered and FTS reads paginate the same as an
+/// unfiltered read.
 ///
 /// An `--assignee=me` filter must be resolved to the viewer's name by the
 /// caller before calling this (see `issues::list::resolve_me`).
-pub fn query_issues(conn: &Connection, args: &IssueQuery) -> Result<Vec<types::Issue>> {
-    let (conditions, mut bind) = crate::db::filters::build_sql_filter(args)?;
-    let order = crate::db::filters::sort_column(&args.sort);
-    let limit = i64::from(args.limit.min(250));
-    bind.push(Box::new(limit));
+pub fn query_issues(conn: &Connection, vars: &IssuesVariables) -> Result<IssueConnection> {
+    let (conditions, mut bind, fts_term) = vars
+        .filter
+        .as_ref()
+        .map(crate::db::filters::build_sql_filter)
+        .unwrap_or_default();
 
-    let composed = sql::select_issues(false, &conditions, order, args.desc);
+    let (order, desc) = vars.sort.as_ref().map_or(
+        (crate::db::filters::sort_column(&SortField::Updated), true),
+        |s| (crate::db::filters::sort_column(&s.field), s.desc),
+    );
+
+    let cap = vars.first.unwrap_or(DEFAULT_PAGE_SIZE).clamp(0, 250);
+    let fetch_limit = i64::from(cap) + 1;
+    let offset: i64 = vars
+        .after
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let has_fts = fts_term.is_some();
+    let composed = sql::select_issues(has_fts, &conditions, order, desc);
     let mut stmt = sql::prepare_composed(conn, &composed)
         .context("failed to prepare query_issues statement")?;
 
+    let mut all_params: BindParams = if let Some(term) = fts_term {
+        vec![Box::new(term)]
+    } else {
+        Vec::new()
+    };
+    all_params.append(&mut bind);
+    all_params.push(Box::new(fetch_limit));
+    all_params.push(Box::new(offset));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        all_params.iter().map(std::convert::AsRef::as_ref).collect();
+
     let rows = stmt
-        .query_map(
-            rusqlite::params_from_iter(bind.iter().map(std::convert::AsRef::as_ref)),
-            issue_from_row,
-        )
+        .query_map(param_refs.as_slice(), issue_from_row)
         .context("failed to execute query_issues")?;
-
-    let mut issues = Vec::new();
-    for row in rows {
-        issues.push(row.context("failed to read issue row")?);
-    }
-    apply_overlays(conn, &mut issues)?;
-    Ok(issues)
-}
-
-/// Query issues with an explicit row offset for pagination.
-///
-/// Returns up to `args.limit` rows starting at `offset`, plus a boolean
-/// indicating whether a next page exists.
-pub fn query_issues_page(
-    conn: &Connection,
-    args: &IssueQuery,
-    offset: i64,
-) -> Result<(Vec<types::Issue>, bool)> {
-    let order = crate::db::filters::sort_column(&args.sort);
-    // Fetch one extra row to detect whether there is a next page.
-    let cap = args.limit.min(250);
-    let fetch_limit = i64::from(cap) + 1;
-
-    let composed = sql::select_issues_page(order, args.desc);
-    let mut stmt =
-        sql::prepare_composed(conn, &composed).context("failed to prepare query statement")?;
-
-    let rows = stmt
-        .query_map(params![fetch_limit, offset], issue_from_row)
-        .context("failed to execute query")?;
 
     let mut issues = Vec::new();
     for row in rows {
@@ -335,12 +339,20 @@ pub fn query_issues_page(
     }
 
     let cap_rows = usize::try_from(cap).unwrap_or(usize::MAX);
-    let has_next = issues.len() > cap_rows;
-    if has_next {
+    let has_next_page = issues.len() > cap_rows;
+    if has_next_page {
         issues.truncate(cap_rows);
     }
     apply_overlays(conn, &mut issues)?;
-    Ok((issues, has_next))
+
+    let end_cursor = has_next_page.then(|| (offset + i64::from(cap)).to_string());
+    Ok(IssueConnection {
+        nodes: issues,
+        page_info: PageInfo {
+            has_next_page,
+            end_cursor,
+        },
+    })
 }
 
 /// Run a registered issue-shaped `SELECT` and map each row via
@@ -612,14 +624,28 @@ mod tests {
         conn
     }
 
+    /// `IssuesVariables` selecting `filter`, with no sort/pagination override.
+    fn vars(filter: lt_types::issues::IssueFilter) -> IssuesVariables {
+        IssuesVariables {
+            filter: Some(filter),
+            sort: None,
+            first: Some(250),
+            after: None,
+        }
+    }
+
     #[test]
     fn reconstructs_issue_fragment_from_joins() {
         let conn = graph_db();
-        let args = IssueQuery {
-            title: Some("Wire it up".to_string()),
-            ..Default::default()
-        };
-        let issues = query_issues(&conn, &args).unwrap();
+        let page = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                title: Some("Wire it up".to_string()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let issues = page.nodes;
         let issue = issues.iter().find(|i| i.id.inner() == "1").unwrap();
 
         assert_eq!(issue.identifier, "ENG-1");
@@ -654,11 +680,17 @@ mod tests {
     #[test]
     fn query_issues_applies_assignee_filter() {
         let conn = test_db();
-        let args = IssueQuery {
-            assignee: Some("alice".to_string()),
-            ..Default::default()
-        };
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                assignee: Some(lt_types::issues::AssigneeFilter::Contains(
+                    "alice".to_string(),
+                )),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
         assert_eq!(issues.len(), 1);
         assert_eq!(
             issues[0].assignee.as_ref().map(|u| u.name.as_str()),
@@ -669,11 +701,15 @@ mod tests {
     #[test]
     fn query_issues_applies_no_assignee_filter() {
         let conn = test_db();
-        let args = IssueQuery {
-            no_assignee: true,
-            ..Default::default()
-        };
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                assignee: Some(lt_types::issues::AssigneeFilter::IsNull),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].id.inner(), "3");
     }
@@ -681,24 +717,92 @@ mod tests {
     #[test]
     fn query_issues_applies_state_filter_and_limit() {
         let conn = test_db();
-        let mut args = IssueQuery {
+        let filter = lt_types::issues::IssueFilter {
             state: Some("todo".to_string()),
             ..Default::default()
         };
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(&conn, &vars(filter.clone())).unwrap().nodes;
         assert_eq!(issues.len(), 2);
 
-        args.limit = 1;
-        let issues = query_issues(&conn, &args).unwrap();
+        let limited_vars = IssuesVariables {
+            filter: Some(filter),
+            sort: None,
+            first: Some(1),
+            after: None,
+        };
+        let issues = query_issues(&conn, &limited_vars).unwrap().nodes;
         assert_eq!(issues.len(), 1);
     }
 
     #[test]
     fn query_issues_without_filters_returns_all() {
         let conn = test_db();
-        let args = IssueQuery::default();
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(
+            &conn,
+            &IssuesVariables {
+                filter: None,
+                sort: None,
+                first: Some(250),
+                after: None,
+            },
+        )
+        .unwrap()
+        .nodes;
         assert_eq!(issues.len(), 3);
+    }
+
+    #[test]
+    fn query_issues_paginates_with_has_next_and_end_cursor() {
+        let conn = test_db();
+        let page = query_issues(
+            &conn,
+            &IssuesVariables {
+                filter: None,
+                sort: None,
+                first: Some(2),
+                after: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.nodes.len(), 2);
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("2"));
+
+        let next = query_issues(
+            &conn,
+            &IssuesVariables {
+                filter: None,
+                sort: None,
+                first: Some(2),
+                after: page.page_info.end_cursor.as_deref().map(str::to_string),
+            },
+        )
+        .unwrap();
+        assert_eq!(next.nodes.len(), 1);
+        assert!(!next.page_info.has_next_page);
+        assert!(next.page_info.end_cursor.is_none());
+    }
+
+    #[test]
+    fn query_issues_paginates_with_a_filter_active() {
+        let conn = test_db();
+        let filter = lt_types::issues::IssueFilter {
+            state: Some("todo".to_string()),
+            ..Default::default()
+        };
+        let page = query_issues(
+            &conn,
+            &IssuesVariables {
+                filter: Some(filter),
+                sort: None,
+                first: Some(1),
+                after: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.nodes.len(), 1);
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("1"));
     }
 
     #[test]
@@ -750,11 +854,15 @@ mod tests {
         crate::db::outbox::enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
         crate::db::outbox::enqueue_assignee_change(&conn, "1", None).unwrap();
 
-        let args = IssueQuery {
-            title: Some("Wire it up".to_string()),
-            ..Default::default()
-        };
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                title: Some("Wire it up".to_string()),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
         let issue = issues.iter().find(|i| i.id.inner() == "1").unwrap();
         assert_eq!(issue.state.name, "Done");
         assert!(issue.assignee.is_none());

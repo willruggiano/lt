@@ -25,8 +25,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 pub use detail::DetailView;
 #[cfg(all(test, feature = "sim"))]
 pub(crate) use detail::{build_cached_detail, populate_relations};
-pub use list::{ListQuery, ListView};
-use lt_runtime::query::IssueQuery;
+pub use list::{ListLaunch, ListQuery, ListView};
 #[cfg(all(test, feature = "sim"))]
 use lt_runtime::sync::service::IssueEdit;
 pub use lt_runtime::sync::service::RuntimeEvent;
@@ -492,7 +491,10 @@ impl App {
         let db = lt_runtime::db::Database::memory()?;
         let (tx, rx) = mpsc::channel();
         let service = RecordingSyncService::new(&db, tx)?;
-        let query = ListQuery::from(IssueQuery::default());
+        let query = ListQuery::new(
+            search_query::parse_query_ast(search_query::DEFAULT_QUERY),
+            50,
+        );
         let list = ListView::new(issues, query);
         Ok(Self::new(list, db, Arc::new(service), rx))
     }
@@ -641,7 +643,7 @@ impl App {
         // Capture the query limit once: it can't change while Search has
         // focus, so the snapshot stays faithful for the overlay's lifetime.
         if let View::List(list) = self.base() {
-            overlay.limit = list.query.args.limit;
+            overlay.limit = list.query.limit;
         }
         // Restore the base list's filter when reopening, unless it's just
         // the default sort stem.
@@ -822,7 +824,7 @@ impl App {
 // ---------------------------------------------------------------------------
 
 pub fn run(
-    args: IssueQuery,
+    launch: ListLaunch,
     service: Arc<dyn SyncService>,
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
@@ -840,7 +842,7 @@ pub fn run(
         db: &db,
         viewer_name: viewer.as_ref().map(|v| v.name.as_str()),
     };
-    let list = ListView::open(ListQuery::from(args), &ctx);
+    let list = ListView::open(ListQuery::new(launch.filter, launch.limit), &ctx);
     let mut app = App::new(list, db, service, events_rx);
 
     app.auth = match viewer {

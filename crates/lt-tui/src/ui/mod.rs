@@ -115,8 +115,8 @@ fn render_views(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
         match &mut app.views[i] {
             View::List(list) => {
                 list_selected = list.table_state.selected().unwrap_or(0);
-                list_sort_field = list.query.args.sort.clone();
-                list_sort_desc = list.query.args.desc;
+                list_sort_field = list.query.sort.clone();
+                list_sort_desc = list.query.desc;
                 list_widths = render_table(frame, chunks[2], list);
             }
             View::Detail(detail) => render_detail_overlay(frame, chunks[2], detail),

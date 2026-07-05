@@ -141,7 +141,7 @@ fn do_fetch_paginated_loads_from_db() {
 }
 
 #[test]
-fn do_fetch_filtered_uses_run_query() {
+fn do_fetch_filtered_uses_the_merged_read() {
     let rows = [
         db_issue("1", "ENG-1", "Todo", 5),
         db_issue("2", "ENG-2", "Done", 4),
@@ -152,7 +152,7 @@ fn do_fetch_filtered_uses_run_query() {
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues.len(), 2);
     assert!(app.list_mut().issues.iter().all(|i| i.state.name == "Todo"));
-    // run_query has no pagination.
+    // Fewer matches than the default page size: no next page.
     assert!(!app.list_mut().query.pagination.has_next_page);
     assert!(app.list_mut().query.pagination.end_cursor.is_none());
 }
@@ -184,7 +184,7 @@ fn next_and_prev_page_walk_offsets() {
         db_issue("5", "ENG-5", "Todo", 1),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.list_mut().query.args.limit = 2;
+    app.list_mut().query.limit = 2;
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
     assert!(app.list_mut().query.pagination.has_next_page);
@@ -216,9 +216,9 @@ fn toggle_desc_refetches() {
         db_issue("2", "ENG-2", "Todo", 4),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    let desc_before = app.list_mut().query.args.desc;
+    let desc_before = app.list_mut().query.desc;
     app.dispatch_key(key('d'));
-    assert_ne!(app.list_mut().query.args.desc, desc_before);
+    assert_ne!(app.list_mut().query.desc, desc_before);
     assert_eq!(app.list_mut().issues.len(), 2);
 }
 
@@ -240,7 +240,10 @@ fn open_with_filterful_query_matches_post_sync_refetch() {
         db: &db,
         viewer_name: None,
     };
-    let mut query = ListQuery::from(IssueQuery::default());
+    let mut query = ListQuery::new(
+        search_query::parse_query_ast(search_query::DEFAULT_QUERY),
+        50,
+    );
     query.filter = search_query::parse_query_ast("state:todo");
 
     // Startup: the query defines the view's initial data.
@@ -259,9 +262,9 @@ fn open_with_filterful_query_matches_post_sync_refetch() {
 #[test]
 fn confirm_search_hands_off_the_query_not_the_viewport_capped_rows() {
     // 6 rows match state:todo; the overlay caps `results` to the 3-row
-    // viewport, but the base list's query limit (the `IssueQuery` default,
-    // 50) is far larger -- confirm must hand off the query so the base list
-    // refetches the full match set, not the overlay's capped rows.
+    // viewport, but the base list's query limit (the default, 50) is far
+    // larger -- confirm must hand off the query so the base list refetches
+    // the full match set, not the overlay's capped rows.
     let mut rows: Vec<lt_types::types::Issue> = (1..=6)
         .map(|i| db_issue(&i.to_string(), &format!("ENG-{i}"), "Todo", i))
         .collect();
@@ -527,15 +530,15 @@ fn run_app_errs_when_events_exhausted_without_quit() {
 fn double_esc_resets_to_initial_filter() {
     let rows = [db_issue("1", "ENG-1", "Todo", 5)];
     let mut app = app_with_db(&rows).unwrap();
-    let initial_sort = app.list_mut().query.args.sort.clone();
-    let next_sort = app.list_mut().query.args.sort.next();
-    app.list_mut().query.args.sort = next_sort;
+    let initial_sort = app.list_mut().query.sort.clone();
+    let next_sort = app.list_mut().query.sort.next();
+    app.list_mut().query.sort = next_sort;
     let replaced = app.list_mut().query.replace_sort_in_filter();
     app.list_mut().query.filter = replaced;
     app.last_esc_time = Some(Instant::now()); // within the 500ms window
 
     app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.list_mut().query.args.sort, initial_sort);
+    assert_eq!(app.list_mut().query.sort, initial_sort);
     assert!(app.last_esc_time.is_none());
 }
 
@@ -701,12 +704,12 @@ fn cascade_unbound_key_in_an_overlay_reaches_the_base() {
     // 'd' (toggle sort direction) is unbound in the popup's own context; it
     // should fall through the cascade to the list's binding underneath.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let before = app.list_mut().query.args.desc;
+    let before = app.list_mut().query.desc;
     push_priority_popup(&mut app, priority_popup_items());
 
     app.dispatch_key(key('d'));
 
-    assert_ne!(app.list_mut().query.args.desc, before);
+    assert_ne!(app.list_mut().query.desc, before);
 }
 
 #[test]
@@ -772,12 +775,12 @@ fn printable_key_in_search_never_reaches_the_list_beneath() {
     // direction) must stay text in the Search overlay: text contexts skip
     // GLOBAL, and forwarding always consumes, so the cascade never resumes.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let before = app.list_mut().query.args.desc;
+    let before = app.list_mut().query.desc;
     app.views.push(View::Search(SearchOverlay::new()));
 
     app.dispatch_key(key('d'));
 
-    assert_eq!(app.list_mut().query.args.desc, before);
+    assert_eq!(app.list_mut().query.desc, before);
     let Some(View::Search(overlay)) = app.views.last() else {
         unreachable!("search view expected")
     };

@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use lt_runtime::db::Connection;
-use lt_runtime::query::IssueQuery;
 use lt_runtime::search_query;
+use lt_types::issues::{IssueFilter, IssueSort, IssuesVariables};
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
@@ -203,7 +203,7 @@ impl SearchOverlay {
             has_searched: false,
             ast,
             completer,
-            limit: IssueQuery::default().limit,
+            limit: 50,
         }
     }
 
@@ -224,7 +224,7 @@ impl SearchOverlay {
         }
 
         self.ast = search_query::parse_query_ast(&raw);
-        let parsed = search_query::ParsedQuery::from(&self.ast);
+        let (filter, sort) = search_query::lower_ast(&self.ast);
         self.completer.update(&self.ast, self.query.cursor);
 
         // Cap to the viewport height so we never render more rows than fit.
@@ -234,12 +234,21 @@ impl SearchOverlay {
         } else {
             list_limit
         };
+        let vars = IssuesVariables {
+            filter: (filter != IssueFilter::default()).then_some(filter),
+            sort: sort.map(|(field, dir)| IssueSort {
+                field,
+                desc: dir == search_query::SortDir::Desc,
+            }),
+            first: i32::try_from(limit).ok(),
+            after: None,
+        };
         match db
             .connect()
-            .and_then(|conn| search_query::run_query(&conn, &parsed, limit))
+            .and_then(|conn| lt_runtime::db::query_issues(&conn, &vars))
         {
-            Ok(issues) => {
-                self.results = issues;
+            Ok(page) => {
+                self.results = page.nodes;
                 if self.results.is_empty() {
                     self.table_state.select(None);
                 } else {
@@ -661,7 +670,7 @@ fn confirm_search(app: &mut App) {
     if let Some(View::List(list)) = app.views.first_mut() {
         // AST is the single source of truth.
         list.query.filter = overlay.ast;
-        list.query.sync_args_from_filter();
+        list.query.sync_sort_from_filter();
         list.query.pagination.cursor_stack.clear();
         list.query.pagination.current_cursor = None;
         list.pending_select = anchor;

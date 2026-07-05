@@ -3,44 +3,188 @@
 //! the fetch/replay lives in `lt-upstream`. The list query selects
 //! [`crate::types::Issue`] directly -- there is no separate wire projection.
 //!
-//! The `filter`/`sort` variables are assembled at runtime as plain JSON by
-//! `lt-upstream` (`build_filter`/`build_sort`), not built from typed
-//! `InputObject`s. [`IssueFilterValue`] and [`IssueSortValue`] exist only so
-//! the built query string declares the right GraphQL variable types
-//! (`$filter: IssueFilter`, `$sort: [IssueSortInput!]`); the wire payload
-//! itself is still sent as `serde_json::Value` by the caller.
+//! [`IssueFilter`]/[`IssueSort`] are the typed, allowlisted filter/sort the
+//! build validates against the schema (`build/search_filter_fields.toml`).
+//! Their `Serialize` impls produce the wire `IssueFilter`/`[IssueSortInput!]`
+//! JSON directly; `lt-storage` lowers the same values to SQL.
 
 use cynic::variables::VariableType;
 use cynic::{MutationBuilder, QueryBuilder};
+use serde_json::{Value, json};
 
 use crate::graphql::{GraphqlOperation, ensure_success, extract_on_success};
 use crate::inputs::{IssueCreateInput, IssueUpdateInput};
 use crate::pagination::PageInfo;
+use crate::query::SortField;
+use crate::scalars::Priority;
 use crate::schema;
 use crate::types::Issue;
 
-/// A dynamically-assembled `IssueFilter`, carried as pre-built JSON.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct IssueFilterValue(pub serde_json::Value);
+/// The allowlisted assignee filter: no assignee, an exact (typically
+/// viewer-resolved) name, or a substring match. `Exact` and `Contains` lower
+/// to the same wire shape (`containsIgnoreCase` on name/email); only the
+/// local SQL lowering (`lt-storage`) treats them differently.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssigneeFilter {
+    IsNull,
+    Exact(String),
+    Contains(String),
+}
 
-impl schema::variable::Variable for IssueFilterValue {
+/// The allowlisted subset of Linear's `IssueFilter` this app supports,
+/// carried as a typed value rather than a JSON blob: the same value lowers to
+/// the wire `IssueFilter` input (this module's `Serialize` impl) and to the
+/// local SQL `WHERE` clause (`lt_storage::db::filters`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IssueFilter {
+    /// Team name substring, or exact key.
+    pub team: Option<String>,
+    pub assignee: Option<AssigneeFilter>,
+    /// Workflow state name substring.
+    pub state: Option<String>,
+    pub priority: Option<Priority>,
+    /// RFC3339 timestamp, inclusive lower bound.
+    pub created_after: Option<String>,
+    /// RFC3339 timestamp, exclusive upper bound.
+    pub created_before: Option<String>,
+    pub updated_after: Option<String>,
+    pub updated_before: Option<String>,
+    /// Title substring.
+    pub title: Option<String>,
+    /// Label name substring.
+    pub label: Option<String>,
+    /// Project name substring.
+    pub project: Option<String>,
+    /// Cycle name substring.
+    pub cycle: Option<String>,
+    /// Creator name substring.
+    pub creator: Option<String>,
+    /// Free-text term: drives local FTS; on the wire, maps to a title substring.
+    pub term: Option<String>,
+}
+
+impl IssueFilter {
+    /// The Linear `IssueFilter` JSON this filter lowers to. AND-joins every
+    /// set field.
+    fn to_wire(&self) -> Value {
+        let mut filters: Vec<Value> = Vec::new();
+
+        if let Some(team) = &self.team {
+            filters.push(json!({
+                "team": {
+                    "or": [
+                        { "key": { "eqIgnoreCase": team } },
+                        { "name": { "containsIgnoreCase": team } }
+                    ]
+                }
+            }));
+        }
+
+        match &self.assignee {
+            Some(AssigneeFilter::IsNull) => {
+                filters.push(json!({ "assignee": { "null": true } }));
+            }
+            Some(AssigneeFilter::Exact(name) | AssigneeFilter::Contains(name)) => {
+                filters.push(json!({
+                    "assignee": {
+                        "or": [
+                            { "name": { "containsIgnoreCase": name } },
+                            { "email": { "containsIgnoreCase": name } }
+                        ]
+                    }
+                }));
+            }
+            None => {}
+        }
+
+        if let Some(state) = &self.state {
+            filters.push(json!({ "state": { "name": { "containsIgnoreCase": state } } }));
+        }
+
+        if let Some(priority) = self.priority {
+            filters.push(json!({ "priority": { "eq": f64::from(priority.0) } }));
+        }
+
+        if let Some(date) = &self.created_after {
+            filters.push(json!({ "createdAt": { "gte": date } }));
+        }
+        if let Some(date) = &self.created_before {
+            filters.push(json!({ "createdAt": { "lt": date } }));
+        }
+        if let Some(date) = &self.updated_after {
+            filters.push(json!({ "updatedAt": { "gte": date } }));
+        }
+        if let Some(date) = &self.updated_before {
+            filters.push(json!({ "updatedAt": { "lt": date } }));
+        }
+
+        if let Some(title) = &self.title {
+            filters.push(json!({ "title": { "containsIgnoreCase": title } }));
+        }
+        if let Some(label) = &self.label {
+            filters.push(json!({ "labels": { "name": { "containsIgnoreCase": label } } }));
+        }
+        if let Some(project) = &self.project {
+            filters.push(json!({ "project": { "name": { "containsIgnoreCase": project } } }));
+        }
+        if let Some(cycle) = &self.cycle {
+            filters.push(json!({ "cycle": { "name": { "containsIgnoreCase": cycle } } }));
+        }
+        if let Some(creator) = &self.creator {
+            filters.push(json!({ "creator": { "name": { "containsIgnoreCase": creator } } }));
+        }
+        if let Some(term) = &self.term {
+            filters.push(json!({ "title": { "containsIgnoreCase": term } }));
+        }
+
+        match filters.len() {
+            0 => Value::Null,
+            1 => filters.remove(0),
+            _ => json!({ "and": filters }),
+        }
+    }
+}
+
+impl serde::Serialize for IssueFilter {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_wire().serialize(serializer)
+    }
+}
+
+impl schema::variable::Variable for IssueFilter {
     const TYPE: VariableType = VariableType::Named("IssueFilter");
 }
-cynic::impl_coercions!(IssueFilterValue, schema::IssueFilter);
+cynic::impl_coercions!(IssueFilter, schema::IssueFilter);
 
-/// A dynamically-assembled `[IssueSortInput!]`, carried as pre-built JSON.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct IssueSortValue(pub serde_json::Value);
+/// A typed `[IssueSortInput!]` of exactly one field: Linear accepts a list,
+/// but this app only ever sorts by one field/direction.
+#[derive(Debug, Clone)]
+pub struct IssueSort {
+    pub field: SortField,
+    pub desc: bool,
+}
 
-impl schema::variable::Variable for IssueSortValue {
+impl serde::Serialize for IssueSort {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        crate::query::build_sort(&self.field, self.desc).serialize(serializer)
+    }
+}
+
+impl schema::variable::Variable for IssueSort {
     const TYPE: VariableType = VariableType::List(&VariableType::Named("IssueSortInput"));
 }
-cynic::impl_coercions!(IssueSortValue, schema::IssueSortInput);
+cynic::impl_coercions!(IssueSort, schema::IssueSortInput);
 
 #[derive(cynic::QueryVariables)]
 pub struct IssuesVariables {
-    pub filter: Option<IssueFilterValue>,
-    pub sort: Option<IssueSortValue>,
+    pub filter: Option<IssueFilter>,
+    pub sort: Option<IssueSort>,
     pub first: Option<i32>,
     pub after: Option<String>,
 }

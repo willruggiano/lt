@@ -1,6 +1,7 @@
 use anyhow::Result;
 use lt_storage::db;
-use lt_types::query::{IssueQuery, SortField};
+use lt_types::issues::{IssueSort, IssuesVariables};
+use lt_types::query::SortField;
 use lt_upstream::client::HttpTransport;
 use lt_upstream::issues::fetch;
 
@@ -17,13 +18,16 @@ pub fn run() -> Result<()> {
     // Persist the viewer so cached reads can resolve `me` offline.
     super::persist_viewer(&conn, &transport)?;
 
-    // Use a default query with no filters and max page size.
-    let args = IssueQuery {
-        limit: 250,
-        sort: SortField::Updated,
-        desc: true,
-        ..IssueQuery::default()
-    };
-
-    super::sync_pages(&conn, |after| fetch(&args, after))
+    // No filter, max page size.
+    super::sync_pages(&conn, |after| {
+        fetch(IssuesVariables {
+            filter: None,
+            sort: Some(IssueSort {
+                field: SortField::Updated,
+                desc: true,
+            }),
+            first: Some(250),
+            after: after.map(ToOwned::to_owned),
+        })
+    })
 }

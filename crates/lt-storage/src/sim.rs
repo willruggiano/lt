@@ -387,11 +387,13 @@ mod tests {
         db::upsert_issues(&conn, &d.issues).unwrap();
         db::upsert_comments(&conn, &d.comments).unwrap();
         // sanity: relational base reconstructs the rows.
-        let args = lt_types::query::IssueQuery {
-            limit: 250,
-            ..Default::default()
+        let vars = lt_types::issues::IssuesVariables {
+            filter: None,
+            sort: None,
+            first: Some(250),
+            after: None,
         };
-        let queried = db::query_issues(&conn, &args).unwrap();
-        assert_eq!(queried.len(), 30);
+        let queried = db::query_issues(&conn, &vars).unwrap();
+        assert_eq!(queried.nodes.len(), 30);
     }
 }

@@ -181,24 +181,21 @@ fn close_detail_clears_pane_state() {
 fn filter_sort_sync_and_replacement() {
     let mut app = app_with_issues(0, 1).unwrap();
     app.list_mut().query.filter = search_query::parse_query_ast("sort:title+");
-    app.list_mut().query.sync_args_from_filter();
+    app.list_mut().query.sync_sort_from_filter();
     assert!(matches!(
-        app.list_mut().query.args.sort,
+        app.list_mut().query.sort,
         lt_runtime::query::SortField::Title
     ));
-    assert!(!app.list_mut().query.args.desc);
+    assert!(!app.list_mut().query.desc);
 
     // replace_sort_in_filter rewrites the sort token, preserving other stems.
-    app.list_mut().query.args.sort = lt_runtime::query::SortField::Updated;
-    app.list_mut().query.args.desc = true;
+    app.list_mut().query.sort = lt_runtime::query::SortField::Updated;
+    app.list_mut().query.desc = true;
     app.list_mut().query.filter = search_query::parse_query_ast("state:todo sort:title+");
     let replaced = app.list_mut().query.replace_sort_in_filter();
-    let parsed = search_query::ParsedQuery::from(&replaced);
-    assert_eq!(
-        parsed.sort.map(|(_, d)| d),
-        Some(search_query::SortDir::Desc)
-    );
-    assert_eq!(parsed.state.as_deref(), Some("todo"));
+    let (filter, sort) = search_query::lower_ast(&replaced);
+    assert_eq!(sort.map(|(_, d)| d), Some(search_query::SortDir::Desc));
+    assert_eq!(filter.state.as_deref(), Some("todo"));
 }
 
 #[test]
