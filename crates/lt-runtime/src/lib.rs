@@ -14,12 +14,13 @@ mod runtime;
 pub use ops::{load, refresh};
 #[cfg(feature = "sim")]
 pub use runtime::SimSeed;
-pub use runtime::{HttpTransportSource, Runtime, SearchOutcome, TransportSource};
+pub use runtime::{
+    CreateIssueOutcome, HttpTransportSource, Runtime, SearchOutcome, TransportSource,
+};
 pub use subscription::{Subscription, SubscriptionKey};
 
 // Command orchestration for the CLI.
 pub mod auth;
-pub mod issues;
 pub mod notifications;
 
 // Store read/write facade re-exported so downstream crates name one seam.

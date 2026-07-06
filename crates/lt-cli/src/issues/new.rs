@@ -1,11 +1,30 @@
 use std::io::{self, BufRead, Write};
 
 use anyhow::{Result, anyhow};
-use lt_runtime::issues::NewIssueSession;
+use lt_runtime::db::Read;
+use lt_runtime::ops::Refresh;
+use lt_runtime::{CreateIssueOutcome, Runtime};
 use lt_types::inputs::IssueCreateInput;
+use lt_types::issues::IssueCreateVariables;
+use lt_types::new_issue::{NewIssueQuery, NewIssueVariables};
 use lt_types::scalars::Priority;
 use lt_types::types::{Team, User as Member, WorkflowState};
-use lt_types::viewer::Viewer;
+use lt_types::viewer::{Viewer, ViewerQuery};
+
+/// Upstream-refresh `Op`, then read the cache: a failed refresh (offline)
+/// falls back to whatever is already cached rather than erroring outright.
+/// Emptiness (no teams, no viewer) is the caller's own concern -- each call
+/// site already reports it with a command-specific message.
+fn refresh_then_load<Op>(runtime: &Runtime, vars: Op::Variables) -> Result<Op::Output>
+where
+    Op: Read + Refresh,
+    Op::Variables: Clone,
+{
+    if let Err(e) = runtime.refresh::<Op>(vars.clone()) {
+        tracing::debug!(error = %e, "new-issue: refresh failed, using cached data");
+    }
+    runtime.load::<Op>(&vars)
+}
 
 #[derive(Debug, Clone)]
 pub struct NewIssueArgs {
@@ -321,14 +340,13 @@ fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
     Ok(())
 }
 
-pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
-    // Open the session: builds the transport and fetches the viewer (for the
-    // "me" shortcut) up front.
-    let session = NewIssueSession::open()?;
-    let viewer = session.viewer.clone();
+pub fn run(out: &mut dyn Write, args: &NewIssueArgs, runtime: &Runtime) -> Result<()> {
+    // Fetch the viewer up front (for the "me" shortcut and the URL's org key).
+    let viewer = refresh_then_load::<ViewerQuery>(runtime, ())?
+        .ok_or_else(|| anyhow!("not logged in -- run `lt auth login` first"))?;
 
     // Step 1: Team
-    let teams = session.teams()?;
+    let teams = refresh_then_load::<NewIssueQuery>(runtime, NewIssueVariables::new(None))?.teams;
     if teams.is_empty() {
         return Err(anyhow!("no teams found in your Linear organization"));
     }
@@ -345,16 +363,19 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
     // Step 4: Priority
     let priority = prompt_priority(out, args.priority.as_deref())?;
 
-    // Step 5: State -- fetch workflow states for the chosen team
-    let states = session.workflow_states(&team_id)?;
+    // Steps 5-6: workflow states and members for the chosen team, one
+    // team-scoped read (the same operation the TUI's new-issue view drives).
+    let team_scoped =
+        refresh_then_load::<NewIssueQuery>(runtime, NewIssueVariables::new(Some(team_id.clone())))?;
+
+    let states = team_scoped.states;
     let state_id = if states.is_empty() {
         None
     } else {
         pick_state(out, &states, args.state.as_deref())?.map(|s| s.id.inner().to_string())
     };
 
-    // Step 6: Assignee -- fetch team members
-    let members = session.team_members(&team_id)?;
+    let members = team_scoped.members;
     let assignee_id = pick_assignee(out, &members, &viewer, args.assignee.as_deref())?;
 
     // Confirm summary before creating
@@ -392,13 +413,19 @@ pub fn run(out: &mut dyn Write, args: &NewIssueArgs) -> Result<()> {
         assignee_id,
     };
 
-    let issue = session.create(&input)?;
-    writeln!(out, "Created: {} - {}", issue.identifier, issue.title)?;
-    writeln!(
-        out,
-        "URL:     https://linear.app/{}/issue/{}",
-        viewer.organization.url_key, issue.identifier
-    )?;
+    match runtime.create_issue_now(IssueCreateVariables { input })? {
+        CreateIssueOutcome::Created(issue) => {
+            writeln!(out, "Created: {} - {}", issue.identifier, issue.title)?;
+            writeln!(
+                out,
+                "URL:     https://linear.app/{}/issue/{}",
+                viewer.organization.url_key, issue.identifier
+            )?;
+        }
+        CreateIssueOutcome::Queued(identifier) => {
+            writeln!(out, "Queued: {identifier} (offline -- will sync later)")?;
+        }
+    }
 
     Ok(())
 }
