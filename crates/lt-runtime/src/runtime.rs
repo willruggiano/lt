@@ -212,6 +212,25 @@ impl RunLoop {
     }
 }
 
+/// [`Runtime::search`]'s outcome: distinguishes an entirely empty cache from
+/// a stale FTS shadow index whose results are an approximate
+/// title-substring fallback rather than a ranked FTS5 match.
+pub enum SearchOutcome {
+    /// No issues are cached at all.
+    NoIndex,
+    Results {
+        issues: Vec<lt_types::types::Issue>,
+        approximate: bool,
+    },
+}
+
+/// [`Runtime::seed_sim`]'s summary, for the caller's report line.
+#[cfg(feature = "sim")]
+pub struct SimSeed {
+    pub issues: usize,
+    pub comments: usize,
+}
+
 pub struct Runtime {
     db: Mutex<Database>,
     transports: Box<dyn TransportSource>,
@@ -280,7 +299,7 @@ impl Runtime {
     /// `last_synced_at` for a `Sync(Done)` timestamp: the DB's own meta,
     /// `None` if it is absent, unreadable, or unparseable (pre-first-sync, or
     /// a corrupt row -- never a panic path).
-    fn synced_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+    pub fn last_synced_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         let raw = self
             .connect()
             .ok()
@@ -484,7 +503,7 @@ impl Runtime {
 
         match result {
             Ok(Ok(touched)) => {
-                (self.on_event)(RuntimeEvent::Sync(SyncEvent::Done(self.synced_at())));
+                (self.on_event)(RuntimeEvent::Sync(SyncEvent::Done(self.last_synced_at())));
                 self.propagate(&touched);
                 CycleOutcome::Done
             }
@@ -513,6 +532,106 @@ impl Runtime {
         let touched = crate::sync::drain::drain(&conn, transport.as_ref())?;
         self.propagate(&touched);
         Ok(touched)
+    }
+
+    /// The shared body of [`Runtime::sync_full`]/[`Runtime::sync_delta`]:
+    /// connect, acquire a transport, run the requested sync body, then
+    /// propagate whatever it touched. Mirrors `cycle` minus its event
+    /// emission -- for a caller that never starts `run` (e.g. `lt-cli`'s `lt
+    /// sync`).
+    fn sync_now(&self, full: bool) -> Result<Vec<EntityKey>> {
+        let conn = self.connect()?;
+        let transport = self.transports.acquire()?;
+        let touched = if full {
+            crate::sync::full::run(&conn, transport.as_ref())?
+        } else {
+            crate::sync::delta::run(&conn, transport.as_ref())?
+        };
+        self.propagate(&touched);
+        Ok(touched)
+    }
+
+    pub fn sync_full(&self) -> Result<Vec<EntityKey>> {
+        self.sync_now(true)
+    }
+
+    /// The delta counterpart of [`Runtime::sync_full`].
+    pub fn sync_delta(&self) -> Result<Vec<EntityKey>> {
+        self.sync_now(false)
+    }
+
+    /// A synchronous, caller-driven upstream refresh of a single operation
+    /// (e.g. `lt-cli`'s explicit read commands): fetch and upsert via
+    /// `Op::refresh`, then propagate whatever it touched. Unlike a
+    /// subscription's background freshness refresh, errors are returned
+    /// rather than logged.
+    pub fn refresh<Op: Refresh>(&self, vars: Op::Variables) -> Result<Vec<EntityKey>> {
+        let conn = self.connect()?;
+        let transport = self.transports.acquire()?;
+        let touched = Op::refresh(&conn, transport.as_ref(), vars)?;
+        self.propagate(&touched);
+        Ok(touched)
+    }
+
+    /// The local full-text search a caller runs without holding a
+    /// `Connection`: an empty cache reports [`SearchOutcome::NoIndex`]; a
+    /// stale FTS shadow index (present issues, no FTS rows) falls back to an
+    /// approximate title-substring match rather than returning nothing.
+    pub fn search(&self, query: &str, limit: usize) -> Result<SearchOutcome> {
+        let conn = self.connect()?;
+        if db::count_issues(&conn)? == 0 {
+            return Ok(SearchOutcome::NoIndex);
+        }
+        let approximate = db::count_fts_rows(&conn).unwrap_or(0) == 0;
+        let issues = if approximate {
+            db::search_issues_like(&conn, query, limit)?
+        } else {
+            db::search_issues(&conn, query, limit)?
+        };
+        Ok(SearchOutcome::Results {
+            issues,
+            approximate,
+        })
+    }
+
+    /// Seed the local database from the deterministic `sim` generator: no
+    /// sync cycle to establish workflow states offline, so they are derived
+    /// from the seeded issues' own state fragments (ADR "Sim compatibility"),
+    /// as is team membership (from the issues' team/assignee and
+    /// team/creator pairs). Marks the cache fresh and records a viewer
+    /// identity (a real assignee from the dataset) so the `--assignee=me`
+    /// filter resolves offline.
+    #[cfg(feature = "sim")]
+    pub fn seed_sim(&self, seed: u64, size: usize) -> Result<SimSeed> {
+        let dataset = crate::sim::generate(seed, size);
+        let conn = self.connect()?;
+        for (team_id, state) in crate::sim::derive_workflow_states(&dataset.issues) {
+            db::upsert_team_state(&conn, &team_id, &state)?;
+        }
+        db::upsert_issues(&conn, &dataset.issues)?;
+        db::upsert_comments(&conn, &dataset.comments)?;
+        db::derive_team_memberships_from_issues(&conn)?;
+        db::set_meta(&conn, "last_synced_at", &chrono::Utc::now().to_rfc3339())?;
+        if let Some(assignee) = dataset.issues.iter().find_map(|i| i.assignee.clone()) {
+            db::set_viewer(
+                &conn,
+                &viewer::Viewer {
+                    user: lt_types::types::User {
+                        id: assignee.id,
+                        name: assignee.name,
+                    },
+                    organization: viewer::Organization {
+                        id: String::new().into(),
+                        name: String::new(),
+                        url_key: String::new(),
+                    },
+                },
+            )?;
+        }
+        Ok(SimSeed {
+            issues: dataset.issues.len(),
+            comments: dataset.comments.len(),
+        })
     }
 
     /// The login worker's body, run on its own thread. `Success` requires a
@@ -682,7 +801,7 @@ impl Runtime {
 mod tests {
     use std::sync::mpsc as std_mpsc;
 
-    use lt_types::issues::{IssuesQuery, IssuesVariables};
+    use lt_types::issues::{IssuesQuery, IssuesVariables, sample_issue_node};
     use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
     use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
     use lt_types::teams::TeamsQuery;
@@ -990,14 +1109,23 @@ mod tests {
         }
     }
 
+    /// A single scripted `team.states` page, shared by every test that drives
+    /// a `TeamStatesQuery` refresh (background or explicit).
+    fn team_states_page_transport() -> FakeTransport {
+        FakeTransport::new(vec![json!({ "team": { "states": { "nodes": [
+            { "id": "s1", "name": "Todo", "position": 1.0 }
+        ] } } })])
+    }
+
     #[test]
     fn refresh_entry_refreshes_and_propagates_when_reads_extend_beyond_issue() {
         let db = Database::memory().unwrap();
-        let fake = FakeTransport::new(vec![json!({ "team": { "states": { "nodes": [
-            { "id": "s1", "name": "Todo", "position": 1.0 }
-        ] } } })]);
         let (on_event, rx) = on_event_channel();
-        let runtime = Runtime::new(db, Box::new(FakeSource::new(fake)), on_event);
+        let runtime = Runtime::new(
+            db,
+            Box::new(FakeSource::new(team_states_page_transport())),
+            on_event,
+        );
         let (sub, _initial) = runtime.subscribe::<TeamStatesQuery>(StatesTeamVariables {
             team_id: "t1".to_string(),
         });
@@ -1068,6 +1196,145 @@ mod tests {
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
         assert_eq!(sub.take().unwrap().unwrap().user.name, "Ada");
+    }
+
+    // -- refresh: a synchronous, caller-driven upstream refresh ----------
+
+    #[test]
+    fn refresh_refreshes_and_propagates_to_a_live_subscription() {
+        let db = Database::memory().unwrap();
+        let (on_event, rx) = on_event_channel();
+        let runtime = Runtime::new(
+            db,
+            Box::new(FakeSource::new(team_states_page_transport())),
+            on_event,
+        );
+        let vars = StatesTeamVariables {
+            team_id: "t1".to_string(),
+        };
+        let (sub, _initial) = runtime.subscribe::<TeamStatesQuery>(vars.clone());
+
+        let touched = runtime.refresh::<TeamStatesQuery>(vars).unwrap();
+
+        assert_eq!(
+            touched,
+            vec![EntityKey::WorkflowStates {
+                team_id: "t1".to_string()
+            }]
+        );
+        let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
+        assert_eq!(sub.take().unwrap()[0].name, "Todo");
+    }
+
+    // -- sync_full / sync_delta: a synchronous sync cycle -----------------
+
+    fn full_sync_transport() -> FakeTransport {
+        FakeTransport::new(vec![
+            json!({ "viewer": { "id": "u1", "name": "Ada", "organization": {
+                "id": "o1", "name": "Acme", "urlKey": "acme"
+            } } }),
+            json!({ "teams": { "nodes": [{ "id": "ENG", "name": "Engineering" }] } }),
+            json!({ "workflowStates": { "nodes": [
+                { "id": "s", "name": "Todo", "position": 1.0, "team": { "id": "ENG" } }
+            ], "pageInfo": { "hasNextPage": false, "endCursor": null } } }),
+            json!({ "issues": { "nodes": [sample_issue_node("1")],
+                "pageInfo": { "hasNextPage": false, "endCursor": null } } }),
+        ])
+    }
+
+    #[test]
+    fn sync_full_upserts_issues_and_stamps_last_synced_at() {
+        let (on_event, _rx) = on_event_channel();
+        let runtime = Runtime::new(
+            Database::memory().unwrap(),
+            Box::new(FakeSource::new(full_sync_transport())),
+            on_event,
+        );
+
+        let touched = runtime.sync_full().unwrap();
+
+        assert!(touched.contains(&EntityKey::Issue));
+        let conn = runtime.connect().unwrap();
+        assert!(db::query_issue_by_id(&conn, "1").unwrap().is_some());
+        assert!(runtime.last_synced_at().is_some());
+    }
+
+    #[test]
+    fn sync_delta_falls_back_to_full_before_any_prior_sync() {
+        let (on_event, _rx) = on_event_channel();
+        let runtime = Runtime::new(
+            Database::memory().unwrap(),
+            Box::new(FakeSource::new(full_sync_transport())),
+            on_event,
+        );
+
+        let touched = runtime.sync_delta().unwrap();
+
+        assert!(touched.contains(&EntityKey::Issue));
+        let conn = runtime.connect().unwrap();
+        assert!(db::query_issue_by_id(&conn, "1").unwrap().is_some());
+        assert!(runtime.last_synced_at().is_some());
+    }
+
+    // -- search: the local FTS-vs-LIKE seam --------------------------------
+
+    #[test]
+    fn search_finds_a_seeded_issue() {
+        let db = Database::memory().unwrap();
+        {
+            let conn = db.connect().unwrap();
+            db::upsert_team_state(
+                &conn,
+                "ENG",
+                &types::WorkflowState {
+                    id: "s-todo".into(),
+                    name: "Todo".to_string(),
+                    position: 1.0,
+                },
+            )
+            .unwrap();
+            db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
+        }
+        let (runtime, _rx) = runtime_over(db);
+
+        let outcome = runtime.search("issue", 10).unwrap();
+
+        match outcome {
+            SearchOutcome::Results {
+                issues,
+                approximate,
+            } => {
+                assert!(!approximate);
+                assert_eq!(issues.len(), 1);
+            }
+            SearchOutcome::NoIndex => panic!("expected results, got NoIndex"),
+        }
+    }
+
+    #[test]
+    fn search_reports_no_index_over_an_empty_cache() {
+        let (runtime, _rx) = runtime_over(Database::memory().unwrap());
+
+        assert!(matches!(
+            runtime.search("anything", 10).unwrap(),
+            SearchOutcome::NoIndex
+        ));
+    }
+
+    // -- seed_sim: the deterministic offline dataset -----------------------
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn seed_sim_populates_issues_and_stamps_meta() {
+        let (runtime, _rx) = runtime_over(Database::memory().unwrap());
+
+        let summary = runtime.seed_sim(0, 10).unwrap();
+
+        assert_eq!(summary.issues, 10);
+        let conn = runtime.connect().unwrap();
+        assert_eq!(db::count_issues(&conn).unwrap(), 10);
+        assert!(runtime.last_synced_at().is_some());
     }
 
     // -- drain_now: the immediate write-path flush -----------------------
