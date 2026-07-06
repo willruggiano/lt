@@ -63,8 +63,8 @@ touches Linear.
                                                    (crates/lt-tui)
 ```
 
-The CLI is dispatched in `crates/lt-cli/src/main.rs`: `auth`, `sync`, and (under
-the `sim` feature) `sim`. Bare `lt` (no subcommand) launches the TUI.
+The CLI is dispatched in `crates/lt-cli/src/main.rs`. Bare `lt` (no subcommand)
+launches the TUI.
 
 ### The operation seam
 
