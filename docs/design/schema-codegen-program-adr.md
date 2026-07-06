@@ -4,320 +4,256 @@
 
 Proposed — a program-decomposition ADR. ENG-16 ("generate as much as possible
 from the graphql spec") is broad enough that a single design would either
-overreach or stay vague. This ADR fixes the _scope frontier_ — what is
-mechanically generatable versus what is irreducibly hand-written — and
-decomposes the work into independently-designable Tasks, each a future sub-issue
-with its own detailed design. It does not itself design any single generator to
-completion.
+overreach or stay vague. This ADR fixes the source of truth and the scope
+frontier, then decomposes the work into independently-designable Tasks, each a
+future sub-issue with its own detailed design. It does not itself design any
+single generator to completion.
 
-It builds on two delivered ADRs whose decisions bound this one:
-
-- [[linear-api-types-codegen.md]] (ENG-31): established the cynic
-  selection-shaped type layer and **rejected whole-schema type generation**.
-- [[operation-seam-adr.md]] (ENG-28): made the operation type the sole
-  vocabulary of both sides of the cache, and flagged every hand-written seam
-  artifact as an ENG-16 codegen target (`operation-seam-adr.md:52-54`).
-- [[mutation-seam-adr.md]] (ENG-67): makes the write path generic by hand,
-  producing the mutation registry this program later generates.
+The keystone: **codegen is type-directed.** It follows from the hand-written
+cynic fragments, not from the raw schema. This extends, rather than reopens,
+[[linear-api-types-codegen.md]] (ENG-31), which established the cynic
+selection-shaped type layer and rejected whole-schema type generation. It also
+depends on [[unified-execute-adr.md]] (ENG-67) and builds on
+[[operation-seam-adr.md]] (ENG-28), which flagged every hand-written seam
+artifact as an ENG-16 codegen target (`operation-seam-adr.md:52-54`).
 
 ## Context
 
-ENG-16 reads as a wishlist: no hand-rolled GraphQL types, CLI args generated
-from variables, the search parser subsumed, resolvable ID fields, autocomplete,
-all SQL generated from the schema, `build/search_filter_fields.toml` dead. Taken
-literally and together, several of these contradict decisions already made with
-cause. The design work is therefore first a _scoping_ problem: separate the
-genuinely-mechanical boilerplate (generate it) from the selection-shaped and
-policy-shaped code (never generate it) from the net-new features that ENG-16
-smuggles in under the word "generate."
+ENG-16 reads as a wishlist: no hand-rolled GraphQL boilerplate, CLI args from
+variables, the search parser subsumed, resolvable ID fields, autocomplete, all
+SQL generated, `build/search_filter_fields.toml` dead. Read naively — "generate
+Rust from the SDL" — several items contradict decisions already made with cause.
+Read correctly, they are one idea:
 
-### The codegen infrastructure already exists
+> The hand-written cynic fragments are the curated source of truth. Everything
+> mechanically downstream of them is generated from _those types_.
 
-There are two schema-driven codegen mechanisms today, both reading the committed
-snapshot `build/linear-schema-definition.graphql` (37,149 lines):
+### The fragments are the allowlist
+
+We keep authoring cynic `QueryFragment`/`QueryVariables`/`InputObject` types by
+hand. That is not the thing being generated — it is the curation. Its earlier
+form was a TOML subset; its correct form is the fragment set itself, which can
+select **any field of any type in the whole upstream schema** and stays fully
+type-safe because cynic checks each fragment against the registered schema
+(`crates/lt-types/src/lib.rs:24-25`, 182 derives across 15 files). The selection
+set _is_ the intent
+([[linear-api-types-codegen.md#The core constraint: usage is selection-shaped, not type-shaped]]:
+`Comment` has ~50 fields, the code selects 3). Whole-schema generation stays
+rejected; the fragment is what we author, and codegen mechanizes the rest.
 
 ```text
-  A) Bespoke source generation (build.rs → OUT_DIR → include!)
-     ┌ build/search_filter_fields.toml (8 filter + 7 sort fields, curated)
-     ├ build/linear-schema-definition.graphql (the SDL snapshot)
-     │        │ parsed + validated by lt-schema-codegen
-     │        ▼
-     ├ crates/lt-types/build.rs   → SortField enum, build_sort()   → src/query.rs include!
-     └ crates/lt-storage/build.rs → StemKey/StemKind, the Chumsky   → src/search_query.rs include!
-                                     parser (one arm per field)
-       (both scripts duplicate the schema-parse + quote/syn/prettyplease pipeline)
-
-  B) cynic derive-macro codegen (no file emission)
-     #[cynic::schema("linear")] registered at build time (lt-types/build.rs:180)
-     #[derive(cynic::QueryFragment/InputObject/Enum/Scalar)] — 182 derives across
-     15 files in lt-types, each compile-checked against the registered schema.
+   raw SDL (524 types)  ──X── never the codegen input (ENG-31)
+        │ cynic derive, hand-authored selection
+        ▼
+   FRAGMENTS  (the curated allowlist, type-safe, whole-schema reach)   ← SOURCE
+        │ codegen follows from THESE types
+        ├─ GraphqlOperation impl        (name, extract projection)
+        ├─ Read / Upsert / Mutate       (SQL projection over the selected fields)
+        ├─ Operation impl               (ENG-67's execute dispatch)
+        ├─ EntityKey / reads            (invalidation, from the fragment's node set)
+        └─ search grammar               (from IssueFilter's fields)
 ```
 
-Sources: `crates/lt-schema-codegen/src/lib.rs`, `crates/lt-types/build.rs`,
-`crates/lt-storage/build.rs`, `crates/lt-types/src/lib.rs:24-25`. So ENG-16 is
-**extending an existing pipeline**, not building one.
+### `search_filter_fields.toml` dies outright
 
-### The scope frontier (primary-source inventory)
+Not "de-duplicated" — dead. `IssueFilter`
+(`crates/lt-types/src/issues.rs:41-66`) is already the curated allowlist as a
+Rust type: it is a field of `IssuesVariables` (`issues.rs:477-482`), already
+lowered to wire JSON by serde through `execute::<Op>`
+(`crates/lt-upstream/src/client.rs:74-84`), and already lowered to SQL by
+`lt-storage`. The TOML re-declares, in a second place, the field set
+`IssueFilter` already states. The search grammar (`StemKey`/`StemKind`/the
+parser) derives from `IssueFilter`'s fields; the SQL filter lowering from
+per-field metadata on the same type. The TOML has nothing left to say.
 
-An inventory of the seam (14 `GraphqlOperation` impls, ~43 registered SQL
-statements, the filter lowering) sorts cleanly into three bins.
+### The generation frontier (primary-source inventory)
 
-**Generatable — mechanical boilerplate around a hand-written core:**
+Sorted by whether an artifact is a function of the source types (generate) or of
+local-cache behavior (hand-write):
 
-- The `GraphqlOperation` impl bodies. `operation()` is _always_ `Self::build`;
-  `extract()` is a one-liner projection for the 9 simple queries —
-  `Ok(self.teams.nodes)` (`crates/lt-types/src/teams.rs:26`), `Ok(self.issues)`
-  (`crates/lt-types/src/issues.rs:507`), `Ok(self.workflow_states)`
-  (`states.rs:110`). Identical across all 14 impls modulo the projection path.
-- `QueryVariables` structs and connection-wrapper fragments (`TeamConnection`,
-  `UserConnection`, `IssueConnection` — all `{ nodes, page_info }`).
-- ~70% of the ~43 SQL statements: id-keyed upsert/select/delete/count/meta. The
-  6 reference-entity upserts already share one template via
-  `entity_upsert_sql!("table")` (`crates/lt-storage/src/db/sql.rs:138-147`), and
-  the row-mappers are macro-factored (`upsert_entities_fn!`, `teams.rs:35-63`).
-- Most `Read`/`Upsert` impls: one-liners delegating to a query fn and returning
-  a fixed `EntityKey` vec (`Read for TeamsQuery`, `teams.rs:177-185`).
-- The mutation replay registry ([[mutation-seam-adr.md]] Decision 2).
+**Derived from the fragment types — generate:**
 
-**Irreducibly hand-written — selection-shaped or policy-shaped:**
+- The `GraphqlOperation` impl. `operation()` is _always_ `Self::build`;
+  `extract()` is the projection the fragment already names —
+  `Ok(self.teams.nodes)` (`teams.rs:26`), `Ok(self.issues)` (`issues.rs:507`).
+  Identical across 14 impls modulo the path.
+- `Read`/`Upsert`: the SELECT projects the fragment's selected columns; the
+  upsert writes the fragment's node types into their tables. The 6
+  reference-entity upserts already share `entity_upsert_sql!`
+  (`crates/lt-storage/src/db/sql.rs:138-147`); the row-mappers are
+  macro-factored (`upsert_entities_fn!`, `teams.rs:35-63`). ~70% of the ~43
+  registered statements are id-keyed CRUD of this shape.
+- `EntityKey`/`reads`: the entity slices an operation depends on _are_ the node
+  types its fragment selects — [[operation-seam-adr.md]] Decision 1 already
+  noted this is "derivable from the document's fragment set."
+- The `Operation` impl and the outbox replay registry
+  ([[unified-execute-adr.md]] Decisions 2, 4).
+- The search grammar, from `IssueFilter`'s fields.
 
-- The **selection set itself.**
-  [[linear-api-types-codegen.md#The core constraint: usage is selection-shaped, not type-shaped]]
-  proved whole-schema generation wrong: `Comment` has ~50 fields, the code
-  uses 3. The cynic fragment _is_ the per-operation intent; it stays
-  hand-authored.
-- The `IssueFilter`→wire lowering: ~10 comparator `InputObject`s and a
-  hand-written `to_wire`/`Serialize` encoding real policy — AND-joining set
-  fields, assignee name-or-email `or`, date gte/lt splitting
-  (`issues.rs:25-451`).
+**A function of local-cache policy — hand-write, permanently:**
+
 - The overlay-merge read model: `COALESCE`/`CASE` effective-field expressions
-  (`sql.rs:53-133`), FTS join + `LIKE` fallback (`sql.rs:212-229`), the dual SQL
-  filter lowering (`crates/lt-storage/src/db/filters.rs:16-98`, 15 `Frag`s).
+  (`sql.rs:53-133`), FTS join + `LIKE` fallback (`sql.rs:212-229`).
 - The outbox machinery: optimistic writes, temp-id rewrite, command coalescing,
   replace-set deletes (`crates/lt-storage/src/db/outbox.rs`).
 - Composed operations' bespoke `extract`: `IssueDetailQuery`'s cursor derivation
   (`detail.rs:69-81`), `NewIssueQuery`'s `@include` directive and cache-sourced
-  viewer (`new_issue.rs:44-93`), `NotificationsQuery`'s InlineFragments enum
-  (`notifications.rs`).
+  viewer (`new_issue.rs:44-93`), `NotificationsQuery`'s InlineFragments enum.
+- The filter→SQL comparator _policy_ (name-or-id, `LIKE` vs exact,
+  `filters.rs:16-98`): partly capturable as per-field metadata (Task 5), partly
+  irreducible.
 
-**Net-new features ENG-16 names but that do not exist yet:**
+**Named by ENG-16 but not yet existing — net-new features, not "generation":**
 
-- Name→id resolution of any kind. Only `resolve_me` exists, and it is
-  name→*name* (`crates/lt-storage/src/search_query.rs:175-183`). No
-  `--project=<name>` → `projectId` path; no id-based filter on the wire or in
-  SQL (every entity filter is name-substring only, `issues.rs:395-415`,
-  `sql.rs:492`).
-- Autocomplete. `Token::PartialStem` already carries
-  `known_key: Option<StemKey>` (`search_query.rs:82-88`) — the natural hook —
-  but nothing consumes it for value completion.
+- Name→id resolution. Only `resolve_me` exists, and it is name→*name*
+  (`crates/lt-storage/src/search_query.rs:175-183`). No `--project=<name>` →
+  `projectId`; no id-based filter on the wire or in SQL (all name-substring,
+  `issues.rs:395-415`, `sql.rs:492`).
+- Autocomplete. `Token::PartialStem.known_key` is populated but unconsumed
+  (`search_query.rs:82-88`).
 
-### The thesis
+### The existing pipeline this extends
+
+There are already two schema-driven codegen mechanisms, both reading
+`build/linear-schema-definition.graphql`:
 
 ```text
-   ┌─────────────────────────────────────────────────────────────────┐
-   │  hand-written CORE, per operation:                                │
-   │    · the cynic selection set (the fragment)                       │
-   │    · the bespoke extract / filter lowering / cache-policy SQL      │
-   └─────────────────────────────────────────────────────────────────┘
-                    ▲ generate the mechanical shell AROUND it, never the core
-   ┌─────────────────────────────────────────────────────────────────┐
-   │  generated SHELL:  GraphqlOperation impl · Variables · connection │
-   │  wrappers · id-keyed CRUD SQL · Read/Upsert glue · replay registry │
-   └─────────────────────────────────────────────────────────────────┘
+  A) build.rs → OUT_DIR → include!  (bespoke source gen via lt-schema-codegen +
+     quote/syn/prettyplease): SortField, build_sort, the Chumsky search parser.
+     The two build.rs (lt-types, lt-storage) DUPLICATE this pipeline.
+  B) cynic derive macros: the fragments, compile-checked against the registered
+     schema. No file emission.
 ```
 
-"Generate as much as possible" resolves to: **generate the shell, hand-write the
-core, and treat the resolvable-ID/autocomplete asks as the features they are.**
-This is the maximal honest reading — it does not resurrect the whole-schema
-generation ENG-31 rejected, and it does not pretend the policy-shaped SQL is
-mechanical.
+Sources: `crates/lt-schema-codegen/src/lib.rs`, `crates/lt-types/build.rs`,
+`crates/lt-storage/build.rs`. ENG-16 shifts weight from A (schema-directed
+source gen) toward B (type-directed derive), because the source is now the
+fragment, not the SDL.
 
-## Decision 1: two codegen modalities, chosen per artifact
+## Decision 1: type-directed derive is the primary modality
 
-The program uses both existing mechanisms; each Task picks the fit:
+The generators read the hand-written Rust types (via companion derive macros
+alongside cynic's), not the SDL. `#[derive(GraphqlOperation)]`,
+`#[derive(Read)]`, `#[derive(Mutate)]` co-locate the generated impl with the
+fragment it derives from, and avoid the `OUT_DIR`/`include!`/brace-escaping
+fragility the search-codegen work documented
+([[search-codegen-and-filter-expansion-adr.md]]).
 
-- **Derive macros** (modality B) for artifacts keyed off a _Rust type_ — the
-  `GraphqlOperation` impl, the reference-entity CRUD. cynic already derives on
-  these types; a companion `#[derive(GraphqlOperation)]` with a
-  `#[graphql_operation(name = "teams", extract = teams.nodes)]` attribute
-  co-locates the spec with the type and avoids the `OUT_DIR`/`include!`
-  indirection the search-codegen work found fragile
-  ([[search-codegen-and-filter-expansion-adr.md]], "the code generation
-  technique is fragile").
-- **build.rs source generation** (modality A) for artifacts keyed off the _SDL +
-  curated allowlist_ — the search grammar, sort vocabulary, and any per-field
-  resolution metadata. The input there is the schema, not a Rust type.
+The SDL-directed build.rs modality (A) survives only where the input genuinely
+_is_ the schema — chiefly the registration `cynic-codegen::register_schema`
+(`lt-types/build.rs:180`). The two duplicated build.rs collapse into
+`lt-schema-codegen` (Task 4).
 
 Rejected alternatives:
 
-| Option                                                                       | Why rejected                                                                                                                                                                                             |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| One modality for everything                                                  | derive can't see the SDL allowlist; build.rs can't cleanly read a downstream Rust type's shape. Each artifact has a natural input; force-fitting one tool reintroduces the escaping/`include!` fragility |
-| Generate operation _documents_ (`.graphql`) and run cynic's query-generation | inverts the selection-shaped design ENG-31 chose; the fragment is the ergonomic authoring surface, not a generated intermediate                                                                          |
+| Option                                                     | Why rejected                                                                                    |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Schema-directed generation (emit types from the SDL)       | the ENG-31 whole-schema rejection; also cannot express which selection an operation wants       |
+| Generate operation _documents_ (`.graphql`) then run cynic | inverts the selection-shaped design; the fragment is the authoring surface, not an intermediate |
 
-## Decision 2: the allowlist survives; only its duplication dies
+## Decision 2: the fragment set is the allowlist; the TOML dies
 
-ENG-16 says "`build/search_filter_fields.toml` dies." It does not — it is the
-_human curation_ of which of ~50 `IssueFilter` fields are exposed (8 today), and
-that curation exists precisely because exposing all of them was rejected
-([[search-codegen-and-filter-expansion-adr.md]]). What dies is the
-**duplication**: the schema-parse + `quote` pipeline is copy-pasted across
-`lt-types/build.rs` and `lt-storage/build.rs` ([[linear-api-types-codegen.md]]
-left this unification as future work). The curation consolidates into one place
-(`lt-schema-codegen`), and per-field metadata (e.g. "this field resolves a name
-to an id") attaches there. "The TOML dies" is reframed as "the TOML stops being
-duplicated and grows the metadata the resolvable-ID feature needs."
+`IssueFilter` is the single curation of filterable fields. The search grammar
+and the SQL filter lowering derive from it; `build/search_filter_fields.toml` is
+deleted. Per-field metadata the derived generators need — the SQL column, the
+comparator, whether the field resolves a name to an id (Task 6) — attaches to
+`IssueFilter`'s fields as attributes, in one place, replacing the TOML's
+parallel declaration.
+
+Rejected alternatives:
+
+| Option                                                  | Why rejected                                                                      |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Keep the TOML as the filter allowlist                   | it duplicates `IssueFilter`'s fields; the type already is the curation            |
+| Expose every `IssueFilter` schema field (drop curation) | the whole-schema exposure [[search-codegen-and-filter-expansion-adr.md]] rejected |
 
 ## The program: decomposed Tasks
 
-Each Task is independently designable and shippable, and becomes its own
-sub-issue with a detailed ADR. Ordered mechanical → structural → net-new.
+Ordered derive-the-shell → structural → net-new. Each is a future sub-issue.
 
 ```text
-  T1 Operation scaffolding ─┐
-  T2 Reference-entity CRUD ─┼─ generate the shell (derive macros)
-  T3 Mutation registry ─────┘   (T3 needs ENG-67)
-  T4 Pipeline unification ─── consolidate build.rs + kill duplication (enables T5–T7)
-  T5 CLI args from variables ─ needs a CLI command surface (currently auth+sync only)
-  T6 Resolvable ID fields ─── net-new: id filters + name→id resolvers + metadata
-  T7 Autocomplete ─────────── net-new: consume known_key (needs T6 for id values)
+  T1 GraphqlOperation derive ─┐
+  T2 Read/Upsert + reads derive ─┼─ derive the shell from the fragment types
+  T3 Mutate + Operation + replay registry ─┘  (needs ENG-67)
+  T4 Pipeline unification: fold the two build.rs into lt-schema-codegen
+  T5 IssueFilter-directed search grammar + SQL lowering; delete the TOML
+  T6 Resolvable ID fields (net-new): id comparators + name→id resolvers
+  T7 Autocomplete (net-new): consume known_key + T6 resolvers
+  T8 CLI args from QueryVariables (forward-looking; CLI surface reduced to auth+sync)
 ```
 
-### Task 1 — Operation scaffolding codegen
-
-Generate the `GraphqlOperation` impl for the mechanical operations from a derive
-macro. Attribute carries `NAME` and the `extract` projection path; `operation()`
-is always `Self::build`. Also generate the trivial `QueryVariables` and
-connection wrappers where they are pure `{ nodes, page_info }`.
-
-- Generates: ~9 of 14 `GraphqlOperation` impls, connection wrappers.
-- Excludes (opt-out, stay hand-written): `IssueDetailQuery`, `NewIssueQuery`,
-  `ViewerQuery`, the three mutations, `NotificationsQuery` — every op whose
-  `extract` is more than a projection (success-gating, cursor derivation, domain
-  recomposition). Cited: `issues.rs:574-579`, `detail.rs:69-81`,
-  `viewer.rs:15-33`, `notifications.rs`.
-- Highest value, lowest risk. Independent of everything else.
-
-### Task 2 — Reference-entity CRUD + Read/Upsert codegen
-
-For the id-keyed reference entities (team, user, project, cycle, label) already
-sharing `entity_upsert_sql!`, derive the upsert/select-by-id/delete SQL and the
-`Read`/`Upsert` impl from the typed struct's fields instead of hand-listing
-columns.
-
-- Generates: the ~70%-mechanical CRUD for reference entities, their `Upsert`
-  impls and fixed `EntityKey` returns.
-- Excludes: `issues` (overlay merge), `comments` (replace-set, `local:%`
-  preservation), FTS, the dynamic `select_issues` composer — all policy-shaped
-  (`sql.rs:85-133,212-229,558-588`, `outbox.rs`).
-- Design question deferred to its sub-ADR: derive-on-entity-type vs. an entity
-  manifest. The current macros (`entity_upsert_sql!`, `upsert_entities_fn!`) are
-  the halfway point to extend.
-
-### Task 3 — Mutation replay registry codegen
-
-Generate the `REPLAY_REGISTRY` slice ([[mutation-seam-adr.md]] Decision 2) from
-the set of `Mutate` impls, replacing the hand-maintained table.
-
-- Depends on: ENG-67 landing the hand-written registry first.
-- Small; the last `NAME → replay` dispatch becomes generated data.
-
-### Task 4 — Codegen pipeline unification
-
-Collapse the duplicated schema-parse + `quote` pipeline from the two `build.rs`
-into `lt-schema-codegen`, and move the filter/sort curation into one place with
-room for per-field metadata.
-
-- Enables T5–T7 (they need one canonical field registry, not two).
-- Pure refactor of the generation machinery; no user-visible change. Cited
-  duplication: subagent-confirmed across `lt-types/build.rs` and
-  `lt-storage/build.rs`; deferral recorded in [[linear-api-types-codegen.md]].
-
-### Task 5 — CLI arguments from `QueryVariables`
-
-Derive clap arguments from a variables struct (`IssuesVariables` →
-`--filter/--sort/--first/--after`), the non-goal [[operation-seam-adr.md]] named
-("`IssueArgs → IssuesQuery` stays a hand-written `From` until ENG-16 derives
-clap from variables", `operation-seam-adr.md:434-435`).
-
-- **Blocked / forward-looking:** the CLI issue commands were removed; the
-  surface is now auth + sync only (`crates/lt-cli/src/main.rs`). This Task needs
-  a CLI command surface to exist, or is designed as the derive that would apply
-  when one returns. Its sub-ADR must resolve that dependency first.
-
-### Task 6 — Resolvable ID fields
-
-Net-new feature: `--project=<name>` → `projectId`. Requires three pieces that do
-not exist: (a) id-based filter fields on the wire and in SQL (today all
-name-substring), (b) standalone name→id cache lookups for projects/cycles/labels
-(upserted only as a side effect of issue upserts today, never queried standalone
-— `sql.rs:154-160`), (c) a resolver at lowering time, the name→id generalization
-of `resolve_me`. Per-field "resolvable entity" metadata lives in the unified
-allowlist (T4).
-
-- Largest net-new surface; bespoke-heavy. Not "generation" so much as a feature
-  whose _resolver dispatch_ can be generated from field metadata.
-
-### Task 7 — Autocomplete
-
-Net-new: consume the already-present `Token::PartialStem.known_key`
-(`search_query.rs:82-88`) to offer key and value completions in the search bar
-and pickers, including resolvable-id values from caches.
-
-- Depends on: T6 for id-value completion.
-- The parser already surfaces the hook; nothing consumes it yet
-  (`search_query.rs:262` skips it for display only).
+- **T1 — `#[derive(GraphqlOperation)]`** from the fragment: `NAME` + the
+  projection path for `extract`. Covers the ~9 simple operations; the bespoke
+  `extract`s (`IssueDetailQuery`, `NewIssueQuery`, mutations' success-gating,
+  `NotificationsQuery`) opt out and stay hand-written.
+- **T2 — `#[derive(Read)]`/`#[derive(Upsert)]`** for id-keyed reference entities
+  (team, user, project, cycle, label): the SELECT/upsert and the
+  `reads`/`EntityKey` set from the fragment's selected node types. Excludes
+  issues/comments (overlay, replace-set, FTS).
+- **T3 — `#[derive(Mutate)]` + the `Operation` impl + the replay registry**
+  ([[unified-execute-adr.md]] Decisions 2, 4). Depends on ENG-67 landing them by
+  hand.
+- **T4 — pipeline unification**: one schema-parse + `quote` pipeline in
+  `lt-schema-codegen`; the duplication across the two build.rs
+  ([[linear-api-types-codegen.md]] deferred this) dies. Enables T5–T8.
+- **T5 — `IssueFilter`-directed grammar + SQL lowering**: the search grammar and
+  the mechanical part of `filters.rs` derive from `IssueFilter` + per-field
+  metadata; the TOML is deleted. FTS and overlay-effective expressions stay
+  hand-written.
+- **T6 — resolvable ID fields** (net-new): id comparators on the wire and in
+  SQL, standalone name→id cache lookups (projects/cycles/labels are upserted
+  only as a side effect today, never queried standalone — `sql.rs:154-160`), and
+  a name→id resolver generalizing `resolve_me`. The resolver _dispatch_
+  generates from field metadata; the lookups are new code.
+- **T7 — autocomplete** (net-new): consume `Token::PartialStem.known_key`
+  (`search_query.rs:82-88`) for key and value completion, including T6
+  resolvables.
+- **T8 — CLI args from `QueryVariables`** ([[operation-seam-adr.md]] non-goal,
+  `operation-seam-adr.md:434-435`). Forward-looking: the CLI issue commands were
+  removed (`crates/lt-cli/src/main.rs` is auth + sync); this Task needs a
+  command surface to exist, or ships as a dormant derive. Its sub-ADR resolves
+  that first.
 
 ## Non-goals (permanent — bounded by prior decisions)
 
-- **Whole-schema type generation.** Rejected in
-  [[linear-api-types-codegen.md#The core constraint: usage is selection-shaped, not type-shaped]];
-  524 recursive mostly-unused types. The selection set stays hand-authored.
-- **Generating policy-shaped SQL.** The overlay merge, FTS, filter lowering, and
-  outbox/temp-id machinery encode local-cache policy with no schema counterpart.
-  ENG-16's "all SQL is generated" applies to the id-keyed CRUD tier only; the
-  policy tier is out of scope by construction.
-- **Generating bespoke `extract`/composed operations.** `IssueDetailQuery`,
-  `NewIssueQuery`, `NotificationsQuery`, and the mutations opt out of Task 1.
-- **`NotificationsQuery` and the inbox.** Consistent with
-  [[operation-seam-adr.md]]'s Notifications non-goal; no codegen until a
-  notifications cache exists.
+- **Generating the fragments/selection sets.** They are the source of truth. The
+  whole-schema type generation [[linear-api-types-codegen.md]] rejected stays
+  rejected.
+- **Generating policy-shaped SQL.** Overlay merge, FTS, temp-id rewrite,
+  composed-op cursor pagination, and the irreducible comparator policy are a
+  function of local-cache behavior, not of the types.
+- **`NotificationsQuery` / the inbox**, consistent with
+  [[operation-seam-adr.md]]'s Notifications non-goal, until a cache table
+  exists.
 
 ## Relationship to ENG-67 and ENG-63
 
-- **ENG-67** ([[mutation-seam-adr.md]]) is a prerequisite for Task 3 and makes
-  the write seam a stable codegen target, mirroring how ENG-28 (the read seam)
-  preceded this program.
-- **ENG-63** (generic `Table<'a, T>`/`Form<'a, T>`) is the TUI-side
-  generalization that consumes generated operation outputs; orthogonal to this
-  program but complementary — once operations are generated, the views over them
-  can be generic.
+- **ENG-67** ([[unified-execute-adr.md]]) hand-writes the `Operation` dispatch
+  and the replay registry; T3 generates them. ENG-67 stabilizes the seam this
+  program generates against, as ENG-28 did for the read seam.
+- **ENG-63** (generic `Table<'a, T>`/`Form<'a, T>`) consumes generated operation
+  outputs; orthogonal but complementary.
 
 ## Test migration
 
-Per Task; the program-level rule is that generation must be
-_behavior-preserving_ and verified as such:
-
-- Each generator Task keeps the existing tests of the artifacts it replaces
-  (e.g. the `Read`/`Upsert` tests in `crates/lt-runtime/src/ops.rs`, the drain
-  tests) green **unchanged** — generated code must pass the hand-written code's
-  tests, or the generation is wrong.
-- The build-time schema/allowlist validation
-  ([[architecture.md#Search and the codegen seam]]) extends to any new metadata:
-  a mismatch between a generated artifact and the schema fails the build, as the
-  filter allowlist does today.
-- New generators get golden-file tests of their emitted source
-  (`prettyplease`-formatted), the pattern
-  [[search-codegen-and-filter-expansion-adr.md]] established.
+- Every generator Task keeps the tests of the artifacts it replaces green
+  **unchanged** — generated code must pass the hand-written code's behavioral
+  tests (`crates/lt-runtime/src/ops.rs`, the drain tests, the filter/grammar
+  tests) or the generation is wrong.
+- The compile-time schema check that cynic already performs on every fragment is
+  the type-directed pipeline's front-line gate; the build-time allowlist
+  validation ([[architecture.md#Search and the codegen seam]]) moves onto the
+  per-field metadata.
+- New generators get golden-file tests of their `prettyplease`-formatted output,
+  the pattern [[search-codegen-and-filter-expansion-adr.md]] established.
 
 ## Open questions
 
-1. **Task 1 authoring surface** — derive-macro attribute vs. a small
-   per-operation manifest. The ADR recommends the derive (Decision 1); the
-   Task-1 sub-ADR confirms it against the composed-operation opt-out ergonomics.
-2. **Task 5 dependency** — whether a CLI command surface is reintroduced (making
-   Task 5 live) or Task 5 ships as a dormant derive. Owned by the Task-5
-   sub-ADR.
-3. **Task 2 boundary** — exactly which entities are "reference/mechanical."
-   Team, user, project, cycle, label are clear; the sub-ADR fixes the line
-   against anything that acquires overlay or replace-set policy.
+1. **Derive reflection limits** (T1–T3, T5): can a companion derive see enough
+   of a fragment's selected fields to emit the SELECT and the `reads` set, or is
+   a small per-operation attribute needed alongside cynic's? Owned by each
+   Task's sub-ADR.
+2. **T5 boundary**: how much of the filter→SQL comparator policy is
+   metadata-derivable vs irreducibly bespoke.
+3. **T8 dependency**: whether a CLI command surface is reintroduced (making T8
+   live) or T8 ships as a dormant derive.
