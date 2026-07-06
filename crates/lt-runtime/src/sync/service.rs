@@ -1,8 +1,4 @@
 //! The vocabulary the [`crate::Runtime`] reports to its consumer (the TUI).
-//!
-//! Invalidation is derived from `EntityKey`/`Read::reads`
-//! (docs/design/operation-seam-adr.md, "Decision 5"), so the queue only ever
-//! needs to say *which subscription* changed.
 
 use lt_types::viewer;
 

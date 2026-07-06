@@ -369,8 +369,7 @@ impl Runtime {
     }
 
     /// One-shot local read over a fresh connection: no registration, no live
-    /// updates. The search overlay's debounced preview and the CLI's cached
-    /// reads.
+    /// updates.
     pub fn load<Op: Read>(&self, vars: &Op::Variables) -> Result<Op::Output> {
         let conn = self.connect()?;
         Op::read(&conn, vars)
