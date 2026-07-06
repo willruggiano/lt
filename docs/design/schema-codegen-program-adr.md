@@ -47,7 +47,7 @@ rejected; the fragment is what we author, and codegen mechanizes the rest.
         ▼
    FRAGMENTS  (the curated allowlist, type-safe, whole-schema reach)   ← SOURCE
         │ codegen follows from THESE types
-        ├─ GraphqlOperation impl        (name, extract projection)
+        ├─ GraphqlOperation impl        (operation() + NAME)
         ├─ Query / Mutation             (SQL projection over the selected fields)
         ├─ Operation impl               (ENG-67's execute dispatch)
         └─ search grammar               (from IssueFilter's fields)
@@ -72,10 +72,10 @@ local-cache behavior (hand-write):
 
 **Derived from the fragment types — generate:**
 
-- The `GraphqlOperation` impl. `operation()` is _always_ `Self::build`;
-  `extract()` is the projection the fragment already names —
-  `Ok(self.teams.nodes)` (`teams.rs:26`), `Ok(self.issues)` (`issues.rs:507`).
-  Identical across 14 impls modulo the path.
+- The `GraphqlOperation` impl. With `extract` removed
+  ([[unified-execute-adr.md]] Decision 5), the impl reduces to
+  `operation() = Self::build` plus `NAME` — identical across all operations,
+  pure boilerplate.
 - `Query`/`Mutation` (the two seam traits, [[unified-execute-adr.md]] Decision
   2): the SELECT projects the fragment's selected columns; the write applies the
   fragment's node types into their tables. The 6 reference-entity upserts
@@ -93,9 +93,11 @@ local-cache behavior (hand-write):
   (`sql.rs:53-133`), FTS join + `LIKE` fallback (`sql.rs:212-229`).
 - The outbox machinery: optimistic writes, temp-id rewrite, command coalescing,
   replace-set deletes (`crates/lt-storage/src/db/outbox.rs`).
-- Composed operations' bespoke `extract`: `IssueDetailQuery`'s cursor derivation
-  (`detail.rs:69-81`), `NewIssueQuery`'s `@include` directive and cache-sourced
-  viewer (`new_issue.rs:44-93`), `NotificationsQuery`'s InlineFragments enum.
+- Composed operations' bespoke wire→domain logic (the `From`/`TryFrom` impls
+  that replace `extract`, [[unified-execute-adr.md]] Decision 5):
+  `IssueDetailQuery`'s cursor derivation (`detail.rs:69-81`), `NewIssueQuery`'s
+  `@include` directive and cache-sourced viewer (`new_issue.rs:44-93`),
+  `NotificationsQuery`'s InlineFragments enum.
 - The filter→SQL comparator _policy_ (name-or-id, `LIKE` vs exact,
   `filters.rs:16-98`): partly capturable as per-field metadata (Task 5), partly
   irreducible.
@@ -179,10 +181,12 @@ Ordered derive-the-shell → structural → net-new. Each is a future sub-issue.
   T8 CLI args from QueryVariables (forward-looking; CLI surface reduced to auth+sync)
 ```
 
-- **T1 — `#[derive(GraphqlOperation)]`** from the fragment: `NAME` + the
-  projection path for `extract`. Covers the ~9 simple operations; the bespoke
-  `extract`s (`IssueDetailQuery`, `NewIssueQuery`, mutations' success-gating,
-  `NotificationsQuery`) opt out and stay hand-written.
+- **T1 — `#[derive(GraphqlOperation)]`** from the fragment:
+  `operation() = Self::build` + `NAME`, uniform now that `extract` is removed
+  ([[unified-execute-adr.md]] Decision 5). The wire→domain transforms `extract`
+  used to hold (`ViewerEnvelope -> Viewer`, the composed `IssueDetailData`)
+  become `From`/`TryFrom` impls; the mutation success-gate moves to the write
+  seam.
 - **T2 — `#[derive(Query)]`/`#[derive(Mutation)]`** for id-keyed reference
   entities (team, user, project, cycle, label): the SELECT and the local write
   from the fragment's selected node types. Excludes issues/comments (overlay,
