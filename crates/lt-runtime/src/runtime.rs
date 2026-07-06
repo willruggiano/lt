@@ -83,6 +83,9 @@ enum Command {
     RequestSync,
     Login,
     LoginFinished(bool),
+    /// Prompts the loop to immediately drain the outbox after a caller-side
+    /// mutation, instead of waiting for the next sync cycle.
+    Drain,
 }
 
 /// One decision the loop's core makes in response to a command or a tick.
@@ -92,6 +95,7 @@ enum Action {
     Cycle { full: bool },
     RefreshEntry(SubscriptionKey),
     SpawnLogin,
+    Drain,
 }
 
 /// The loop's pause gate and login-in-flight guard, decided independent of
@@ -117,6 +121,7 @@ impl LoopState {
     fn on_command(&mut self, cmd: Command) -> Vec<Action> {
         match cmd {
             Command::Subscribe(id) => vec![Action::RefreshEntry(id)],
+            Command::Drain => vec![Action::Drain],
             Command::RequestSync => {
                 self.paused = false;
                 vec![Action::Cycle { full: true }]
@@ -498,6 +503,18 @@ impl Runtime {
         }
     }
 
+    /// Immediately replay every pending outbox command upstream, then
+    /// propagate whatever it touched. The single drain body: runs on the loop
+    /// thread (`Action::Drain`, triggered by a caller-side mutation) so it
+    /// shares the loop's serialization of all base writes.
+    pub fn drain_now(&self) -> Result<Vec<EntityKey>> {
+        let conn = self.connect()?;
+        let transport = self.transports.acquire()?;
+        let touched = crate::sync::drain::drain(&conn, transport.as_ref())?;
+        self.propagate(&touched);
+        Ok(touched)
+    }
+
     /// The login worker's body, run on its own thread. `Success` requires a
     /// fresh identity: a token exchange that succeeds but whose identity
     /// fetch fails is reported as `Error`.
@@ -525,6 +542,17 @@ impl Runtime {
             Action::Cycle { full } => self.run_cycle(full, run),
             Action::RefreshEntry(id) => self.refresh_entry(id),
             Action::SpawnLogin => self.spawn_login(scope),
+            Action::Drain => self.perform_drain(),
+        }
+    }
+
+    /// `Action::Drain`'s body: run the drain, panic-guarded like a sync cycle
+    /// since it shares the same DB/network I/O on the loop thread.
+    fn perform_drain(&self) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.drain_now())) {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "immediate outbox drain failed"),
+            Err(_) => tracing::warn!("immediate outbox drain panicked"),
         }
     }
 
@@ -614,42 +642,38 @@ impl Runtime {
         }
     }
 
-    /// Transactional local enqueue, then propagation of whatever
-    /// `CommentCreateMutation::enqueue` touched (the comment thread only --
-    /// creating a comment does not touch the issues table).
+    /// Every write's shared tail: transactional local enqueue, propagation of
+    /// whatever it touched, then a prompt for the loop to immediately drain
+    /// the outbox rather than waiting for the next sync cycle.
+    fn enqueue_and_propagate<M: Mutate>(&self, vars: M::Variables) -> Result<Vec<EntityKey>> {
+        let conn = self.connect()?;
+        let touched = M::enqueue(&conn, vars)?;
+        self.propagate(&touched);
+        if self.commands_tx.send(Command::Drain).is_err() {
+            tracing::debug!("enqueue_and_propagate: runtime loop is gone");
+        }
+        Ok(touched)
+    }
+
+    /// The comment thread only -- creating a comment does not touch the
+    /// issues table.
     pub fn create_comment(&self, input: &CommentCreateInput) -> Result<()> {
-        let conn = self.connect()?;
-        let touched = CommentCreateMutation::enqueue(
-            &conn,
-            CommentCreateVariables {
-                input: input.clone(),
-            },
-        )?;
-        self.propagate(&touched);
+        self.enqueue_and_propagate::<CommentCreateMutation>(CommentCreateVariables {
+            input: input.clone(),
+        })?;
         Ok(())
     }
 
-    /// Transactional local enqueue, then propagation of whatever
-    /// `IssueUpdateMutation::enqueue` touched.
     pub fn update_issue(&self, vars: IssueUpdateVariables) -> Result<()> {
-        let conn = self.connect()?;
-        let touched = IssueUpdateMutation::enqueue(&conn, vars)?;
-        self.propagate(&touched);
+        self.enqueue_and_propagate::<IssueUpdateMutation>(vars)?;
         Ok(())
     }
 
-    /// Enqueues the optimistic create -- `IssueCreateMutation`'s own local
-    /// effect -- then propagates whatever it touched. Returns the optimistic
-    /// identifier so the caller can seek to it.
+    /// Returns the optimistic identifier so the caller can seek to it.
     pub fn create_issue(&self, input: &IssueCreateInput) -> Result<String> {
-        let conn = self.connect()?;
-        let touched = IssueCreateMutation::enqueue(
-            &conn,
-            IssueCreateVariables {
-                input: input.clone(),
-            },
-        )?;
-        self.propagate(&touched);
+        self.enqueue_and_propagate::<IssueCreateMutation>(IssueCreateVariables {
+            input: input.clone(),
+        })?;
         Ok(db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER.to_string())
     }
 }
@@ -713,6 +737,12 @@ mod tests {
         assert_eq!(state.on_timeout(), vec![Action::Cycle { full: false }]);
         // A new login is accepted again.
         assert_eq!(state.on_command(Command::Login), vec![Action::SpawnLogin]);
+    }
+
+    #[test]
+    fn drain_command_prompts_a_drain_action() {
+        let mut state = LoopState::new();
+        assert_eq!(state.on_command(Command::Drain), vec![Action::Drain]);
     }
 
     #[test]
@@ -1038,5 +1068,141 @@ mod tests {
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
         assert_eq!(sub.take().unwrap().unwrap().user.name, "Ada");
+    }
+
+    // -- drain_now: the immediate write-path flush -----------------------
+
+    /// A single cached issue with its workflow state already known.
+    /// `sample_base_issue`'s state must be locally known (sync owns workflow
+    /// states; issue upserts never write them), so the read model's join
+    /// resolves it.
+    fn db_with_a_todo_issue(id: &str) -> Database {
+        let db = Database::memory().unwrap();
+        let conn = db.connect().unwrap();
+        db::upsert_team_state(
+            &conn,
+            "ENG",
+            &types::WorkflowState {
+                id: "s-todo".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
+        db::upsert_issues(&conn, &[db::outbox::sample_base_issue(id)]).unwrap();
+        db
+    }
+
+    fn update_priority_to_urgent(runtime: &Runtime, id: &str) {
+        runtime
+            .update_issue(IssueUpdateVariables {
+                id: id.to_string(),
+                input: lt_types::inputs::IssueUpdateInput {
+                    priority: Some(1),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn update_issue_sends_a_drain_command() {
+        let (runtime, _rx) = runtime_over(db_with_a_todo_issue("issue-1"));
+        let commands_rx = runtime.take_commands_rx().unwrap();
+
+        update_priority_to_urgent(&runtime, "issue-1");
+
+        assert!(matches!(commands_rx.try_recv(), Ok(Command::Drain)));
+    }
+
+    #[test]
+    fn drain_now_replays_a_pending_update_and_reaches_the_subscription_again() {
+        let fake = FakeTransport::new(vec![
+            json!({ "issueUpdate": { "success": true, "issue": null } }),
+        ]);
+        let (on_event, rx) = on_event_channel();
+        let runtime = Runtime::new(
+            db_with_a_todo_issue("issue-1"),
+            Box::new(FakeSource::new(fake)),
+            on_event,
+        );
+        let (sub, _initial) = runtime.subscribe::<IssuesQuery>(IssuesVariables {
+            filter: None,
+            sort: None,
+            first: None,
+            after: None,
+        });
+
+        update_priority_to_urgent(&runtime, "issue-1");
+        // The optimistic overlay's own propagation, from `update_issue` itself.
+        let first = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(first, RuntimeEvent::Updated(id) if id == sub.key()));
+
+        let touched = runtime.drain_now().unwrap();
+        assert_eq!(touched, vec![EntityKey::Issue]);
+
+        // The ack's own propagation reaches the subscription a second time.
+        let second = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(second, RuntimeEvent::Updated(id) if id == sub.key()));
+
+        let conn = runtime.connect().unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outbox WHERE status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0);
+        let priority_label: String = conn
+            .query_row(
+                "SELECT priority_label FROM issues WHERE id = 'issue-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(priority_label, "Urgent");
+    }
+
+    #[test]
+    fn drain_now_leaves_a_failed_update_pending_and_the_overlay_still_renders() {
+        // No scripted responses: the transport errors, simulating offline.
+        let fake = FakeTransport::new(vec![]);
+        let (on_event, rx) = on_event_channel();
+        let runtime = Runtime::new(
+            db_with_a_todo_issue("issue-1"),
+            Box::new(FakeSource::new(fake)),
+            on_event,
+        );
+        let (sub, _initial) = runtime.subscribe::<IssuesQuery>(IssuesVariables {
+            filter: None,
+            sort: None,
+            first: None,
+            after: None,
+        });
+
+        update_priority_to_urgent(&runtime, "issue-1");
+        // The optimistic overlay's own propagation.
+        rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let touched = runtime.drain_now().unwrap();
+        assert!(touched.is_empty());
+        // The failed drain propagates nothing further.
+        assert!(rx.try_recv().is_err());
+
+        // The read model still carries the overlay's optimistic edit.
+        let page = sub.take().unwrap();
+        assert_eq!(page.nodes[0].priority_label, "Urgent");
+
+        let conn = runtime.connect().unwrap();
+        let (attempts, last_error): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT attempts, last_error FROM outbox WHERE entity_id = 'issue-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 1);
+        assert!(last_error.is_some());
     }
 }
