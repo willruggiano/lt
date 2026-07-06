@@ -1,15 +1,15 @@
 mod auth;
 mod logging;
-mod output;
 mod sync;
 
+use std::io;
 use std::sync::{Arc, mpsc};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "lt", about = "Linear TUI for terminal power users", version)]
+#[command(name = "lt", about, version)]
 struct Cli {
     /// Profile to use: each profile has its own credentials and local
     /// database (one account/workspace per profile). Defaults to $`LT_PROFILE`
@@ -88,19 +88,9 @@ fn main() -> Result<()> {
         .or_else(|| std::env::var("LT_PROFILE").ok().filter(|s| !s.is_empty()));
     lt_config::set_profile(profile)?;
 
-    // Determine whether we are entering TUI mode so we can choose the right
-    // logging subscriber before any other code runs.
-    let is_tui = cli.command.is_none();
-
     // Keep the guard alive for the duration of main() so the background
     // logging thread is not torn down prematurely.
-    let _log_guard = if is_tui {
-        logging::init_tui()?
-    } else {
-        logging::init_cli()?
-    };
-
-    let mut out = output::Output::stdout();
+    let _guard = logging::init(cli.command.is_none());
 
     match cli.command {
         None => run_tui(
@@ -109,11 +99,11 @@ fn main() -> Result<()> {
             lt_runtime::query::SortDirection::Descending,
             50,
         )?,
-        Some(Commands::Auth { command }) => auth::run(&mut out, &command)?,
+        Some(Commands::Auth { command }) => auth::run(&mut io::stdout(), &command)?,
         Some(Commands::Sync { command }) => {
             let runtime = build_runtime(Box::new(|_| {}));
             let cmd = command.unwrap_or(sync::SyncCommands::Delta);
-            sync::run(&mut out, cmd, &runtime)?;
+            sync::run(&mut io::stdout(), cmd, &runtime)?;
         }
     }
     Ok(())

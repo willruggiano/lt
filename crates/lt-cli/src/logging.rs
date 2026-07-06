@@ -1,26 +1,7 @@
 //! Structured logging setup using `tracing` + `tracing-subscriber` + `tracing-appender`.
 //!
-//! Two modes are supported:
-//!
-//! - TUI mode  -- all log output goes to the rotating file log only.
-//!   Nothing is printed to stdout/stderr so the TUI is not corrupted.
-//!
-//! - CLI mode  -- INFO-level messages are also written to stdout so the user can
-//!   see progress.  Everything (DEBUG and above) goes to the file log.
-//!
-//! The log directory is `~/.local/state/lt/logs/`.
-//! Log files are rotated daily by `tracing-appender`.
-//!
-//! The caller must keep the `WorkerGuard` returned by each init function alive
-//! for the duration of the program.  Dropping the guard flushes and closes the
-//! background logging thread.
-//!
-//! ## Log level policy
-//!
-//! External library log events at DEBUG are noisy (e.g. ureq logs raw HTTP
-//! headers with CRLF sequences that produce `^M` in log files).  The default
-//! filter therefore sets DEBUG for the `lt` crate and WARN for everything else.
-//! Pass `RUST_LOG` to override.
+//! The log directory is `$XDG_STATE_DIR/lt/logs/`.
+//! Log files are rotated daily.
 
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime};
@@ -99,63 +80,32 @@ fn file_env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,lt=debug"))
 }
 
-// -- public init functions ---------------------------------------------------
-
-/// Initialise logging for **TUI mode**.
-///
-/// All output goes to the rotating file log; nothing is written to stdout or
-/// stderr so the terminal UI is not corrupted.
-///
-/// Returns a `WorkerGuard` that must be kept alive for the duration of the
-/// program to ensure all buffered log records are flushed.
-pub fn init_tui() -> Result<WorkerGuard> {
+#[must_use = "dropping the guard flushes and closes the background logging thread"]
+pub fn init(stdout: bool) -> Result<WorkerGuard> {
     let dir = lt_config::log_dir()?;
     prune_old_logs(&dir, 7);
     let file_appender = tracing_appender::rolling::daily(&dir, "lt.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
+    let filter = file_env_filter();
     let file_layer = fmt::layer()
         .with_ansi(false)
         .with_writer(StripCrMakeWriter(non_blocking))
-        .with_filter(file_env_filter());
+        .with_filter(filter.clone());
 
-    tracing_subscriber::registry().with(file_layer).init();
+    if stdout {
+        let stdout_layer = fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::io::stdout)
+            .with_filter(filter);
 
-    Ok(guard)
-}
-
-/// Initialise logging for **CLI mode**.
-///
-/// INFO-level (and above) messages are printed to stdout so the user sees
-/// progress feedback.  All messages (DEBUG and above for `lt`, WARN for
-/// libraries) are also written to the rotating file log.
-///
-/// Returns a `WorkerGuard` that must be kept alive for the duration of the
-/// program to ensure all buffered log records are flushed.
-pub fn init_cli() -> Result<WorkerGuard> {
-    let dir = lt_config::log_dir()?;
-    prune_old_logs(&dir, 7);
-    let file_appender = tracing_appender::rolling::daily(&dir, "lt.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-
-    let file_layer = fmt::layer()
-        .with_ansi(false)
-        .with_writer(StripCrMakeWriter(non_blocking))
-        .with_filter(file_env_filter());
-
-    // Stdout layer: INFO and above (unless overridden via RUST_LOG).
-    let stdout_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,lt=info"));
-
-    let stdout_layer = fmt::layer()
-        .with_ansi(false)
-        .with_writer(std::io::stdout)
-        .with_filter(stdout_filter);
-
-    tracing_subscriber::registry()
-        .with(file_layer)
-        .with(stdout_layer)
-        .init();
+        tracing_subscriber::registry()
+            .with(file_layer)
+            .with(stdout_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry().with(file_layer).init();
+    }
 
     Ok(guard)
 }

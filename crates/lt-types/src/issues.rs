@@ -481,6 +481,12 @@ pub struct IssuesVariables {
     pub after: Option<String>,
 }
 
+#[derive(Default, cynic::QueryFragment)]
+pub struct IssueConnection {
+    pub nodes: Vec<Issue>,
+    pub page_info: PageInfo,
+}
+
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query", variables = "IssuesVariables")]
 pub struct IssuesQuery {
@@ -500,12 +506,6 @@ impl GraphqlOperation for IssuesQuery {
     fn extract(self) -> anyhow::Result<Self::Output> {
         Ok(self.issues)
     }
-}
-
-#[derive(Default, cynic::QueryFragment)]
-pub struct IssueConnection {
-    pub nodes: Vec<Issue>,
-    pub page_info: PageInfo,
 }
 
 // ---------------------------------------------------------------------------
@@ -549,22 +549,17 @@ pub struct IssueCreateVariables {
 }
 
 #[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "Mutation", variables = "IssueCreateVariables")]
-pub struct IssueCreateMutation {
-    #[arguments(input: $input)]
-    pub issue_create: IssuePayload,
-}
-
-/// The `IssueUpdate`/`IssueCreate` response envelope, shared by both mutations:
-/// a success flag plus the full server-truth issue (nullable in the schema
-/// even on success). Both mutations select the whole [`Issue`] fragment so the
-/// drainer can reconcile the base from server truth rather than hand-stitching
-/// fields.
-#[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "IssuePayload")]
 pub struct IssuePayload {
     pub success: bool,
     pub issue: Option<Issue>,
+}
+
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "Mutation", variables = "IssueCreateVariables")]
+pub struct IssueCreateMutation {
+    #[arguments(input: $input)]
+    pub issue_create: IssuePayload,
 }
 
 impl GraphqlOperation for IssueCreateMutation {

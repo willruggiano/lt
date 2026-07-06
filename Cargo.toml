@@ -8,6 +8,7 @@ edition = "2024"
 license = "MIT"
 homepage = "https://github.com/willruggiano/lt"
 repository = "https://github.com/willruggiano/lt"
+description = "A local-first Linear TUI for terminal power users"
 
 [workspace.dependencies]
 anyhow = "1"
