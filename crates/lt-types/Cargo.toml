@@ -16,11 +16,6 @@ chrono = { workspace = true, features = ["serde"] }
 [build-dependencies]
 cynic-codegen = "3.13"
 lt-schema-codegen.workspace = true
-prettyplease = "0.2"
-proc-macro2 = "1"
-quote = "1"
-serde.workspace = true
-syn = { version = "2", default-features = false, features = ["full", "parsing"] }
 toml = "1"
 
 [features]
