@@ -48,9 +48,8 @@ rejected; the fragment is what we author, and codegen mechanizes the rest.
    FRAGMENTS  (the curated allowlist, type-safe, whole-schema reach)   ← SOURCE
         │ codegen follows from THESE types
         ├─ GraphqlOperation impl        (name, extract projection)
-        ├─ Read / Upsert / Mutate       (SQL projection over the selected fields)
+        ├─ Query / Mutation             (SQL projection over the selected fields)
         ├─ Operation impl               (ENG-67's execute dispatch)
-        ├─ EntityKey / reads            (invalidation, from the fragment's node set)
         └─ search grammar               (from IssueFilter's fields)
 ```
 
@@ -77,15 +76,13 @@ local-cache behavior (hand-write):
   `extract()` is the projection the fragment already names —
   `Ok(self.teams.nodes)` (`teams.rs:26`), `Ok(self.issues)` (`issues.rs:507`).
   Identical across 14 impls modulo the path.
-- `Read`/`Upsert`: the SELECT projects the fragment's selected columns; the
-  upsert writes the fragment's node types into their tables. The 6
-  reference-entity upserts already share `entity_upsert_sql!`
+- `Query`/`Mutation` (the two seam traits, [[unified-execute-adr.md]] Decision
+  2): the SELECT projects the fragment's selected columns; the write applies the
+  fragment's node types into their tables. The 6 reference-entity upserts
+  already share `entity_upsert_sql!`
   (`crates/lt-storage/src/db/sql.rs:138-147`); the row-mappers are
   macro-factored (`upsert_entities_fn!`, `teams.rs:35-63`). ~70% of the ~43
   registered statements are id-keyed CRUD of this shape.
-- `EntityKey`/`reads`: the entity slices an operation depends on _are_ the node
-  types its fragment selects — [[operation-seam-adr.md]] Decision 1 already
-  noted this is "derivable from the document's fragment set."
 - The `Operation` impl and the outbox replay registry
   ([[unified-execute-adr.md]] Decisions 2, 4).
 - The search grammar, from `IssueFilter`'s fields.
@@ -134,7 +131,7 @@ fragment, not the SDL.
 
 The generators read the hand-written Rust types (via companion derive macros
 alongside cynic's), not the SDL. `#[derive(GraphqlOperation)]`,
-`#[derive(Read)]`, `#[derive(Mutate)]` co-locate the generated impl with the
+`#[derive(Query)]`, `#[derive(Mutation)]` co-locate the generated impl with the
 fragment it derives from, and avoid the `OUT_DIR`/`include!`/brace-escaping
 fragility the search-codegen work documented
 ([[search-codegen-and-filter-expansion-adr.md]]).
@@ -173,8 +170,8 @@ Ordered derive-the-shell → structural → net-new. Each is a future sub-issue.
 
 ```text
   T1 GraphqlOperation derive ─┐
-  T2 Read/Upsert + reads derive ─┼─ derive the shell from the fragment types
-  T3 Mutate + Operation + replay registry ─┘  (needs ENG-67)
+  T2 Query / Mutation derive ─┼─ derive the shell from the fragment types
+  T3 Operation + replay registry ─┘  (needs ENG-67)
   T4 Pipeline unification: fold the two build.rs into lt-schema-codegen
   T5 IssueFilter-directed search grammar + SQL lowering; delete the TOML
   T6 Resolvable ID fields (net-new): id comparators + name→id resolvers
@@ -186,11 +183,11 @@ Ordered derive-the-shell → structural → net-new. Each is a future sub-issue.
   projection path for `extract`. Covers the ~9 simple operations; the bespoke
   `extract`s (`IssueDetailQuery`, `NewIssueQuery`, mutations' success-gating,
   `NotificationsQuery`) opt out and stay hand-written.
-- **T2 — `#[derive(Read)]`/`#[derive(Upsert)]`** for id-keyed reference entities
-  (team, user, project, cycle, label): the SELECT/upsert and the
-  `reads`/`EntityKey` set from the fragment's selected node types. Excludes
-  issues/comments (overlay, replace-set, FTS).
-- **T3 — `#[derive(Mutate)]` + the `Operation` impl + the replay registry**
+- **T2 — `#[derive(Query)]`/`#[derive(Mutation)]`** for id-keyed reference
+  entities (team, user, project, cycle, label): the SELECT and the local write
+  from the fragment's selected node types. Excludes issues/comments (overlay,
+  replace-set, FTS).
+- **T3 — the `Operation` impl + the replay registry**
   ([[unified-execute-adr.md]] Decisions 2, 4). Depends on ENG-67 landing them by
   hand.
 - **T4 — pipeline unification**: one schema-parse + `quote` pipeline in
@@ -250,7 +247,7 @@ Ordered derive-the-shell → structural → net-new. Each is a future sub-issue.
 ## Open questions
 
 1. **Derive reflection limits** (T1–T3, T5): can a companion derive see enough
-   of a fragment's selected fields to emit the SELECT and the `reads` set, or is
+   of a fragment's selected fields to emit the SELECT and the local write, or is
    a small per-operation attribute needed alongside cynic's? Owned by each
    Task's sub-ADR.
 2. **T5 boundary**: how much of the filter→SQL comparator policy is
