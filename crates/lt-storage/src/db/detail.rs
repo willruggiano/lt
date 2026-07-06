@@ -1,4 +1,4 @@
-//! `Read`/`Upsert` for the composed issue-detail operation
+//! `Query`/`Mutation` for the composed issue-detail operation
 //! (`lt_types::detail::IssueDetailQuery`): joins today's
 //! `query_issue_by_id` + `query_comments` + `query_children` for the read
 //! side, and the issue-upsert path plus the comment replace-set for the
@@ -10,13 +10,13 @@ use rusqlite::Connection;
 
 use crate::db::comments::{delete_comments_for_issue, query_comments, upsert_comments};
 use crate::db::issues::{issue_upsert_touched, query_children, query_issue_by_id, upsert_issues};
-use crate::db::ops::{EntityKey, Read, Upsert};
+use crate::db::ops::{EntityKey, Mutation, Query};
 
-impl Read for IssueDetailQuery {
+impl Query for IssueDetailQuery {
     /// `None` when the id is locally absent: the current detail view opens
     /// from a listed (already-cached) issue, so absence means a stale cache
     /// after an upstream delete, not a bug to panic over.
-    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+    fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
         let Some(issue) = query_issue_by_id(conn, &vars.id)? else {
             return Ok(None);
         };
@@ -42,11 +42,11 @@ impl Read for IssueDetailQuery {
     }
 }
 
-impl Upsert for IssueDetailQuery {
+impl Mutation for IssueDetailQuery {
     /// The issue and its children go through the issue upsert path (so
     /// touched mirrors [`crate::db::issues::IssuesQuery`]'s impl); comments
     /// replace the set, same as the per-entity comment upsert did.
-    fn upsert(
+    fn apply(
         conn: &Connection,
         vars: &Self::Variables,
         out: &Self::Output,
@@ -104,7 +104,7 @@ mod tests {
     fn read_is_none_for_a_locally_absent_issue() {
         let conn = test_db();
         assert!(
-            IssueDetailQuery::read(&conn, &vars("missing"))
+            IssueDetailQuery::query(&conn, &vars("missing"))
                 .unwrap()
                 .is_none()
         );
@@ -133,7 +133,7 @@ mod tests {
         )
         .unwrap();
 
-        let data = IssueDetailQuery::read(&conn, &vars("1")).unwrap().unwrap();
+        let data = IssueDetailQuery::query(&conn, &vars("1")).unwrap().unwrap();
         assert_eq!(data.issue.identifier, "ENG-1");
         assert_eq!(data.comments.len(), 1);
         assert_eq!(data.children.len(), 1);
@@ -157,7 +157,7 @@ mod tests {
     fn upsert_of_none_is_a_noop() {
         let conn = test_db();
         assert!(
-            IssueDetailQuery::upsert(&conn, &vars("1"), &None)
+            IssueDetailQuery::apply(&conn, &vars("1"), &None)
                 .unwrap()
                 .is_empty()
         );
@@ -179,7 +179,7 @@ mod tests {
             children: vec![sample_base_issue("2")],
             comments_cursor: None,
         };
-        let touched = IssueDetailQuery::upsert(&conn, &vars("1"), &Some(data)).unwrap();
+        let touched = IssueDetailQuery::apply(&conn, &vars("1"), &Some(data)).unwrap();
         assert!(touched.contains(&EntityKey::Issue));
         assert!(touched.contains(&EntityKey::Comment {
             issue_id: "1".to_string()

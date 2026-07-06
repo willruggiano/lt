@@ -22,15 +22,19 @@ pub struct TeamMembersQuery {
 
 impl GraphqlOperation for TeamMembersQuery {
     type Variables = TeamVariables;
-    type Output = Vec<User>;
+    type Output = UserConnection;
     const NAME: &'static str = "teamMembers";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(self.team.members.nodes)
+impl TryFrom<TeamMembersQuery> for UserConnection {
+    type Error = anyhow::Error;
+
+    fn try_from(op: TeamMembersQuery) -> anyhow::Result<Self> {
+        Ok(op.team.members)
     }
 }
 
@@ -40,7 +44,7 @@ pub struct TeamWithMembers {
     pub members: UserConnection,
 }
 
-#[derive(cynic::QueryFragment)]
+#[derive(Default, cynic::QueryFragment)]
 pub struct UserConnection {
     pub nodes: Vec<User>,
 }
@@ -60,19 +64,23 @@ mod tests {
     }
 
     #[test]
-    fn extract_returns_member_nodes() {
+    fn recomposes_into_the_member_connection() {
         let data = serde_json::json!({
             "team": { "members": { "nodes": [
                 { "id": "u1", "name": "Ada" },
                 { "id": "u2", "name": "Grace" }
             ] } }
         });
-        let members = serde_json::from_value::<TeamMembersQuery>(data)
+        let members: UserConnection = serde_json::from_value::<TeamMembersQuery>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert_eq!(
-            members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            members
+                .nodes
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
             ["Ada", "Grace"]
         );
     }

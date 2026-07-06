@@ -61,8 +61,8 @@ impl From<lt_types::types::User> for PopupItem {
 /// read different operations, so the slot is an enum over them rather than
 /// one generic field. `None` for the static priority popup.
 pub(crate) enum PopupSub {
-    States(Subscription<Vec<lt_types::types::WorkflowState>>),
-    Members(Subscription<Vec<lt_types::types::User>>),
+    States(Subscription<lt_types::states::WorkflowStateConnection>),
+    Members(Subscription<lt_types::members::UserConnection>),
 }
 
 /// State/priority/assignee picker: the popup's items plus the target
@@ -204,7 +204,7 @@ impl SearchOverlay {
 
     /// Run the structured search query and refresh results, capped to
     /// `viewport_rows` so the overlay never grows taller than the list. A
-    /// one-shot `load` over the runtime -- the search overlay's debounced
+    /// one-shot `execute` over the runtime -- the search overlay's debounced
     /// preview never registers a subscription.
     pub fn run_search(&mut self, runtime: &lt_runtime::Runtime, viewport_rows: u16) {
         self.fts_unavailable = false;
@@ -235,7 +235,7 @@ impl SearchOverlay {
             first: i32::try_from(limit).ok(),
             after: None,
         };
-        match runtime.load::<IssuesQuery>(&vars) {
+        match runtime.execute::<IssuesQuery>(vars) {
             Ok(page) => {
                 self.results = page.nodes;
                 if self.results.is_empty() {
@@ -298,7 +298,7 @@ impl super::App {
             .subscribe::<TeamStatesQuery>(StatesTeamVariables {
                 team_id: team_id.clone(),
             });
-        let items: Vec<PopupItem> = states.into_iter().map(PopupItem::from).collect();
+        let items: Vec<PopupItem> = states.nodes.into_iter().map(PopupItem::from).collect();
         let selected = items
             .iter()
             .position(|item| item.label == current_state_name)
@@ -345,7 +345,7 @@ impl super::App {
             .subscribe::<TeamMembersQuery>(MembersTeamVariables {
                 team_id: team_id.clone(),
             });
-        let items = assignee_popup_items(members);
+        let items = assignee_popup_items(members.nodes);
         let selected = current_assignee
             .and_then(|a| {
                 items
@@ -374,7 +374,7 @@ impl PopupView {
         match &self.sub {
             Some(PopupSub::States(sub)) if sub.key() == key => {
                 if let Some(states) = sub.take() {
-                    self.items = states.into_iter().map(PopupItem::from).collect();
+                    self.items = states.nodes.into_iter().map(PopupItem::from).collect();
                     self.selected = self
                         .items
                         .iter()
@@ -384,7 +384,7 @@ impl PopupView {
             }
             Some(PopupSub::Members(sub)) if sub.key() == key => {
                 if let Some(members) = sub.take() {
-                    self.items = assignee_popup_items(members);
+                    self.items = assignee_popup_items(members.nodes);
                     self.selected = self
                         .items
                         .iter()

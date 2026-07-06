@@ -23,15 +23,19 @@ pub struct WorkflowStatesQuery {
 
 impl GraphqlOperation for WorkflowStatesQuery {
     type Variables = TeamVariables;
-    type Output = Vec<WorkflowState>;
+    type Output = WorkflowStateConnection;
     const NAME: &'static str = "workflowStates";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(self.team.states.nodes)
+impl TryFrom<WorkflowStatesQuery> for WorkflowStateConnection {
+    type Error = anyhow::Error;
+
+    fn try_from(op: WorkflowStatesQuery) -> anyhow::Result<Self> {
+        Ok(op.team.states)
     }
 }
 
@@ -41,7 +45,7 @@ pub struct TeamWithStates {
     pub states: WorkflowStateConnection,
 }
 
-#[derive(cynic::QueryFragment)]
+#[derive(Default, cynic::QueryFragment)]
 pub struct WorkflowStateConnection {
     pub nodes: Vec<WorkflowState>,
 }
@@ -65,15 +69,19 @@ pub struct TeamStatesQuery {
 
 impl GraphqlOperation for TeamStatesQuery {
     type Variables = TeamVariables;
-    type Output = Vec<WorkflowState>;
+    type Output = WorkflowStateConnection;
     const NAME: &'static str = "teamStates";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(self.team.states.nodes)
+impl TryFrom<TeamStatesQuery> for WorkflowStateConnection {
+    type Error = anyhow::Error;
+
+    fn try_from(op: TeamStatesQuery) -> anyhow::Result<Self> {
+        Ok(op.team.states)
     }
 }
 
@@ -104,9 +112,13 @@ impl GraphqlOperation for AllWorkflowStatesQuery {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(self.workflow_states)
+impl TryFrom<AllWorkflowStatesQuery> for WorkflowStateWithTeamConnection {
+    type Error = anyhow::Error;
+
+    fn try_from(op: AllWorkflowStatesQuery) -> anyhow::Result<Self> {
+        Ok(op.workflow_states)
     }
 }
 
@@ -149,19 +161,23 @@ mod tests {
     }
 
     #[test]
-    fn extract_returns_state_nodes() {
+    fn recomposes_into_the_state_connection() {
         let data = serde_json::json!({
             "team": { "states": { "nodes": [
                 { "id": "s1", "name": "Todo", "position": 1.0 },
                 { "id": "s2", "name": "Done", "position": 2.0 }
             ] } }
         });
-        let states = serde_json::from_value::<WorkflowStatesQuery>(data)
+        let states: WorkflowStateConnection = serde_json::from_value::<WorkflowStatesQuery>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert_eq!(
-            states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            states
+                .nodes
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
             ["Todo", "Done"]
         );
     }
@@ -177,19 +193,20 @@ mod tests {
     }
 
     #[test]
-    fn team_states_query_extract_returns_state_nodes_with_position() {
+    fn team_states_query_recomposes_state_nodes_with_position() {
         let data = serde_json::json!({
             "team": { "states": { "nodes": [
                 { "id": "s1", "name": "Todo", "position": 1.0 },
                 { "id": "s2", "name": "Done", "position": 2.5 }
             ] } }
         });
-        let states = serde_json::from_value::<TeamStatesQuery>(data)
+        let states: WorkflowStateConnection = serde_json::from_value::<TeamStatesQuery>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert_eq!(
             states
+                .nodes
                 .iter()
                 .map(|s| (s.name.as_str(), s.position))
                 .collect::<Vec<_>>(),
@@ -211,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn all_workflow_states_query_extract_returns_nodes_and_page_info() {
+    fn all_workflow_states_query_recomposes_nodes_and_page_info() {
         let data = serde_json::json!({
             "workflowStates": {
                 "nodes": [
@@ -221,10 +238,11 @@ mod tests {
                 "pageInfo": { "hasNextPage": true, "endCursor": "cur" }
             }
         });
-        let page = serde_json::from_value::<AllWorkflowStatesQuery>(data)
-            .unwrap()
-            .extract()
-            .unwrap();
+        let page: WorkflowStateWithTeamConnection =
+            serde_json::from_value::<AllWorkflowStatesQuery>(data)
+                .unwrap()
+                .try_into()
+                .unwrap();
         assert_eq!(
             page.nodes
                 .iter()

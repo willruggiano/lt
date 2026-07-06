@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use lt_storage::db;
-use lt_storage::db::{Connection, Database, EntityKey, Mutate, Read, Upsert};
+use lt_storage::db::{Connection, Database, EntityKey, Mutation, Query};
 use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
 use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
 use lt_types::issues::{
@@ -22,7 +22,7 @@ use lt_upstream::auth::login_non_interactive;
 use lt_upstream::auth::refresh::load_or_refresh_token;
 use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
 
-use crate::ops::Refresh;
+use crate::ops::{Operation, Refresh};
 use crate::subscription::{Subscription, SubscriptionKey};
 use crate::sync::service::{LoginEvent, OnEvent, RuntimeEvent, SyncEvent};
 
@@ -285,7 +285,7 @@ impl Runtime {
     }
 
     /// A fresh connection to the injected database.
-    fn connect(&self) -> Result<Connection> {
+    pub(crate) fn connect(&self) -> Result<Connection> {
         self.db
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -294,7 +294,7 @@ impl Runtime {
 
     /// Best-effort viewer identity via the injected transport source, for the
     /// login worker's direct report (`LoginEvent::Success`, not a cache
-    /// read). Ordinary sync cycles persist the viewer through the `Upsert`
+    /// read). Ordinary sync cycles persist the viewer through the `Mutation`
     /// seam instead (`sync::persist_viewer`); the header subscribes to
     /// `ViewerQuery` and picks that up through propagation.
     fn viewer_identity(&self) -> Option<viewer::Viewer> {
@@ -333,7 +333,7 @@ impl Runtime {
     /// `reads` extend beyond the delta cycle's baseline coverage.
     pub fn subscribe<Op>(&self, vars: Op::Variables) -> (Subscription<Op::Output>, Op::Output)
     where
-        Op: Read + Upsert + Refresh + 'static,
+        Op: Query + Mutation + Refresh + 'static,
         Op::Variables: Clone + Send + Sync + 'static,
         Op::Output: Default + Send + 'static,
     {
@@ -346,7 +346,7 @@ impl Runtime {
         let vars_for_reread = vars.clone();
         let reread: RereadFn =
             Arc::new(
-                move |conn: &Connection| match Op::read(conn, &vars_for_reread) {
+                move |conn: &Connection| match Op::query(conn, &vars_for_reread) {
                     Ok(out) => {
                         *slot_for_reread
                             .lock()
@@ -386,7 +386,7 @@ impl Runtime {
 
         let initial = self
             .connect()
-            .and_then(|conn| Op::read(&conn, &vars))
+            .and_then(|conn| Op::query(&conn, &vars))
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "subscription initial read failed");
                 Op::Output::default()
@@ -410,11 +410,12 @@ impl Runtime {
         (sub, initial)
     }
 
-    /// One-shot local read over a fresh connection: no registration, no live
-    /// updates.
-    pub fn load<Op: Read>(&self, vars: &Op::Variables) -> Result<Op::Output> {
-        let conn = self.connect()?;
-        Op::read(&conn, vars)
+    /// The entire data surface (docs/design/unified-execute-adr.md, "Decision
+    /// 1"): a query op reads the cache projection, one-shot, no registration,
+    /// no live updates -- the search overlay's debounced preview and the
+    /// CLI's cached reads share this path.
+    pub fn execute<Op: Operation>(&self, vars: Op::Variables) -> Result<Op::Output> {
+        Op::execute(self, vars)
     }
 
     /// Re-run every live entry whose `reads` intersects `touched`
@@ -739,7 +740,7 @@ impl Runtime {
     /// Every write's shared tail: transactional local enqueue, propagation of
     /// whatever it touched, then a prompt for the loop to immediately drain
     /// the outbox rather than waiting for the next sync cycle.
-    fn enqueue_and_propagate<M: Mutate>(&self, vars: M::Variables) -> Result<Vec<EntityKey>> {
+    fn enqueue_and_propagate<M: Mutation>(&self, vars: M::Variables) -> Result<Vec<EntityKey>> {
         let conn = self.connect()?;
         let touched = M::enqueue(&conn, vars)?;
         self.propagate(&touched);
@@ -935,8 +936,8 @@ mod tests {
 
         let (_sub, initial) = runtime.subscribe::<TeamsQuery>(());
 
-        assert_eq!(initial.len(), 1);
-        assert_eq!(initial[0].name, "Eng");
+        assert_eq!(initial.nodes.len(), 1);
+        assert_eq!(initial.nodes[0].name, "Eng");
     }
 
     #[test]
@@ -1146,7 +1147,7 @@ mod tests {
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
         let states = sub.take().unwrap();
-        assert_eq!(states[0].name, "Todo");
+        assert_eq!(states.nodes[0].name, "Todo");
     }
 
     #[test]
@@ -1183,7 +1184,7 @@ mod tests {
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
-        assert_eq!(sub.take().unwrap()[0].name, "Ada");
+        assert_eq!(sub.take().unwrap().nodes[0].name, "Ada");
     }
 
     #[test]

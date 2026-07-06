@@ -25,7 +25,7 @@ pub enum SyncEvent {
     /// Sync succeeded, stamped with `last_synced_at` (the runtime's own
     /// `sync_meta` read), or `None` if that read finds no prior sync. The
     /// viewer identity is not carried here: a sync cycle persists it through
-    /// the same `Upsert` seam as everything else it touches, so a live
+    /// the same `Mutation` seam as everything else it touches, so a live
     /// `ViewerQuery` subscription picks it up through propagation instead.
     Done(Option<chrono::DateTime<chrono::Utc>>),
     Error(String),

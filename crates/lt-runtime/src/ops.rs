@@ -1,9 +1,11 @@
 //! The generic operation drivers: the local read and the upstream refresh
-//! shared by every [`Read`]/[`Upsert`] operation
-//! (docs/design/operation-seam-adr.md, "Decision 1").
+//! shared by every [`Query`]/[`Mutation`] operation
+//! (docs/design/operation-seam-adr.md, "Decision 1"), and the [`Operation`]
+//! dispatch trait behind [`crate::Runtime::execute`]
+//! (docs/design/unified-execute-adr.md, "Decision 2").
 
 use anyhow::Result;
-use lt_storage::db::{Connection, EntityKey, Read, Upsert};
+use lt_storage::db::{Connection, EntityKey, Mutation, Query};
 use lt_types::comments::{CommentsQuery, CommentsVariables};
 use lt_types::detail::IssueDetailQuery;
 use lt_types::issues::IssuesQuery;
@@ -14,14 +16,16 @@ use lt_types::teams::TeamsQuery;
 use lt_types::viewer::ViewerQuery;
 use lt_upstream::client::{GraphqlTransport, execute};
 
-/// One-shot local read: `Op::read` over `conn`. The search overlay's
+use crate::runtime::Runtime;
+
+/// One-shot local read: `Op::query` over `conn`. The search overlay's
 /// debounced preview and the CLI's cached reads share this path.
-pub fn load<Op: Read>(conn: &Connection, vars: &Op::Variables) -> Result<Op::Output> {
-    Op::read(conn, vars)
+pub fn load<Op: Query>(conn: &Connection, vars: &Op::Variables) -> Result<Op::Output> {
+    Op::query(conn, vars)
 }
 
-/// Upstream refresh: fetch `Op` through `transport`, then upsert its output
-/// into the cache, returning the entity keys the upsert touched
+/// Upstream refresh: fetch `Op` through `transport`, then apply its output
+/// into the cache, returning the entity keys the write touched
 /// (docs/design/operation-seam-adr.md, "Decision 5").
 pub fn refresh<Op>(
     conn: &Connection,
@@ -29,23 +33,24 @@ pub fn refresh<Op>(
     vars: Op::Variables,
 ) -> Result<Vec<EntityKey>>
 where
-    Op: Upsert,
+    Op: Mutation,
     Op::Variables: Clone,
+    Op::Output: TryFrom<Op, Error = anyhow::Error>,
 {
     let out = execute::<Op>(transport, vars.clone())?;
-    Op::upsert(conn, &vars, &out)
+    Op::apply(conn, &vars, &out)
 }
 
 /// How a live subscription's background freshness refresh
 /// (docs/design/operation-seam-adr.md, "Decision 6") brings its operation up
-/// to date from upstream. Distinct from [`Upsert`], which only knows how to
+/// to date from upstream. Distinct from [`Mutation`], which only knows how to
 /// write an already-fetched result into the cache: fetching needs
 /// `lt-upstream`, which `lt-storage` does not depend on, so this lives here
 /// rather than on the storage-side trait. Every operation [`crate::Runtime`]
 /// can `subscribe` to implements it: the generic single-page [`refresh`]
 /// driver for most operations, [`IssueDetailQuery`]'s own impl (below) for its
 /// fetch-to-exhaustion comment pagination (ADR "Decision 3").
-pub trait Refresh: Upsert {
+pub trait Refresh: Mutation {
     fn refresh(
         conn: &Connection,
         transport: &dyn GraphqlTransport,
@@ -95,14 +100,14 @@ impl Refresh for TeamMembersQuery {
 
 impl Refresh for IssueDetailQuery {
     /// One wire request for the issue plus its first page of
-    /// comments/children, upserted through [`IssueDetailQuery`]'s own
+    /// comments/children, applied through [`IssueDetailQuery`]'s own
     /// replace-set comment semantics; then [`CommentsQuery`] pages the
     /// remainder of the comment thread to exhaustion -- multiple wire
     /// requests, one refresh call (docs/design/operation-seam-adr.md,
     /// "Decision 3"). Each later page appends rather than replacing
-    /// ([`CommentsQuery`]'s own `Upsert`): a delete-first per page would wipe
-    /// the previous page's inserts. Children stay a single first-page fetch
-    /// (capped at 250 by the document itself).
+    /// ([`CommentsQuery`]'s own `Mutation::apply`): a delete-first per page
+    /// would wipe the previous page's inserts. Children stay a single
+    /// first-page fetch (capped at 250 by the document itself).
     fn refresh(
         conn: &Connection,
         transport: &dyn GraphqlTransport,
@@ -110,7 +115,7 @@ impl Refresh for IssueDetailQuery {
     ) -> Result<Vec<EntityKey>> {
         let out = execute::<IssueDetailQuery>(transport, vars.clone())?;
         let mut cursor = out.as_ref().and_then(|data| data.comments_cursor.clone());
-        let mut touched = IssueDetailQuery::upsert(conn, &vars, &out)?;
+        let mut touched = IssueDetailQuery::apply(conn, &vars, &out)?;
 
         while let Some(after) = cursor {
             let page_vars = CommentsVariables {
@@ -123,7 +128,7 @@ impl Refresh for IssueDetailQuery {
                 .has_next_page
                 .then_some(page.page_info.end_cursor.clone())
                 .flatten();
-            touched.extend(CommentsQuery::upsert(conn, &page_vars, &page)?);
+            touched.extend(CommentsQuery::apply(conn, &page_vars, &page)?);
         }
 
         Ok(touched)
@@ -147,6 +152,63 @@ impl Refresh for ViewerQuery {
         vars: Self::Variables,
     ) -> Result<Vec<EntityKey>> {
         refresh::<ViewerQuery>(conn, transport, vars)
+    }
+}
+
+/// [`Runtime::execute`]'s dispatch, by operation kind
+/// (docs/design/unified-execute-adr.md, "Decision 2"): a query op reads the
+/// cache. `Query` and `Mutation` are disjoint traits, so this is hand-written
+/// per operation rather than a blanket impl -- three lines choosing the seam,
+/// an ENG-16 codegen target.
+pub trait Operation: lt_types::graphql::GraphqlOperation {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output>;
+}
+
+/// Shared body for every query-kind [`Operation`] impl: a cache-first read
+/// over a fresh connection.
+fn query_execute<Op: Query>(runtime: &Runtime, vars: &Op::Variables) -> Result<Op::Output> {
+    Op::query(&runtime.connect()?, vars)
+}
+
+impl Operation for IssuesQuery {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        query_execute::<Self>(runtime, &vars)
+    }
+}
+
+impl Operation for TeamsQuery {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        query_execute::<Self>(runtime, &vars)
+    }
+}
+
+impl Operation for TeamStatesQuery {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        query_execute::<Self>(runtime, &vars)
+    }
+}
+
+impl Operation for TeamMembersQuery {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        query_execute::<Self>(runtime, &vars)
+    }
+}
+
+impl Operation for NewIssueQuery {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        query_execute::<Self>(runtime, &vars)
+    }
+}
+
+impl Operation for ViewerQuery {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        query_execute::<Self>(runtime, &vars)
+    }
+}
+
+impl Operation for IssueDetailQuery {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        query_execute::<Self>(runtime, &vars)
     }
 }
 

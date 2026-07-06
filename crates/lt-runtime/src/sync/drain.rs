@@ -8,7 +8,7 @@
 
 use anyhow::{Result, bail};
 use lt_storage::db::outbox::{self, PendingOp};
-use lt_storage::db::{AckContext, EntityKey, Mutate};
+use lt_storage::db::{AckContext, EntityKey, Mutation};
 use lt_types::comments::CommentCreateMutation;
 use lt_types::graphql::GraphqlOperation;
 use lt_types::issues::{IssueCreateMutation, IssueUpdateMutation};
@@ -46,7 +46,7 @@ fn replay(
 }
 
 /// Replay one operation: decode its stored variables, execute the mutation on
-/// the wire, then let the operation's own [`Mutate::ack`] reconcile the base
+/// the wire, then let the operation's own [`Mutation::ack`] reconcile the base
 /// and retire the command.
 fn replay_op<M>(
     conn: &Connection,
@@ -54,8 +54,9 @@ fn replay_op<M>(
     op: &PendingOp,
 ) -> Result<Vec<EntityKey>>
 where
-    M: Mutate,
+    M: Mutation,
     M::Variables: DeserializeOwned + Clone,
+    M::Output: TryFrom<M, Error = anyhow::Error>,
 {
     let vars: M::Variables = serde_json::from_str(&op.variables)?;
     let out = execute::<M>(transport, vars.clone())?;

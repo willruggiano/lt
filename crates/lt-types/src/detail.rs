@@ -64,17 +64,21 @@ impl GraphqlOperation for IssueDetailQuery {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        let page_info = self.issue.comments.page_info;
+impl TryFrom<IssueDetailQuery> for Option<IssueDetailData> {
+    type Error = anyhow::Error;
+
+    fn try_from(op: IssueDetailQuery) -> anyhow::Result<Self> {
+        let page_info = op.issue.comments.page_info;
         let comments_cursor = page_info
             .has_next_page
             .then_some(page_info.end_cursor)
             .flatten();
         Ok(Some(IssueDetailData {
-            issue: self.issue.base,
-            comments: self.issue.comments.nodes,
-            children: self.issue.children.nodes,
+            issue: op.issue.base,
+            comments: op.issue.comments.nodes,
+            children: op.issue.children.nodes,
             comments_cursor,
         }))
     }
@@ -94,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_maps_issue_comments_and_children() {
+    fn recompose_maps_issue_comments_and_children() {
         let data = serde_json::json!({
             "issue": {
                 "id": "1", "identifier": "ENG-1", "title": "t",
@@ -121,11 +125,11 @@ mod tests {
                 }
             }
         });
-        let out = serde_json::from_value::<IssueDetailQuery>(data)
+        let out: Option<IssueDetailData> = serde_json::from_value::<IssueDetailQuery>(data)
             .unwrap()
-            .extract()
-            .unwrap()
+            .try_into()
             .unwrap();
+        let out = out.unwrap();
         assert_eq!(out.issue.identifier, "ENG-1");
         assert_eq!(out.comments.len(), 1);
         assert_eq!(out.comments[0].body, "hi");
@@ -153,26 +157,26 @@ mod tests {
     }
 
     #[test]
-    fn extract_carries_the_comment_cursor_when_more_pages_remain() {
+    fn recompose_carries_the_comment_cursor_when_more_pages_remain() {
         let data = response_with_comment_page(true, Some("cur"));
-        let out = serde_json::from_value::<IssueDetailQuery>(data)
+        let out: Option<IssueDetailData> = serde_json::from_value::<IssueDetailQuery>(data)
             .unwrap()
-            .extract()
-            .unwrap()
+            .try_into()
             .unwrap();
+        let out = out.unwrap();
         assert_eq!(out.comments_cursor.as_deref(), Some("cur"));
     }
 
     #[test]
-    fn extract_has_no_cursor_when_the_next_page_has_no_cursor() {
+    fn recompose_has_no_cursor_when_the_next_page_has_no_cursor() {
         // Defensive: `hasNextPage: true` with a null cursor cannot be paged,
         // so it is treated the same as no next page.
         let data = response_with_comment_page(true, None);
-        let out = serde_json::from_value::<IssueDetailQuery>(data)
+        let out: Option<IssueDetailData> = serde_json::from_value::<IssueDetailQuery>(data)
             .unwrap()
-            .extract()
-            .unwrap()
+            .try_into()
             .unwrap();
+        let out = out.unwrap();
         assert!(out.comments_cursor.is_none());
     }
 }

@@ -502,9 +502,13 @@ impl GraphqlOperation for IssuesQuery {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(self.issues)
+impl TryFrom<IssuesQuery> for IssueConnection {
+    type Error = anyhow::Error;
+
+    fn try_from(op: IssuesQuery) -> anyhow::Result<Self> {
+        Ok(op.issues)
     }
 }
 
@@ -533,12 +537,16 @@ impl GraphqlOperation for IssueUpdateMutation {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
+impl TryFrom<IssueUpdateMutation> for Option<Issue> {
+    type Error = anyhow::Error;
+
+    fn try_from(op: IssueUpdateMutation) -> anyhow::Result<Self> {
         extract_on_success(
-            Self::NAME,
-            self.issue_update.success,
-            self.issue_update.issue,
+            IssueUpdateMutation::NAME,
+            op.issue_update.success,
+            op.issue_update.issue,
         )
     }
 }
@@ -570,10 +578,14 @@ impl GraphqlOperation for IssueCreateMutation {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        ensure_success(Self::NAME, self.issue_create.success)?;
-        self.issue_create
+impl TryFrom<IssueCreateMutation> for Issue {
+    type Error = anyhow::Error;
+
+    fn try_from(op: IssueCreateMutation) -> anyhow::Result<Self> {
+        ensure_success(IssueCreateMutation::NAME, op.issue_create.success)?;
+        op.issue_create
             .issue
             .ok_or_else(|| anyhow::anyhow!("issueCreate returned no entity"))
     }
@@ -819,16 +831,16 @@ mod tests {
     }
 
     #[test]
-    fn issues_query_extract_maps_page() {
+    fn issues_query_recomposes_into_the_connection() {
         let data = serde_json::json!({
             "issues": {
                 "nodes": [sample_issue_node("1")],
                 "pageInfo": { "hasNextPage": true, "endCursor": "50" }
             }
         });
-        let page = serde_json::from_value::<IssuesQuery>(data)
+        let page: IssueConnection = serde_json::from_value::<IssuesQuery>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert_eq!(page.nodes.len(), 1);
         assert!(page.page_info.has_next_page);
@@ -836,25 +848,24 @@ mod tests {
     }
 
     #[test]
-    fn issue_update_extract_tolerates_absent_issue() {
+    fn issue_update_recompose_tolerates_absent_issue() {
         let data = serde_json::json!({
             "issueUpdate": { "success": true, "issue": null }
         });
-        let issue = serde_json::from_value::<IssueUpdateMutation>(data)
+        let issue: Option<Issue> = serde_json::from_value::<IssueUpdateMutation>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert!(issue.is_none());
     }
 
     #[test]
-    fn issue_update_extract_rejects_success_false() {
+    fn issue_update_recompose_rejects_success_false() {
         let data = serde_json::json!({
             "issueUpdate": { "success": false, "issue": null }
         });
-        let Err(err) = serde_json::from_value::<IssueUpdateMutation>(data)
-            .unwrap()
-            .extract()
+        let Err(err) =
+            Option::<Issue>::try_from(serde_json::from_value::<IssueUpdateMutation>(data).unwrap())
         else {
             panic!("expected a success=false error");
         };
@@ -862,25 +873,24 @@ mod tests {
     }
 
     #[test]
-    fn issue_create_extract_returns_entity() {
+    fn issue_create_recompose_returns_entity() {
         let data = serde_json::json!({
             "issueCreate": { "success": true, "issue": sample_issue_node("1") }
         });
-        let issue = serde_json::from_value::<IssueCreateMutation>(data)
+        let issue: Issue = serde_json::from_value::<IssueCreateMutation>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert_eq!(issue.identifier, "ENG-1");
     }
 
     #[test]
-    fn issue_create_extract_rejects_absent_issue_on_success() {
+    fn issue_create_recompose_rejects_absent_issue_on_success() {
         let data = serde_json::json!({
             "issueCreate": { "success": true, "issue": null }
         });
-        let Err(err) = serde_json::from_value::<IssueCreateMutation>(data)
-            .unwrap()
-            .extract()
+        let Err(err) =
+            Issue::try_from(serde_json::from_value::<IssueCreateMutation>(data).unwrap())
         else {
             panic!("expected a missing-entity error");
         };

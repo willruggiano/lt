@@ -7,7 +7,7 @@ pub mod service;
 use anyhow::Result;
 use chrono::Utc;
 use lt_storage::db;
-use lt_storage::db::{EntityKey, Upsert};
+use lt_storage::db::{EntityKey, Mutation};
 use lt_types::issues::{IssuesQuery, IssuesVariables};
 use lt_types::states::{AllWorkflowStatesQuery, AllWorkflowStatesVariables};
 use lt_types::teams::TeamsQuery;
@@ -16,7 +16,7 @@ use lt_upstream::client::{GraphqlTransport, execute};
 
 /// Persist the authenticated viewer's identity into `sync_meta` so cached reads
 /// can resolve `me` without a network round-trip. Goes through the same
-/// `Upsert` seam every other operation does, so its touched `Viewer` key
+/// `Mutation` seam every other operation does, so its touched `Viewer` key
 /// folds into the cycle's own propagation instead of being a side effect
 /// nothing downstream hears about.
 fn persist_viewer(
@@ -27,7 +27,7 @@ fn persist_viewer(
 }
 
 /// Paginate the org-wide `AllWorkflowStatesQuery` to exhaustion, upserting
-/// each page as it arrives via its `Upsert` impl.
+/// each page as it arrives via its `Mutation` impl.
 fn sync_workflow_states(
     conn: &rusqlite::Connection,
     transport: &dyn GraphqlTransport,
@@ -40,7 +40,7 @@ fn sync_workflow_states(
             after: cursor.take(),
         };
         let page = execute::<AllWorkflowStatesQuery>(transport, vars.clone())?;
-        touched.extend(AllWorkflowStatesQuery::upsert(conn, &vars, &page)?);
+        touched.extend(AllWorkflowStatesQuery::apply(conn, &vars, &page)?);
 
         if !page.page_info.has_next_page {
             break;
@@ -67,7 +67,7 @@ fn sync_reference_data(
 }
 
 /// Paginate an `IssuesQuery` refresh to exhaustion, upserting each page as it
-/// arrives via [`IssuesQuery`]'s `Upsert` impl, then record the current UTC
+/// arrives via [`IssuesQuery`]'s `Mutation` impl, then record the current UTC
 /// time as `last_synced_at`. Returns the deduplicated union of every page's
 /// touched entity keys (docs/design/operation-seam-adr.md, "Decision 5"), so
 /// the caller can propagate them to live subscriptions.
@@ -87,7 +87,7 @@ where
     loop {
         let vars = make_vars(cursor.as_deref());
         let page = execute::<IssuesQuery>(transport, vars.clone())?;
-        touched.extend(IssuesQuery::upsert(conn, &vars, &page)?);
+        touched.extend(IssuesQuery::apply(conn, &vars, &page)?);
 
         if !page.page_info.has_next_page {
             break;

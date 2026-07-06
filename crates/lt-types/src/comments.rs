@@ -34,9 +34,13 @@ impl GraphqlOperation for CommentsQuery {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(self.issue.comments)
+impl TryFrom<CommentsQuery> for CommentConnection {
+    type Error = anyhow::Error;
+
+    fn try_from(op: CommentsQuery) -> anyhow::Result<Self> {
+        Ok(op.issue.comments)
     }
 }
 
@@ -106,12 +110,16 @@ impl GraphqlOperation for CommentCreateMutation {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
+impl TryFrom<CommentCreateMutation> for Comment {
+    type Error = anyhow::Error;
+
+    fn try_from(op: CommentCreateMutation) -> anyhow::Result<Self> {
         extract_on_success(
-            Self::NAME,
-            self.comment_create.success,
-            self.comment_create.comment,
+            CommentCreateMutation::NAME,
+            op.comment_create.success,
+            op.comment_create.comment,
         )
     }
 }
@@ -146,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn comments_query_extract_maps_page() {
+    fn comments_query_recomposes_into_the_connection() {
         let data = serde_json::json!({ "issue": { "comments": {
             "nodes": [{
                 "id": "c1", "body": "hi",
@@ -156,9 +164,9 @@ mod tests {
             }],
             "pageInfo": { "hasNextPage": true, "endCursor": "cur" }
         }}});
-        let page = serde_json::from_value::<CommentsQuery>(data)
+        let page: CommentConnection = serde_json::from_value::<CommentsQuery>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert_eq!(page.nodes.len(), 1);
         assert!(page.page_info.has_next_page);
@@ -166,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn comment_create_extract_rejects_success_false() {
+    fn comment_create_recompose_rejects_success_false() {
         let data = serde_json::json!({
             "commentCreate": { "success": false, "comment": {
                 "id": "c1", "body": "hi",
@@ -174,9 +182,7 @@ mod tests {
                 "user": null, "issueId": "i1"
             }}
         });
-        let err = serde_json::from_value::<CommentCreateMutation>(data)
-            .unwrap()
-            .extract()
+        let err = Comment::try_from(serde_json::from_value::<CommentCreateMutation>(data).unwrap())
             .unwrap_err();
         assert!(err.to_string().contains("commentCreate"));
     }

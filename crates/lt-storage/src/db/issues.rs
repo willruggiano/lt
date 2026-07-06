@@ -7,7 +7,7 @@ use lt_types::scalars::Priority;
 use lt_types::types;
 use rusqlite::{Connection, params};
 
-use crate::db::ops::{EntityKey, Read, Upsert};
+use crate::db::ops::{EntityKey, Mutation, Query};
 use crate::db::parse_datetime_column;
 use crate::db::sql::{self, BindParams, EntityTable, Sql};
 
@@ -398,8 +398,8 @@ pub fn count_fts_rows(conn: &Connection) -> Result<i64> {
     count_rows(conn, sql::COUNT_FTS_ROWS, "count fts rows")
 }
 
-impl Read for IssuesQuery {
-    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+impl Query for IssuesQuery {
+    fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
         query_issues(conn, vars)
     }
 
@@ -412,7 +412,7 @@ impl Read for IssuesQuery {
 /// `nodes` is non-empty, plus one `WorkflowStates{team_id}` per distinct team
 /// among them -- every issue carries a team name and a team-scoped state name
 /// (`upsert_issue_tx`). Shared by [`IssuesQuery`]'s and
-/// [`lt_types::detail::IssueDetailQuery`]'s `Upsert` impls so both report the
+/// [`lt_types::detail::IssueDetailQuery`]'s `Mutation` impls so both report the
 /// same honest set for the same kind of write.
 pub(crate) fn issue_upsert_touched(nodes: &[types::Issue]) -> Vec<EntityKey> {
     let mut touched = Vec::new();
@@ -433,10 +433,10 @@ pub(crate) fn issue_upsert_touched(nodes: &[types::Issue]) -> Vec<EntityKey> {
     touched
 }
 
-impl Upsert for IssuesQuery {
+impl Mutation for IssuesQuery {
     /// An issue upsert also writes its referenced team and workflow-state
     /// rows; see [`issue_upsert_touched`].
-    fn upsert(
+    fn apply(
         conn: &Connection,
         _vars: &Self::Variables,
         out: &Self::Output,
@@ -823,11 +823,11 @@ mod tests {
         use lt_types::inputs::{Field, IssueUpdateInput};
         use lt_types::issues::{IssueUpdateMutation, IssueUpdateVariables};
 
-        use crate::db::ops::Mutate;
+        use crate::db::ops::Mutation;
 
         let conn = graph_db();
         // The state a picker offers is already cached by that picker's own
-        // `Upsert` (`TeamStatesQuery`); mirror that precondition here.
+        // `Mutation` (`TeamStatesQuery`); mirror that precondition here.
         crate::db::teams::upsert_team_state(
             &conn,
             "ENG",
@@ -892,7 +892,7 @@ mod tests {
         use lt_types::inputs::IssueUpdateInput;
         use lt_types::issues::{IssueUpdateMutation, IssueUpdateVariables};
 
-        use crate::db::ops::Mutate;
+        use crate::db::ops::Mutation;
 
         let conn = graph_db();
         // The issue's base state is "In Progress" (graph_db/sample_api_issue);
@@ -1002,7 +1002,7 @@ mod tests {
                 end_cursor: None,
             },
         };
-        let touched = IssuesQuery::upsert(&conn, &vars, &out).unwrap();
+        let touched = IssuesQuery::apply(&conn, &vars, &out).unwrap();
         assert_eq!(
             touched,
             vec![
@@ -1035,6 +1035,6 @@ mod tests {
                 end_cursor: None,
             },
         };
-        assert!(IssuesQuery::upsert(&conn, &vars, &out).unwrap().is_empty());
+        assert!(IssuesQuery::apply(&conn, &vars, &out).unwrap().is_empty());
     }
 }

@@ -70,17 +70,19 @@ fn parse_graphql_response(body: Value) -> Result<Value> {
 }
 
 /// Run one [`GraphqlOperation`] through `transport`, sending its typed
-/// variables and decoding the response into its domain output.
-pub fn execute<Op: GraphqlOperation>(
-    transport: &dyn GraphqlTransport,
-    variables: Op::Variables,
-) -> Result<Op::Output> {
+/// variables and decoding the response into its domain output: the decoded
+/// envelope recomposes into `Op::Output` via its `TryFrom` impl.
+pub fn execute<Op>(transport: &dyn GraphqlTransport, variables: Op::Variables) -> Result<Op::Output>
+where
+    Op: GraphqlOperation,
+    Op::Output: TryFrom<Op, Error = anyhow::Error>,
+{
     let op = Op::operation(variables);
     let vars = serde_json::to_value(&op.variables).context("serializing GraphQL variables")?;
     let data = transport.query(&op.query, vars)?;
-    serde_json::from_value::<Op>(data)
-        .with_context(|| format!("deserializing {} response", Op::NAME))?
-        .extract()
+    let decoded = serde_json::from_value::<Op>(data)
+        .with_context(|| format!("deserializing {} response", Op::NAME))?;
+    Op::Output::try_from(decoded)
 }
 
 /// Test double for [`GraphqlTransport`]: returns scripted `data` payloads in
@@ -158,7 +160,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(states.is_empty());
+        assert!(states.nodes.is_empty());
         assert_eq!(transport.variables(0), json!({ "teamId": "t1" }));
     }
 

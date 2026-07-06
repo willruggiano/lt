@@ -5,10 +5,9 @@
 //! `pending_overlay` (so the read model renders it immediately) and a command
 //! into `outbox`, both in one transaction. The sync drainer is the
 //! single writer that replays the outbox against the API and reconciles the
-//! base on success. [`Mutate`] binds each mutation operation to that local
-//! effect and its ack, mirroring how [`Read`](crate::db::Read)/[`Upsert`]
-//! bind a query operation to the read side (docs/design/operation-seam-adr.md,
-//! Non-goals: "Mutations").
+//! base on success. [`Mutation`] binds each mutation operation to that local
+//! effect and its ack, alongside a query operation's fetched-response write
+//! (docs/design/unified-execute-adr.md, "Decision 2").
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -23,7 +22,7 @@ use lt_types::types;
 use rusqlite::{Connection, params};
 use serde_json::json;
 
-use crate::db::ops::{AckContext, EntityKey, Mutate};
+use crate::db::ops::{AckContext, EntityKey, Mutation};
 use crate::db::sql;
 
 /// The optimistic identifier every locally-created issue carries until the
@@ -171,10 +170,10 @@ fn refresh_issue_update_command(tx: &Connection, issue_id: &str) -> Result<()> {
 // IssueUpdateMutation
 // ---------------------------------------------------------------------------
 
-impl Mutate for IssueUpdateMutation {
+impl Mutation for IssueUpdateMutation {
     /// Overlay whichever of `vars.input`'s fields are set -- the id/name join
     /// each field resolves through is already cached, since every id offered
-    /// by a picker came from that same picker's own `Upsert` -- then rebuild
+    /// by a picker came from that same picker's own `Mutation::apply` -- then rebuild
     /// the coalesced command from every overlay row the issue carries (not
     /// just this one), so repeated edits collapse into a single pending
     /// `issueUpdate`.
@@ -341,7 +340,7 @@ fn optimistic_issue(conn: &Connection, input: &IssueCreateInput) -> Result<types
     })
 }
 
-impl Mutate for IssueCreateMutation {
+impl Mutation for IssueCreateMutation {
     /// Insert an optimistic base row under a client temp id and queue the
     /// `issueCreate` command. Creates never coalesce: each mints its own temp
     /// id, so the shared coalescing primitive is a no-op delete plus an
@@ -399,7 +398,7 @@ impl Mutate for IssueCreateMutation {
 // CommentCreateMutation
 // ---------------------------------------------------------------------------
 
-impl Mutate for CommentCreateMutation {
+impl Mutation for CommentCreateMutation {
     /// Insert an optimistic comment row under a freshly-minted `temp_id` and
     /// queue the `commentCreate` command. The issue and body come from
     /// `vars.input`; the author is the persisted viewer identity

@@ -77,14 +77,18 @@ impl GraphqlOperation for NewIssueQuery {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        let (states, members) = self.team.map_or_else(
+impl TryFrom<NewIssueQuery> for NewIssueData {
+    type Error = anyhow::Error;
+
+    fn try_from(op: NewIssueQuery) -> anyhow::Result<Self> {
+        let (states, members) = op.team.map_or_else(
             || (Vec::new(), Vec::new()),
             |t| (t.states.nodes, t.members.nodes),
         );
         Ok(NewIssueData {
-            teams: self.teams.nodes,
+            teams: op.teams.nodes,
             states,
             members,
             viewer: None,
@@ -116,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_with_team_returns_states_and_members() {
+    fn recompose_with_team_returns_states_and_members() {
         let data = serde_json::json!({
             "teams": { "nodes": [{ "id": "t1", "name": "Eng" }] },
             "team": {
@@ -124,9 +128,9 @@ mod tests {
                 "members": { "nodes": [{ "id": "u1", "name": "Ada" }] }
             }
         });
-        let out = serde_json::from_value::<NewIssueQuery>(data)
+        let out: NewIssueData = serde_json::from_value::<NewIssueQuery>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert_eq!(out.teams.len(), 1);
         assert_eq!(out.states.len(), 1);
@@ -135,13 +139,13 @@ mod tests {
     }
 
     #[test]
-    fn extract_without_team_leaves_states_and_members_empty() {
+    fn recompose_without_team_leaves_states_and_members_empty() {
         let data = serde_json::json!({
             "teams": { "nodes": [{ "id": "t1", "name": "Eng" }] }
         });
-        let out = serde_json::from_value::<NewIssueQuery>(data)
+        let out: NewIssueData = serde_json::from_value::<NewIssueQuery>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert_eq!(out.teams.len(), 1);
         assert!(out.states.is_empty());
