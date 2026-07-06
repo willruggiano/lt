@@ -47,10 +47,6 @@ A Cargo workspace of eight crates under `crates/`:
   lt-cli ──────────── clap dispatch, output formatting, logging
 ```
 
-`lt-tui` depends only on `lt-runtime` and `lt-types`; `lt-runtime` re-exports
-the store facade, so the TUI and CLI reach both the store and the API edge
-through it alone.
-
 ### Data flow
 
 `lt` is local-first: every read path queries SQLite; only populating the cache
@@ -68,8 +64,7 @@ touches Linear.
 ```
 
 The CLI is dispatched in `crates/lt-cli/src/main.rs`: `auth`, `issues`, `tui`,
-`inbox`, `sync`, `search`, and (under the `sim` feature) `sim`. Profile
-selection, logging init, and DB open all happen before any subcommand runs.
+`inbox`, `sync`, `search`, and (under the `sim` feature) `sim`.
 
 ### The operation seam
 

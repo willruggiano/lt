@@ -10,7 +10,8 @@ paths:
   [[documentation.md]].
 - Lint strictness — when to add a lint, when silencing one is acceptable — is
   governed by [[contributing.md#Strictness]]. A permitted `#[allow(...)]`
-  carries a one-line justification comment.
+  carries a one-line justification comment and must be explicitly accepted by
+  the user.
 - `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!`, and `dbg!` are denied
   in non-test code; propagate errors with `Result` and `?` (the crate uses
   `anyhow`). Tests may use them freely.
