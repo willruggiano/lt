@@ -9,17 +9,15 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use lt_storage::db;
 use lt_storage::db::{Connection, Database, EntityKey, Mutate, Read, Upsert};
 use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
-use lt_types::graphql::GraphqlOperation;
 use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
 use lt_types::issues::{
     IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
 };
-use lt_types::viewer::ViewerQuery;
-use lt_types::{types, viewer};
+use lt_types::viewer::{self, ViewerQuery};
 use lt_upstream::auth::login_non_interactive;
 use lt_upstream::auth::refresh::load_or_refresh_token;
 use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
@@ -211,26 +209,6 @@ impl RunLoop {
             deadline: Instant::now(),
         }
     }
-}
-
-/// [`Runtime::search`]'s outcome: distinguishes an entirely empty cache from
-/// a stale FTS shadow index whose results are an approximate
-/// title-substring fallback rather than a ranked FTS5 match.
-pub enum SearchOutcome {
-    /// No issues are cached at all.
-    NoIndex,
-    Results {
-        issues: Vec<lt_types::types::Issue>,
-        approximate: bool,
-    },
-}
-
-/// [`Runtime::create_issue_now`]'s outcome: the create was acked
-/// synchronously, or the transport was unreachable and the command stays
-/// queued for the next sync (the CLI's offline case).
-pub enum CreateIssueOutcome {
-    Created(Box<types::Issue>),
-    Queued(String),
 }
 
 /// [`Runtime::seed_sim`]'s summary, for the caller's report line.
@@ -569,40 +547,6 @@ impl Runtime {
         self.sync_now(false)
     }
 
-    /// A synchronous, caller-driven upstream refresh of a single operation
-    /// (e.g. `lt-cli`'s explicit read commands): fetch and upsert via
-    /// `Op::refresh`, then propagate whatever it touched. Unlike a
-    /// subscription's background freshness refresh, errors are returned
-    /// rather than logged.
-    pub fn refresh<Op: Refresh>(&self, vars: Op::Variables) -> Result<Vec<EntityKey>> {
-        let conn = self.connect()?;
-        let transport = self.transports.acquire()?;
-        let touched = Op::refresh(&conn, transport.as_ref(), vars)?;
-        self.propagate(&touched);
-        Ok(touched)
-    }
-
-    /// The local full-text search a caller runs without holding a
-    /// `Connection`: an empty cache reports [`SearchOutcome::NoIndex`]; a
-    /// stale FTS shadow index (present issues, no FTS rows) falls back to an
-    /// approximate title-substring match rather than returning nothing.
-    pub fn search(&self, query: &str, limit: usize) -> Result<SearchOutcome> {
-        let conn = self.connect()?;
-        if db::count_issues(&conn)? == 0 {
-            return Ok(SearchOutcome::NoIndex);
-        }
-        let approximate = db::count_fts_rows(&conn).unwrap_or(0) == 0;
-        let issues = if approximate {
-            db::search_issues_like(&conn, query, limit)?
-        } else {
-            db::search_issues(&conn, query, limit)?
-        };
-        Ok(SearchOutcome::Results {
-            issues,
-            approximate,
-        })
-    }
-
     /// Seed the local database from the deterministic `sim` generator: no
     /// sync cycle to establish workflow states offline, so they are derived
     /// from the seeded issues' own state fragments (ADR "Sim compatibility"),
@@ -803,44 +747,6 @@ impl Runtime {
             input: input.clone(),
         })?;
         Ok(db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER.to_string())
-    }
-
-    /// The CLI's synchronous create: enqueue through the same outbox path as
-    /// [`Runtime::create_issue`], then immediately replay that command
-    /// (instead of handing it to the loop's `Command::Drain`, since `lt
-    /// issues new` has no running loop to hand it off to) and report the
-    /// server's real issue. A replay failure (offline) leaves the command
-    /// pending for the next sync and reports the optimistic identifier
-    /// instead of an error.
-    pub fn create_issue_now(&self, vars: IssueCreateVariables) -> Result<CreateIssueOutcome> {
-        let conn = self.connect()?;
-        let touched = IssueCreateMutation::enqueue(&conn, vars)?;
-        self.propagate(&touched);
-
-        // `enqueue` never coalesces a create (each mints its own temp id), so
-        // the newest pending `issueCreate` command is the one just committed.
-        let op = db::outbox::pending_operations(&conn)?
-            .into_iter()
-            .filter(|op| op.op_type == IssueCreateMutation::NAME)
-            .max_by_key(|op| op.seq)
-            .context("issue-create command missing immediately after its own enqueue")?;
-
-        let replayed = self.transports.acquire().and_then(|transport| {
-            crate::sync::drain::replay_op::<IssueCreateMutation>(&conn, transport.as_ref(), &op)
-        });
-
-        match replayed {
-            Ok((issue, keys)) => {
-                self.propagate(&keys);
-                Ok(CreateIssueOutcome::Created(Box::new(issue)))
-            }
-            Err(e) => {
-                db::outbox::record_error(&conn, op.seq, &e.to_string())?;
-                Ok(CreateIssueOutcome::Queued(
-                    db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER.to_string(),
-                ))
-            }
-        }
     }
 }
 
@@ -1245,35 +1151,6 @@ mod tests {
         assert_eq!(sub.take().unwrap().unwrap().user.name, "Ada");
     }
 
-    // -- refresh: a synchronous, caller-driven upstream refresh ----------
-
-    #[test]
-    fn refresh_refreshes_and_propagates_to_a_live_subscription() {
-        let db = Database::memory().unwrap();
-        let (on_event, rx) = on_event_channel();
-        let runtime = Runtime::new(
-            db,
-            Box::new(FakeSource::new(team_states_page_transport())),
-            on_event,
-        );
-        let vars = StatesTeamVariables {
-            team_id: "t1".to_string(),
-        };
-        let (sub, _initial) = runtime.subscribe::<TeamStatesQuery>(vars.clone());
-
-        let touched = runtime.refresh::<TeamStatesQuery>(vars).unwrap();
-
-        assert_eq!(
-            touched,
-            vec![EntityKey::WorkflowStates {
-                team_id: "t1".to_string()
-            }]
-        );
-        let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
-        assert_eq!(sub.take().unwrap()[0].name, "Todo");
-    }
-
     // -- sync_full / sync_delta: a synchronous sync cycle -----------------
 
     fn full_sync_transport() -> FakeTransport {
@@ -1322,51 +1199,6 @@ mod tests {
         let conn = runtime.connect().unwrap();
         assert!(db::query_issue_by_id(&conn, "1").unwrap().is_some());
         assert!(runtime.last_synced_at().is_some());
-    }
-
-    // -- search: the local FTS-vs-LIKE seam --------------------------------
-
-    #[test]
-    fn search_finds_a_seeded_issue() {
-        let db = Database::memory().unwrap();
-        {
-            let conn = db.connect().unwrap();
-            db::upsert_team_state(
-                &conn,
-                "ENG",
-                &types::WorkflowState {
-                    id: "s-todo".into(),
-                    name: "Todo".to_string(),
-                    position: 1.0,
-                },
-            )
-            .unwrap();
-            db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
-        }
-        let (runtime, _rx) = runtime_over(db);
-
-        let outcome = runtime.search("issue", 10).unwrap();
-
-        match outcome {
-            SearchOutcome::Results {
-                issues,
-                approximate,
-            } => {
-                assert!(!approximate);
-                assert_eq!(issues.len(), 1);
-            }
-            SearchOutcome::NoIndex => panic!("expected results, got NoIndex"),
-        }
-    }
-
-    #[test]
-    fn search_reports_no_index_over_an_empty_cache() {
-        let (runtime, _rx) = runtime_over(Database::memory().unwrap());
-
-        assert!(matches!(
-            runtime.search("anything", 10).unwrap(),
-            SearchOutcome::NoIndex
-        ));
     }
 
     // -- seed_sim: the deterministic offline dataset -----------------------
@@ -1518,130 +1350,5 @@ mod tests {
             .unwrap();
         assert_eq!(attempts, 1);
         assert!(last_error.is_some());
-    }
-
-    // -- create_issue_now: the CLI's synchronous create -------------------
-
-    fn db_with_a_todo_state_for(team_id: &str) -> Database {
-        let db = Database::memory().unwrap();
-        let conn = db.connect().unwrap();
-        db::upsert_team_state(
-            &conn,
-            team_id,
-            &types::WorkflowState {
-                id: "s-todo".into(),
-                name: "Todo".to_string(),
-                position: 1.0,
-            },
-        )
-        .unwrap();
-        db
-    }
-
-    fn new_issue_input() -> IssueCreateInput {
-        IssueCreateInput {
-            title: "New issue".to_string(),
-            team_id: "ENG".to_string(),
-            description: None,
-            state_id: None,
-            priority: None,
-            assignee_id: None,
-        }
-    }
-
-    #[test]
-    fn create_issue_now_returns_the_server_issue_and_clears_the_outbox() {
-        let (on_event, _rx) = on_event_channel();
-        let fake = FakeTransport::new(vec![
-            json!({ "issueCreate": { "success": true, "issue": sample_issue_node("real-1") } }),
-        ]);
-        let runtime = Runtime::new(
-            db_with_a_todo_state_for("ENG"),
-            Box::new(FakeSource::new(fake)),
-            on_event,
-        );
-
-        let outcome = runtime
-            .create_issue_now(IssueCreateVariables {
-                input: new_issue_input(),
-            })
-            .unwrap();
-
-        let issue = match outcome {
-            CreateIssueOutcome::Created(issue) => issue,
-            CreateIssueOutcome::Queued(id) => panic!("expected Created, got Queued({id})"),
-        };
-        assert_eq!(issue.identifier, "ENG-real-1");
-
-        let conn = runtime.connect().unwrap();
-        let ident: String = conn
-            .query_row(
-                "SELECT identifier FROM issues WHERE id = 'real-1'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(ident, "ENG-real-1");
-        let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM outbox WHERE status = 'pending'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(pending, 0);
-    }
-
-    #[test]
-    fn create_issue_now_offline_queues_and_the_optimistic_row_still_renders() {
-        // No scripted responses: the transport errors, simulating offline.
-        let fake = FakeTransport::new(vec![]);
-        let (on_event, rx) = on_event_channel();
-        let runtime = Runtime::new(
-            db_with_a_todo_state_for("ENG"),
-            Box::new(FakeSource::new(fake)),
-            on_event,
-        );
-        let (sub, _initial) = runtime.subscribe::<IssuesQuery>(IssuesVariables {
-            filter: None,
-            sort: None,
-            first: None,
-            after: None,
-        });
-
-        let outcome = runtime
-            .create_issue_now(IssueCreateVariables {
-                input: new_issue_input(),
-            })
-            .unwrap();
-
-        match outcome {
-            CreateIssueOutcome::Queued(identifier) => {
-                assert_eq!(identifier, db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER);
-            }
-            CreateIssueOutcome::Created(issue) => {
-                panic!("expected Queued, got Created({})", issue.identifier)
-            }
-        }
-
-        // The optimistic overlay's own propagation, from `enqueue` itself.
-        let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
-        let page = sub.take().unwrap();
-        assert_eq!(page.nodes.len(), 1);
-        assert_eq!(
-            page.nodes[0].identifier,
-            db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER
-        );
-
-        let conn = runtime.connect().unwrap();
-        let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM outbox WHERE status = 'pending'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(pending, 1);
     }
 }

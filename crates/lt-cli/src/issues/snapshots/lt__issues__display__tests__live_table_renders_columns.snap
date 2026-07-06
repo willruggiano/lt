@@ -1,8 +1,0 @@
----
-source: src/issues/display.rs
-expression: live_to_string(&issues)
----
-IDENTIFIER  TITLE                                     STATE        PRIORITY     ASSIGNEE      TEAM         CREATED     UPDATED   
-----------  ----------------------------------------  -----------  -----------  ------------  -----------  ----------  ----------
-ENG-1       Short title                               In Progress  Urgent       Ada Lovelace  Engineering  2026-01-02  2026-01-06
-ENG-2       A title that is definitely longer tha...  Backlog      No priority  -             Engineering  2026-01-01  2026-01-01

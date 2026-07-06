@@ -1,29 +1,6 @@
-//! The issue domain: the live (`--live`) list fetch behind the CLI's cache.
-//! The cached read model lives in `lt-storage`; this query is the issue path
-//! that hits the network. Create/update/replay mutations execute
-//! `lt-types::issues` mutation types directly via `execute`; this module owns
-//! only the shared issue node fixture their tests reuse.
-
-use anyhow::Result;
-use lt_types::issues::{IssueConnection, IssuesQuery, IssuesVariables};
-
-use crate::auth::refresh::load_or_refresh_token;
-use crate::client::{GraphqlTransport, HttpTransport, execute};
-
-/// Fetch one page of issues, loading (and refreshing) the token first.
-pub fn fetch(vars: IssuesVariables) -> Result<IssueConnection> {
-    let token = load_or_refresh_token()?;
-    fetch_with(&HttpTransport::new(token.access_token), vars)
-}
-
-/// Fetch one page of issues through `transport`. Split from `fetch` so the
-/// request building and page-info extraction are testable with a fake transport.
-pub fn fetch_with(
-    transport: &dyn GraphqlTransport,
-    vars: IssuesVariables,
-) -> Result<IssueConnection> {
-    execute::<IssuesQuery>(transport, vars)
-}
+//! The issue domain: create/update/replay mutations execute `lt-types::issues`
+//! mutation types directly via `execute`; this module owns only the shared
+//! issue node fixture their tests reuse.
 
 // ---------------------------------------------------------------------------
 // Shared test fixture (issue node shape reused by the create/update/replay
@@ -40,32 +17,7 @@ pub use lt_types::issues::sample_issue_node;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::FakeTransport;
-
-    #[test]
-    fn fetch_with_maps_nodes_and_sends_pagination_vars() {
-        let transport = FakeTransport::new(vec![serde_json::json!({
-            "issues": {
-                "nodes": [sample_issue_node("1")],
-                "pageInfo": { "hasNextPage": true, "endCursor": "50" }
-            }
-        })]);
-        let vars = IssuesVariables {
-            filter: None,
-            sort: None,
-            first: Some(50),
-            after: Some("0".to_string()),
-        };
-        let page = fetch_with(&transport, vars).unwrap();
-        assert_eq!(page.nodes.len(), 1);
-        assert_eq!(page.nodes[0].identifier, "ENG-1");
-        assert!(page.page_info.has_next_page);
-        assert_eq!(page.page_info.end_cursor.as_deref(), Some("50"));
-
-        let vars = transport.variables(0);
-        assert_eq!(vars["first"], serde_json::json!(50));
-        assert_eq!(vars["after"], serde_json::json!("0"));
-    }
+    use crate::client::{FakeTransport, execute};
 
     #[test]
     fn create_returns_server_identity() {

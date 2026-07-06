@@ -1423,9 +1423,7 @@ name = "lt-cli"
 version = "0.6.1"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
- "insta",
  "lt-config",
  "lt-runtime",
  "lt-tui",

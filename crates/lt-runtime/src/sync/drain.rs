@@ -38,40 +38,28 @@ fn replay(
     op: &PendingOp,
 ) -> Result<Vec<EntityKey>> {
     match op.op_type.as_str() {
-        IssueUpdateMutation::NAME => {
-            replay_op::<IssueUpdateMutation>(conn, transport, op).map(|(_, keys)| keys)
-        }
-        IssueCreateMutation::NAME => {
-            replay_op::<IssueCreateMutation>(conn, transport, op).map(|(_, keys)| keys)
-        }
-        CommentCreateMutation::NAME => {
-            replay_op::<CommentCreateMutation>(conn, transport, op).map(|(_, keys)| keys)
-        }
+        IssueUpdateMutation::NAME => replay_op::<IssueUpdateMutation>(conn, transport, op),
+        IssueCreateMutation::NAME => replay_op::<IssueCreateMutation>(conn, transport, op),
+        CommentCreateMutation::NAME => replay_op::<CommentCreateMutation>(conn, transport, op),
         other => bail!("unknown outbox op_type: {other}"),
     }
 }
 
 /// Replay one operation: decode its stored variables, execute the mutation on
 /// the wire, then let the operation's own [`Mutate::ack`] reconcile the base
-/// and retire the command. Returns the acked wire output alongside the
-/// touched keys -- captured before `ack` consumes it -- so a caller that
-/// needs to report the server's own reply synchronously
-/// (`Runtime::create_issue_now`) does not have to re-derive it from the
-/// cache; the generic `drain` loop above discards it.
-pub(crate) fn replay_op<M>(
+/// and retire the command.
+fn replay_op<M>(
     conn: &Connection,
     transport: &dyn GraphqlTransport,
     op: &PendingOp,
-) -> Result<(M::Output, Vec<EntityKey>)>
+) -> Result<Vec<EntityKey>>
 where
     M: Mutate,
     M::Variables: DeserializeOwned + Clone,
-    M::Output: Clone,
 {
     let vars: M::Variables = serde_json::from_str(&op.variables)?;
     let out = execute::<M>(transport, vars.clone())?;
-    let captured = out.clone();
-    let touched = M::ack(
+    M::ack(
         conn,
         AckContext {
             seq: op.seq,
@@ -79,8 +67,7 @@ where
             vars: &vars,
         },
         out,
-    )?;
-    Ok((captured, touched))
+    )
 }
 
 #[cfg(test)]
