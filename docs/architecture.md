@@ -59,12 +59,12 @@ touches Linear.
   sim::generate ──────> Dataset ─────────────────────────┘  (crates/lt-storage)
   (feature "sim",       (no network, no token)                     │
    crates/lt-storage/src/sim.rs)                     query (no token)
-                                    list / search / inbox / TUI <──┘
-                                    (crates/lt-cli, crates/lt-tui)
+                                                          TUI <──┘
+                                                   (crates/lt-tui)
 ```
 
-The CLI is dispatched in `crates/lt-cli/src/main.rs`: `auth`, `issues`, `tui`,
-`inbox`, `sync`, `search`, and (under the `sim` feature) `sim`.
+The CLI is dispatched in `crates/lt-cli/src/main.rs`: `auth`, `sync`, and (under
+the `sim` feature) `sim`. Bare `lt` (no subcommand) launches the TUI.
 
 ### The operation seam
 
@@ -161,12 +161,11 @@ and emits a parser into `OUT_DIR`. A schema/allowlist mismatch fails the build.
 Rationale and the parser design are in [[search-parser-v2-adr.md]]; the
 filter-expansion model is in [[search-codegen-and-filter-expansion-adr.md]].
 
-Two front ends consume the grammar: the `lt search` command runs FTS5 queries
-against `issues_fts` (`crates/lt-cli/src/search.rs`), and the TUI search bar
-parses `key:value` stems plus free-text into a query AST
-(`crates/lt-storage/src/search_query.rs`). The AST is the single source of truth
-for TUI filter state (see [[unified-filter-state.md]]) and lowers into the typed
-`IssueFilter`, the one filter-to-SQL path
+The TUI search bar consumes the grammar: it parses `key:value` stems plus
+free-text into a query AST (`crates/lt-storage/src/search_query.rs`), whose
+free-text terms lower to an FTS5 query over `issues_fts`. The AST is the single
+source of truth for TUI filter state (see [[unified-filter-state.md]]) and
+lowers into the typed `IssueFilter`, the one filter-to-SQL path
 (`crates/lt-storage/src/db/filters.rs`).
 
 ### TUI
