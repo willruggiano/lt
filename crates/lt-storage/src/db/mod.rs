@@ -294,9 +294,9 @@ impl Database {
 
     /// Open another handle onto the same database: for `File`, the same path
     /// (there is only one); for `Memory`, a second keepalive connection on the
-    /// same shared-cache URI, so a second owner (e.g. a test's fake
-    /// `SyncService`) reads and writes the exact rows the first sees. Neither
-    /// handle's lifetime depends on the other's.
+    /// same shared-cache URI, so a second owner (e.g. a test's `Runtime`)
+    /// reads and writes the exact rows the first sees. Neither handle's
+    /// lifetime depends on the other's.
     #[cfg(any(test, feature = "test-util"))]
     pub fn share(&self) -> Result<Self> {
         match self {
