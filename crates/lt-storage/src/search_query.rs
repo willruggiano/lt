@@ -25,44 +25,24 @@
 ///   assignee -> "me"
 ///   priority -> "urgent"
 ///   state    -> "todo"
-///   `fts_query` -> "oauth* crash*"   (prefix-matched)
+///   `filter.term` -> "oauth* crash*"   (prefix-matched)
 ///
 /// Default
 /// -------
 /// When the user presses `/`, the search bar is pre-populated with
 /// `sort:updated-` so the first thing they see is the most recently
 /// updated issues in descending order.
-use anyhow::Result;
-use lt_types::query::{IssueQuery, SortField};
-use lt_types::types::Issue;
-use rusqlite::Connection;
-use tracing::warn;
-
-use crate::db::sql::{self, BindParams, Frag};
+use lt_types::issues::{AssigneeFilter, IssueFilter};
+use lt_types::query::{SortDirection, SortField};
 
 // ---------------------------------------------------------------------------
-// Generated parser (bd-1pl): StemKey, StemKind, parse_query_ast_impl,
-// From<&QueryAst> for ParsedQuery, apply_generated_conditions
+// Generated parser (bd-1pl): StemKey, StemKind, parse_query_ast_impl
 // ---------------------------------------------------------------------------
 
-// SortDir is referenced by StemKind::Sort in the generated file.
-// We forward-declare the sort direction enum here so it is in scope when
-// search_stems.rs is included below.
-//
-// NOTE: SortDir is also used by ParsedQuery and related helpers defined later
-// in this file.  The include! expands here, so it sees SortDir.
+// SortDirection is referenced by StemKind::Sort in the generated file; the
+// `use` above brings it into scope for search_stems.rs's `include!` below.
 
-/// Direction suffix on a sort stem.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SortDir {
-    /// Ascending ('+' suffix or no suffix).
-    Asc,
-    /// Descending ('-' suffix).
-    Desc,
-}
-
-// Include the generated enums (StemKey, StemKind), parse_query_ast_impl(), and
-// From<&QueryAst> for ParsedQuery.
+// Include the generated enums (StemKey, StemKind) and parse_query_ast_impl().
 include!(concat!(env!("OUT_DIR"), "/search_stems.rs"));
 
 // ---------------------------------------------------------------------------
@@ -134,7 +114,7 @@ pub struct QueryAst {
 pub fn parse_query_ast(raw: &str) -> QueryAst {
     let (tokens, errors) = parse_query_ast_impl(raw);
     for err in &errors {
-        warn!(
+        tracing::warn!(
             span_start = err.span.start,
             span_end = err.span.end,
             "search parse error: {}",
@@ -148,139 +128,57 @@ pub fn parse_query_ast(raw: &str) -> QueryAst {
     }
 }
 
-// From<&QueryAst> for ParsedQuery is generated in search_stems.rs (bd-1pl).
-
 // ---------------------------------------------------------------------------
-// ParsedQuery -- result of parsing a raw query string
+// AST -> IssueFilter lowering
 // ---------------------------------------------------------------------------
 
-/// A fully parsed search query.
-#[derive(Debug, Clone)]
-pub struct ParsedQuery {
-    /// Sort field, if a `sort:` stem was present.
-    pub sort: Option<(SortField, SortDir)>,
-    /// Assignee filter value (raw string, "me" is treated specially at query time).
-    pub assignee: Option<String>,
-    /// Priority filter label (normalised to lowercase).
-    pub priority: Option<String>,
-    /// State filter (substring match, lowercased).
-    pub state: Option<String>,
-    /// Team filter (substring match).
-    pub team: Option<String>,
-    /// Label filter (substring match, lowercased).
-    pub label: Option<String>,
-    /// Project filter (substring match, lowercased).
-    pub project: Option<String>,
-    /// Cycle filter (substring match, lowercased).
-    pub cycle: Option<String>,
-    /// Creator filter (substring match, lowercased).
-    pub creator: Option<String>,
-    /// Free-text words joined into an FTS5 query.  Empty string means no FTS.
-    pub fts_terms: String,
-}
-
-impl ParsedQuery {
-    /// Return `true` when any filter constraint (beyond sort) is active.
-    pub fn has_filters(&self) -> bool {
-        self.assignee.is_some()
-            || self.priority.is_some()
-            || self.state.is_some()
-            || self.team.is_some()
-            || self.label.is_some()
-            || self.project.is_some()
-            || self.cycle.is_some()
-            || self.creator.is_some()
-            || !self.fts_terms.is_empty()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Parser
-// ---------------------------------------------------------------------------
-
-/// Parse a raw query string typed into the TUI search bar.
-///
-/// Unknown stems are treated as free-text words so that partial typing
-/// (e.g. `sort:`) does not produce hard errors.
-///
-/// NOTE: Production code now uses `ParsedQuery::from(&QueryAst)` instead.
-/// This function is retained for unit tests that verify parity between the
-/// two parsing paths.
-#[cfg(test)]
-pub fn parse_query(raw: &str) -> ParsedQuery {
-    let mut sort: Option<(SortField, SortDir)> = None;
-    let mut assignee: Option<String> = None;
-    let mut priority: Option<String> = None;
-    let mut state: Option<String> = None;
-    let mut team: Option<String> = None;
-    let mut label: Option<String> = None;
-    let mut project: Option<String> = None;
-    let mut cycle: Option<String> = None;
-    let mut creator: Option<String> = None;
+/// Lower a `QueryAst` to the typed [`IssueFilter`] plus the sort stem, if
+/// present. Unknown stem keys and partially-typed stems are skipped (they
+/// carry no `StemKind`); free-text words join into `filter.term` with a
+/// trailing `*` for FTS5 prefix matching.
+pub fn lower_ast(ast: &QueryAst) -> (IssueFilter, Option<(SortField, SortDirection)>) {
+    let mut filter = IssueFilter::default();
+    let mut sort: Option<(SortField, SortDirection)> = None;
     let mut fts_words: Vec<String> = Vec::new();
 
-    for token in raw.split_whitespace() {
-        if let Some((key, value)) = token.split_once(':') {
-            match key.to_lowercase().as_str() {
-                "sort" => {
-                    if let Some((field, dir)) = parse_sort_value(value) {
-                        sort = Some((field, dir));
-                        continue;
-                    }
-                    // Unrecognised sort value -- fall through to fts_words.
+    for token in &ast.tokens {
+        match token {
+            Token::Stem { kind, .. } => match kind {
+                StemKind::Sort { field, dir } => sort = Some((field.clone(), *dir)),
+                StemKind::Assignee { value } => {
+                    filter.assignee = Some(AssigneeFilter::Contains(value.clone()));
                 }
-                "assignee" if !value.is_empty() => {
-                    assignee = Some(value.to_lowercase());
-                    continue;
-                }
-                "priority" if !value.is_empty() => {
-                    priority = Some(value.to_lowercase());
-                    continue;
-                }
-                "state" if !value.is_empty() => {
-                    state = Some(value.to_lowercase());
-                    continue;
-                }
-                "team" if !value.is_empty() => {
-                    team = Some(value.to_string());
-                    continue;
-                }
-                "label" if !value.is_empty() => {
-                    label = Some(value.to_lowercase());
-                    continue;
-                }
-                "project" if !value.is_empty() => {
-                    project = Some(value.to_lowercase());
-                    continue;
-                }
-                "cycle" if !value.is_empty() => {
-                    cycle = Some(value.to_lowercase());
-                    continue;
-                }
-                "creator" if !value.is_empty() => {
-                    creator = Some(value.to_lowercase());
-                    continue;
-                }
-                _ => {}
-            }
+                StemKind::Priority { value } => filter.priority = value.parse().ok(),
+                StemKind::State { value } => filter.state = Some(value.clone()),
+                StemKind::Team { value } => filter.team = Some(value.clone()),
+                StemKind::Label { value } => filter.label = Some(value.clone()),
+                StemKind::Project { value } => filter.project = Some(value.clone()),
+                StemKind::Cycle { value } => filter.cycle = Some(value.clone()),
+                StemKind::Creator { value } => filter.creator = Some(value.clone()),
+            },
+            Token::PartialStem { .. } => {}
+            Token::Word { text, .. } => fts_words.push(format!("{text}*")),
         }
-        // Plain word -- add to FTS query with prefix wildcard for incremental matching.
-        fts_words.push(format!("{token}*"));
     }
 
-    let fts_terms = fts_words.join(" ");
+    if !fts_words.is_empty() {
+        filter.term = Some(fts_words.join(" "));
+    }
 
-    ParsedQuery {
-        sort,
-        assignee,
-        priority,
-        state,
-        team,
-        label,
-        project,
-        cycle,
-        creator,
-        fts_terms,
+    (filter, sort)
+}
+
+/// Resolve `assignee:me` to the viewer's exact name. Without a synced
+/// viewer, the literal value "me" stays: an exact match no real assignee
+/// name equals, so the filter matches nothing rather than falling back to
+/// unfiltered.
+pub fn resolve_me(filter: &mut IssueFilter, viewer_name: Option<&str>) {
+    if let Some(AssigneeFilter::Contains(value)) = &filter.assignee
+        && value.eq_ignore_ascii_case("me")
+    {
+        filter.assignee = Some(AssigneeFilter::Exact(
+            viewer_name.unwrap_or("me").to_string(),
+        ));
     }
 }
 
@@ -288,165 +186,6 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
 // field maps onto a registered `SortCol` via `crate::db::filters::sort_column`
 // (shared with the CLI filter builder -- same generated `SortField` type),
 // not a generated function, so ORDER BY text lives only in `db/sql.rs`.
-
-// ---------------------------------------------------------------------------
-// Normalise priority label
-// ---------------------------------------------------------------------------
-
-/// Normalise a user-supplied priority string to the DB label, or return `None`
-/// when the string is not a recognised priority.
-fn normalise_priority(s: &str) -> Option<&'static str> {
-    match s.to_lowercase().as_str() {
-        "none" | "no" | "0" => Some("No priority"),
-        "urgent" | "1" => Some("Urgent"),
-        "high" | "2" => Some("High"),
-        "medium" | "3" => Some("Medium"),
-        "low" | "4" => Some("Low"),
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SQL execution
-// ---------------------------------------------------------------------------
-
-/// Execute a `ParsedQuery` against the local SQLite database.
-///
-/// Returns up to `limit` matching `Issue` rows.
-///
-/// # Errors
-///
-/// Returns an error if the SQLite query fails (e.g. FTS index unavailable).
-// Select the registered WHERE-clause fragments and their bound parameters for
-// a parsed query. Conditions reference the read model's join aliases (`i`
-// issues, `s` state, `t` team, `ua` assignee, `uc` creator, `p` project, `c`
-// cycle). Each filter stem maps to one fragment (see `db/sql.rs`'s
-// `FRAG_*` docs for the exact clause text):
-//   assignee: FRAG_ASSIGNEE_LOWER_LIKE, or FRAG_ASSIGNEE_ME for value "me"
-//   priority: FRAG_PRIORITY_EQ, value normalised via normalise_priority()
-//             first; unrecognised values are silently skipped
-//   state:    FRAG_STATE_LOWER_LIKE
-//   team:     FRAG_TEAM_LOWER_OR_ID
-//   label:    FRAG_LABEL_EXISTS
-fn build_conditions(q: &ParsedQuery) -> (Vec<Frag>, BindParams) {
-    let mut conditions: Vec<Frag> = Vec::new();
-    // rusqlite requires heterogeneous param lists via the params! macro or by
-    // boxing. We box with Box<dyn ToSql> for flexibility.
-    let mut bind: BindParams = Vec::new();
-
-    // -- assignee --
-    if let Some(ref a) = q.assignee {
-        if a == "me" {
-            // "me" without auth context: match the literal string "me" -- callers
-            // that have a viewer name should resolve it before calling run_query.
-            conditions.push(sql::FRAG_ASSIGNEE_ME);
-        } else {
-            conditions.push(sql::FRAG_ASSIGNEE_LOWER_LIKE);
-            bind.push(Box::new(format!("%{a}%")));
-        }
-    }
-
-    // -- priority --
-    if let Some(ref p) = q.priority
-        && let Some(label) = normalise_priority(p)
-    {
-        conditions.push(sql::FRAG_PRIORITY_EQ);
-        bind.push(Box::new(label.to_string()));
-    }
-    // Unknown priority string: skip the filter silently so partial typing
-    // does not wipe the result list.
-
-    // -- state --
-    if let Some(ref s) = q.state {
-        conditions.push(sql::FRAG_STATE_LOWER_LIKE);
-        bind.push(Box::new(format!("%{s}%")));
-    }
-
-    // -- team --
-    if let Some(ref t) = q.team {
-        conditions.push(sql::FRAG_TEAM_LOWER_OR_ID);
-        let pat = format!("%{}%", t.to_lowercase());
-        bind.push(Box::new(pat.clone()));
-        bind.push(Box::new(pat));
-    }
-
-    // -- label --
-    if let Some(ref l) = q.label {
-        conditions.push(sql::FRAG_LABEL_EXISTS);
-        bind.push(Box::new(format!("%{l}%")));
-    }
-
-    // -- project --
-    if let Some(ref p) = q.project {
-        conditions.push(sql::FRAG_PROJECT_LOWER_LIKE);
-        bind.push(Box::new(format!("%{p}%")));
-    }
-
-    // -- cycle --
-    if let Some(ref c) = q.cycle {
-        conditions.push(sql::FRAG_CYCLE_LOWER_LIKE);
-        bind.push(Box::new(format!("%{c}%")));
-    }
-
-    // -- creator --
-    if let Some(ref c) = q.creator {
-        conditions.push(sql::FRAG_CREATOR_LOWER_LIKE);
-        bind.push(Box::new(format!("%{c}%")));
-    }
-
-    (conditions, bind)
-}
-
-pub fn run_query(conn: &Connection, q: &ParsedQuery, limit: usize) -> Result<Vec<Issue>> {
-    let (conditions, bind) = build_conditions(q);
-
-    let (order, desc) = match &q.sort {
-        Some((field, dir)) => (
-            crate::db::filters::sort_column(field),
-            *dir == SortDir::Desc,
-        ),
-        None => (crate::db::filters::sort_column(&SortField::Updated), true),
-    };
-
-    let has_fts = !q.fts_terms.is_empty();
-    let composed = sql::select_issues(has_fts, &conditions, order, desc);
-
-    // Build the final param list: for FTS queries the FTS term goes first,
-    // then the condition binds, then the trailing LIMIT bind.
-    let mut all_params: BindParams = if has_fts {
-        vec![Box::new(q.fts_terms.clone())]
-    } else {
-        Vec::new()
-    };
-    all_params.extend(bind);
-    all_params.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
-
-    let mut stmt = sql::prepare_composed(conn, &composed)
-        .map_err(|e| anyhow::anyhow!("prepare search_query: {e}"))?;
-
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        all_params.iter().map(std::convert::AsRef::as_ref).collect();
-
-    let rows = stmt
-        .query_map(param_refs.as_slice(), crate::db::issue_from_row)
-        .map_err(|e| anyhow::anyhow!("execute search_query: {e}"))?;
-
-    let mut issues = Vec::new();
-    for row in rows {
-        issues.push(row.map_err(|e| anyhow::anyhow!("read search_query row: {e}"))?);
-    }
-    Ok(issues)
-}
-
-/// Resolve "me" in a parsed query to the actual viewer name.
-///
-/// If `viewer_name` is Some and the assignee filter is "me", it is replaced
-/// with the actual name so that the SQL LIKE filter works correctly.
-pub fn resolve_me(q: &mut ParsedQuery, viewer_name: Option<&str>) {
-    if q.assignee.as_deref() == Some("me") {
-        q.assignee = viewer_name.map(str::to_lowercase);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Default query string shown when the user presses /
@@ -459,28 +198,36 @@ pub const DEFAULT_QUERY: &str = "sort:updated-";
 // args_to_ast / render_filter_context (bd-3nu)
 // ---------------------------------------------------------------------------
 
-/// Convert CLI `IssueQuery` into a `QueryAst` suitable for use as the initial
-/// filter state.
+/// Convert a typed filter/sort into a `QueryAst` suitable for use as the
+/// initial filter state.
 ///
-/// Builds a space-separated query string from the args fields (team, assignee,
-/// state, priority, sort) and passes it through `parse_query_ast()` so the
-/// resulting AST is always structurally valid.
-pub fn args_to_ast(args: &IssueQuery) -> QueryAst {
+/// Builds a space-separated query string from the filter's team, assignee,
+/// state, and priority fields plus the sort field/direction, and passes it
+/// through `parse_query_ast()` so the resulting AST is always structurally
+/// valid.
+pub fn args_to_ast(filter: &IssueFilter, sort: &SortField, direction: SortDirection) -> QueryAst {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(ref t) = args.team {
+    if let Some(t) = &filter.team {
         parts.push(format!("team:{t}"));
     }
-    if let Some(ref a) = args.assignee {
-        parts.push(format!("assignee:{a}"));
+    match &filter.assignee {
+        Some(AssigneeFilter::Exact(a) | AssigneeFilter::Contains(a)) => {
+            parts.push(format!("assignee:{a}"));
+        }
+        Some(AssigneeFilter::IsNull) | None => {}
     }
-    if let Some(ref s) = args.state {
+    if let Some(s) = &filter.state {
         parts.push(format!("state:{s}"));
     }
-    if let Some(ref p) = args.priority {
-        parts.push(format!("priority:{p}"));
+    if let Some(p) = filter.priority {
+        parts.push(format!("priority:{}", p.0));
     }
-    let dir = if args.desc { "-" } else { "+" };
-    parts.push(format!("sort:{}{}", args.sort.label(), dir));
+    let dir = if direction == SortDirection::Descending {
+        "-"
+    } else {
+        "+"
+    };
+    parts.push(format!("sort:{}{}", sort.label(), dir));
     parse_query_ast(&parts.join(" "))
 }
 
@@ -497,8 +244,8 @@ pub fn render_filter_context(ast: &QueryAst) -> String {
             Token::Stem { kind, .. } => match kind {
                 StemKind::Sort { field, dir } => {
                     let d = match dir {
-                        SortDir::Desc => "-",
-                        SortDir::Asc => "+",
+                        SortDirection::Descending => "-",
+                        SortDirection::Ascending => "+",
                     };
                     parts.push(format!("sort:{}{}", field.label(), d));
                 }
@@ -525,117 +272,6 @@ pub fn render_filter_context(ast: &QueryAst) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_empty_string() {
-        let q = parse_query("");
-        assert!(q.sort.is_none());
-        assert!(q.fts_terms.is_empty());
-    }
-
-    #[test]
-    fn parse_default_query() {
-        let q = parse_query(DEFAULT_QUERY);
-        let (field, dir) = q.sort.unwrap();
-        assert!(matches!(field, SortField::Updated));
-        assert_eq!(dir, SortDir::Desc);
-        assert!(q.fts_terms.is_empty());
-    }
-
-    #[test]
-    fn parse_sort_asc_plus() {
-        let q = parse_query("sort:priority+");
-        let (field, dir) = q.sort.unwrap();
-        assert!(matches!(field, SortField::Priority));
-        assert_eq!(dir, SortDir::Asc);
-    }
-
-    #[test]
-    fn parse_sort_no_suffix_defaults_asc() {
-        let q = parse_query("sort:title");
-        let (field, dir) = q.sort.unwrap();
-        assert!(matches!(field, SortField::Title));
-        assert_eq!(dir, SortDir::Asc);
-    }
-
-    #[test]
-    fn parse_assignee_me() {
-        let q = parse_query("assignee:me");
-        assert_eq!(q.assignee.as_deref(), Some("me"));
-    }
-
-    #[test]
-    fn parse_priority_urgent() {
-        let q = parse_query("priority:urgent");
-        assert_eq!(q.priority.as_deref(), Some("urgent"));
-    }
-
-    #[test]
-    fn parse_state_todo() {
-        let q = parse_query("state:todo");
-        assert_eq!(q.state.as_deref(), Some("todo"));
-    }
-
-    #[test]
-    fn parse_fts_words() {
-        let q = parse_query("oauth crash");
-        assert_eq!(q.fts_terms, "oauth* crash*");
-    }
-
-    #[test]
-    fn parse_mixed_query() {
-        let q = parse_query("sort:updated- assignee:me priority:urgent state:todo oauth crash");
-        let (field, dir) = q.sort.clone().unwrap();
-        assert!(matches!(field, SortField::Updated));
-        assert_eq!(dir, SortDir::Desc);
-        assert_eq!(q.assignee.as_deref(), Some("me"));
-        assert_eq!(q.priority.as_deref(), Some("urgent"));
-        assert_eq!(q.state.as_deref(), Some("todo"));
-        assert_eq!(q.fts_terms, "oauth* crash*");
-    }
-
-    #[test]
-    fn parse_unknown_sort_field_goes_to_fts() {
-        let q = parse_query("sort:bogus");
-        // bogus field -> no sort set, "sort:bogus" goes to fts
-        assert!(q.sort.is_none());
-        assert_eq!(q.fts_terms, "sort:bogus*");
-    }
-
-    #[test]
-    fn parse_unknown_stem_goes_to_fts() {
-        let q = parse_query("foo:bar baz");
-        assert_eq!(q.fts_terms, "foo:bar* baz*");
-    }
-
-    #[test]
-    fn resolve_me_replaces_with_viewer_name() {
-        let mut q = parse_query("assignee:me");
-        resolve_me(&mut q, Some("Alice"));
-        assert_eq!(q.assignee.as_deref(), Some("alice"));
-    }
-
-    #[test]
-    fn resolve_me_no_viewer_clears_assignee() {
-        let mut q = parse_query("assignee:me");
-        resolve_me(&mut q, None);
-        assert!(q.assignee.is_none());
-    }
-
-    #[test]
-    fn normalise_priority_variants() {
-        assert_eq!(normalise_priority("urgent"), Some("Urgent"));
-        assert_eq!(normalise_priority("1"), Some("Urgent"));
-        assert_eq!(normalise_priority("high"), Some("High"));
-        assert_eq!(normalise_priority("medium"), Some("Medium"));
-        assert_eq!(normalise_priority("low"), Some("Low"));
-        assert_eq!(normalise_priority("none"), Some("No priority"));
-        assert_eq!(normalise_priority("bogus"), None);
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_query_ast tests (bd-22c)
-    // -----------------------------------------------------------------------
 
     #[test]
     fn ast_empty_input() {
@@ -668,7 +304,6 @@ mod tests {
     fn ast_two_words_spans() {
         let ast = parse_query_ast("foo bar");
         assert_eq!(ast.tokens.len(), 2);
-        // "foo" at [0,3), "bar" at [4,7)
         match &ast.tokens[0] {
             Token::Word { span, text } => {
                 assert_eq!((span.start, span.end), (0, 3));
@@ -700,7 +335,7 @@ mod tests {
                 assert_eq!((key_span.start, key_span.end), (0, 4));
                 assert_eq!((val_span.start, val_span.end), (5, 13));
                 assert!(matches!(field, SortField::Updated));
-                assert_eq!(*dir, SortDir::Desc);
+                assert_eq!(*dir, SortDirection::Descending);
             }
             other => panic!("expected Stem(Sort), got {other:?}"),
         }
@@ -803,58 +438,169 @@ mod tests {
         }
     }
 
-    // Parity tests: From<&QueryAst> must produce identical results to parse_query.
+    // -- lower_ast --------------------------------------------------------
 
-    fn assert_from_ast_parity(raw: &str) {
-        let q1 = parse_query(raw);
-        let ast = parse_query_ast(raw);
-        let q2 = ParsedQuery::from(&ast);
-        assert_eq!(q1.sort, q2.sort);
-        assert_eq!(q1.assignee, q2.assignee);
-        assert_eq!(q1.priority, q2.priority);
-        assert_eq!(q1.state, q2.state);
-        assert_eq!(q1.team, q2.team);
-        assert_eq!(q1.fts_terms, q2.fts_terms);
+    #[test]
+    fn lower_ast_empty() {
+        let ast = parse_query_ast("");
+        let (filter, sort) = lower_ast(&ast);
+        assert_eq!(filter, IssueFilter::default());
+        assert!(sort.is_none());
     }
 
     #[test]
-    fn from_ast_parity_empty() {
-        assert_from_ast_parity("");
+    fn lower_ast_default_query() {
+        let ast = parse_query_ast(DEFAULT_QUERY);
+        let (_, sort) = lower_ast(&ast);
+        let (field, dir) = sort.unwrap();
+        assert!(matches!(field, SortField::Updated));
+        assert_eq!(dir, SortDirection::Descending);
     }
 
     #[test]
-    fn from_ast_parity_full_query() {
-        assert_from_ast_parity("sort:updated- assignee:me priority:urgent state:todo oauth crash");
+    fn lower_ast_sort_asc_plus() {
+        let ast = parse_query_ast("sort:priority+");
+        let (_, sort) = lower_ast(&ast);
+        let (field, dir) = sort.unwrap();
+        assert!(matches!(field, SortField::Priority));
+        assert_eq!(dir, SortDirection::Ascending);
     }
 
     #[test]
-    fn from_ast_unknown_sort_field_not_fts() {
-        // "sort:bogus" is a PartialStem -- should produce no FTS terms, not "sort:bogus*".
+    fn lower_ast_assignee_me() {
+        let ast = parse_query_ast("assignee:me");
+        let (filter, _) = lower_ast(&ast);
+        assert_eq!(
+            filter.assignee,
+            Some(AssigneeFilter::Contains("me".to_string()))
+        );
+    }
+
+    #[test]
+    fn lower_ast_priority_urgent() {
+        let ast = parse_query_ast("priority:urgent");
+        let (filter, _) = lower_ast(&ast);
+        assert_eq!(filter.priority.map(|p| p.0), Some(1));
+    }
+
+    #[test]
+    fn lower_ast_unknown_priority_is_skipped() {
+        let ast = parse_query_ast("priority:bogus");
+        let (filter, _) = lower_ast(&ast);
+        assert!(filter.priority.is_none());
+    }
+
+    #[test]
+    fn lower_ast_state_todo() {
+        let ast = parse_query_ast("state:todo");
+        let (filter, _) = lower_ast(&ast);
+        assert_eq!(filter.state.as_deref(), Some("todo"));
+    }
+
+    #[test]
+    fn lower_ast_fts_words() {
+        let ast = parse_query_ast("oauth crash");
+        let (filter, _) = lower_ast(&ast);
+        assert_eq!(filter.term.as_deref(), Some("oauth* crash*"));
+    }
+
+    #[test]
+    fn lower_ast_mixed_query() {
+        let ast =
+            parse_query_ast("sort:updated- assignee:me priority:urgent state:todo oauth crash");
+        let (filter, sort) = lower_ast(&ast);
+        let (field, dir) = sort.unwrap();
+        assert!(matches!(field, SortField::Updated));
+        assert_eq!(dir, SortDirection::Descending);
+        assert_eq!(
+            filter.assignee,
+            Some(AssigneeFilter::Contains("me".to_string()))
+        );
+        assert_eq!(filter.priority.map(|p| p.0), Some(1));
+        assert_eq!(filter.state.as_deref(), Some("todo"));
+        assert_eq!(filter.term.as_deref(), Some("oauth* crash*"));
+    }
+
+    #[test]
+    fn lower_ast_unknown_sort_field_goes_to_fts() {
+        // "sort:bogus" is a PartialStem -- goes to fts, not treated as sort.
         let ast = parse_query_ast("sort:bogus");
-        let q = ParsedQuery::from(&ast);
-        assert_eq!(q.fts_terms, "");
-        assert_eq!(q.sort, None);
+        let (filter, sort) = lower_ast(&ast);
+        assert_eq!(filter.term, None);
+        assert!(sort.is_none());
     }
 
     #[test]
-    fn from_ast_unknown_stem_skipped() {
+    fn lower_ast_unknown_stem_skipped() {
         // "foo:bar" is an unknown PartialStem and must not be emitted as FTS.
         // "baz" is a plain Word and should be emitted.
         let ast = parse_query_ast("foo:bar baz");
-        let q = ParsedQuery::from(&ast);
-        assert_eq!(q.fts_terms, "baz*");
+        let (filter, _) = lower_ast(&ast);
+        assert_eq!(filter.term.as_deref(), Some("baz*"));
     }
 
-    // -----------------------------------------------------------------------
+    #[test]
+    fn lower_ast_label_project_cycle_creator() {
+        let ast = parse_query_ast("label:backend project:platform cycle:seven creator:carol");
+        let (filter, _) = lower_ast(&ast);
+        assert_eq!(filter.label.as_deref(), Some("backend"));
+        assert_eq!(filter.project.as_deref(), Some("platform"));
+        assert_eq!(filter.cycle.as_deref(), Some("seven"));
+        assert_eq!(filter.creator.as_deref(), Some("carol"));
+    }
+
+    #[test]
+    fn lower_ast_team() {
+        let ast = parse_query_ast("team:eng");
+        let (filter, _) = lower_ast(&ast);
+        assert_eq!(filter.team.as_deref(), Some("eng"));
+    }
+
+    // -- resolve_me ---------------------------------------------------------
+
+    #[test]
+    fn resolve_me_replaces_with_viewer_name() {
+        let ast = parse_query_ast("assignee:me");
+        let (mut filter, _) = lower_ast(&ast);
+        resolve_me(&mut filter, Some("Alice"));
+        assert_eq!(
+            filter.assignee,
+            Some(AssigneeFilter::Exact("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_me_no_viewer_keeps_literal_me() {
+        let ast = parse_query_ast("assignee:me");
+        let (mut filter, _) = lower_ast(&ast);
+        resolve_me(&mut filter, None);
+        assert_eq!(
+            filter.assignee,
+            Some(AssigneeFilter::Exact("me".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_me_leaves_other_assignees_untouched() {
+        let ast = parse_query_ast("assignee:bob");
+        let (mut filter, _) = lower_ast(&ast);
+        resolve_me(&mut filter, Some("Alice"));
+        assert_eq!(
+            filter.assignee,
+            Some(AssigneeFilter::Contains("bob".to_string()))
+        );
+    }
 }
 
 #[cfg(test)]
-mod run_query_tests {
+mod merged_read_tests {
+    use lt_types::issues::IssuesVariables;
     use lt_types::types;
     use rusqlite::Connection;
 
     use super::*;
     use crate::db;
+    use crate::db::query_issues;
 
     fn user(name: &str) -> types::User {
         types::User {
@@ -867,14 +613,15 @@ mod run_query_tests {
         types::WorkflowState {
             id: name.into(),
             name: name.to_string(),
+            position: 1.0,
         }
     }
 
     /// A baseline issue; tests override only the fields a filter targets. Entity
     /// ids mirror names (the team id is its key) so the relational upsert
     /// reconstructs them.
-    fn issue(id: &str, title: &str) -> Issue {
-        Issue {
+    fn issue(id: &str, title: &str) -> types::Issue {
+        types::Issue {
             id: id.into(),
             identifier: format!("ENG-{id}"),
             title: title.to_string(),
@@ -942,68 +689,80 @@ mod run_query_tests {
         r3.state = state("Done");
         r3.updated_at = "2026-01-03T00:00:00Z".parse().unwrap();
 
+        // Sync owns workflow states -- issue upserts never write them, so
+        // every state a fixture's issues reference must already be locally
+        // known for the read model's `JOIN` to resolve the row.
+        db::upsert_team_state(&conn, "ENG", &state("Todo")).unwrap();
+        db::upsert_team_state(&conn, "DES", &state("In Progress")).unwrap();
+        db::upsert_team_state(&conn, "ENG", &state("Done")).unwrap();
+
         db::upsert_issues(&conn, &[r1, r2, r3]).unwrap();
         conn
     }
 
-    fn ids(issues: &[Issue]) -> Vec<&str> {
+    fn ids(issues: &[types::Issue]) -> Vec<&str> {
         issues.iter().map(|i| i.id.inner()).collect()
+    }
+
+    /// Run `query` through the same lowering the TUI's search bar uses,
+    /// against the merged read entry point.
+    fn run(conn: &Connection, query: &str, limit: i32) -> Vec<types::Issue> {
+        let ast = parse_query_ast(query);
+        let (filter, sort) = lower_ast(&ast);
+        let vars = IssuesVariables {
+            filter: (filter != IssueFilter::default()).then_some(filter),
+            sort: sort.map(|(field, direction)| lt_types::issues::IssueSort { field, direction }),
+            first: Some(limit),
+            after: None,
+        };
+        query_issues(conn, &vars).unwrap().nodes
     }
 
     #[test]
     fn fts_term_matches_title_tokens() {
         let conn = test_db();
-        let q = parse_query("oauth");
-        let got = run_query(&conn, &q, 50).unwrap();
         // Both "fix oauth login" and "oauth token refresh" match; default sort
         // is updated DESC, so id 1 (newer) precedes id 3.
-        assert_eq!(ids(&got), ["1", "3"]);
+        assert_eq!(ids(&run(&conn, "oauth", 50)), ["1", "3"]);
     }
 
     #[test]
     fn fts_term_combined_with_structured_filter() {
         let conn = test_db();
-        let q = parse_query("oauth state:done");
-        let got = run_query(&conn, &q, 50).unwrap();
-        assert_eq!(ids(&got), ["3"]);
+        assert_eq!(ids(&run(&conn, "oauth state:done", 50)), ["3"]);
     }
 
     #[test]
     fn assignee_filter_matches_substring() {
         let conn = test_db();
-        let q = parse_query("assignee:ali");
-        assert_eq!(ids(&run_query(&conn, &q, 50).unwrap()), ["1"]);
+        assert_eq!(ids(&run(&conn, "assignee:ali", 50)), ["1"]);
     }
 
     #[test]
     fn assignee_me_literal_without_resolution_matches_nothing() {
         let conn = test_db();
-        let q = parse_query("assignee:me");
-        assert!(run_query(&conn, &q, 50).unwrap().is_empty());
+        // No resolve_me call: "me" stays a substring match against no real name.
+        assert!(run(&conn, "assignee:me", 50).is_empty());
     }
 
     #[test]
     fn priority_filter_normalises_label() {
         let conn = test_db();
-        let q = parse_query("priority:urgent");
-        assert_eq!(ids(&run_query(&conn, &q, 50).unwrap()), ["1"]);
+        assert_eq!(ids(&run(&conn, "priority:urgent", 50)), ["1"]);
     }
 
     #[test]
     fn unknown_priority_is_skipped_not_applied() {
         let conn = test_db();
-        let q = parse_query("priority:bogus");
         // The unrecognised value drops the filter, so all rows return.
-        assert_eq!(run_query(&conn, &q, 50).unwrap().len(), 3);
+        assert_eq!(run(&conn, "priority:bogus", 50).len(), 3);
     }
 
     #[test]
     fn team_filter_matches_name_or_key() {
         let conn = test_db();
-        let by_key = parse_query("team:des");
-        assert_eq!(ids(&run_query(&conn, &by_key, 50).unwrap()), ["2"]);
-        let by_name = parse_query("team:engineering");
-        assert_eq!(ids(&run_query(&conn, &by_name, 50).unwrap()), ["1", "3"]);
+        assert_eq!(ids(&run(&conn, "team:des", 50)), ["2"]);
+        assert_eq!(ids(&run(&conn, "team:engineering", 50)), ["1", "3"]);
     }
 
     #[test]
@@ -1015,27 +774,21 @@ mod run_query_tests {
             "cycle:cycle",
             "creator:carol",
         ] {
-            let q = parse_query(stem);
-            assert_eq!(ids(&run_query(&conn, &q, 50).unwrap()), ["2"], "for {stem}");
+            assert_eq!(ids(&run(&conn, stem, 50)), ["2"], "for {stem}");
         }
     }
 
     #[test]
     fn state_filter_substring_match() {
         let conn = test_db();
-        let q = parse_query("state:progress");
-        assert_eq!(ids(&run_query(&conn, &q, 50).unwrap()), ["2"]);
+        assert_eq!(ids(&run(&conn, "state:progress", 50)), ["2"]);
     }
 
     #[test]
     fn sort_and_limit_apply() {
         let conn = test_db();
         // Ascending by priority label is alphabetical: High, Low, Urgent.
-        let q = parse_query("sort:priority+");
-        let got = run_query(&conn, &q, 50).unwrap();
-        assert_eq!(ids(&got), ["2", "3", "1"]);
-
-        let limited = run_query(&conn, &parse_query("sort:updated-"), 2).unwrap();
-        assert_eq!(limited.len(), 2);
+        assert_eq!(ids(&run(&conn, "sort:priority+", 50)), ["2", "3", "1"]);
+        assert_eq!(run(&conn, "sort:updated-", 2).len(), 2);
     }
 }

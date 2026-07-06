@@ -12,7 +12,6 @@ use std::sync::{Arc, mpsc};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use lt_runtime::sync::service::SyncService;
 
 #[derive(Parser)]
 #[command(name = "lt", about = "Linear TUI for terminal power users", version)]
@@ -69,15 +68,25 @@ enum Commands {
     },
 }
 
-/// Launch the TUI with the `lt-runtime`-backed sync service injected.
+/// Launch the TUI with the `lt-runtime`-backed `Runtime` injected.
 ///
 /// `lt-cli` owns both ends of the `AppEvent` channel: the sender feeds both
-/// the TUI's input thread and the service's `OnEvent` callback, so a
+/// the TUI's input thread and the runtime's `OnEvent` callback, so a
 /// same-thread write and a background sync/login outcome land on the same
-/// queue; the receiver drives `lt_tui::run`'s loop. The service's blocking
+/// queue; the receiver drives `lt_tui::run`'s loop. The runtime's blocking
 /// `run` loop is spawned on a detached, process-lifetime background thread
 /// before the TUI starts.
-fn run_tui(query: lt_runtime::query::IssueQuery) -> Result<()> {
+fn run_tui(
+    filter: &lt_types::issues::IssueFilter,
+    sort: &lt_runtime::query::SortField,
+    direction: lt_runtime::query::SortDirection,
+    limit: u32,
+) -> Result<()> {
+    let launch = lt_tui::ListLaunch {
+        filter: lt_runtime::search_query::args_to_ast(filter, sort, direction),
+        limit,
+    };
+
     let (tx, rx) = mpsc::channel();
     let on_event_tx = tx.clone();
     let on_event: lt_runtime::sync::service::OnEvent = Box::new(move |ev| {
@@ -85,13 +94,14 @@ fn run_tui(query: lt_runtime::query::IssueQuery) -> Result<()> {
             tracing::debug!("runtime event: TUI is gone");
         }
     });
-    let service = Arc::new(lt_runtime::LinearSyncService::new(
+    let runtime = Arc::new(lt_runtime::Runtime::new(
         lt_runtime::db::Database::File,
+        Box::new(lt_runtime::HttpTransportSource),
         on_event,
     ));
-    let sync_service = Arc::clone(&service);
-    std::thread::spawn(move || sync_service.run());
-    lt_tui::run(query, service, tx, rx)
+    let sync_runtime = Arc::clone(&runtime);
+    std::thread::spawn(move || sync_runtime.run());
+    lt_tui::run(launch, runtime, tx, rx)
 }
 
 fn main() -> Result<()> {
@@ -119,11 +129,23 @@ fn main() -> Result<()> {
     let mut out = output::Output::stdout();
 
     match cli.command {
-        None => run_tui(lt_runtime::query::IssueQuery::default())?,
+        None => run_tui(
+            &lt_types::issues::IssueFilter::default(),
+            &lt_runtime::query::SortField::Updated,
+            lt_runtime::query::SortDirection::Descending,
+            50,
+        )?,
         Some(Commands::Auth { command }) => auth::run(&mut out, &command)?,
         Some(Commands::Inbox { args }) => inbox::run(&mut out, &args)?,
         Some(Commands::Issues { args, subcommand }) => issues::run(&mut out, &args, subcommand)?,
-        Some(Commands::Tui { args }) => run_tui(lt_runtime::query::IssueQuery::from(&args))?,
+        Some(Commands::Tui { args }) => {
+            run_tui(
+                &args.literal_filter()?,
+                &args.sort,
+                args.sort_direction(),
+                args.limit,
+            )?;
+        }
         Some(Commands::Sync { command }) => {
             let cmd = command.unwrap_or(sync::SyncCommands::Delta);
             sync::run(&mut out, cmd)?;

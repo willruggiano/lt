@@ -80,6 +80,37 @@ impl std::str::FromStr for Priority {
     }
 }
 
+/// The Linear API's `priorityLabel` string for each level, indexed by `.0`
+/// (out-of-range levels cannot occur: `priorityLabel` is the wire source of
+/// truth this scalar is decoded alongside).
+const LABELS: [&str; 5] = ["No priority", "Urgent", "High", "Medium", "Low"];
+
+impl Priority {
+    /// The `priorityLabel` string this level matches on the wire, used to
+    /// filter the local `priority_label` column by an equivalent level.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        LABELS
+            .get(usize::from(self.0))
+            .copied()
+            .unwrap_or(LABELS[0])
+    }
+
+    /// Parse a `priorityLabel` string back to its level. Lossy: any
+    /// unrecognised label (including "No priority") collapses to 0, so this
+    /// is a parse, not a `From`.
+    #[must_use]
+    pub fn from_label(label: &str) -> Self {
+        match label.to_lowercase().as_str() {
+            "urgent" => Self(1),
+            "high" => Self(2),
+            "medium" => Self(3),
+            "low" => Self(4),
+            _ => Self(0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +130,19 @@ mod tests {
         assert_eq!("4".parse::<Priority>().unwrap().0, 4);
         // Case-insensitive.
         assert_eq!("URGENT".parse::<Priority>().unwrap().0, 1);
+    }
+
+    #[test]
+    fn priority_label_round_trips_through_from_label() {
+        for level in 0..=4u8 {
+            assert_eq!(Priority::from_label(Priority(level).label()).0, level);
+        }
+    }
+
+    #[test]
+    fn priority_from_label_is_lossy_for_unrecognised_labels() {
+        assert_eq!(Priority::from_label("No priority").0, 0);
+        assert_eq!(Priority::from_label("bogus").0, 0);
     }
 
     #[test]

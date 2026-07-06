@@ -6,7 +6,8 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use lt_runtime::query::{IssueQuery, SortField};
+use lt_runtime::query::SortField;
+use lt_types::issues::IssueFilter;
 
 #[derive(Args, Clone)]
 pub struct IssueArgs {
@@ -67,24 +68,57 @@ pub struct IssueArgs {
     pub live: bool,
 }
 
-/// Lower the clap args into the data-layer [`IssueQuery`] (drops the CLI-only
-/// `--live` flag, which the caller handles separately).
-impl From<&IssueArgs> for IssueQuery {
-    fn from(args: &IssueArgs) -> Self {
-        IssueQuery {
-            team: args.team.clone(),
-            assignee: args.assignee.clone(),
-            no_assignee: args.no_assignee,
-            state: args.state.clone(),
-            priority: args.priority.clone(),
-            created_after: args.created_after.clone(),
-            created_before: args.created_before.clone(),
-            updated_after: args.updated_after.clone(),
-            updated_before: args.updated_before.clone(),
-            sort: args.sort.clone(),
-            desc: !args.asc,
-            title: args.title.clone(),
-            limit: args.limit,
+impl IssueArgs {
+    /// Lower every filter field except assignee: `--assignee=me` needs a DB
+    /// connection to resolve against the synced viewer (`list::resolve_assignee`);
+    /// `--no-assignee`/a plain name need no DB access and are set here.
+    pub(crate) fn literal_filter(&self) -> Result<IssueFilter> {
+        Ok(IssueFilter {
+            team: self.team.clone(),
+            assignee: if self.no_assignee {
+                Some(lt_types::issues::AssigneeFilter::IsNull)
+            } else {
+                self.assignee
+                    .clone()
+                    .map(lt_types::issues::AssigneeFilter::Contains)
+            },
+            state: self.state.clone(),
+            priority: self.priority.as_deref().map(str::parse).transpose()?,
+            created_after: self
+                .created_after
+                .as_deref()
+                .map(|d| lt_types::query::parse_date(d, "created-after"))
+                .transpose()?,
+            created_before: self
+                .created_before
+                .as_deref()
+                .map(|d| lt_types::query::parse_date(d, "created-before"))
+                .transpose()?,
+            updated_after: self
+                .updated_after
+                .as_deref()
+                .map(|d| lt_types::query::parse_date(d, "updated-after"))
+                .transpose()?,
+            updated_before: self
+                .updated_before
+                .as_deref()
+                .map(|d| lt_types::query::parse_date(d, "updated-before"))
+                .transpose()?,
+            title: self.title.clone(),
+            label: None,
+            project: None,
+            cycle: None,
+            creator: None,
+            term: None,
+        })
+    }
+
+    /// `--asc`'s typed direction (default is descending).
+    pub(crate) fn sort_direction(&self) -> lt_types::query::SortDirection {
+        if self.asc {
+            lt_types::query::SortDirection::Ascending
+        } else {
+            lt_types::query::SortDirection::Descending
         }
     }
 }

@@ -1,65 +1,61 @@
-use lt_runtime::query::SortField;
-use ratatui::Frame;
+use lt_runtime::query::{SortDirection, SortField};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, StatefulWidget, Widget};
 
-use super::table::{row_cells, sort_col_index};
-use super::util::{TableSpec, render_issue_table};
+use super::table::sort_col_index;
 use crate::SearchOverlay;
+use crate::present::issue::IssueTable;
 
-/// Active sort field and direction.
+/// Active sort field and direction, threaded in from the base list so the
+/// search overlay's results table marks the same sorted column -- cross-view
+/// data as a render parameter, never stored on either view.
 pub(super) struct SortOrder<'a> {
     pub(super) field: &'a SortField,
-    pub(super) desc: bool,
+    pub(super) direction: SortDirection,
 }
 
-pub(super) fn render_search_overlay(
-    frame: &mut Frame,
-    chunks: &[Rect],
-    overlay: &mut SearchOverlay,
-    sort: &SortOrder,
-) {
-    // This function only handles the results in the main content area (chunks[2]).
-    let area = chunks[2];
+/// Render input for the FTS search overlay's results: its own rows/table
+/// state, plus the base list's active sort order.
+pub(super) struct SearchResults<'a> {
+    pub(super) overlay: &'a mut SearchOverlay,
+    pub(super) sort: SortOrder<'a>,
+}
 
-    if overlay.fts_unavailable {
-        // Show an error overlay without hiding the table entirely.
-        frame.render_widget(
-            Paragraph::new("Search unavailable: run lt sync first"),
-            area,
-        );
-        return;
-    }
+impl Widget for &mut SearchResults<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let overlay = &mut *self.overlay;
 
-    if overlay.query.value.trim().is_empty() {
-        // No query yet -- keep the underlying list visible.
-        return;
-    }
+        if overlay.fts_unavailable {
+            // Show an error overlay without hiding the table entirely.
+            Paragraph::new("Search unavailable: run lt sync first").render(area, buf);
+            return;
+        }
 
-    // Keep the underlying list visible while a search is queued (debounce
-    // pending) or hasn't run yet, avoiding a flash of empty content.
-    if overlay.results.is_empty() && (overlay.last_changed.is_some() || !overlay.has_searched) {
-        return;
-    }
+        if overlay.query.value.trim().is_empty() {
+            // No query yet -- keep the underlying list visible.
+            return;
+        }
 
-    frame.render_widget(Clear, area);
+        // Keep the underlying list visible while a search is queued (debounce
+        // pending) or hasn't run yet, avoiding a flash of empty content.
+        if overlay.results.is_empty() && (overlay.last_changed.is_some() || !overlay.has_searched) {
+            return;
+        }
 
-    if overlay.results.is_empty() {
-        frame.render_widget(Paragraph::new("No results."), area);
-        return;
-    }
+        Clear.render(area, buf);
 
-    // Render results as a table identical in style to the main list.
-    let sort_col = sort_col_index(sort.field);
-    render_issue_table(
-        frame,
-        area,
-        &TableSpec {
+        if overlay.results.is_empty() {
+            Paragraph::new("No results.").render(area, buf);
+            return;
+        }
+
+        // Render results as a table identical in style to the main list.
+        let table = IssueTable {
             issues: &overlay.results,
-            sort_col,
-            desc: sort.desc,
-            cells: row_cells,
-        },
-        &mut overlay.table_state,
-    );
+            sort_col: sort_col_index(self.sort.field),
+            direction: self.sort.direction,
+        };
+        StatefulWidget::render(&table, area, buf, &mut overlay.table_state);
+    }
 }

@@ -1,11 +1,22 @@
 // Event-loop tests: the DB- and event-coupled surface render tests skip --
 // `do_fetch`/pagination, `run_app` via `EventPump::Scripted`, double-esc,
 // and sync/login typestate transitions, all fed directly (no live threads).
-
-use std::sync::atomic::Ordering;
+//
+// Tests drive the real `Runtime` over an in-memory `Database`, never
+// starting `run()` (docs/design/operation-seam-adr.md, "Decision 7"):
+// initial reads and write propagation are synchronous. Live-update routing
+// for Teams/WorkflowStates/TeamMemberships-scoped subscriptions (the
+// state/assignee popup, the new-issue modal) is exercised at the
+// `lt-runtime` layer instead (`crates/lt-runtime/src/runtime.rs`), since
+// reaching it needs an upstream refresh no `Runtime` write method can
+// synthesize; these tests cover their construction, the team-change
+// drop/resubscribe, and the pure `reanchor` helper.
 
 use crossterm::event::KeyModifiers;
-use lt_runtime::db::Database;
+use lt_runtime::test_util::Database;
+use lt_types::inputs::{CommentCreateInput, IssueCreateInput, IssueUpdateInput};
+use lt_types::issues::IssueUpdateVariables;
+use lt_types::teams::TeamsQuery;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -19,25 +30,21 @@ fn drain_events(app: &mut App) {
     }
 }
 
-/// Test-side re-fetch of the base list, driving the same `refetch` the
-/// app's own key handlers call.
+/// Test-side resubscribe of the base list, driving the same `resubscribe`
+/// the app's own key handlers call.
 fn fetch_base_list(app: &mut App, reset_selection: bool) {
-    let ctx = StateCtx {
-        db: &app.db,
-        viewer_name: app.auth.viewer_name(),
-    };
+    let viewer_name = app.auth.viewer_name().map(str::to_string);
+    let runtime = app.runtime.clone();
     if let Some(View::List(list)) = app.views.first_mut() {
-        list.refetch(&ctx, reset_selection);
+        list.resubscribe(&runtime, viewer_name.as_deref(), reset_selection);
     }
 }
 
-/// Test-side page turn, driving the same query/refetch pair as the
+/// Test-side page turn, driving the same query/resubscribe pair as the
 /// pagination arms of `apply_list`.
 fn turn_page(app: &mut App, forward: bool) {
-    let ctx = StateCtx {
-        db: &app.db,
-        viewer_name: app.auth.viewer_name(),
-    };
+    let viewer_name = app.auth.viewer_name().map(str::to_string);
+    let runtime = app.runtime.clone();
     if let Some(View::List(list)) = app.views.first_mut() {
         let turned = if forward {
             list.query.next_page()
@@ -45,7 +52,7 @@ fn turn_page(app: &mut App, forward: bool) {
             list.query.prev_page()
         };
         if turned {
-            list.refetch(&ctx, true);
+            list.resubscribe(&runtime, viewer_name.as_deref(), true);
         }
     }
 }
@@ -73,6 +80,7 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
         state: types::WorkflowState {
             id: state.into(),
             name: state.to_string(),
+            position: 1.0,
         },
         assignee: None,
         team: types::Team {
@@ -90,31 +98,54 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
     }
 }
 
-/// A comment fixture for seeding the DB directly (bypassing the sync/outbox
-/// paths) in `route_state_event` tests.
-fn comment(id: &str, issue_id: &str, body: &str) -> lt_types::comments::Comment {
-    let ts = lt_types::scalars::DateTime("2026-01-06T00:00:00Z".parse().unwrap_or_default());
-    lt_types::comments::Comment {
-        id: id.into(),
-        body: body.to_string(),
-        created_at: ts,
-        updated_at: ts,
-        user: None,
-        issue_id: Some(issue_id.to_string()),
+/// Seed every `(team_id, state)` pair `rows` reference -- sync owns workflow
+/// states (issue upserts never write them), so a fixture's issues must have
+/// their states already locally known for the read model's `JOIN` to
+/// resolve them, deduplicated by `(team_id, state_id)`.
+fn seed_states_from(
+    conn: &lt_runtime::test_util::Connection,
+    rows: &[lt_types::types::Issue],
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for issue in rows {
+        let key = (
+            issue.team.id.inner().to_string(),
+            issue.state.id.inner().to_string(),
+        );
+        if seen.insert(key) {
+            lt_runtime::test_util::upsert_team_state(conn, issue.team.id.inner(), &issue.state)?;
+        }
     }
+    Ok(())
 }
 
 /// Build an `App` backed by a fresh in-memory `Database` seeded with `rows`,
-/// with its `RecordingSyncService` sharing that same database.
-fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
+/// with its `Runtime` sharing that same database, returning the database
+/// handle too so a test can seed further rows later (shared-cache: any
+/// connection off this handle reaches the same rows the app's `Runtime`
+/// reads/writes).
+fn app_with_db_and_handle(rows: &[lt_types::types::Issue]) -> Result<(App, Database)> {
     let db = Database::memory()?;
     {
         let conn = db.connect()?;
-        lt_runtime::db::upsert_issues(&conn, rows)?;
+        seed_states_from(&conn, rows)?;
+        lt_runtime::test_util::upsert_issues(&conn, rows)?;
     }
     let mut app = App::for_test(Vec::new())?;
-    app.install_db(db)?;
-    Ok(app)
+    app.install_db(&db)?;
+    Ok((app, db))
+}
+
+/// [`app_with_db_and_handle`], for the (common) case where the test never
+/// needs to seed further rows after construction.
+fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
+    Ok(app_with_db_and_handle(rows)?.0)
+}
+
+/// Push a `Detail` view for `issue`, subscribing its comment thread.
+fn open_detail_for(app: &mut App, issue: &lt_types::types::Issue) {
+    let detail = build_cached_detail(issue, &app.runtime);
+    app.views.push(View::Detail(Box::new(detail)));
 }
 
 fn drive(app: &mut App, keys: &[KeyEvent]) -> Result<()> {
@@ -141,7 +172,7 @@ fn do_fetch_paginated_loads_from_db() {
 }
 
 #[test]
-fn do_fetch_filtered_uses_run_query() {
+fn do_fetch_filtered_uses_the_merged_read() {
     let rows = [
         db_issue("1", "ENG-1", "Todo", 5),
         db_issue("2", "ENG-2", "Done", 4),
@@ -152,13 +183,13 @@ fn do_fetch_filtered_uses_run_query() {
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues.len(), 2);
     assert!(app.list_mut().issues.iter().all(|i| i.state.name == "Todo"));
-    // run_query has no pagination.
+    // Fewer matches than the default page size: no next page.
     assert!(!app.list_mut().query.pagination.has_next_page);
     assert!(app.list_mut().query.pagination.end_cursor.is_none());
 }
 
 #[test]
-fn pending_select_seeks_identifier_on_next_issues_event() {
+fn pending_select_seeks_identifier_on_next_issues_update() {
     let rows = [
         db_issue("1", "ENG-1", "Todo", 5),
         db_issue("2", "ENG-2", "Todo", 4),
@@ -168,7 +199,17 @@ fn pending_select_seeks_identifier_on_next_issues_event() {
     fetch_base_list(&mut app, true);
     app.list_mut().pending_select = Some("ENG-3".to_string());
 
-    app.route_state_event(&StateEvent::Issues);
+    // A write that touches `Issue` propagates to the live list subscription.
+    app.runtime
+        .update_issue(IssueUpdateVariables {
+            id: "1".to_string(),
+            input: IssueUpdateInput {
+                priority: Some(0),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    drain_events(&mut app);
 
     assert_eq!(app.list_mut().table_state.selected(), Some(2));
     assert!(app.list_mut().pending_select.is_none());
@@ -184,7 +225,7 @@ fn next_and_prev_page_walk_offsets() {
         db_issue("5", "ENG-5", "Todo", 1),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    app.list_mut().query.args.limit = 2;
+    app.list_mut().query.limit = 2;
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues[0].identifier, "ENG-1");
     assert!(app.list_mut().query.pagination.has_next_page);
@@ -216,16 +257,16 @@ fn toggle_desc_refetches() {
         db_issue("2", "ENG-2", "Todo", 4),
     ];
     let mut app = app_with_db(&rows).unwrap();
-    let desc_before = app.list_mut().query.args.desc;
+    let direction_before = app.list_mut().query.order.direction;
     app.dispatch_key(key('d'));
-    assert_ne!(app.list_mut().query.args.desc, desc_before);
+    assert_ne!(app.list_mut().query.order.direction, direction_before);
     assert_eq!(app.list_mut().issues.len(), 2);
 }
 
 // -- ListView::open ---------------------------------------------------------
 
 #[test]
-fn open_with_filterful_query_matches_post_sync_refetch() {
+fn open_with_filterful_query_matches_post_sync_resubscribe() {
     let rows = [
         db_issue("1", "ENG-1", "Todo", 5),
         db_issue("2", "ENG-2", "Done", 4),
@@ -234,22 +275,25 @@ fn open_with_filterful_query_matches_post_sync_refetch() {
     let db = Database::memory().unwrap();
     {
         let conn = db.connect().unwrap();
-        lt_runtime::db::upsert_issues(&conn, &rows).unwrap();
+        seed_states_from(&conn, &rows).unwrap();
+        lt_runtime::test_util::upsert_issues(&conn, &rows).unwrap();
     }
-    let ctx = StateCtx {
-        db: &db,
-        viewer_name: None,
-    };
-    let mut query = ListQuery::from(IssueQuery::default());
+    let (tx, _rx) = mpsc::channel();
+    let runtime = test_runtime(db, tx);
+    let mut query = ListQuery::new(
+        search_query::parse_query_ast(search_query::DEFAULT_QUERY),
+        50,
+    );
     query.filter = search_query::parse_query_ast("state:todo");
 
     // Startup: the query defines the view's initial data.
-    let mut list = ListView::open(query, &ctx);
+    let mut list = ListView::open(query, &runtime, None);
     let startup: Vec<String> = list.issues.iter().map(|i| i.identifier.clone()).collect();
     assert_eq!(startup, vec!["ENG-1".to_string(), "ENG-3".to_string()]);
 
-    // Steady-state: the same engine, driven by the first sync's `Issues` event.
-    list.consume(&ctx, true, &StateEvent::Issues);
+    // Steady-state: the same engine, driven by a resubscribe (what a sync's
+    // propagation triggers via the subscription's own re-read closure).
+    list.resubscribe(&runtime, None, true);
     let post_sync: Vec<String> = list.issues.iter().map(|i| i.identifier.clone()).collect();
     assert_eq!(startup, post_sync);
 }
@@ -259,9 +303,9 @@ fn open_with_filterful_query_matches_post_sync_refetch() {
 #[test]
 fn confirm_search_hands_off_the_query_not_the_viewport_capped_rows() {
     // 6 rows match state:todo; the overlay caps `results` to the 3-row
-    // viewport, but the base list's query limit (the `IssueQuery` default,
-    // 50) is far larger -- confirm must hand off the query so the base list
-    // refetches the full match set, not the overlay's capped rows.
+    // viewport, but the base list's query limit (the default, 50) is far
+    // larger -- confirm must hand off the query so the base list refetches
+    // the full match set, not the overlay's capped rows.
     let mut rows: Vec<lt_types::types::Issue> = (1..=6)
         .map(|i| db_issue(&i.to_string(), &format!("ENG-{i}"), "Todo", i))
         .collect();
@@ -271,7 +315,7 @@ fn confirm_search_hands_off_the_query_not_the_viewport_capped_rows() {
 
     let mut overlay = SearchOverlay::new();
     overlay.query = TextInput::from("state:todo".to_string());
-    overlay.run_search(&app.db, app.viewport_height);
+    overlay.run_search(&app.runtime, app.viewport_height);
     assert_eq!(overlay.results.len(), 3); // viewport-capped
     app.views.push(View::Search(overlay));
 
@@ -293,10 +337,10 @@ fn confirm_search_hands_off_the_query_not_the_viewport_capped_rows() {
     assert_eq!(app.list_mut().issues[selected].identifier, anchor);
 }
 
-// -- populate_relations ---------------------------------------------------
+// -- build_cached_detail: children come through the composed subscription --
 
 #[test]
-fn populate_relations_fills_parent_and_children() {
+fn build_cached_detail_populates_children_from_the_subscription() {
     let mut parent = db_issue("p1", "ENG-9", "Todo", 9);
     parent.title = "the parent".to_string();
     let mut child = db_issue("c1", "ENG-10", "Done", 8);
@@ -304,47 +348,29 @@ fn populate_relations_fills_parent_and_children() {
         id: "p1".into(),
         identifier: "ENG-9".to_string(),
     });
-    let app = app_with_db(&[parent, child]).unwrap();
+    let app = app_with_db(&[parent.clone(), child]).unwrap();
 
-    // The issue whose relations we resolve; populate_relations keys off its id.
-    let mut issue: lt_types::types::Issue = db_issue("c1", "ENG-10", "Done", 8);
-    let mut detail = build_cached_detail(&issue, Vec::new());
+    let detail = build_cached_detail(&parent, &app.runtime);
 
-    // Seed the issue under a parent so query_children finds it.
-    issue.id = "p1".into();
-    populate_relations(&app.db, &mut detail, &issue);
     assert_eq!(detail.children.len(), 1);
     assert_eq!(detail.children[0].identifier, "ENG-10");
 }
 
-// -- route_state_event ------------------------------------------------------
-
-/// An app seeded with `issue`, a fresh `"cm1"` comment already in the DB,
-/// and a `Detail(issue)` already pushed.
-fn app_with_open_detail_and_fresh_comment(
-    issue: &lt_types::types::Issue,
-    body: &str,
-) -> Result<App> {
-    let mut app = app_with_db(std::slice::from_ref(issue))?;
-    let conn = app.db.connect()?;
-    lt_runtime::db::upsert_comments(&conn, &[comment("cm1", issue.id.inner(), body)])?;
-    drop(conn);
-    app.views.push(View::Detail(Box::new(build_cached_detail(
-        issue,
-        Vec::new(),
-    ))));
-    Ok(app)
-}
+// -- route_update: comments ---------------------------------------------
 
 #[test]
-fn route_state_event_comments_updates_a_live_matching_detail() {
-    // `Comments{A}` with `Detail(A)` live re-reads `query_comments(A)`.
+fn route_update_comments_updates_a_live_matching_detail() {
     let issue = db_issue("c1", "ENG-1", "Todo", 5);
-    let mut app = app_with_open_detail_and_fresh_comment(&issue, "fresh").unwrap();
+    let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
+    open_detail_for(&mut app, &issue);
 
-    app.route_state_event(&StateEvent::Comments {
-        issue_id: "c1".to_string(),
-    });
+    app.runtime
+        .create_comment(&CommentCreateInput {
+            issue_id: "c1".to_string(),
+            body: "fresh".to_string(),
+        })
+        .unwrap();
+    drain_events(&mut app);
 
     let Some(View::Detail(detail)) = app.views.last() else {
         unreachable!("detail view expected")
@@ -354,27 +380,30 @@ fn route_state_event_comments_updates_a_live_matching_detail() {
 }
 
 #[test]
-fn route_state_event_comments_falls_through_without_a_matching_detail() {
-    // No consumer, then a `Detail(B)` id mismatch -- both drop the event.
+fn route_update_comments_falls_through_without_a_matching_detail() {
     let a = db_issue("a", "ENG-1", "Todo", 5);
     let b = db_issue("b", "ENG-2", "Todo", 4);
     let mut app = app_with_db(&[a.clone(), b.clone()]).unwrap();
-    {
-        let conn = app.db.connect().unwrap();
-        lt_runtime::db::upsert_comments(&conn, &[comment("cm1", "a", "fresh")]).unwrap();
-    }
 
-    // No consumer: no-op, no panic.
-    app.route_state_event(&StateEvent::Comments {
-        issue_id: "a".to_string(),
-    });
+    // No consumer yet: no-op, no panic.
+    app.runtime
+        .create_comment(&CommentCreateInput {
+            issue_id: "a".to_string(),
+            body: "fresh".to_string(),
+        })
+        .unwrap();
+    drain_events(&mut app);
 
     // Detail(b) live: id mismatch falls through.
-    app.views
-        .push(View::Detail(Box::new(build_cached_detail(&b, Vec::new()))));
-    app.route_state_event(&StateEvent::Comments {
-        issue_id: "a".to_string(),
-    });
+    open_detail_for(&mut app, &b);
+    app.runtime
+        .create_comment(&CommentCreateInput {
+            issue_id: "a".to_string(),
+            body: "fresh2".to_string(),
+        })
+        .unwrap();
+    drain_events(&mut app);
+
     let Some(View::Detail(detail)) = app.views.last() else {
         unreachable!("detail view expected")
     };
@@ -382,16 +411,25 @@ fn route_state_event_comments_falls_through_without_a_matching_detail() {
 }
 
 #[test]
-fn route_state_event_comments_applied_twice_is_idempotent() {
-    // Duplicate/late events are idempotent re-reads of current truth.
+fn route_update_comments_applied_twice_is_idempotent() {
+    // Duplicate/late events are idempotent: the second `take()` finds
+    // nothing new.
     let issue = db_issue("c1", "ENG-1", "Todo", 5);
-    let mut app = app_with_open_detail_and_fresh_comment(&issue, "fresh").unwrap();
+    let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
+    open_detail_for(&mut app, &issue);
 
-    let ev = StateEvent::Comments {
-        issue_id: "c1".to_string(),
+    app.runtime
+        .create_comment(&CommentCreateInput {
+            issue_id: "c1".to_string(),
+            body: "fresh".to_string(),
+        })
+        .unwrap();
+    let ev = app.events_rx.recv().unwrap();
+    let AppEvent::Runtime(RuntimeEvent::Updated(id)) = ev else {
+        unreachable!("expected an Updated event")
     };
-    app.route_state_event(&ev);
-    app.route_state_event(&ev);
+    app.apply(AppEvent::Runtime(RuntimeEvent::Updated(id)));
+    app.apply(AppEvent::Runtime(RuntimeEvent::Updated(id)));
 
     let Some(View::Detail(detail)) = app.views.last() else {
         unreachable!("detail view expected")
@@ -399,48 +437,56 @@ fn route_state_event_comments_applied_twice_is_idempotent() {
     assert_eq!(detail.comments.len(), 1);
 }
 
+// -- route_update: issues -------------------------------------------------
+
 #[test]
-fn route_state_event_issues_refreshes_the_focused_base() {
-    // The base is focused, so `Issues` re-fetches.
+fn route_update_issues_refreshes_the_focused_base() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues.len(), 1);
 
-    {
-        let conn = app.db.connect().unwrap();
-        lt_runtime::db::upsert_issues(&conn, &[db_issue("2", "ENG-2", "Todo", 4)]).unwrap();
-    }
-    app.route_state_event(&StateEvent::Issues);
+    app.runtime
+        .create_issue(&IssueCreateInput {
+            title: "New".to_string(),
+            team_id: "ENG".to_string(),
+            description: None,
+            state_id: None,
+            priority: None,
+            assignee_id: None,
+        })
+        .unwrap();
+    drain_events(&mut app);
+
     assert_eq!(app.list_mut().issues.len(), 2);
 }
 
 #[test]
-fn route_state_event_issues_under_an_overlay_skips_the_base_but_refreshes_detail() {
-    // An overlay above the base: the base's `focused` guard drops the
-    // refresh, but a live `Detail` still re-reads its own issue.
+fn route_update_issues_under_an_overlay_defers_and_resume_focus_replays() {
+    // An overlay above the base: the base's `focused` guard defers the
+    // update -- the subscription's slot holds the latest for focus return.
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
     fetch_base_list(&mut app, true);
-    app.views.push(View::Detail(Box::new(build_cached_detail(
-        &issue,
-        Vec::new(),
-    ))));
+    open_detail_for(&mut app, &issue);
 
-    let mut renamed = issue.clone();
-    renamed.title = "renamed".to_string();
-    {
-        let conn = app.db.connect().unwrap();
-        lt_runtime::db::upsert_issues(&conn, &[renamed]).unwrap();
-    }
-    app.route_state_event(&StateEvent::Issues);
+    app.runtime
+        .create_issue(&IssueCreateInput {
+            title: "New".to_string(),
+            team_id: "ENG".to_string(),
+            description: None,
+            state_id: None,
+            priority: None,
+            assignee_id: None,
+        })
+        .unwrap();
+    drain_events(&mut app);
 
-    // The base is stale -- it never re-fetched.
-    assert_eq!(app.list_mut().issues[0].title, "issue ENG-1");
-    // The detail pane, being live, reflects the change immediately.
-    let Some(View::Detail(detail)) = app.views.last() else {
-        unreachable!("detail view expected")
-    };
-    assert_eq!(detail.issue.title, "renamed");
+    // The base is stale -- it never re-read while unfocused.
+    assert_eq!(app.list_mut().issues.len(), 1);
+
+    // Popping the overlay replays the deferred update.
+    app.pop_view();
+    assert_eq!(app.list_mut().issues.len(), 2);
 }
 
 // -- optimistic writers: popup_confirm / submit_comment round trips -------
@@ -449,9 +495,23 @@ fn route_state_event_issues_under_an_overlay_skips_the_base_but_refreshes_detail
 fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let issue_id = issue.id.inner().to_string();
-    let mut app = app_with_db(&[issue]).unwrap();
+    let (mut app, db) = app_with_db_and_handle(&[issue]).unwrap();
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues[0].state.name, "Todo");
+
+    // The id a real popup offers is already cached under its name by that
+    // picker's own `TeamStatesQuery` subscription; mirror that precondition
+    // here rather than hand-placing a name at write time.
+    lt_runtime::test_util::upsert_team_state(
+        &db.connect().unwrap(),
+        "ENG",
+        &lt_types::types::WorkflowState {
+            id: "done-state".into(),
+            name: "Done".to_string(),
+            position: 1.0,
+        },
+    )
+    .unwrap();
 
     app.views.push(View::Popup(PopupView {
         kind: PopupKind::State,
@@ -462,19 +522,17 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
             id: Some("done-state".to_string()),
         }],
         selected: 0,
-        anchor: None,
+        sub: None,
     }));
 
     app.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    // The write goes through the service, which emits `State(Issues)` onto
-    // the queue rather than routing it directly; drain it, as `run_app`
-    // would in the same frame.
+    // The write goes through the runtime, which propagates rather than
+    // routing directly; drain it, as `run_app` would in the same frame.
     drain_events(&mut app);
 
     // The popup pops...
     assert_eq!(app.views.len(), 1);
-    // ...and the queued `Issues` invalidation re-reads the overlay-merged
-    // state from the DB.
+    // ...and the queued update re-reads the overlay-merged state from the DB.
     assert_eq!(app.list_mut().issues[0].state.name, "Done");
 }
 
@@ -482,7 +540,7 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
 fn submit_comment_writes_through_the_db_and_refreshes_the_open_detail() {
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
-    let mut detail = build_cached_detail(&issue, Vec::new());
+    let mut detail = build_cached_detail(&issue, &app.runtime);
     detail.comment_input = Some("a new comment".to_string());
     app.views.push(View::Detail(Box::new(detail)));
 
@@ -527,15 +585,15 @@ fn run_app_errs_when_events_exhausted_without_quit() {
 fn double_esc_resets_to_initial_filter() {
     let rows = [db_issue("1", "ENG-1", "Todo", 5)];
     let mut app = app_with_db(&rows).unwrap();
-    let initial_sort = app.list_mut().query.args.sort.clone();
-    let next_sort = app.list_mut().query.args.sort.next();
-    app.list_mut().query.args.sort = next_sort;
+    let initial_sort = app.list_mut().query.order.field.clone();
+    let next_sort = app.list_mut().query.order.field.next();
+    app.list_mut().query.order.field = next_sort;
     let replaced = app.list_mut().query.replace_sort_in_filter();
     app.list_mut().query.filter = replaced;
     app.last_esc_time = Some(Instant::now()); // within the 500ms window
 
     app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.list_mut().query.args.sort, initial_sort);
+    assert_eq!(app.list_mut().query.order.field, initial_sort);
     assert!(app.last_esc_time.is_none());
 }
 
@@ -628,7 +686,7 @@ fn push_priority_popup(app: &mut App, items: Vec<PopupItem>) {
         team_id: None,
         items,
         selected: 0,
-        anchor: None,
+        sub: None,
     }));
 }
 
@@ -636,10 +694,7 @@ fn push_priority_popup(app: &mut App, items: Vec<PopupItem>) {
 fn floor_esc_pops_detail_overlay() {
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
-    app.views.push(View::Detail(Box::new(build_cached_detail(
-        &issue,
-        Vec::new(),
-    ))));
+    open_detail_for(&mut app, &issue);
     app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.views.len(), 1);
 }
@@ -671,7 +726,8 @@ fn floor_esc_pops_help_overlay() {
 #[test]
 fn floor_esc_pops_new_issue_overlay() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    app.views.push(View::NewIssue(bare_new_issue_modal()));
+    let modal = test_new_issue_modal(&app.runtime);
+    app.views.push(View::NewIssue(modal));
     app.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.views.len(), 1);
 }
@@ -701,12 +757,12 @@ fn cascade_unbound_key_in_an_overlay_reaches_the_base() {
     // 'd' (toggle sort direction) is unbound in the popup's own context; it
     // should fall through the cascade to the list's binding underneath.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let before = app.list_mut().query.args.desc;
+    let before = app.list_mut().query.order.direction;
     push_priority_popup(&mut app, priority_popup_items());
 
     app.dispatch_key(key('d'));
 
-    assert_ne!(app.list_mut().query.args.desc, before);
+    assert_ne!(app.list_mut().query.order.direction, before);
 }
 
 #[test]
@@ -714,7 +770,8 @@ fn cascade_bound_key_stops_at_the_overlay() {
     // The new-issue modal consumes every key but Esc (a text/form context);
     // `q` must not reach the base's quit.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    app.views.push(View::NewIssue(bare_new_issue_modal()));
+    let modal = test_new_issue_modal(&app.runtime);
+    app.views.push(View::NewIssue(modal));
 
     app.dispatch_key(key('q'));
 
@@ -735,10 +792,7 @@ fn scroll_key_moves_the_focused_view_and_never_a_view_beneath() {
     let base_selected_before = app.list_mut().table_state.selected();
 
     let issue = app.list_mut().issues[0].clone();
-    app.views.push(View::Detail(Box::new(build_cached_detail(
-        &issue,
-        Vec::new(),
-    ))));
+    open_detail_for(&mut app, &issue);
 
     app.dispatch_key(key('j'));
 
@@ -772,12 +826,12 @@ fn printable_key_in_search_never_reaches_the_list_beneath() {
     // direction) must stay text in the Search overlay: text contexts skip
     // GLOBAL, and forwarding always consumes, so the cascade never resumes.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let before = app.list_mut().query.args.desc;
+    let before = app.list_mut().query.order.direction;
     app.views.push(View::Search(SearchOverlay::new()));
 
     app.dispatch_key(key('d'));
 
-    assert_eq!(app.list_mut().query.args.desc, before);
+    assert_eq!(app.list_mut().query.order.direction, before);
     let Some(View::Search(overlay)) = app.views.last() else {
         unreachable!("search view expected")
     };
@@ -807,7 +861,7 @@ fn esc_with_comment_input_open_cancels_input_and_keeps_detail_view() {
     // the Detail view beneath it -- narrower than the floor's pop.
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
-    let mut detail = build_cached_detail(&issue, Vec::new());
+    let mut detail = build_cached_detail(&issue, &app.runtime);
     detail.comment_input = Some("draft".to_string());
     app.views.push(View::Detail(Box::new(detail)));
 
@@ -857,11 +911,14 @@ fn popup_scroll_supports_the_shared_motion_set() {
 
 // -- typestates: consume_sync_event / consume_login_event, L/refresh -----
 
-fn ada() -> lt_types::viewer::User {
-    lt_types::viewer::User {
-        id: "u1".into(),
-        name: "Ada".to_string(),
+fn ada() -> lt_types::viewer::Viewer {
+    lt_types::viewer::Viewer {
+        user: lt_types::types::User {
+            id: "u1".into(),
+            name: "Ada".to_string(),
+        },
         organization: lt_types::viewer::Organization {
+            id: "o1".into(),
             name: "Acme".to_string(),
             url_key: "acme".to_string(),
         },
@@ -879,65 +936,44 @@ fn consume_sync_event_started_sets_syncing() {
 }
 
 #[test]
-fn consume_sync_event_done_sets_identity_and_synced() {
-    // `Sync(Done)` only transitions the typestate; the `State(Issues)` the
-    // loop emits alongside is a separate queued event.
+fn consume_sync_event_done_sets_synced_at_from_the_payload() {
+    // `Sync(Done)` carries the runtime's own `synced_at` timestamp and only
+    // transitions the `sync` typestate; the viewer identity flows through
+    // the header's own `ViewerQuery` subscription instead (`apply_viewer_update`).
     let mut app = app_with_db(&[]).unwrap();
     app.sync = SyncStatus::Syncing;
+    let now = chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
 
-    app.consume_sync_event(SyncEvent::Done(Some(ada())));
+    app.consume_sync_event(SyncEvent::Done(Some(now)));
 
-    assert_eq!(app.auth.viewer_name(), Some("Ada"));
-    assert!(matches!(app.sync, SyncStatus::Synced { .. }));
+    match &app.sync {
+        SyncStatus::Synced { synced_at } => assert_eq!(*synced_at, Some(now)),
+        SyncStatus::Idle | SyncStatus::Syncing | SyncStatus::Failed { .. } => {
+            unreachable!("expected Synced")
+        }
+    }
 }
 
+// A live `ViewerQuery` update (`apply_viewer_update` setting `Authenticated`
+// from a fresh slot value) needs an upstream refresh no `Runtime` write
+// method can synthesize -- like the team-scoped subscriptions above, that
+// path is exercised at the `lt-runtime` layer instead
+// (`crates/lt-runtime/src/runtime.rs`, `refresh_entry_*`,
+// `crates/lt-runtime/src/ops.rs`, `refresh_viewer_persists_and_reports_viewer`).
+
 #[test]
-fn consume_sync_event_done_without_identity_leaves_auth_unchanged() {
+fn apply_viewer_update_leaves_auth_unchanged_without_a_fresh_slot_value() {
+    // No propagation has touched `Viewer` since subscribing: `take()` finds
+    // nothing new, so a matching update is a no-op -- safe to call
+    // unconditionally.
     let mut app = app_with_db(&[]).unwrap();
     app.auth = AuthStatus::Unauthenticated;
 
-    app.consume_sync_event(SyncEvent::Done(None));
+    app.apply_viewer_update(app.viewer_sub.key());
 
     assert!(matches!(app.auth, AuthStatus::Unauthenticated));
-    assert!(matches!(app.sync, SyncStatus::Synced { .. }));
-}
-
-#[test]
-fn consume_sync_event_done_reads_synced_at_from_db_meta() {
-    let mut app = app_with_db(&[]).unwrap();
-    {
-        let conn = app.db.connect().unwrap();
-        lt_runtime::db::set_meta(&conn, "last_synced_at", "2026-01-10T12:00:00Z").unwrap();
-    }
-
-    app.consume_sync_event(SyncEvent::Done(None));
-
-    match &app.sync {
-        SyncStatus::Synced { synced_at } => {
-            assert_eq!(synced_at.to_rfc3339(), "2026-01-10T12:00:00+00:00");
-        }
-        SyncStatus::Idle | SyncStatus::Syncing | SyncStatus::Failed { .. } => {
-            unreachable!("expected Synced")
-        }
-    }
-}
-
-#[test]
-fn consume_sync_event_done_falls_back_to_the_clock_without_meta() {
-    let mut app = app_with_db(&[]).unwrap();
-    let now = chrono::DateTime::parse_from_rfc3339("2026-02-01T00:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    app.clock = Clock::Fixed(now);
-
-    app.consume_sync_event(SyncEvent::Done(None));
-
-    match &app.sync {
-        SyncStatus::Synced { synced_at } => assert_eq!(*synced_at, now),
-        SyncStatus::Idle | SyncStatus::Syncing | SyncStatus::Failed { .. } => {
-            unreachable!("expected Synced")
-        }
-    }
 }
 
 #[test]
@@ -993,49 +1029,47 @@ fn consume_login_event_error_sets_failed_and_footer() {
 #[test]
 fn l_key_gates_on_authenticating() {
     let mut app = app_with_db(&[]).unwrap();
-    let db = app.db.share().unwrap();
-    let service = app.install_recording_service(&db).unwrap();
 
     app.dispatch_key(key('L'));
     assert!(matches!(app.auth, AuthStatus::Authenticating));
-    assert_eq!(service.login_calls.load(Ordering::SeqCst), 1);
 
     // A second press while already authenticating is a no-op -- the TUI's
     // own gate.
     app.dispatch_key(key('L'));
-    assert_eq!(service.login_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(app.auth, AuthStatus::Authenticating));
 }
 
 #[test]
-fn refresh_requests_sync_on_every_press() {
-    // `ctrl+r` doesn't gate on `Syncing`: a press mid-cycle coalesces into
-    // a follow-up sync rather than being ignored.
-    let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let db = app.db.share().unwrap();
-    let service = app.install_recording_service(&db).unwrap();
+fn refresh_key_resubscribes_the_base_list_immediately() {
+    // `ctrl+r` doesn't gate on `Syncing`: an immediate resubscribe runs
+    // before the sync request goes out.
+    let (mut app, db) = app_with_db_and_handle(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
+    fetch_base_list(&mut app, true);
+    {
+        let conn = db.connect().unwrap();
+        lt_runtime::test_util::upsert_issues(&conn, &[db_issue("2", "ENG-2", "Todo", 4)]).unwrap();
+    }
 
     app.dispatch_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-    assert_eq!(service.request_sync_calls.load(Ordering::SeqCst), 1);
 
-    app.dispatch_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-    assert_eq!(service.request_sync_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(app.list_mut().issues.len(), 2);
 }
 
 /// Seed `team_id` with two ordered workflow states ("Todo" @1.0, "Done" @2.0).
-fn seed_team_states(conn: &lt_runtime::db::Connection, team_id: &str) -> Result<()> {
-    lt_runtime::db::upsert_team_state(
+fn seed_team_states(conn: &lt_runtime::test_util::Connection, team_id: &str) -> Result<()> {
+    lt_runtime::test_util::upsert_team_state(
         conn,
         team_id,
-        &lt_types::states::WorkflowStateWithPosition {
+        &lt_types::types::WorkflowState {
             id: "s-todo".into(),
             name: "Todo".to_string(),
             position: 1.0,
         },
     )?;
-    lt_runtime::db::upsert_team_state(
+    lt_runtime::test_util::upsert_team_state(
         conn,
         team_id,
-        &lt_types::states::WorkflowStateWithPosition {
+        &lt_types::types::WorkflowState {
             id: "s-done".into(),
             name: "Done".to_string(),
             position: 2.0,
@@ -1044,148 +1078,12 @@ fn seed_team_states(conn: &lt_runtime::db::Connection, team_id: &str) -> Result<
     Ok(())
 }
 
-/// A bare `NewIssueModal` fixture; callers vary only the fields under test.
-fn bare_new_issue_modal() -> NewIssueModal {
-    NewIssueModal {
-        focused_field: NewIssueField::Team,
-        title: TextInput::from(String::new()),
-        description: String::new(),
-        teams: Vec::new(),
-        team_selected: 0,
-        priorities: Vec::new(),
-        priority_selected: 0,
-        states: Vec::new(),
-        state_selected: 0,
-        assignees: Vec::new(),
-        assignee_selected: 0,
-        loading: true,
-        error: String::new(),
-        watched_team_id: None,
-    }
-}
-
 #[test]
-fn new_issue_modal_teams_event_rereads_and_reanchors_by_id() {
-    // `State(Teams)` with `NewIssue` in the stack: re-read teams and
-    // re-anchor the selection by id (not index).
+fn route_update_with_no_matching_view_is_a_noop() {
     let mut app = app_with_db(&[]).unwrap();
-    {
-        let conn = app.db.connect().unwrap();
-        lt_runtime::db::upsert_teams(
-            &conn,
-            &[
-                lt_types::types::Team {
-                    id: "t1".into(),
-                    name: "Eng".to_string(),
-                },
-                lt_types::types::Team {
-                    id: "t2".into(),
-                    name: "Design".to_string(),
-                },
-            ],
-        )
-        .unwrap();
-    }
-    let mut modal = bare_new_issue_modal();
-    modal.teams = vec![PopupItem {
-        label: "Eng".to_string(),
-        id: Some("t1".to_string()),
-    }];
-    modal.team_selected = 0;
-    app.views.push(View::NewIssue(modal));
-
-    app.route_state_event(&StateEvent::Teams);
-
-    let Some(View::NewIssue(modal)) = app.views.last() else {
-        unreachable!("new-issue view expected")
-    };
-    assert_eq!(modal.teams.len(), 2);
-    // Alphabetical order puts "Design" first; the selection follows "t1" by
-    // id rather than resetting to index 0.
-    assert_eq!(modal.teams[modal.team_selected].id.as_deref(), Some("t1"));
-}
-
-#[test]
-fn route_state_event_teams_with_no_modal_is_a_noop() {
-    // `State(Teams)` with no `NewIssue` in the stack: no consumer.
-    let mut app = app_with_db(&[]).unwrap();
-    app.route_state_event(&StateEvent::Teams);
+    let (sub, _) = app.runtime.subscribe::<TeamsQuery>(());
+    app.route_update(sub.key());
     assert_eq!(app.views.len(), 1);
-}
-
-#[test]
-fn new_issue_modal_team_event_rereads_and_preserves_picks_by_id() {
-    // `State(Team{T})` with `NewIssue` on team T: re-read states/members,
-    // preserve the picks by id, clear `loading`.
-    let mut app = app_with_db(&[]).unwrap();
-    {
-        let conn = app.db.connect().unwrap();
-        seed_team_states(&conn, "t1").unwrap();
-        lt_runtime::db::upsert_users(
-            &conn,
-            &[lt_types::types::User {
-                id: "u1".into(),
-                name: "Ada".to_string(),
-            }],
-        )
-        .unwrap();
-        lt_runtime::db::replace_team_memberships(&conn, "t1", &["u1"]).unwrap();
-    }
-    let mut modal = bare_new_issue_modal();
-    modal.teams = vec![PopupItem {
-        label: "Eng".to_string(),
-        id: Some("t1".to_string()),
-    }];
-    modal.team_selected = 0;
-    modal.states = vec![PopupItem {
-        label: "Done".to_string(),
-        id: Some("s-done".to_string()),
-    }];
-    modal.state_selected = 0; // "Done" picked before the refresh landed
-    app.views.push(View::NewIssue(modal));
-
-    app.route_state_event(&StateEvent::Team {
-        team_id: "t1".to_string(),
-    });
-
-    let Some(View::NewIssue(modal)) = app.views.last() else {
-        unreachable!("new-issue view expected")
-    };
-    assert_eq!(modal.states.len(), 2);
-    // Position order puts "Todo" first; "Done" is preserved by id rather
-    // than resetting to index 0.
-    assert_eq!(
-        modal.states[modal.state_selected].id.as_deref(),
-        Some("s-done")
-    );
-    // "Unassigned" + the one seeded member (no synced viewer in this test).
-    assert_eq!(modal.assignees.len(), 2);
-    assert!(!modal.loading);
-}
-
-#[test]
-fn new_issue_modal_team_event_for_a_different_team_falls_through() {
-    // `State(Team{T})` with `NewIssue` on team U: the id mismatch falls
-    // through, leaving `loading`/items untouched.
-    let mut app = app_with_db(&[]).unwrap();
-    let mut modal = bare_new_issue_modal();
-    modal.teams = vec![PopupItem {
-        label: "Design".to_string(),
-        id: Some("t2".to_string()),
-    }];
-    modal.team_selected = 0;
-    app.views.push(View::NewIssue(modal));
-
-    // A refresh for a team the user has since tabbed away from.
-    app.route_state_event(&StateEvent::Team {
-        team_id: "t1".to_string(),
-    });
-
-    let Some(View::NewIssue(modal)) = app.views.last() else {
-        unreachable!("new-issue view expected")
-    };
-    assert!(modal.states.is_empty());
-    assert!(modal.loading);
 }
 
 #[test]
@@ -1193,7 +1091,7 @@ fn new_issue_team_picker_g_selects_the_last_team() {
     // `G` in the new-issue Team picker moves to the last item -- previously
     // a no-op via `Scroll`'s trait defaults.
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
-    let mut modal = bare_new_issue_modal();
+    let mut modal = test_new_issue_modal(&app.runtime);
     modal.focused_field = NewIssueField::Title;
     modal.teams = (0..5)
         .map(|i| PopupItem {
@@ -1213,36 +1111,81 @@ fn new_issue_team_picker_g_selects_the_last_team() {
 }
 
 #[test]
-fn popup_team_event_rebuilds_items_and_reanchors_selection() {
-    // `State(Team{T})` with `Popup { team_id: Some(T) }`: rebuild `items`
-    // from the cache and re-anchor the selection by item id.
-    let mut app = app_with_db(&[]).unwrap();
+fn new_issue_team_change_drops_the_old_scoped_subscriptions_and_subscribes_new_ones() {
+    // Leaving the Team field with a different team selected re-subscribes
+    // states/members for the new team (RAII replaces the old hand-diffed
+    // `watched_team_id` bookkeeping) and marks `loading`.
+    let (mut app, db) = app_with_db_and_handle(&[]).unwrap();
     {
-        let conn = app.db.connect().unwrap();
-        seed_team_states(&conn, "t1").unwrap();
+        let conn = db.connect().unwrap();
+        seed_team_states(&conn, "t2").unwrap();
     }
-    app.views.push(View::Popup(PopupView {
-        kind: PopupKind::State,
-        issue_id: "issue-1".to_string(),
-        team_id: Some("t1".to_string()),
-        items: vec![PopupItem {
-            label: "Done".to_string(),
-            id: Some("s-done".to_string()),
-        }],
-        selected: 0,
-        anchor: None,
-    }));
+    let mut modal = test_new_issue_modal(&app.runtime);
+    modal.focused_field = NewIssueField::Title;
+    modal.teams = vec![
+        PopupItem {
+            label: "Eng".to_string(),
+            id: Some("t1".to_string()),
+        },
+        PopupItem {
+            label: "Design".to_string(),
+            id: Some("t2".to_string()),
+        },
+    ];
+    modal.team_selected = 0;
+    modal.loading = false;
+    app.views.push(View::NewIssue(modal));
 
-    app.route_state_event(&StateEvent::Team {
-        team_id: "t1".to_string(),
-    });
+    app.dispatch_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // Title -> Team
+    let Some(View::NewIssue(modal)) = app.views.last_mut() else {
+        unreachable!("new-issue view expected")
+    };
+    modal.team_selected = 1; // select "Design" (t2)
+
+    app.dispatch_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // leaves Team
+
+    let Some(View::NewIssue(modal)) = app.views.last() else {
+        unreachable!("new-issue view expected")
+    };
+    assert!(modal.loading);
+    assert_eq!(
+        modal
+            .states
+            .iter()
+            .map(|s| s.label.as_str())
+            .collect::<Vec<_>>(),
+        ["Todo", "Done"]
+    );
+}
+
+#[test]
+fn popup_team_scoped_construction_reads_the_current_states() {
+    // "Backlog", not "Todo"/"Done", so the popup shows the issue's own
+    // state back-fill alongside the seeded, team-synced states below.
+    let issue = db_issue("1", "ENG-1", "Backlog", 5);
+    let (mut app, db) = app_with_db_and_handle(&[issue]).unwrap();
+    fetch_base_list(&mut app, true);
+    {
+        let conn = db.connect().unwrap();
+        seed_team_states(&conn, "ENG").unwrap();
+    }
+
+    app.open_state_popup();
 
     let Some(View::Popup(popup)) = app.views.last() else {
         unreachable!("popup view expected")
     };
-    assert_eq!(popup.items.len(), 2);
-    // Position order puts "Todo" first; the selection is preserved by id.
-    assert_eq!(popup.items[popup.selected].id.as_deref(), Some("s-done"));
+    assert_eq!(
+        popup
+            .items
+            .iter()
+            .map(|i| i.label.as_str())
+            .collect::<Vec<_>>(),
+        // Position order; "Backlog" carries `db_issue`'s fixed placeholder
+        // position (1.0), tying with "Todo" (also seeded at 1.0) and
+        // sorting first by name.
+        ["Backlog", "Todo", "Done"]
+    );
 }
 
 #[test]

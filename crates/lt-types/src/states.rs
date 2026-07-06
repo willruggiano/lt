@@ -4,10 +4,11 @@
 use cynic::QueryBuilder;
 
 use crate::graphql::GraphqlOperation;
+use crate::pagination::PageInfo;
 use crate::schema;
 use crate::types::WorkflowState;
 
-#[derive(cynic::QueryVariables)]
+#[derive(cynic::QueryVariables, Clone)]
 pub struct TeamVariables {
     #[cynic(rename = "teamId")]
     pub team_id: String,
@@ -46,43 +47,25 @@ pub struct WorkflowStateConnection {
 }
 
 // ---------------------------------------------------------------------------
-// Team-scoped fetch with position (lt-runtime::teams::sync_team_data)
+// Team-scoped fetch (lt-runtime::teams::sync_team_data)
 // ---------------------------------------------------------------------------
 
-/// A workflow state carrying `position`, used only by [`TeamStatesQuery`] --
-/// the local cache's state/assignee pickers need Linear's stored ordering.
-/// The shared [`WorkflowState`] fragment used by the issue fragment stays
-/// `{ id, name }`.
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
-#[cynic(graphql_type = "WorkflowState")]
-pub struct WorkflowStateWithPosition {
-    pub id: cynic::Id,
-    pub name: String,
-    pub position: f64,
-}
-
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "Team")]
-pub struct TeamWithPositionedStates {
-    pub states: WorkflowStateWithPositionConnection,
-}
-
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "WorkflowStateConnection")]
-pub struct WorkflowStateWithPositionConnection {
-    pub nodes: Vec<WorkflowStateWithPosition>,
-}
-
+/// Team-scoped states, reusing [`TeamWithStates`]/[`WorkflowStateConnection`]:
+/// the shared [`WorkflowState`] fragment already carries `position`, so this
+/// is otherwise identical to [`WorkflowStatesQuery`] -- distinct because the
+/// local cache's state/assignee pickers (this query, synced) and the
+/// interactive new-issue session (that one, unsynced) are separate call
+/// sites.
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query", variables = "TeamVariables")]
 pub struct TeamStatesQuery {
     #[arguments(id: $team_id)]
-    pub team: TeamWithPositionedStates,
+    pub team: TeamWithStates,
 }
 
 impl GraphqlOperation for TeamStatesQuery {
     type Variables = TeamVariables;
-    type Output = Vec<WorkflowStateWithPosition>;
+    type Output = Vec<WorkflowState>;
     const NAME: &'static str = "teamStates";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
@@ -92,6 +75,63 @@ impl GraphqlOperation for TeamStatesQuery {
     fn extract(self) -> anyhow::Result<Self::Output> {
         Ok(self.team.states.nodes)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Org-wide fetch (the sync cycle: every workflow state a synced issue could
+// reference must be locally known before any issue page lands, since sync
+// owns workflow states -- issue upserts no longer write them)
+// ---------------------------------------------------------------------------
+
+#[derive(cynic::QueryVariables, Clone)]
+pub struct AllWorkflowStatesVariables {
+    pub first: i32,
+    pub after: Option<String>,
+}
+
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "Query", variables = "AllWorkflowStatesVariables")]
+pub struct AllWorkflowStatesQuery {
+    #[arguments(first: $first, after: $after)]
+    pub workflow_states: WorkflowStateWithTeamConnection,
+}
+
+impl GraphqlOperation for AllWorkflowStatesQuery {
+    type Variables = AllWorkflowStatesVariables;
+    type Output = WorkflowStateWithTeamConnection;
+    const NAME: &'static str = "allWorkflowStates";
+
+    fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
+        Self::build(variables)
+    }
+
+    fn extract(self) -> anyhow::Result<Self::Output> {
+        Ok(self.workflow_states)
+    }
+}
+
+#[derive(Default, cynic::QueryFragment)]
+#[cynic(graphql_type = "WorkflowStateConnection")]
+pub struct WorkflowStateWithTeamConnection {
+    pub nodes: Vec<WorkflowStateWithTeam>,
+    pub page_info: PageInfo,
+}
+
+/// A workflow state carrying its own team's id, so the org-wide fetch above
+/// can upsert each state team-scoped without a second, per-team round trip.
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "WorkflowState")]
+pub struct WorkflowStateWithTeam {
+    pub id: cynic::Id,
+    pub name: String,
+    pub position: f64,
+    pub team: TeamRef,
+}
+
+#[derive(cynic::QueryFragment)]
+#[cynic(graphql_type = "Team")]
+pub struct TeamRef {
+    pub id: cynic::Id,
 }
 
 #[cfg(test)]
@@ -112,8 +152,8 @@ mod tests {
     fn extract_returns_state_nodes() {
         let data = serde_json::json!({
             "team": { "states": { "nodes": [
-                { "id": "s1", "name": "Todo" },
-                { "id": "s2", "name": "Done" }
+                { "id": "s1", "name": "Todo", "position": 1.0 },
+                { "id": "s2", "name": "Done", "position": 2.0 }
             ] } }
         });
         let states = serde_json::from_value::<WorkflowStatesQuery>(data)
@@ -155,5 +195,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("Todo", 1.0), ("Done", 2.5)]
         );
+    }
+
+    #[test]
+    fn all_workflow_states_query_declares_first_and_after_variables() {
+        let built = AllWorkflowStatesQuery::operation(AllWorkflowStatesVariables {
+            first: 250,
+            after: None,
+        })
+        .query;
+        assert!(built.contains("$first: Int"));
+        assert!(built.contains("$after: String"));
+        assert!(built.contains("workflowStates"));
+        assert!(built.contains("team"));
+    }
+
+    #[test]
+    fn all_workflow_states_query_extract_returns_nodes_and_page_info() {
+        let data = serde_json::json!({
+            "workflowStates": {
+                "nodes": [
+                    { "id": "s1", "name": "Todo", "position": 1.0, "team": { "id": "t1" } },
+                    { "id": "s2", "name": "Done", "position": 2.0, "team": { "id": "t2" } }
+                ],
+                "pageInfo": { "hasNextPage": true, "endCursor": "cur" }
+            }
+        });
+        let page = serde_json::from_value::<AllWorkflowStatesQuery>(data)
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(
+            page.nodes
+                .iter()
+                .map(|s| (s.name.as_str(), s.team.id.inner()))
+                .collect::<Vec<_>>(),
+            [("Todo", "t1"), ("Done", "t2")]
+        );
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("cur"));
     }
 }

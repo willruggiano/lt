@@ -25,10 +25,13 @@ fn draw(app: &mut App, w: u16, h: u16) -> String {
 /// A stable `Authenticated` fixture for a deterministic header identity.
 fn authenticated(name: &str, org: &str) -> AuthStatus {
     AuthStatus::Authenticated {
-        viewer: viewer::User {
-            id: "viewer-1".into(),
-            name: name.to_string(),
+        viewer: viewer::Viewer {
+            user: User {
+                id: "viewer-1".into(),
+                name: name.to_string(),
+            },
             organization: viewer::Organization {
+                id: "org-1".into(),
                 name: org.to_string(),
                 url_key: org.to_lowercase(),
             },
@@ -105,7 +108,9 @@ fn apply_fetched_selection_resets_or_clamps() {
 #[test]
 fn detail_scroll_saturates() {
     let issue = sim_issues(0, 1)[0].clone();
-    let mut detail = build_cached_detail(&issue, Vec::new());
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let runtime = test_runtime(lt_runtime::test_util::Database::memory().unwrap(), tx);
+    let mut detail = build_cached_detail(&issue, &runtime);
     detail.scroll(ScrollMotion::Down, 10);
     assert_eq!(detail.scroll, 1);
     detail.scroll(ScrollMotion::Up, 10);
@@ -134,7 +139,7 @@ fn popup_move_clamps_and_cancel_resets_stack() {
         team_id: None,
         items: vec![item("a", None), item("b", None), item("c", None)],
         selected: 0,
-        anchor: Some(ratatui::layout::Rect::new(0, 0, 1, 1)),
+        sub: None,
     }));
 
     app.dispatch_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -161,7 +166,7 @@ fn close_detail_clears_pane_state() {
     // input's narrower Esc (cancel the draft) wins first.
     let mut app = app_with_issues(0, 1).unwrap();
     let issue = app.list_mut().issues[0].clone();
-    let mut detail = build_cached_detail(&issue, Vec::new());
+    let mut detail = build_cached_detail(&issue, &app.runtime);
     detail.scroll = 5;
     detail.comment_input = Some("draft".to_string());
     app.views.push(View::Detail(Box::new(detail)));
@@ -181,24 +186,27 @@ fn close_detail_clears_pane_state() {
 fn filter_sort_sync_and_replacement() {
     let mut app = app_with_issues(0, 1).unwrap();
     app.list_mut().query.filter = search_query::parse_query_ast("sort:title+");
-    app.list_mut().query.sync_args_from_filter();
+    app.list_mut().query.sync_sort_from_filter();
     assert!(matches!(
-        app.list_mut().query.args.sort,
+        app.list_mut().query.order.field,
         lt_runtime::query::SortField::Title
     ));
-    assert!(!app.list_mut().query.args.desc);
+    assert_eq!(
+        app.list_mut().query.order.direction,
+        lt_runtime::query::SortDirection::Ascending
+    );
 
     // replace_sort_in_filter rewrites the sort token, preserving other stems.
-    app.list_mut().query.args.sort = lt_runtime::query::SortField::Updated;
-    app.list_mut().query.args.desc = true;
+    app.list_mut().query.order.field = lt_runtime::query::SortField::Updated;
+    app.list_mut().query.order.direction = lt_runtime::query::SortDirection::Descending;
     app.list_mut().query.filter = search_query::parse_query_ast("state:todo sort:title+");
     let replaced = app.list_mut().query.replace_sort_in_filter();
-    let parsed = search_query::ParsedQuery::from(&replaced);
+    let (filter, sort) = search_query::lower_ast(&replaced);
     assert_eq!(
-        parsed.sort.map(|(_, d)| d),
-        Some(search_query::SortDir::Desc)
+        sort.map(|(_, d)| d),
+        Some(lt_runtime::query::SortDirection::Descending)
     );
-    assert_eq!(parsed.state.as_deref(), Some("todo"));
+    assert_eq!(filter.state.as_deref(), Some("todo"));
 }
 
 #[test]
@@ -212,22 +220,17 @@ fn new_issue_field_cycles_both_directions() {
 }
 
 #[test]
-fn priority_label_to_u8_maps_levels() {
-    assert_eq!(priority_label_to_u8("Urgent"), 1);
-    assert_eq!(priority_label_to_u8("high"), 2);
-    assert_eq!(priority_label_to_u8("normal"), 3);
-    assert_eq!(priority_label_to_u8("medium"), 3);
-    assert_eq!(priority_label_to_u8("low"), 4);
-    assert_eq!(priority_label_to_u8("No priority"), 0);
-}
-
-#[test]
 fn assignee_items_put_me_first_and_skip_viewer() {
-    // `viewer` here is the persisted-db shape, distinct from the live API
-    // `viewer::User`.
-    let viewer = User {
-        id: "v".into(),
-        name: "Vic".to_string(),
+    let viewer = viewer::Viewer {
+        user: User {
+            id: "v".into(),
+            name: "Vic".to_string(),
+        },
+        organization: viewer::Organization {
+            id: "org-1".into(),
+            name: "Acme".to_string(),
+            url_key: "acme".to_string(),
+        },
     };
     let members = || {
         vec![
@@ -273,11 +276,26 @@ fn empty_list() {
 fn detail_overlay() {
     let mut app = app_with_issues(0, 12).unwrap();
     let issue = app.list_mut().issues[0].clone();
-    app.views.push(View::Detail(Box::new(build_cached_detail(
-        &issue,
-        Vec::new(),
-    ))));
+    let detail = build_cached_detail(&issue, &app.runtime);
+    app.views.push(View::Detail(Box::new(detail)));
     insta::assert_snapshot!(draw(&mut app, 100, 24));
+}
+
+#[test]
+fn detail_overlay_shows_parent_reference() {
+    let mut app = app_with_issues(0, 12).unwrap();
+    let mut issue = app.list_mut().issues[0].clone();
+    issue.parent = Some(lt_types::types::Parent {
+        id: "parent-1".into(),
+        identifier: "ENG-1".to_string(),
+    });
+    let detail = build_cached_detail(&issue, &app.runtime);
+    app.views.push(View::Detail(Box::new(detail)));
+    let out = draw(&mut app, 100, 24);
+    assert!(
+        out.contains("Parent: ENG-1"),
+        "expected parent reference line, got:\n{out}"
+    );
 }
 
 #[test]
@@ -290,7 +308,7 @@ fn priority_popup() {
         team_id: None,
         items: priority_popup_items(),
         selected: 1,
-        anchor: None,
+        sub: None,
     }));
     insta::assert_snapshot!(draw(&mut app, 100, 20));
 }
@@ -324,10 +342,8 @@ fn pending_chord_indicator_shows_at_list_top() {
 fn pending_chord_indicator_shows_over_detail_view() {
     let mut app = app_with_issues(0, 3).unwrap();
     let issue = app.list_mut().issues[0].clone();
-    app.views.push(View::Detail(Box::new(build_cached_detail(
-        &issue,
-        Vec::new(),
-    ))));
+    let detail = build_cached_detail(&issue, &app.runtime);
+    app.views.push(View::Detail(Box::new(detail)));
     app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
     assert!(app.pending_key.is_some());
     let out = draw(&mut app, 80, 10);
@@ -347,30 +363,25 @@ fn help_popup() {
 #[test]
 fn new_issue_modal() {
     let mut app = app_with_issues(0, 12).unwrap();
-    app.views.push(View::NewIssue(NewIssueModal {
-        focused_field: NewIssueField::Title,
-        title: TextInput::from("Fix the renderer".to_string()),
-        description: "Some description.".to_string(),
-        teams: vec![PopupItem {
-            label: "Engineering".to_string(),
-            id: Some("ENG".to_string()),
-        }],
-        team_selected: 0,
-        priorities: priority_popup_items(),
-        priority_selected: 0,
-        states: vec![PopupItem {
-            label: "Todo".to_string(),
-            id: Some("s1".to_string()),
-        }],
-        state_selected: 0,
-        assignees: vec![PopupItem {
-            label: "Ada Lovelace".to_string(),
-            id: Some("u1".to_string()),
-        }],
-        assignee_selected: 0,
-        loading: false,
-        error: String::new(),
-        watched_team_id: Some("ENG".to_string()),
-    }));
+    let mut modal = test_new_issue_modal(&app.runtime);
+    modal.focused_field = NewIssueField::Title;
+    modal.title = TextInput::from("Fix the renderer".to_string());
+    modal.description = "Some description.".to_string();
+    modal.teams = vec![PopupItem {
+        label: "Engineering".to_string(),
+        id: Some("ENG".to_string()),
+    }];
+    modal.team_selected = 0;
+    modal.priorities = priority_popup_items();
+    modal.states = vec![PopupItem {
+        label: "Todo".to_string(),
+        id: Some("s1".to_string()),
+    }];
+    modal.assignees = vec![PopupItem {
+        label: "Ada Lovelace".to_string(),
+        id: Some("u1".to_string()),
+    }];
+    modal.loading = false;
+    app.views.push(View::NewIssue(modal));
     insta::assert_snapshot!(draw(&mut app, 100, 30));
 }

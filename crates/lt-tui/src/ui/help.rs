@@ -1,18 +1,36 @@
-use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Widget};
 
 use super::text_span::append_text_input_spans;
 use super::util::{pct, to_u16};
 use crate::HelpPopup;
 
-/// The popup's frame sizing, computed once per frame from `popup`'s
-/// already-cached column widths.
+/// The popup's frame sizing, computed once per frame from `popup`'s rows.
 struct HelpLayout {
     popup_area: Rect,
     gap_str: String,
+}
+
+/// The three help-panel columns' max width across every row, recomputed each
+/// frame since it's cheap over the (small, immutable) row set.
+fn column_widths(popup: &HelpPopup) -> (usize, usize, usize) {
+    let key = popup
+        .rows
+        .iter()
+        .map(|r| r.binding_form.len())
+        .max()
+        .unwrap_or(10);
+    let context = popup
+        .rows
+        .iter()
+        .map(|r| r.context.len())
+        .max()
+        .unwrap_or(6);
+    let label = popup.rows.iter().map(|r| r.label.len()).max().unwrap_or(10);
+    (key, context, label)
 }
 
 /// Size the popup wide enough for every row's key/context/label columns --
@@ -21,14 +39,15 @@ struct HelpLayout {
 /// inter-column gap from 2 spaces to 1 rather than truncate a label. Height
 /// is up to 80% of `area`, centred.
 fn help_layout(area: Rect, popup: &HelpPopup) -> HelpLayout {
+    let (key_col_width, context_col_width, label_col_width) = column_widths(popup);
     let borders = 2;
     let inner_max = area.width.saturating_sub(borders);
     let row_width = |gap: u16| {
-        1 + to_u16(popup.key_col_width)
+        1 + to_u16(key_col_width)
             + gap
-            + to_u16(popup.context_col_width)
+            + to_u16(context_col_width)
             + gap
-            + to_u16(popup.label_col_width)
+            + to_u16(label_col_width)
             + 1
     };
     let (inner_width, gap): (u16, u16) = if row_width(2) <= inner_max {
@@ -50,75 +69,78 @@ fn help_layout(area: Rect, popup: &HelpPopup) -> HelpLayout {
     }
 }
 
-pub(super) fn render_help_popup(frame: &mut Frame, area: Rect, popup: &HelpPopup) {
-    let layout = help_layout(area, popup);
-    let popup_area = layout.popup_area;
+impl Widget for &HelpPopup {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let layout = help_layout(area, self);
+        let popup_area = layout.popup_area;
 
-    frame.render_widget(Clear, popup_area);
+        Clear.render(popup_area, buf);
 
-    let block = Block::default()
-        .title(" Help  (type to search, Esc to close) ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded);
-    let inner = block.inner(popup_area);
-    frame.render_widget(block, popup_area);
+        let block = Block::default()
+            .title(" Help  (type to search, Esc to close) ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded);
+        let inner = block.inner(popup_area);
+        block.render(popup_area, buf);
 
-    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
 
-    let mut search_line = Line::from(vec![Span::raw("/ ")]);
-    append_text_input_spans(&mut search_line, &popup.search, &[]);
-    frame.render_widget(Paragraph::new(search_line), chunks[0]);
+        let mut search_line = Line::from(vec![Span::raw("/ ")]);
+        append_text_input_spans(&mut search_line, &self.search, &[]);
+        Paragraph::new(search_line).render(chunks[0], buf);
 
-    let list_height = chunks[1].height as usize;
-    let total = popup.filtered.len();
+        let list_height = chunks[1].height as usize;
+        let total = self.filtered.len();
+        let (key_col_width, context_col_width, _) = column_widths(self);
 
-    let scroll_offset = if popup.selected >= list_height {
-        popup.selected - list_height + 1
-    } else {
-        0
-    };
+        let scroll_offset = if self.selected >= list_height {
+            self.selected - list_height + 1
+        } else {
+            0
+        };
 
-    let items: Vec<ListItem> = popup
-        .filtered
-        .iter()
-        .skip(scroll_offset)
-        .take(list_height)
-        .enumerate()
-        .map(|(vis_idx, &real_idx)| {
-            let row = &popup.rows[real_idx];
-            let abs_idx = vis_idx + scroll_offset;
-            let line = format!(
-                " {binding:<kw$}{gap_str}{context:<cw$}{gap_str}{label} ",
-                binding = row.binding_form,
-                context = row.context,
-                label = row.label,
-                kw = popup.key_col_width,
-                cw = popup.context_col_width,
-                gap_str = layout.gap_str,
+        let items: Vec<ListItem> = self
+            .filtered
+            .iter()
+            .skip(scroll_offset)
+            .take(list_height)
+            .enumerate()
+            .map(|(vis_idx, &real_idx)| {
+                let row = &self.rows[real_idx];
+                let abs_idx = vis_idx + scroll_offset;
+                let line = format!(
+                    " {binding:<kw$}{gap_str}{context:<cw$}{gap_str}{label} ",
+                    binding = row.binding_form,
+                    context = row.context,
+                    label = row.label,
+                    kw = key_col_width,
+                    cw = context_col_width,
+                    gap_str = layout.gap_str,
+                );
+                let style = if abs_idx == self.selected {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(line).style(style)
+            })
+            .collect();
+
+        let count_hint = if total > list_height {
+            format!(" [{}/{}] ", self.selected + 1, total)
+        } else {
+            String::new()
+        };
+        if !count_hint.is_empty() && chunks[1].height > 0 {
+            let hint_area = Rect::new(
+                chunks[1].x,
+                chunks[1].y + chunks[1].height - 1,
+                chunks[1].width,
+                1,
             );
-            let style = if abs_idx == popup.selected {
-                Style::new().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            ListItem::new(line).style(style)
-        })
-        .collect();
+            Paragraph::new(count_hint).render(hint_area, buf);
+        }
 
-    let count_hint = if total > list_height {
-        format!(" [{}/{}] ", popup.selected + 1, total)
-    } else {
-        String::new()
-    };
-    if !count_hint.is_empty() && chunks[1].height > 0 {
-        let hint_area = Rect::new(
-            chunks[1].x,
-            chunks[1].y + chunks[1].height - 1,
-            chunks[1].width,
-            1,
-        );
-        frame.render_widget(Paragraph::new(count_hint), hint_area);
+        List::new(items).render(chunks[1], buf);
     }
-
-    frame.render_widget(List::new(items), chunks[1]);
 }

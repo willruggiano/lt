@@ -1,11 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lt_runtime::db::Connection;
-use lt_runtime::sync::service::Scope;
+use lt_runtime::{Subscription, SubscriptionKey};
+use lt_types::new_issue::{NewIssueData, NewIssueQuery, NewIssueVariables};
 use lt_types::types::User;
 
 use super::{
-    App, Keymap, PopupItem, ScrollMotion, StateCtx, StateEvent, TextInput, Unbound, View, keymap,
-    priority_popup_items, state_items,
+    App, Keymap, PopupItem, ScrollMotion, TextInput, Unbound, View, keymap, priority_popup_items,
 };
 
 // ---------------------------------------------------------------------------
@@ -46,7 +45,11 @@ impl NewIssueField {
     }
 }
 
-/// All mutable state for the new-issue modal form.
+/// All mutable state for the new-issue modal form: one `NewIssueQuery`
+/// subscription is the whole data contract
+/// (docs/design/operation-seam-adr.md, "Decision 3"); a team change is a new
+/// vars value, so the view drops the old subscription and subscribes anew
+/// (replacing the old hand-diffed `watched_team_id` bookkeeping).
 pub struct NewIssueModal {
     pub focused_field: NewIssueField,
 
@@ -73,9 +76,7 @@ pub struct NewIssueModal {
     /// surfaced here (offline, every targeted refresh would fail, making the
     /// field constant noise); those go to `tracing`.
     pub error: String,
-    /// The team scope the service is watching, distinct from the live
-    /// `team_selected` cursor; diffed to unwatch the old team, watch the new.
-    pub watched_team_id: Option<String>,
+    sub: Subscription<NewIssueData>,
 }
 
 impl NewIssueModal {
@@ -86,58 +87,36 @@ impl NewIssueModal {
             .and_then(|t| t.id.clone())
     }
 
-    /// `Teams` re-reads the list, re-anchoring by id. `Team{team_id}`
-    /// (guarded by a `selected_team_id()` match) re-reads states/members and
-    /// clears `loading`.
-    pub(crate) fn consume(&mut self, ctx: &StateCtx, _focused: bool, ev: &StateEvent) {
-        match ev {
-            StateEvent::Teams => {
-                let conn = match ctx.db.connect() {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "new-issue modal: failed to open db connection");
-                        return;
-                    }
-                };
-                let teams = match lt_runtime::db::query_teams(&conn) {
-                    Ok(teams) => teams,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "new-issue modal: failed to query teams");
-                        return;
-                    }
-                };
-                let current_id = self.selected_team_id();
-                self.teams = teams.into_iter().map(PopupItem::from).collect();
-                self.team_selected = reanchor(&self.teams, current_id.as_deref());
-            }
-            StateEvent::Team { team_id }
-                if self.selected_team_id().as_deref() == Some(team_id.as_str()) =>
-            {
-                let conn = match ctx.db.connect() {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "new-issue modal: failed to open db connection");
-                        return;
-                    }
-                };
-                let current_state = self
-                    .states
-                    .get(self.state_selected)
-                    .and_then(|s| s.id.clone());
-                self.states = state_items(&conn, team_id);
-                self.state_selected = reanchor(&self.states, current_state.as_deref());
-
-                let current_assignee = self
-                    .assignees
-                    .get(self.assignee_selected)
-                    .and_then(|a| a.id.clone());
-                self.assignees = assignee_items(&conn, team_id);
-                self.assignee_selected = reanchor(&self.assignees, current_assignee.as_deref());
-
-                self.loading = false;
-            }
-            _ => {}
+    /// A matching subscription update re-reads the whole form: teams
+    /// re-anchored by id, states/assignees rebuilt from whatever the
+    /// current vars' team scope produced, `loading` cleared.
+    pub(crate) fn apply_update(&mut self, key: SubscriptionKey) {
+        if self.sub.key() != key {
+            return;
         }
+        let Some(data) = self.sub.take() else {
+            return;
+        };
+
+        let current_team = self.selected_team_id();
+        self.teams = data.teams.into_iter().map(PopupItem::from).collect();
+        self.team_selected = reanchor(&self.teams, current_team.as_deref());
+
+        let current_state = self
+            .states
+            .get(self.state_selected)
+            .and_then(|s| s.id.clone());
+        self.states = data.states.into_iter().map(PopupItem::from).collect();
+        self.state_selected = reanchor(&self.states, current_state.as_deref());
+
+        let current_assignee = self
+            .assignees
+            .get(self.assignee_selected)
+            .and_then(|a| a.id.clone());
+        self.assignees = build_assignee_items(data.viewer.as_ref(), data.members);
+        self.assignee_selected = reanchor(&self.assignees, current_assignee.as_deref());
+
+        self.loading = false;
     }
 
     /// This modal's declared keymap, by focused field: the text fields
@@ -154,35 +133,28 @@ impl NewIssueModal {
     }
 }
 
-/// The modal's assignee picker items for `team_id`.
-fn assignee_items(conn: &Connection, team_id: &str) -> Vec<PopupItem> {
-    let viewer = match lt_runtime::db::synced_viewer(conn) {
-        Ok(viewer) => viewer,
-        Err(e) => {
-            tracing::warn!(error = %e, "new-issue modal: failed to read synced viewer");
-            None
-        }
-    };
-    let members = lt_runtime::db::query_team_members(conn, team_id).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, team_id, "new-issue modal: failed to query team members");
-        Vec::new()
-    });
-    build_assignee_items(viewer.as_ref(), members)
-}
-
-/// `state_items`/`assignee_items` for `team_id`, opening a fresh connection.
-/// Empty on a connection failure (offline-safe: the caller just sees an
-/// empty picker until the background refresh lands).
-fn team_scoped_items(
-    db: &lt_runtime::db::Database,
-    team_id: &str,
-) -> (Vec<PopupItem>, Vec<PopupItem>) {
-    match db.connect() {
-        Ok(conn) => (state_items(&conn, team_id), assignee_items(&conn, team_id)),
-        Err(e) => {
-            tracing::warn!(error = %e, "new-issue modal: failed to open db connection");
-            (Vec::new(), Vec::new())
-        }
+/// A bare modal fixture for tests that only need `NewIssueModal`'s shape,
+/// not live updates: a throwaway team-less `NewIssueQuery` subscription over
+/// `runtime`, every picker empty. Callers mutate the `pub` fields to set up
+/// their scenario.
+#[cfg(all(test, feature = "sim"))]
+pub(crate) fn test_new_issue_modal(runtime: &lt_runtime::Runtime) -> NewIssueModal {
+    let (sub, _) = runtime.subscribe::<NewIssueQuery>(NewIssueVariables::new(None));
+    NewIssueModal {
+        focused_field: NewIssueField::Team,
+        title: TextInput::from(String::new()),
+        description: String::new(),
+        teams: Vec::new(),
+        team_selected: 0,
+        priorities: Vec::new(),
+        priority_selected: 0,
+        states: Vec::new(),
+        state_selected: 0,
+        assignees: Vec::new(),
+        assignee_selected: 0,
+        loading: true,
+        error: String::new(),
+        sub,
     }
 }
 
@@ -203,18 +175,17 @@ impl super::App {
     pub(crate) fn open_new_issue_modal(&mut self) {
         // Pre-fill team from the base list's active filter if set.
         let preset_team = match self.base() {
-            View::List(list) => list.query.args.team.clone(),
+            View::List(list) => list.query.team_filter(),
             _ => None,
         };
 
-        let teams: Vec<PopupItem> = self
-            .db
-            .connect()
-            .and_then(|conn| lt_runtime::db::query_teams(&conn))
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "new-issue modal: failed to load teams");
-                Vec::new()
-            })
+        // Team-less first: the initial vars don't know the team id until the
+        // subscription's own team list resolves the preset.
+        let (teamless_sub, teamless_data) = self
+            .runtime
+            .subscribe::<NewIssueQuery>(NewIssueVariables::new(None));
+        let teams: Vec<PopupItem> = teamless_data
+            .teams
             .into_iter()
             .map(PopupItem::from)
             .collect();
@@ -228,9 +199,20 @@ impl super::App {
             })
             .unwrap_or(0);
         let team_id = teams.get(team_selected).and_then(|t| t.id.clone());
-        let (states, assignees) = match &team_id {
-            Some(id) => team_scoped_items(&self.db, id),
-            None => (Vec::new(), Vec::new()),
+
+        // A resolved team is a new vars value: drop the team-less
+        // subscription and subscribe anew with it (the same pattern a later
+        // team change reuses).
+        let (sub, states, assignees) = match team_id {
+            Some(id) => {
+                let (sub, data) = self
+                    .runtime
+                    .subscribe::<NewIssueQuery>(NewIssueVariables::new(Some(id)));
+                let states = data.states.into_iter().map(PopupItem::from).collect();
+                let assignees = build_assignee_items(data.viewer.as_ref(), data.members);
+                (sub, states, assignees)
+            }
+            None => (teamless_sub, Vec::new(), Vec::new()),
         };
 
         self.push_view(View::NewIssue(NewIssueModal {
@@ -247,37 +229,26 @@ impl super::App {
             assignee_selected: 0,
             loading: true,
             error: String::new(),
-            watched_team_id: team_id,
+            sub,
         }));
     }
 
-    /// Leaving the Team field: unwatch the previously-watched team and
-    /// watch the newly-selected one, then an instant read for it.
+    /// Leaving the Team field: drop the old subscription and subscribe anew
+    /// for the newly-selected team (RAII replaces the old hand-diffed
+    /// watch/unwatch).
     fn new_issue_team_changed(&mut self, i: usize) {
-        let (old_team_id, new_team_id) = match self.views.get(i) {
-            Some(View::NewIssue(modal)) => {
-                (modal.watched_team_id.clone(), modal.selected_team_id())
-            }
+        let new_team_id = match self.views.get(i) {
+            Some(View::NewIssue(modal)) => modal.selected_team_id(),
             _ => return,
         };
-        if old_team_id != new_team_id {
-            if let Some(old) = old_team_id {
-                self.service.unwatch(Scope::Team { team_id: old });
-            }
-            if let Some(new) = new_team_id.clone() {
-                self.service.watch(Scope::Team { team_id: new });
-            }
-            if let Some(View::NewIssue(modal)) = self.views.get_mut(i) {
-                modal.watched_team_id.clone_from(&new_team_id);
-            }
-        }
+        let (sub, data) = self
+            .runtime
+            .subscribe::<NewIssueQuery>(NewIssueVariables::new(new_team_id));
+        let states: Vec<PopupItem> = data.states.into_iter().map(PopupItem::from).collect();
+        let assignees = build_assignee_items(data.viewer.as_ref(), data.members);
 
-        let Some(team_id) = new_team_id else {
-            return;
-        };
-
-        let (states, assignees) = team_scoped_items(&self.db, &team_id);
         if let Some(View::NewIssue(modal)) = self.views.get_mut(i) {
+            modal.sub = sub;
             modal.states = states;
             modal.state_selected = 0;
             modal.assignees = assignees;
@@ -307,7 +278,7 @@ impl super::App {
         };
 
         let input = build_issue_create_input(modal, &team_id);
-        match self.service.create_issue(&input) {
+        match self.runtime.create_issue(&input) {
             Ok(identifier) => {
                 self.pop_view();
                 self.footer_msg = Some("Created issue (pending sync)".to_string());
@@ -366,12 +337,15 @@ fn build_issue_create_input(
 
 /// The assignee popup items: "Me (name)" first if known, then "Unassigned",
 /// then the remaining team members (excluding the viewer).
-pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) -> Vec<PopupItem> {
+pub(crate) fn build_assignee_items(
+    viewer: Option<&lt_types::viewer::Viewer>,
+    members: Vec<User>,
+) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = Vec::new();
     if let Some(v) = viewer {
         items.push(PopupItem {
-            label: format!("Me ({})", v.name),
-            id: Some(v.id.inner().to_string()),
+            label: format!("Me ({})", v.user.name),
+            id: Some(v.user.id.inner().to_string()),
         });
     }
     items.push(PopupItem {
@@ -380,7 +354,7 @@ pub(crate) fn build_assignee_items(viewer: Option<&User>, members: Vec<User>) ->
     });
     for m in members {
         // Skip the viewer entry since it is already at the top.
-        if viewer.is_some_and(|v| v.id.inner() == m.id.inner()) {
+        if viewer.is_some_and(|v| v.user.id.inner() == m.id.inner()) {
             continue;
         }
         items.push(m.into());
@@ -468,8 +442,8 @@ pub(crate) fn apply_new_issue(app: &mut App, i: usize, action: keymap::Action) {
     }
 }
 
-/// Advance to the next field: leaving Team swaps the watched team scope;
-/// any other field just advances.
+/// Advance to the next field: leaving Team swaps the team-scoped
+/// subscriptions; any other field just advances.
 fn new_issue_advance(app: &mut App, i: usize) {
     let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
         return;
@@ -555,5 +529,30 @@ fn new_issue_picker_state<'a>(
         NewIssueField::Assignee => (modal.assignees.len(), &mut modal.assignee_selected),
         // Text fields should not reach here.
         _ => (0, &mut modal.team_selected),
+    }
+}
+
+#[cfg(all(test, feature = "sim"))]
+mod tests {
+    use super::*;
+
+    fn item(id: &str) -> PopupItem {
+        PopupItem {
+            label: id.to_string(),
+            id: Some(id.to_string()),
+        }
+    }
+
+    #[test]
+    fn reanchor_finds_the_matching_id() {
+        let items = vec![item("a"), item("b"), item("c")];
+        assert_eq!(reanchor(&items, Some("b")), 1);
+    }
+
+    #[test]
+    fn reanchor_falls_back_to_zero_when_the_id_is_gone() {
+        let items = vec![item("a"), item("b")];
+        assert_eq!(reanchor(&items, Some("gone")), 0);
+        assert_eq!(reanchor(&items, None), 0);
     }
 }

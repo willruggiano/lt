@@ -8,66 +8,76 @@
 
 use anyhow::{Result, bail};
 use lt_storage::db::outbox::{self, PendingOp};
-use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
-use lt_types::issues::{
-    IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
-};
+use lt_storage::db::{AckContext, EntityKey, Mutate};
+use lt_types::comments::CommentCreateMutation;
+use lt_types::graphql::GraphqlOperation;
+use lt_types::issues::{IssueCreateMutation, IssueUpdateMutation};
 use lt_upstream::client::{GraphqlTransport, execute};
 use rusqlite::Connection;
+use serde::de::DeserializeOwned;
 
 /// Replay every pending outbox command, recording (not propagating) per-command
-/// failures so a single bad command never aborts the surrounding sync.
-pub fn drain(conn: &Connection, transport: &dyn GraphqlTransport) -> Result<()> {
+/// failures so a single bad command never aborts the surrounding sync. Returns
+/// the union of entity keys every successfully-replayed command touched
+/// (docs/design/operation-seam-adr.md, "Decision 5"), for the sync cycle's own
+/// propagation.
+pub fn drain(conn: &Connection, transport: &dyn GraphqlTransport) -> Result<Vec<EntityKey>> {
+    let mut touched = Vec::new();
     for op in outbox::pending_operations(conn)? {
-        if let Err(e) = replay(conn, transport, &op) {
-            outbox::record_error(conn, op.seq, &e.to_string())?;
+        match replay(conn, transport, &op) {
+            Ok(keys) => touched.extend(keys),
+            Err(e) => outbox::record_error(conn, op.seq, &e.to_string())?,
         }
     }
-    Ok(())
+    Ok(touched)
 }
 
-fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -> Result<()> {
+fn replay(
+    conn: &Connection,
+    transport: &dyn GraphqlTransport,
+    op: &PendingOp,
+) -> Result<Vec<EntityKey>> {
     match op.op_type.as_str() {
-        outbox::OP_ISSUE_UPDATE => {
-            let vars: IssueUpdateVariables = serde_json::from_str(&op.variables)?;
-            // The server issue is nullable in the schema even on success;
-            // when present it becomes the new base truth, otherwise the ack
-            // falls back to applying the overlay's per-field intent.
-            let server_issue = execute::<IssueUpdateMutation>(transport, vars)?;
-            outbox::ack_issue_update(conn, op.seq, &op.entity_id, server_issue.as_ref())?;
-        }
-        outbox::OP_ISSUE_CREATE => {
-            let vars: IssueCreateVariables = serde_json::from_str(&op.variables)?;
-            // Upsert the server's full issue into the base, replacing the
-            // temp row -- server truth, not a hand-stitched id/identifier
-            // rewrite.
-            let issue = execute::<IssueCreateMutation>(transport, vars)?;
-            outbox::ack_issue_create(conn, op.seq, &op.entity_id, &issue)?;
-        }
-        outbox::OP_COMMENT_CREATE => {
-            let vars: CommentCreateVariables = serde_json::from_str(&op.variables)?;
-            let issue_id = vars.input.issue_id.clone();
-            // The server-returned comment is used as-is: it already carries
-            // the shared `comments::Comment` shape the base row is built from.
-            let comment = execute::<CommentCreateMutation>(transport, vars)?;
-            outbox::ack_comment_create(
-                conn,
-                op.seq,
-                &outbox::CommentAck {
-                    temp_id: &op.entity_id,
-                    issue_id: &issue_id,
-                    comment: &comment,
-                },
-            )?;
-        }
+        IssueUpdateMutation::NAME => replay_op::<IssueUpdateMutation>(conn, transport, op),
+        IssueCreateMutation::NAME => replay_op::<IssueCreateMutation>(conn, transport, op),
+        CommentCreateMutation::NAME => replay_op::<CommentCreateMutation>(conn, transport, op),
         other => bail!("unknown outbox op_type: {other}"),
     }
-    Ok(())
+}
+
+/// Replay one operation: decode its stored variables, execute the mutation on
+/// the wire, then let the operation's own [`Mutate::ack`] reconcile the base
+/// and retire the command.
+fn replay_op<M>(
+    conn: &Connection,
+    transport: &dyn GraphqlTransport,
+    op: &PendingOp,
+) -> Result<Vec<EntityKey>>
+where
+    M: Mutate,
+    M::Variables: DeserializeOwned + Clone,
+{
+    let vars: M::Variables = serde_json::from_str(&op.variables)?;
+    let out = execute::<M>(transport, vars.clone())?;
+    M::ack(
+        conn,
+        AckContext {
+            seq: op.seq,
+            entity_id: &op.entity_id,
+            vars: &vars,
+        },
+        out,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use lt_storage::db::outbox::{self, sample_base_issue as base_issue};
+    use lt_storage::db::outbox::sample_base_issue as base_issue;
+    use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
+    use lt_types::inputs::{CommentCreateInput, IssueCreateInput, IssueUpdateInput};
+    use lt_types::issues::{
+        IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
+    };
     use lt_upstream::client::FakeTransport;
     use rusqlite::Connection;
     use serde_json::json;
@@ -93,14 +103,24 @@ mod tests {
     #[test]
     fn drains_issue_update_and_reconciles_base() {
         let conn = db_with_issue("1");
-        outbox::enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
+        IssueUpdateMutation::enqueue(
+            &conn,
+            IssueUpdateVariables {
+                id: "1".to_string(),
+                input: IssueUpdateInput {
+                    state_id: Some("s-done".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
 
         // No server issue in the response: falls back to the overlay
         // reconciliation.
         let transport = FakeTransport::new(vec![
             json!({ "issueUpdate": { "success": true, "issue": null } }),
         ]);
-        drain(&conn, &transport).unwrap();
+        let touched = drain(&conn, &transport).unwrap();
 
         let state: String = conn
             .query_row("SELECT state_id FROM issues WHERE id = '1'", [], |r| {
@@ -109,6 +129,7 @@ mod tests {
             .unwrap();
         assert_eq!(state, "s-done");
         assert_eq!(pending_count(&conn), 0);
+        assert_eq!(touched, vec![EntityKey::Issue]);
         // The replayed command carried the coalesced variables.
         assert_eq!(transport.variables(0)["input"]["stateId"], json!("s-done"));
     }
@@ -116,12 +137,22 @@ mod tests {
     #[test]
     fn drains_issue_update_prefers_server_issue_when_present() {
         let conn = db_with_issue("1");
-        outbox::enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
+        IssueUpdateMutation::enqueue(
+            &conn,
+            IssueUpdateVariables {
+                id: "1".to_string(),
+                input: IssueUpdateInput {
+                    state_id: Some("s-done".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
 
         // The server returns full truth, including a state the overlay never
         // recorded (e.g. a workflow automation moved it further).
         let mut server_issue = lt_upstream::issues::sample_issue_node("1");
-        server_issue["state"] = json!({ "id": "s-merged", "name": "Merged" });
+        server_issue["state"] = json!({ "id": "s-merged", "name": "Merged", "position": 3.0 });
         let transport = FakeTransport::new(vec![
             json!({ "issueUpdate": { "success": true, "issue": server_issue } }),
         ]);
@@ -140,10 +171,19 @@ mod tests {
     fn drains_issue_create_and_rewrites_temp_id() {
         let db = lt_storage::db::Database::memory().unwrap();
         let conn = db.connect().unwrap();
-        let mut issue = base_issue("temp");
-        issue.id = "local:abc".into();
-        issue.identifier = "NEW".to_string();
-        let input = lt_types::inputs::IssueCreateInput {
+        // The optimistic create defaults to the team's first cached state
+        // (sync owns workflow states; issue upserts never write them).
+        lt_storage::db::upsert_team_state(
+            &conn,
+            "ENG",
+            &lt_types::types::WorkflowState {
+                id: "s-todo".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
+        let input = IssueCreateInput {
             title: "New".to_string(),
             team_id: "ENG".to_string(),
             description: None,
@@ -151,7 +191,7 @@ mod tests {
             priority: None,
             assignee_id: None,
         };
-        outbox::enqueue_issue_create(&conn, &issue, &input).unwrap();
+        IssueCreateMutation::enqueue(&conn, IssueCreateVariables { input }).unwrap();
 
         let mut server_issue = lt_upstream::issues::sample_issue_node("1");
         server_issue["id"] = json!("real-1");
@@ -159,7 +199,8 @@ mod tests {
         let transport = FakeTransport::new(vec![
             json!({ "issueCreate": { "success": true, "issue": server_issue } }),
         ]);
-        drain(&conn, &transport).unwrap();
+        let touched = drain(&conn, &transport).unwrap();
+        assert!(touched.contains(&EntityKey::Issue));
 
         let ident: String = conn
             .query_row(
@@ -172,7 +213,7 @@ mod tests {
         // The temp row is gone, not just renamed in place.
         let temp: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM issues WHERE id = 'local:abc'",
+                "SELECT COUNT(*) FROM issues WHERE identifier = 'NEW'",
                 [],
                 |r| r.get(0),
             )
@@ -184,11 +225,11 @@ mod tests {
     #[test]
     fn drains_comment_create_replacing_temp_row() {
         let conn = db_with_issue("1");
-        let input = lt_types::inputs::CommentCreateInput {
+        let input = CommentCreateInput {
             issue_id: "1".to_string(),
             body: "hi".to_string(),
         };
-        outbox::enqueue_comment_create(&conn, "local:c", &input).unwrap();
+        CommentCreateMutation::enqueue(&conn, CommentCreateVariables { input }).unwrap();
 
         let transport = FakeTransport::new(vec![json!({
             "commentCreate": { "success": true, "comment": {
@@ -198,7 +239,13 @@ mod tests {
                 "issueId": "1"
             }}
         })]);
-        drain(&conn, &transport).unwrap();
+        let touched = drain(&conn, &transport).unwrap();
+        assert_eq!(
+            touched,
+            vec![EntityKey::Comment {
+                issue_id: "1".to_string()
+            }]
+        );
 
         let ids: Vec<String> = lt_storage::db::query_comments(&conn, "1")
             .unwrap()
@@ -212,11 +259,22 @@ mod tests {
     #[test]
     fn offline_drain_leaves_command_pending_and_records_error() {
         let conn = db_with_issue("1");
-        outbox::enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
+        IssueUpdateMutation::enqueue(
+            &conn,
+            IssueUpdateVariables {
+                id: "1".to_string(),
+                input: IssueUpdateInput {
+                    state_id: Some("s-done".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
 
         // No scripted responses: the transport errors, simulating offline.
         let transport = FakeTransport::new(vec![]);
-        drain(&conn, &transport).unwrap();
+        let touched = drain(&conn, &transport).unwrap();
+        assert!(touched.is_empty());
 
         assert_eq!(pending_count(&conn), 1);
         let (attempts, last_error): (i64, Option<String>) = conn
@@ -234,5 +292,28 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM pending_overlay", [], |r| r.get(0))
             .unwrap();
         assert_eq!(overlays, 1);
+    }
+
+    #[test]
+    fn unknown_op_type_is_recorded_as_an_error() {
+        let conn = db_with_issue("1");
+        conn.execute(
+            "INSERT INTO outbox (op_type, entity_id, variables, status, attempts, created_at) \
+             VALUES ('bogus', '1', '{}', 'pending', 0, '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let transport = FakeTransport::new(vec![]);
+        drain(&conn, &transport).unwrap();
+
+        let last_error: Option<String> = conn
+            .query_row(
+                "SELECT last_error FROM outbox WHERE entity_id = '1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(last_error.unwrap().contains("bogus"));
     }
 }

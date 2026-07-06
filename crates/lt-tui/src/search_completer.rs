@@ -335,10 +335,11 @@ fn stem_key_candidates(prefix: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use lt_runtime::query::{IssueQuery, SortField};
+    use lt_runtime::query::{SortDirection, SortField};
     use lt_runtime::search_query::{
-        SortDir, StemKind, Token, args_to_ast, parse_query_ast, render_filter_context,
+        StemKind, Token, args_to_ast, parse_query_ast, render_filter_context,
     };
+    use lt_types::issues::{AssigneeFilter, IssueFilter};
 
     use super::*;
     use crate::text_input::TextInput;
@@ -504,8 +505,11 @@ mod tests {
 
     #[test]
     fn args_to_ast_default_produces_sort_updated_desc() {
-        let args = IssueQuery::default();
-        let ast = args_to_ast(&args);
+        let ast = args_to_ast(
+            &IssueFilter::default(),
+            &SortField::Updated,
+            SortDirection::Descending,
+        );
         assert_eq!(ast.raw, "sort:updated-");
         assert_eq!(ast.tokens.len(), 1);
         match &ast.tokens[0] {
@@ -514,7 +518,7 @@ mod tests {
                 ..
             } => {
                 assert!(matches!(field, SortField::Updated));
-                assert_eq!(*dir, SortDir::Desc);
+                assert_eq!(*dir, SortDirection::Descending);
             }
             other => panic!("expected Stem(Sort), got {other:?}"),
         }
@@ -522,12 +526,12 @@ mod tests {
 
     #[test]
     fn args_to_ast_team_and_assignee() {
-        let args = IssueQuery {
+        let filter = IssueFilter {
             team: Some("eng".to_string()),
-            assignee: Some("me".to_string()),
-            ..IssueQuery::default()
+            assignee: Some(AssigneeFilter::Contains("me".to_string())),
+            ..Default::default()
         };
-        let ast = args_to_ast(&args);
+        let ast = args_to_ast(&filter, &SortField::Updated, SortDirection::Descending);
         assert!(ast.raw.contains("team:eng"));
         assert!(ast.raw.contains("assignee:me"));
         assert!(ast.raw.contains("sort:"));
@@ -550,12 +554,11 @@ mod tests {
 
     #[test]
     fn args_to_ast_asc_sort() {
-        let args = IssueQuery {
-            sort: SortField::Priority,
-            desc: false,
-            ..IssueQuery::default()
-        };
-        let ast = args_to_ast(&args);
+        let ast = args_to_ast(
+            &IssueFilter::default(),
+            &SortField::Priority,
+            SortDirection::Ascending,
+        );
         assert!(ast.raw.ends_with("sort:priority+"));
         match &ast.tokens[0] {
             Token::Stem {
@@ -563,7 +566,7 @@ mod tests {
                 ..
             } => {
                 assert!(matches!(field, SortField::Priority));
-                assert_eq!(*dir, SortDir::Asc);
+                assert_eq!(*dir, SortDirection::Ascending);
             }
             other => panic!("expected Stem(Sort), got {other:?}"),
         }
@@ -603,12 +606,12 @@ mod tests {
 
     #[test]
     fn render_filter_context_round_trip() {
-        let args = IssueQuery {
+        let filter = IssueFilter {
             team: Some("eng".to_string()),
-            assignee: Some("me".to_string()),
-            ..IssueQuery::default()
+            assignee: Some(AssigneeFilter::Contains("me".to_string())),
+            ..Default::default()
         };
-        let ast = args_to_ast(&args);
+        let ast = args_to_ast(&filter, &SortField::Updated, SortDirection::Descending);
         let s = render_filter_context(&ast);
         assert_eq!(s, "team:eng  assignee:me  sort:updated-");
     }

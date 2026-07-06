@@ -30,11 +30,14 @@ pub struct Parent {
     pub identifier: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "WorkflowState")]
 pub struct WorkflowState {
     pub id: cynic::Id,
     pub name: String,
+    /// Linear's stored ordering within the team's workflow
+    /// (`WorkflowState.position: Float!`).
+    pub position: f64,
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
@@ -91,46 +94,4 @@ pub struct Issue {
     pub parent: Option<Parent>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
-}
-
-/// Map a Linear priority label to its numeric level. Lossy: any unrecognised
-/// label (including "No priority") collapses to 0, so this is a parse, not a
-/// `From`.
-pub fn priority_label_to_u8(label: &str) -> u8 {
-    match label.to_lowercase().as_str() {
-        "urgent" => 1,
-        "high" => 2,
-        "normal" | "medium" => 3,
-        "low" => 4,
-        _ => 0,
-    }
-}
-
-/// Map a numeric priority level to its label, matching the popup picker's
-/// vocabulary. Used to write a priority overlay back into the `priority_label`
-/// base column on ack.
-pub fn priority_u8_to_label(priority: u8) -> &'static str {
-    match priority {
-        1 => "Urgent",
-        2 => "High",
-        3 => "Normal",
-        4 => "Low",
-        _ => "No priority",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::priority_u8_to_label;
-
-    #[test]
-    fn priority_u8_to_label_covers_all_levels() {
-        assert_eq!(priority_u8_to_label(0), "No priority");
-        assert_eq!(priority_u8_to_label(1), "Urgent");
-        assert_eq!(priority_u8_to_label(2), "High");
-        assert_eq!(priority_u8_to_label(3), "Normal");
-        assert_eq!(priority_u8_to_label(4), "Low");
-        // Out-of-range falls back to "No priority".
-        assert_eq!(priority_u8_to_label(9), "No priority");
-    }
 }

@@ -25,14 +25,17 @@ fn transport_from_config() -> Result<HttpTransport> {
 /// A ready-to-drive new-issue session: a transport plus the viewer identity.
 pub struct NewIssueSession {
     transport: HttpTransport,
-    pub viewer: viewer::User,
+    pub viewer: viewer::Viewer,
 }
 
 impl NewIssueSession {
     /// Open a session: build the transport and fetch the viewer up front.
     pub fn open() -> Result<Self> {
         let transport = transport_from_config()?;
-        let viewer = execute::<ViewerQuery>(&transport, ())?;
+        // `Query.viewer` is non-null on the wire; `ViewerQuery::Output` is
+        // `Option` only for the local cache read's missing-row case.
+        let viewer = execute::<ViewerQuery>(&transport, ())?
+            .ok_or_else(|| anyhow!("viewer query returned no viewer"))?;
         Ok(Self { transport, viewer })
     }
 

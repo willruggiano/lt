@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Delivery has not started; the Task decomposition is at the end.
+Accepted and delivered; the Task decomposition is at the end.
 
 ## Context
 

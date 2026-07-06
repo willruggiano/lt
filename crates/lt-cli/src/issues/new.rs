@@ -3,8 +3,9 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Result, anyhow};
 use lt_runtime::issues::NewIssueSession;
 use lt_types::inputs::IssueCreateInput;
-use lt_types::types::{Team, User as Member, WorkflowState, priority_u8_to_label};
-use lt_types::viewer::User as Viewer;
+use lt_types::scalars::Priority;
+use lt_types::types::{Team, User as Member, WorkflowState};
+use lt_types::viewer::Viewer;
 
 #[derive(Debug, Clone)]
 pub struct NewIssueArgs {
@@ -222,7 +223,7 @@ fn pick_assignee(
     if let Some(h) = hint {
         let lower = h.to_lowercase();
         if lower == "me" {
-            return Ok(Some(viewer.id.inner().to_string()));
+            return Ok(Some(viewer.user.id.inner().to_string()));
         }
         if lower == "none" || lower == "unassigned" {
             return Ok(None);
@@ -236,7 +237,7 @@ fn pick_assignee(
 
     writeln!(out, "Assignee (optional):")?;
     writeln!(out, "  0. Unassigned")?;
-    writeln!(out, "  me. Assign to me ({})", viewer.name)?;
+    writeln!(out, "  me. Assign to me ({})", viewer.user.name)?;
     for (i, m) in members.iter().enumerate() {
         writeln!(out, "  {}. {}", i + 1, m.name)?;
     }
@@ -248,7 +249,7 @@ fn pick_assignee(
         return Ok(None);
     }
     if trimmed.to_lowercase() == "me" {
-        return Ok(Some(viewer.id.inner().to_string()));
+        return Ok(Some(viewer.user.id.inner().to_string()));
     }
 
     let lower = trimmed.to_lowercase();
@@ -291,11 +292,7 @@ fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
     } else {
         writeln!(out, "  Description: (none)")?;
     }
-    writeln!(
-        out,
-        "  Priority:    {}",
-        priority_u8_to_label(summary.priority)
-    )?;
+    writeln!(out, "  Priority:    {}", Priority(summary.priority).label())?;
     if let Some(sid) = summary.state_id {
         let sname = summary
             .states
@@ -307,8 +304,8 @@ fn print_summary(out: &mut dyn Write, summary: &IssueSummary) -> Result<()> {
         writeln!(out, "  State:       (default)")?;
     }
     if let Some(aid) = summary.assignee_id {
-        let aname = if aid == summary.viewer.id.inner() {
-            summary.viewer.name.clone()
+        let aname = if aid == summary.viewer.user.id.inner() {
+            summary.viewer.user.name.clone()
         } else {
             summary
                 .members
@@ -421,6 +418,7 @@ mod tests {
         WorkflowState {
             id: id.into(),
             name: name.to_string(),
+            position: 1.0,
         }
     }
 
@@ -433,9 +431,12 @@ mod tests {
 
     fn viewer() -> Viewer {
         Viewer {
-            id: "viewer-id".into(),
-            name: "Vic Viewer".to_string(),
+            user: lt_types::types::User {
+                id: "viewer-id".into(),
+                name: "Vic Viewer".to_string(),
+            },
             organization: lt_types::viewer::Organization {
+                id: "org-1".into(),
                 name: "Acme".to_string(),
                 url_key: "acme".to_string(),
             },

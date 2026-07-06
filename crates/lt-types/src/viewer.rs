@@ -4,17 +4,17 @@
 use cynic::QueryBuilder;
 
 use crate::graphql::GraphqlOperation;
-use crate::schema;
+use crate::{schema, types};
 
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query")]
 pub struct ViewerQuery {
-    pub viewer: User,
+    viewer: ViewerEnvelope,
 }
 
 impl GraphqlOperation for ViewerQuery {
     type Variables = ();
-    type Output = User;
+    type Output = Option<Viewer>;
     const NAME: &'static str = "viewer";
 
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
@@ -22,25 +22,39 @@ impl GraphqlOperation for ViewerQuery {
     }
 
     fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(self.viewer)
+        Ok(Some(Viewer {
+            user: types::User {
+                id: self.viewer.id,
+                name: self.viewer.name,
+            },
+            organization: self.viewer.organization,
+        }))
     }
 }
 
-/// The authenticated user's identity, as selected by the viewer query. A
-/// distinct selection from [`crate::types::User`] (adds `organization`, drops
-/// nothing an assignee/creator would need) is why this fragment exists
-/// alongside it, disambiguated by module path.
+/// The wire selection for `Query.viewer`: the shared [`types::User`] fields
+/// plus `organization`. Private -- callers see only [`Viewer`], composed from
+/// it in [`ViewerQuery::extract`].
 #[derive(cynic::QueryFragment, Debug, Clone)]
 #[cynic(graphql_type = "User")]
-pub struct User {
-    pub id: cynic::Id,
-    pub name: String,
+struct ViewerEnvelope {
+    id: cynic::Id,
+    name: String,
+    organization: Organization,
+}
+
+/// The authenticated user's identity: the shared [`types::User`] fragment
+/// plus the organization the viewer query alone selects.
+#[derive(Debug, Clone)]
+pub struct Viewer {
+    pub user: types::User,
     pub organization: Organization,
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone)]
 #[cynic(graphql_type = "Organization")]
 pub struct Organization {
+    pub id: cynic::Id,
     pub name: String,
     #[cynic(rename = "urlKey")]
     pub url_key: String,
@@ -56,15 +70,17 @@ mod tests {
             "viewer": {
                 "id": "u1",
                 "name": "Ada",
-                "organization": { "name": "Acme", "urlKey": "acme" }
+                "organization": { "id": "o1", "name": "Acme", "urlKey": "acme" }
             }
         });
         let viewer = serde_json::from_value::<ViewerQuery>(data)
             .unwrap()
             .extract()
+            .unwrap()
             .unwrap();
-        assert_eq!(viewer.id.inner(), "u1");
-        assert_eq!(viewer.name, "Ada");
+        assert_eq!(viewer.user.id.inner(), "u1");
+        assert_eq!(viewer.user.name, "Ada");
+        assert_eq!(viewer.organization.id.inner(), "o1");
         assert_eq!(viewer.organization.name, "Acme");
         assert_eq!(viewer.organization.url_key, "acme");
     }

@@ -7,13 +7,12 @@
 //! statement cannot exist. Production code executes fixed statements only
 //! through [`prepare`] / [`execute`], which take `Sql`, never `&str`.
 //!
-//! The two dynamic builders (`filters.rs::build_sql_filter`,
-//! `search_query.rs::build_conditions`) select a runtime slice of registered
-//! [`Frag`] conditions and a registered [`SortCol`]; the only way to turn
-//! those into SQL text is [`select_issues`] / [`select_issues_page`], which
-//! produce a private [`ComposedSql`] executed only through
-//! [`prepare_composed`]. There is no free-form SQL text splicing anywhere in
-//! `lt-storage`'s production code.
+//! The one dynamic builder (`filters.rs::build_sql_filter`) selects a runtime
+//! slice of registered [`Frag`] conditions and a registered [`SortCol`]; the
+//! only way to turn those into SQL text is [`select_issues`], which produces
+//! a private [`ComposedSql`] executed only through [`prepare_composed`].
+//! There is no free-form SQL text splicing anywhere in `lt-storage`'s
+//! production code.
 //!
 //! See docs/design/type-safe-sql-adr.md ("Statement registry", "Enforcement:
 //! the `Sql` newtype", decisions 2-3).
@@ -48,18 +47,52 @@ macro_rules! statements {
     };
 }
 
+/// The effective state id: a state overlay's value is never NULL (there is
+/// no "clear the state" edit), so `COALESCE` picks the overlay's id when a
+/// pending row exists.
+macro_rules! effective_state_id {
+    () => {
+        "COALESCE(po_state.value, i.state_id)"
+    };
+}
+
+/// The effective assignee id. Unlike state, a `NULL` overlay value here means
+/// "cleared", so `COALESCE` would wrongly fall through to the base id; the
+/// `CASE` distinguishes "no overlay row" from "overlay clears it".
+macro_rules! effective_assignee_id {
+    () => {
+        "CASE WHEN po_assignee.entity_id IS NOT NULL THEN po_assignee.value ELSE i.assignee_id END"
+    };
+}
+
+/// The effective priority label. The overlay stores the label directly
+/// (`Priority::label`, the one source of truth for the mapping), so no SQL
+/// re-derives it from the numeric level.
+macro_rules! effective_priority_label {
+    () => {
+        "COALESCE(po_priority.value, i.priority_label)"
+    };
+}
+
 /// The fragment-typed read model's column list: every field
 /// [`crate::types::Issue`](lt_types::types::Issue) selects, every column
 /// explicitly aliased so [`crate::db::issues::issue_from_row`] reads by name
 /// (ADR decision 4) rather than positional index. Labels are aggregated by a
-/// correlated subquery.
+/// correlated subquery. `state_id`/`assignee_id`/`priority_label` select the
+/// *effective* value -- the pending overlay merged over the base, via
+/// [`issue_joins`] -- so every issue-shaped statement renders un-synced local
+/// edits without a separate in-memory merge.
 macro_rules! issue_columns {
     () => {
-        "i.id AS id, i.identifier AS identifier, i.title AS title, \
-         i.priority_label AS priority_label, i.description AS description, \
-         i.created_at AS created_at, i.updated_at AS updated_at, \
-         i.state_id AS state_id, s.name AS state_name, \
-         i.assignee_id AS assignee_id, ua.name AS assignee_name, \
+        concat!(
+            "i.id AS id, i.identifier AS identifier, i.title AS title, ",
+            effective_priority_label!(),
+            " AS priority_label, i.description AS description, \
+         i.created_at AS created_at, i.updated_at AS updated_at, ",
+            effective_state_id!(),
+            " AS state_id, s.name AS state_name, s.position AS state_position, ",
+            effective_assignee_id!(),
+            " AS assignee_id, ua.name AS assignee_name, \
          i.team_id AS team_id, t.name AS team_name, \
          i.project_id AS project_id, p.name AS project_name, \
          i.cycle_id AS cycle_id, c.name AS cycle_name, \
@@ -67,21 +100,35 @@ macro_rules! issue_columns {
          i.parent_id AS parent_id, pp.identifier AS parent_identifier, \
          (SELECT GROUP_CONCAT(l.name, ',') FROM issue_labels il \
             JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id) AS labels"
+        )
     };
 }
 
-/// The entity joins that reconstruct an issue's referenced rows. The base
-/// table is aliased `i`; callers prepend `FROM issues i` (optionally with an
-/// FTS join) before this fragment.
+/// The entity joins that reconstruct an issue's referenced rows, resolving
+/// `state`/`assignee`/`priority` through their overlay-effective ids (see
+/// [`issue_columns`]). The base table is aliased `i`; callers prepend `FROM
+/// issues i` (optionally with an FTS join) before this fragment.
 macro_rules! issue_joins {
     () => {
-        "JOIN workflow_states s ON s.id = i.state_id \
-         JOIN teams t            ON t.id = i.team_id \
-         LEFT JOIN users ua      ON ua.id = i.assignee_id \
-         LEFT JOIN projects p    ON p.id = i.project_id \
-         LEFT JOIN cycles c      ON c.id = i.cycle_id \
-         LEFT JOIN users uc      ON uc.id = i.creator_id \
-         LEFT JOIN issues pp     ON pp.id = i.parent_id"
+        concat!(
+            "LEFT JOIN pending_overlay po_state ON po_state.entity_id = i.id \
+                AND po_state.field = 'state' \
+             JOIN workflow_states s ON s.id = ",
+            effective_state_id!(),
+            " \
+             JOIN teams t ON t.id = i.team_id \
+             LEFT JOIN pending_overlay po_assignee ON po_assignee.entity_id = i.id \
+                AND po_assignee.field = 'assignee' \
+             LEFT JOIN users ua ON ua.id = ",
+            effective_assignee_id!(),
+            " \
+             LEFT JOIN pending_overlay po_priority ON po_priority.entity_id = i.id \
+                AND po_priority.field = 'priority' \
+             LEFT JOIN projects p    ON p.id = i.project_id \
+             LEFT JOIN cycles c      ON c.id = i.cycle_id \
+             LEFT JOIN users uc      ON uc.id = i.creator_id \
+             LEFT JOIN issues pp     ON pp.id = i.parent_id"
+        )
     };
 }
 
@@ -107,7 +154,6 @@ macro_rules! entity_upsert_sql {
 pub(crate) enum EntityTable {
     Teams,
     Users,
-    WorkflowStates,
     Projects,
     Cycles,
     Labels,
@@ -119,7 +165,6 @@ impl EntityTable {
         match self {
             EntityTable::Teams => UPSERT_TEAM,
             EntityTable::Users => UPSERT_USER,
-            EntityTable::WorkflowStates => UPSERT_WORKFLOW_STATE,
             EntityTable::Projects => UPSERT_PROJECT,
             EntityTable::Cycles => UPSERT_CYCLE,
             EntityTable::Labels => UPSERT_LABEL,
@@ -131,7 +176,6 @@ impl EntityTable {
         match self {
             EntityTable::Teams => "teams",
             EntityTable::Users => "users",
-            EntityTable::WorkflowStates => "workflow_states",
             EntityTable::Projects => "projects",
             EntityTable::Cycles => "cycles",
             EntityTable::Labels => "labels",
@@ -155,14 +199,6 @@ statements! {
     /// Link one label to an issue; a no-op if the link already exists.
     INSERT_ISSUE_LABEL, 2,
         "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)";
-
-    /// Load every pending overlay row, resolving the state/assignee name
-    /// through the entity tables in one query.
-    LOAD_OVERLAYS, 0,
-        "SELECT po.entity_id, po.field, po.value, ws.name, u.name \
-         FROM pending_overlay po \
-         LEFT JOIN workflow_states ws ON po.field = 'state'    AND ws.id = po.value \
-         LEFT JOIN users u           ON po.field = 'assignee' AND u.id  = po.value";
 
     /// Read one `sync_meta` value by key.
     GET_META, 1,
@@ -228,14 +264,25 @@ statements! {
     UPSERT_TEAM, 2, entity_upsert_sql!("teams");
     /// Upsert one `(id, name)` row into `users`.
     UPSERT_USER, 2, entity_upsert_sql!("users");
-    /// Upsert one `(id, name)` row into `workflow_states`.
-    UPSERT_WORKFLOW_STATE, 2, entity_upsert_sql!("workflow_states");
     /// Upsert one `(id, name)` row into `projects`.
     UPSERT_PROJECT, 2, entity_upsert_sql!("projects");
     /// Upsert one `(id, name)` row into `cycles`.
     UPSERT_CYCLE, 2, entity_upsert_sql!("cycles");
     /// Upsert one `(id, name)` row into `labels`.
     UPSERT_LABEL, 2, entity_upsert_sql!("labels");
+
+    /// Upsert the viewer's organization row.
+    UPSERT_ORGANIZATION, 3,
+        "INSERT INTO organizations (id, name, url_key) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, url_key = excluded.url_key";
+
+    /// Look up a single `users` row by id, for viewer reconstruction.
+    QUERY_USER_BY_ID, 1,
+        "SELECT id, name FROM users WHERE id = ?1";
+
+    /// Look up a single `organizations` row by id, for viewer reconstruction.
+    QUERY_ORGANIZATION_BY_ID, 1,
+        "SELECT id, name, url_key FROM organizations WHERE id = ?1";
 
     /// Upsert one `(entity_id, field)` pending-overlay row.
     SET_OVERLAY, 3,
@@ -313,28 +360,28 @@ statements! {
     DELETE_COMMENTS_FOR_ISSUE, 1,
         "DELETE FROM issue_comments WHERE issue_id = ?1 AND id NOT LIKE 'local:%'";
 
-    /// Upsert one workflow state scoped to its team. `position` is `COALESCE`d
-    /// against the stored value so an issue-driven upsert (which knows only the
-    /// state's team) can pass `NULL` without clobbering a position recorded by
-    /// a targeted team sync.
+    /// Upsert one workflow state scoped to its team. Every caller -- a
+    /// targeted team sync or an issue upsert's state fragment -- carries the
+    /// state's real `position` (`WorkflowState.position: Float!` on the
+    /// wire), so no conflict-time merge is needed.
     UPSERT_WORKFLOW_STATE_SCOPED, 4,
         "INSERT INTO workflow_states (id, name, team_id, position) \
          VALUES (?1, ?2, ?3, ?4) \
          ON CONFLICT(id) DO UPDATE SET \
             name = excluded.name, \
             team_id = excluded.team_id, \
-            position = COALESCE(excluded.position, workflow_states.position)";
+            position = excluded.position";
 
     /// Every team, alphabetically by name.
     QUERY_TEAMS, 0,
         "SELECT id, name FROM teams ORDER BY name";
 
-    /// A team's workflow states in Linear's stored order; states known only
-    /// from issue upserts (`position IS NULL`) sort last, by name.
+    /// A team's workflow states, carrying `position`, in Linear's stored
+    /// order (ties broken by name).
     QUERY_TEAM_STATES, 1,
-        "SELECT id, name FROM workflow_states \
+        "SELECT id, name, position FROM workflow_states \
          WHERE team_id = ?1 \
-         ORDER BY position IS NULL, position, name";
+         ORDER BY position, name";
 
     /// A team's members, resolved through `team_memberships`, by name.
     QUERY_TEAM_MEMBERS, 1,
@@ -413,52 +460,39 @@ macro_rules! fragments {
 }
 
 fragments! {
-    // -- filters.rs::build_sql_filter --
-    /// `--team`: match the team name or its exact key.
-    FRAG_TEAM_OR_ID, 2, "(t.name LIKE ? OR i.team_id = ?)";
-    /// `--assignee=me` (or case-insensitive): exact match against the
-    /// caller-resolved viewer name.
-    FRAG_ASSIGNEE_EQ, 1, "ua.name = ?";
-    /// `--assignee`: substring match.
-    FRAG_ASSIGNEE_LIKE, 1, "ua.name LIKE ?";
-    /// `--no-assignee`.
-    FRAG_NO_ASSIGNEE, 0, "i.assignee_id IS NULL";
-    /// `--state`: substring match.
-    FRAG_STATE_LIKE, 1, "s.name LIKE ?";
-    /// `--priority`: exact match against the normalised label. Shared by
-    /// `filters.rs` and `search_query.rs`'s `priority:` stem.
-    FRAG_PRIORITY_EQ, 1, "i.priority_label = ?";
-    /// `--title`: substring match.
-    FRAG_TITLE_LIKE, 1, "i.title LIKE ?";
-    /// `--created-after`.
-    FRAG_CREATED_AFTER, 1, "i.created_at >= ?";
-    /// `--created-before`.
-    FRAG_CREATED_BEFORE, 1, "i.created_at < ?";
-    /// `--updated-after`.
-    FRAG_UPDATED_AFTER, 1, "i.updated_at >= ?";
-    /// `--updated-before`.
-    FRAG_UPDATED_BEFORE, 1, "i.updated_at < ?";
-
-    // -- search_query.rs::build_conditions --
-    /// `assignee:me` in the TUI search bar: matched without caller
-    /// resolution (an unresolved "me" therefore matches nothing).
-    FRAG_ASSIGNEE_ME, 0, "LOWER(ua.name) = 'me'";
-    /// `assignee:<name>`: case-insensitive substring match.
-    FRAG_ASSIGNEE_LOWER_LIKE, 1, "LOWER(COALESCE(ua.name,'')) LIKE ?";
-    /// `state:<name>`: case-insensitive substring match.
-    FRAG_STATE_LOWER_LIKE, 1, "LOWER(s.name) LIKE ?";
-    /// `team:<name>`: case-insensitive match against the team name or key.
+    /// `team`: case-insensitive match against the team name or key.
     FRAG_TEAM_LOWER_OR_ID, 2,
         "(LOWER(t.name) LIKE ? OR LOWER(COALESCE(i.team_id,'')) LIKE ?)";
-    /// `label:<name>`: any linked label whose name matches.
+    /// `assignee`, exact: resolved-viewer or literal-`me` match.
+    FRAG_ASSIGNEE_EQ, 1, "ua.name = ?";
+    /// `assignee`, substring: case-insensitive match against the name.
+    FRAG_ASSIGNEE_LOWER_LIKE, 1, "LOWER(COALESCE(ua.name,'')) LIKE ?";
+    /// `assignee`, null: no assignee (the overlay-effective id, not the base).
+    FRAG_NO_ASSIGNEE, 0, concat!(effective_assignee_id!(), " IS NULL");
+    /// `state`: case-insensitive substring match.
+    FRAG_STATE_LOWER_LIKE, 1, "LOWER(s.name) LIKE ?";
+    /// `priority`: exact match against the normalised label (the
+    /// overlay-effective label, not the base).
+    FRAG_PRIORITY_EQ, 1, concat!(effective_priority_label!(), " = ?");
+    /// `title`: case-insensitive substring match.
+    FRAG_TITLE_LIKE, 1, "i.title LIKE ?";
+    /// `created_after`.
+    FRAG_CREATED_AFTER, 1, "i.created_at >= ?";
+    /// `created_before`.
+    FRAG_CREATED_BEFORE, 1, "i.created_at < ?";
+    /// `updated_after`.
+    FRAG_UPDATED_AFTER, 1, "i.updated_at >= ?";
+    /// `updated_before`.
+    FRAG_UPDATED_BEFORE, 1, "i.updated_at < ?";
+    /// `label`: any linked label whose name matches.
     FRAG_LABEL_EXISTS, 1,
         "EXISTS (SELECT 1 FROM issue_labels il JOIN labels lb ON lb.id = il.label_id \
          WHERE il.issue_id = i.id AND LOWER(lb.name) LIKE ?)";
-    /// `project:<name>`: case-insensitive substring match.
+    /// `project`: case-insensitive substring match.
     FRAG_PROJECT_LOWER_LIKE, 1, "LOWER(COALESCE(p.name,'')) LIKE ?";
-    /// `cycle:<name>`: case-insensitive substring match.
+    /// `cycle`: case-insensitive substring match.
     FRAG_CYCLE_LOWER_LIKE, 1, "LOWER(COALESCE(c.name,'')) LIKE ?";
-    /// `creator:<name>`: case-insensitive substring match.
+    /// `creator`: case-insensitive substring match.
     FRAG_CREATOR_LOWER_LIKE, 1, "LOWER(COALESCE(uc.name,'')) LIKE ?";
 }
 
@@ -494,8 +528,10 @@ sort_cols! {
     SORT_CREATED_AT, "i.created_at";
     /// `sort:updated` / `--sort updated` (the default).
     SORT_UPDATED_AT, "i.updated_at";
-    /// `sort:priority` / `--sort priority`.
-    SORT_PRIORITY_LABEL, "i.priority_label";
+    /// `sort:priority` / `--sort priority` (the overlay-effective label, for
+    /// parity with `sort:state`/`sort:assignee`, which pick up the effective
+    /// value for free through their joined aliases).
+    SORT_PRIORITY_LABEL, effective_priority_label!();
     /// `sort:title` / `--sort title`.
     SORT_TITLE, "i.title";
     /// `sort:assignee` / `--sort assignee`.
@@ -512,14 +548,13 @@ sort_cols! {
 /// [`select_issues`] / [`select_issues_page`] in this module.
 pub(crate) struct ComposedSql(String);
 
-/// Build the issue-shaped `SELECT` behind `query_issues` (`db/issues.rs`) and
-/// the TUI structured search (`search_query.rs::run_query`).
+/// Build the issue-shaped, offset-paginated `SELECT` behind `db::issues::query_issues`.
 ///
 /// `conditions` are AND-joined after `WHERE`. When `fts` is set, the query
 /// joins `issues_fts` and `issues_fts MATCH ?` is the first `WHERE` clause
 /// (so its bind param precedes `conditions`' binds), with `conditions`
-/// AND-joined after it. `LIMIT` is always a single trailing bound param the
-/// caller supplies last.
+/// AND-joined after it. `LIMIT ? OFFSET ?` are always the two trailing bound
+/// params the caller supplies last, in that order.
 pub(crate) fn select_issues(
     fts: bool,
     conditions: &[Frag],
@@ -545,19 +580,7 @@ pub(crate) fn select_issues(
     };
 
     ComposedSql(format!(
-        "SELECT {cols} FROM issues i{fts_join} {joins}{where_sql} ORDER BY {order} {dir} LIMIT ?",
-        cols = issue_columns!(),
-        joins = issue_joins!(),
-        order = order.0,
-    ))
-}
-
-/// Build the offset-paginated `SELECT` behind `query_issues_page`
-/// (`db/issues.rs`): no `WHERE`, `LIMIT ?1 OFFSET ?2`.
-pub(crate) fn select_issues_page(order: SortCol, desc: bool) -> ComposedSql {
-    let dir = if desc { "DESC" } else { "ASC" };
-    ComposedSql(format!(
-        "SELECT {cols} FROM issues i {joins} ORDER BY {order} {dir} LIMIT ?1 OFFSET ?2",
+        "SELECT {cols} FROM issues i{fts_join} {joins}{where_sql} ORDER BY {order} {dir} LIMIT ? OFFSET ?",
         cols = issue_columns!(),
         joins = issue_joins!(),
         order = order.0,
@@ -573,7 +596,7 @@ pub(crate) fn prepare_composed<'c>(
     conn.prepare(&sql.0)
 }
 
-/// The 22 names `ISSUE_COLUMNS` aliases to, in order -- the shape
+/// The 23 names `ISSUE_COLUMNS` aliases to, in order -- the shape
 /// [`crate::db::issues::issue_from_row`] reads by name. Validator-only.
 #[cfg(test)]
 pub(crate) const ISSUE_COLUMN_NAMES: &[&str] = &[
@@ -586,6 +609,7 @@ pub(crate) const ISSUE_COLUMN_NAMES: &[&str] = &[
     "updated_at",
     "state_id",
     "state_name",
+    "state_position",
     "assignee_id",
     "assignee_name",
     "team_id",
@@ -691,43 +715,33 @@ mod tests {
                 .unwrap_or_else(|e| panic!("failed to prepare fragment {name}: {e}"));
             assert_eq!(
                 stmt.parameter_count(),
-                *declared_params + 1,
-                "{name}: declared param count + 1 (LIMIT) does not match the composed statement"
+                *declared_params + 2,
+                "{name}: declared param count + 2 (LIMIT, OFFSET) does not match the composed statement"
             );
         }
     }
 
     /// The FTS template: `select_issues(true, &[], ...)` must prepare with
-    /// exactly the `MATCH` and `LIMIT` binds (no conditions).
+    /// exactly the `MATCH`, `LIMIT`, and `OFFSET` binds (no conditions).
     #[test]
-    fn fts_template_prepares_with_match_and_limit_params() {
+    fn fts_template_prepares_with_match_limit_and_offset_params() {
         let conn = migrated_conn();
         let composed = select_issues(true, &[], SORT_UPDATED_AT, true);
         let stmt = conn.prepare(&composed.0).unwrap();
-        assert_eq!(stmt.parameter_count(), 2);
+        assert_eq!(stmt.parameter_count(), 3);
     }
 
-    /// Every registered sort column must prepare through both composers.
+    /// Every registered sort column must prepare, with `LIMIT`/`OFFSET` as
+    /// the only params when there are no conditions.
     #[test]
-    fn every_sort_col_prepares_through_both_composers() {
+    fn every_sort_col_prepares_with_limit_and_offset_params() {
         let conn = migrated_conn();
         for (name, col) in SORT_COLS {
-            let list = select_issues(false, &[], *col, true);
-            conn.prepare(&list.0)
+            let composed = select_issues(false, &[], *col, true);
+            let stmt = conn
+                .prepare(&composed.0)
                 .unwrap_or_else(|e| panic!("failed to prepare {name} via select_issues: {e}"));
-
-            let page = select_issues_page(*col, false);
-            conn.prepare(&page.0)
-                .unwrap_or_else(|e| panic!("failed to prepare {name} via select_issues_page: {e}"));
+            assert_eq!(stmt.parameter_count(), 2);
         }
-    }
-
-    /// `select_issues_page` has no conditions: only `LIMIT` and `OFFSET`.
-    #[test]
-    fn select_issues_page_has_limit_and_offset_params() {
-        let conn = migrated_conn();
-        let composed = select_issues_page(SORT_UPDATED_AT, true);
-        let stmt = conn.prepare(&composed.0).unwrap();
-        assert_eq!(stmt.parameter_count(), 2);
     }
 }

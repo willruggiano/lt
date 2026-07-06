@@ -28,6 +28,11 @@ pub struct SimArgs {
 pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     let dataset = generate(args.seed, args.size);
     let conn = db::open_db(db::db_path()?)?;
+    // No sync cycle to establish workflow states offline: derive them from
+    // the seeded issues' own state fragments (ADR "Sim compatibility").
+    for (team_id, state) in lt_runtime::sim::derive_workflow_states(&dataset.issues) {
+        db::upsert_team_state(&conn, &team_id, &state)?;
+    }
     db::upsert_issues(&conn, &dataset.issues)?;
     db::upsert_comments(&conn, &dataset.comments)?;
     // No team-membership API to seed from offline: derive it from the
@@ -35,8 +40,23 @@ pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
     // compatibility").
     db::derive_team_memberships_from_issues(&conn)?;
     db::set_meta(&conn, "last_synced_at", &Utc::now().to_rfc3339())?;
-    if let Some(viewer) = dataset.issues.iter().find_map(|i| i.assignee.clone()) {
-        db::set_synced_viewer(&conn, viewer.id.inner(), &viewer.name)?;
+    if let Some(assignee) = dataset.issues.iter().find_map(|i| i.assignee.clone()) {
+        // `lt sim` has no organization concept to seed; the identity itself
+        // is real (a real assignee from the dataset).
+        db::set_viewer(
+            &conn,
+            &lt_types::viewer::Viewer {
+                user: lt_types::types::User {
+                    id: assignee.id,
+                    name: assignee.name,
+                },
+                organization: lt_types::viewer::Organization {
+                    id: String::new().into(),
+                    name: String::new(),
+                    url_key: String::new(),
+                },
+            },
+        )?;
     }
     writeln!(
         out,

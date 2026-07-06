@@ -249,9 +249,16 @@ impl Generator {
         let cycle = self.maybe_cycle();
         let creator = Self::user(Some(self.name()));
         let parent = self.maybe_parent(&team_key, existing);
-        let priority_label = (*self.pick(PRIORITIES)).to_string();
-        let priority = types::priority_label_to_u8(&priority_label);
-        let state_name = (*self.pick(STATES)).to_string();
+        // `PRIORITIES` is ordered by level, so the picked index is the level
+        // directly -- no label round trip needed.
+        let priority_idx = self.rng.random_range(0..PRIORITIES.len());
+        let priority_label = PRIORITIES[priority_idx].to_string();
+        let priority = u8::try_from(priority_idx).unwrap_or(0);
+        // `STATES` is ordered by workflow stage, so the picked index doubles
+        // as a stand-in for Linear's stored `position` -- same idiom as
+        // `priority_idx` above.
+        let state_idx = self.rng.random_range(0..STATES.len());
+        let state_name = STATES[state_idx].to_string();
         types::Issue {
             id: format!("sim-{:016x}-{index}", self.seed).into(),
             identifier,
@@ -262,6 +269,7 @@ impl Generator {
             state: types::WorkflowState {
                 id: state_name.clone().into(),
                 name: state_name,
+                position: f64::from(u32::try_from(state_idx).unwrap_or(0)),
             },
             assignee,
             team: types::Team {
@@ -321,6 +329,29 @@ pub fn generate(seed: u64, size: usize) -> Dataset {
         issues.push(issue);
     }
     Dataset { issues, comments }
+}
+
+/// Every `(team_id, WorkflowState)` pair a generated dataset's issues
+/// reference, deduplicated by `(team_id, state_id)`. Sync owns workflow
+/// states in production (issue upserts never write them), and `lt sim` has no
+/// sync cycle or per-team states API to seed from offline, so this mirrors
+/// [`derive_team_memberships_from_issues`](crate::db::derive_team_memberships_from_issues)'s
+/// ADR "Sim compatibility" rationale for the workflow-states invariant
+/// instead.
+#[must_use]
+pub fn derive_workflow_states(issues: &[types::Issue]) -> Vec<(String, types::WorkflowState)> {
+    let mut seen = HashSet::new();
+    let mut states = Vec::new();
+    for issue in issues {
+        let key = (
+            issue.team.id.inner().to_string(),
+            issue.state.id.inner().to_string(),
+        );
+        if seen.insert(key) {
+            states.push((issue.team.id.inner().to_string(), issue.state.clone()));
+        }
+    }
+    states
 }
 
 #[cfg(test)]
@@ -384,14 +415,19 @@ mod tests {
         let d = generate(5, 30);
         let database = crate::db::Database::memory().unwrap();
         let conn = database.connect().unwrap();
+        for (team_id, state) in derive_workflow_states(&d.issues) {
+            db::upsert_team_state(&conn, &team_id, &state).unwrap();
+        }
         db::upsert_issues(&conn, &d.issues).unwrap();
         db::upsert_comments(&conn, &d.comments).unwrap();
         // sanity: relational base reconstructs the rows.
-        let args = lt_types::query::IssueQuery {
-            limit: 250,
-            ..Default::default()
+        let vars = lt_types::issues::IssuesVariables {
+            filter: None,
+            sort: None,
+            first: Some(250),
+            after: None,
         };
-        let queried = db::query_issues(&conn, &args).unwrap();
-        assert_eq!(queried.len(), 30);
+        let queried = db::query_issues(&conn, &vars).unwrap();
+        assert_eq!(queried.nodes.len(), 30);
     }
 }

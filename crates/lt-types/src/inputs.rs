@@ -67,7 +67,7 @@ where
 
 /// Partial update for `issueUpdate`. Every field is optional; omitted fields are
 /// left unchanged. `assignee_id` is three-valued so it can be cleared.
-#[derive(cynic::InputObject, Debug, Default, serde::Deserialize, PartialEq)]
+#[derive(cynic::InputObject, Debug, Clone, Default, serde::Deserialize, PartialEq)]
 #[cynic(graphql_type = "IssueUpdateInput", rename_all = "camelCase")]
 #[serde(rename_all = "camelCase", default)]
 pub struct IssueUpdateInput {

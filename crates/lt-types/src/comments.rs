@@ -13,7 +13,7 @@ use crate::scalars::DateTime;
 use crate::schema;
 use crate::types::User;
 
-#[derive(cynic::QueryVariables)]
+#[derive(cynic::QueryVariables, Clone)]
 pub struct CommentsVariables {
     pub id: String,
     pub after: Option<String>,
@@ -47,7 +47,7 @@ pub struct IssueWithComments {
     pub comments: CommentConnection,
 }
 
-#[derive(cynic::QueryFragment)]
+#[derive(Default, cynic::QueryFragment)]
 pub struct CommentConnection {
     pub nodes: Vec<Comment>,
     pub page_info: PageInfo,
@@ -79,7 +79,7 @@ impl Comment {
 // Mutation
 // ---------------------------------------------------------------------------
 
-#[derive(cynic::QueryVariables, serde::Deserialize)]
+#[derive(cynic::QueryVariables, Clone, serde::Deserialize)]
 pub struct CommentCreateVariables {
     pub input: CommentCreateInput,
 }

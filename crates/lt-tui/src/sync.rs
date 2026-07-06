@@ -15,7 +15,10 @@ pub(crate) fn sync_status_label(sync: &SyncStatus, auth: &AuthStatus, clock: &Cl
     match sync {
         SyncStatus::Idle => "not synced".to_string(),
         SyncStatus::Syncing => "syncing...".to_string(),
-        SyncStatus::Synced { synced_at, .. } => format_sync_label(*synced_at, clock),
+        SyncStatus::Synced { synced_at } => match synced_at {
+            Some(synced_at) => format_sync_label(*synced_at, clock),
+            None => "not yet synced".to_string(),
+        },
         SyncStatus::Failed { message, .. } => format!("sync error: {message}"),
     }
 }
@@ -94,11 +97,21 @@ mod tests {
         );
         assert_eq!(
             sync_status_label(
-                &SyncStatus::Synced { synced_at: now },
+                &SyncStatus::Synced {
+                    synced_at: Some(now)
+                },
                 &AuthStatus::Unknown,
                 &clock
             ),
             "synced just now"
+        );
+        assert_eq!(
+            sync_status_label(
+                &SyncStatus::Synced { synced_at: None },
+                &AuthStatus::Unknown,
+                &clock
+            ),
+            "not yet synced"
         );
         assert_eq!(
             sync_status_label(

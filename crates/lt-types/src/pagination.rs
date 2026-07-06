@@ -4,7 +4,7 @@
 
 use crate::schema;
 
-#[derive(Debug, cynic::QueryFragment)]
+#[derive(Debug, Default, cynic::QueryFragment)]
 pub struct PageInfo {
     pub has_next_page: bool,
     pub end_cursor: Option<String>,

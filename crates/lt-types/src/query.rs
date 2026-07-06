@@ -1,8 +1,5 @@
-//! The storage-side issue query spec and its generated sort vocabulary.
-//!
-//! `IssueQuery` is the clap-free filter/sort specification the DB query layer,
-//! the TUI, and the sync thread all carry. `lt-cli` lowers its clap `IssueQuery`
-//! into it.
+//! The generated sort vocabulary shared by the DB query layer, the TUI, and
+//! the sync thread.
 
 use anyhow::{Result, anyhow};
 
@@ -21,42 +18,13 @@ impl std::str::FromStr for SortField {
     }
 }
 
-/// A filter/sort specification for the issues list.
-#[derive(Clone, Debug)]
-pub struct IssueQuery {
-    pub team: Option<String>,
-    pub assignee: Option<String>,
-    pub no_assignee: bool,
-    pub state: Option<String>,
-    pub priority: Option<String>,
-    pub created_after: Option<String>,
-    pub created_before: Option<String>,
-    pub updated_after: Option<String>,
-    pub updated_before: Option<String>,
-    pub sort: SortField,
-    pub desc: bool,
-    pub title: Option<String>,
-    pub limit: u32,
-}
-
-impl Default for IssueQuery {
-    fn default() -> Self {
-        Self {
-            team: None,
-            assignee: None,
-            no_assignee: false,
-            state: None,
-            priority: None,
-            created_after: None,
-            created_before: None,
-            updated_after: None,
-            updated_before: None,
-            sort: SortField::Updated,
-            desc: true,
-            title: None,
-            limit: 50,
-        }
-    }
+/// A sort's direction: the one vocabulary crossing every seam that carries a
+/// [`SortField`] (the TUI's `sort:` stem, the wire `IssueSortInput`, and
+/// local SQL ordering).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
 }
 
 /// Validate and normalise a `YYYY-MM-DD` date into an RFC3339 start-of-day

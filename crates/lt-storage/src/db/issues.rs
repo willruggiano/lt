@@ -1,14 +1,15 @@
-use std::collections::HashMap;
-
 use anyhow::{Context, Result};
 use chrono::Utc;
-use lt_types::query::IssueQuery;
+use lt_types::issues::{IssueConnection, IssuesQuery, IssuesVariables};
+use lt_types::pagination::PageInfo;
+use lt_types::query::{SortDirection, SortField};
 use lt_types::scalars::Priority;
 use lt_types::types;
 use rusqlite::{Connection, params};
 
+use crate::db::ops::{EntityKey, Read, Upsert};
 use crate::db::parse_datetime_column;
-use crate::db::sql::{self, EntityTable, Sql};
+use crate::db::sql::{self, BindParams, EntityTable, Sql};
 
 /// Reconstruct a [`types::Issue`] from a row selected by
 /// [`sql::QUERY_ISSUE_BY_ID`] (or any other statement or composed query built
@@ -16,7 +17,7 @@ use crate::db::sql::{self, EntityTable, Sql};
 /// column alias.
 pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Issue> {
     let priority_label: String = row.get("priority_label")?;
-    let priority = types::priority_label_to_u8(&priority_label);
+    let priority = Priority::from_label(&priority_label);
 
     let created_at: String = row.get("created_at")?;
     let updated_at: String = row.get("updated_at")?;
@@ -41,10 +42,11 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
         identifier: row.get("identifier")?,
         title: row.get("title")?,
         priority_label,
-        priority: Priority(priority),
+        priority,
         state: types::WorkflowState {
             id: state_id.into(),
             name: row.get("state_name")?,
+            position: row.get("state_position")?,
         },
         assignee: assignee_id.map(|id| types::User {
             id: id.into(),
@@ -138,15 +140,6 @@ pub(crate) fn upsert_issue_tx(
         issue.team.id.inner(),
         Some(&issue.team.name),
     )?;
-    // Every issue upsert knows its state's team, so the team-scoped upsert
-    // back-fills `team_id` for free; `position` stays whatever a targeted
-    // team sync last recorded (`sql::UPSERT_WORKFLOW_STATE_SCOPED`).
-    crate::db::teams::upsert_workflow_state_team_only(
-        tx,
-        issue.state.id.inner(),
-        &issue.state.name,
-        issue.team.id.inner(),
-    )?;
     if let Some(a) = &issue.assignee {
         upsert_named_entity(tx, EntityTable::Users, a.id.inner(), Some(&a.name))?;
     }
@@ -201,133 +194,64 @@ pub(crate) fn upsert_issue_tx(
     Ok(())
 }
 
-/// One pending-overlay row resolved against its referenced entity name.
-struct OverlayApply {
-    field: String,
-    value: Option<String>,
-    state_name: Option<String>,
-    user_name: Option<String>,
-}
+/// The default page size when `vars.first` is absent.
+const DEFAULT_PAGE_SIZE: i32 = 50;
 
-/// Load every pending overlay row, resolving the state/assignee name through
-/// the entity tables in one query. The set is small (only un-synced edits), so
-/// it is read whole and grouped in memory rather than filtered per issue list.
-fn load_overlays(conn: &Connection) -> Result<HashMap<String, Vec<OverlayApply>>> {
-    let mut stmt =
-        sql::prepare(conn, sql::LOAD_OVERLAYS).context("failed to prepare overlay merge query")?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                OverlayApply {
-                    field: r.get(1)?,
-                    value: r.get(2)?,
-                    state_name: r.get(3)?,
-                    user_name: r.get(4)?,
-                },
-            ))
-        })
-        .context("failed to query overlays")?;
-    let mut map: HashMap<String, Vec<OverlayApply>> = HashMap::new();
-    for row in rows {
-        let (id, apply) = row.context("failed to read overlay row")?;
-        map.entry(id).or_default().push(apply);
-    }
-    Ok(map)
-}
-
-/// Merge the pending overlay over the base issues: overlay wins per field. This
-/// is the read half of the base/overlay split -- un-synced local intent renders
-/// immediately without ever being written into the base.
-fn apply_overlays(conn: &Connection, issues: &mut [types::Issue]) -> Result<()> {
-    let map = load_overlays(conn)?;
-    if map.is_empty() {
-        return Ok(());
-    }
-    for issue in issues {
-        let Some(rows) = map.get(issue.id.inner()) else {
-            continue;
-        };
-        for o in rows {
-            match o.field.as_str() {
-                "state" => {
-                    if let Some(id) = &o.value {
-                        issue.state = types::WorkflowState {
-                            id: id.clone().into(),
-                            name: o.state_name.clone().unwrap_or_default(),
-                        };
-                    }
-                }
-                "priority" => {
-                    if let Some(p) = o.value.as_deref().and_then(|v| v.parse::<u8>().ok()) {
-                        issue.priority = Priority(p);
-                        issue.priority_label = types::priority_u8_to_label(p).to_string();
-                    }
-                }
-                "assignee" => {
-                    issue.assignee = o.value.as_ref().map(|id| types::User {
-                        id: id.clone().into(),
-                        name: o.user_name.clone().unwrap_or_default(),
-                    });
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Query issues from the local DB, applying the WHERE clause built from the
-/// `IssueQuery` filter fields (bd-2km) and ORDER BY from the sort fields.
+/// Query issues from the local DB: applies the WHERE clause built from
+/// `vars.filter` (and its FTS5 term, if set) and the ORDER BY from
+/// `vars.sort`, defaulting to `updated DESC`. `vars.after` is a stringified
+/// row offset (defaulting to 0); `vars.first` caps the page (defaulting to
+/// [`DEFAULT_PAGE_SIZE`], capped at 250). Fetches one extra row to detect
+/// `has_next_page`, so filtered and FTS reads paginate the same as an
+/// unfiltered read.
 ///
 /// An `--assignee=me` filter must be resolved to the viewer's name by the
 /// caller before calling this (see `issues::list::resolve_me`).
-pub fn query_issues(conn: &Connection, args: &IssueQuery) -> Result<Vec<types::Issue>> {
-    let (conditions, mut bind) = crate::db::filters::build_sql_filter(args)?;
-    let order = crate::db::filters::sort_column(&args.sort);
-    let limit = i64::from(args.limit.min(250));
-    bind.push(Box::new(limit));
+pub fn query_issues(conn: &Connection, vars: &IssuesVariables) -> Result<IssueConnection> {
+    let (conditions, mut bind, fts_term) = vars
+        .filter
+        .as_ref()
+        .map(crate::db::filters::build_sql_filter)
+        .unwrap_or_default();
 
-    let composed = sql::select_issues(false, &conditions, order, args.desc);
+    let (order, desc) = vars.sort.as_ref().map_or(
+        (crate::db::filters::sort_column(&SortField::Updated), true),
+        |s| {
+            (
+                crate::db::filters::sort_column(&s.field),
+                s.direction == SortDirection::Descending,
+            )
+        },
+    );
+
+    let cap = vars.first.unwrap_or(DEFAULT_PAGE_SIZE).clamp(0, 250);
+    let fetch_limit = i64::from(cap) + 1;
+    let offset: i64 = vars
+        .after
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let has_fts = fts_term.is_some();
+    let composed = sql::select_issues(has_fts, &conditions, order, desc);
     let mut stmt = sql::prepare_composed(conn, &composed)
         .context("failed to prepare query_issues statement")?;
 
+    let mut all_params: BindParams = if let Some(term) = fts_term {
+        vec![Box::new(term)]
+    } else {
+        Vec::new()
+    };
+    all_params.append(&mut bind);
+    all_params.push(Box::new(fetch_limit));
+    all_params.push(Box::new(offset));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        all_params.iter().map(std::convert::AsRef::as_ref).collect();
+
     let rows = stmt
-        .query_map(
-            rusqlite::params_from_iter(bind.iter().map(std::convert::AsRef::as_ref)),
-            issue_from_row,
-        )
+        .query_map(param_refs.as_slice(), issue_from_row)
         .context("failed to execute query_issues")?;
-
-    let mut issues = Vec::new();
-    for row in rows {
-        issues.push(row.context("failed to read issue row")?);
-    }
-    apply_overlays(conn, &mut issues)?;
-    Ok(issues)
-}
-
-/// Query issues with an explicit row offset for pagination.
-///
-/// Returns up to `args.limit` rows starting at `offset`, plus a boolean
-/// indicating whether a next page exists.
-pub fn query_issues_page(
-    conn: &Connection,
-    args: &IssueQuery,
-    offset: i64,
-) -> Result<(Vec<types::Issue>, bool)> {
-    let order = crate::db::filters::sort_column(&args.sort);
-    // Fetch one extra row to detect whether there is a next page.
-    let cap = args.limit.min(250);
-    let fetch_limit = i64::from(cap) + 1;
-
-    let composed = sql::select_issues_page(order, args.desc);
-    let mut stmt =
-        sql::prepare_composed(conn, &composed).context("failed to prepare query statement")?;
-
-    let rows = stmt
-        .query_map(params![fetch_limit, offset], issue_from_row)
-        .context("failed to execute query")?;
 
     let mut issues = Vec::new();
     for row in rows {
@@ -335,12 +259,19 @@ pub fn query_issues_page(
     }
 
     let cap_rows = usize::try_from(cap).unwrap_or(usize::MAX);
-    let has_next = issues.len() > cap_rows;
-    if has_next {
+    let has_next_page = issues.len() > cap_rows;
+    if has_next_page {
         issues.truncate(cap_rows);
     }
-    apply_overlays(conn, &mut issues)?;
-    Ok((issues, has_next))
+
+    let end_cursor = has_next_page.then(|| (offset + i64::from(cap)).to_string());
+    Ok(IssueConnection {
+        nodes: issues,
+        page_info: PageInfo {
+            has_next_page,
+            end_cursor,
+        },
+    })
 }
 
 /// Run a registered issue-shaped `SELECT` and map each row via
@@ -364,7 +295,6 @@ fn query_issues_one(
     for row in rows {
         issues.push(row.context("failed to read issue row")?);
     }
-    apply_overlays(conn, &mut issues)?;
     Ok(issues)
 }
 
@@ -429,8 +359,8 @@ pub fn query_children(conn: &Connection, parent_id: &str) -> Result<Vec<types::I
     )
 }
 
-/// Look up a single issue by id, for the detail pane's parent reference.
-/// Returns `None` when no issue with that id is cached.
+/// Look up a single issue by id, for the issue-detail operation's parent
+/// reference. Returns `None` when no issue with that id is cached.
 pub fn query_issue_by_id(conn: &Connection, id: &str) -> Result<Option<types::Issue>> {
     let mut issues = query_issues_one(
         conn,
@@ -468,29 +398,52 @@ pub fn count_fts_rows(conn: &Connection) -> Result<i64> {
     count_rows(conn, sql::COUNT_FTS_ROWS, "count fts rows")
 }
 
-/// The `sync_meta` keys the synced viewer identity is stored under. Kept
-/// private so every reader/writer goes through [`synced_viewer`] /
-/// [`set_synced_viewer`] instead of the raw key strings.
-const VIEWER_ID_KEY: &str = "viewer_id";
-const VIEWER_NAME_KEY: &str = "viewer_name";
+impl Read for IssuesQuery {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+        query_issues(conn, vars)
+    }
 
-/// Persist the authenticated viewer's identity into `sync_meta`, so cached
-/// reads can resolve "me" without a network round-trip.
-pub fn set_synced_viewer(conn: &Connection, id: &str, name: &str) -> Result<()> {
-    set_meta(conn, VIEWER_ID_KEY, id)?;
-    set_meta(conn, VIEWER_NAME_KEY, name)?;
-    Ok(())
+    fn reads(_vars: &Self::Variables) -> Vec<EntityKey> {
+        vec![EntityKey::Issue]
+    }
 }
 
-/// Look up the persisted viewer identity (id, name). `None` when sync has not
-/// yet recorded one.
-pub fn synced_viewer(conn: &Connection) -> Result<Option<types::User>> {
-    let id = get_meta(conn, VIEWER_ID_KEY)?;
-    let name = get_meta(conn, VIEWER_NAME_KEY)?;
-    Ok(id.zip(name).map(|(id, name)| types::User {
-        id: id.into(),
-        name,
-    }))
+/// The entity keys an issue-fragment upsert touches: `Issue`/`Teams` when
+/// `nodes` is non-empty, plus one `WorkflowStates{team_id}` per distinct team
+/// among them -- every issue carries a team name and a team-scoped state name
+/// (`upsert_issue_tx`). Shared by [`IssuesQuery`]'s and
+/// [`lt_types::detail::IssueDetailQuery`]'s `Upsert` impls so both report the
+/// same honest set for the same kind of write.
+pub(crate) fn issue_upsert_touched(nodes: &[types::Issue]) -> Vec<EntityKey> {
+    let mut touched = Vec::new();
+    if !nodes.is_empty() {
+        touched.push(EntityKey::Issue);
+        touched.push(EntityKey::Teams);
+    }
+    let mut team_ids: Vec<&str> = nodes.iter().map(|i| i.team.id.inner()).collect();
+    team_ids.sort_unstable();
+    team_ids.dedup();
+    touched.extend(
+        team_ids
+            .into_iter()
+            .map(|team_id| EntityKey::WorkflowStates {
+                team_id: team_id.to_string(),
+            }),
+    );
+    touched
+}
+
+impl Upsert for IssuesQuery {
+    /// An issue upsert also writes its referenced team and workflow-state
+    /// rows; see [`issue_upsert_touched`].
+    fn upsert(
+        conn: &Connection,
+        _vars: &Self::Variables,
+        out: &Self::Output,
+    ) -> Result<Vec<EntityKey>> {
+        upsert_issues(conn, &out.nodes)?;
+        Ok(issue_upsert_touched(&out.nodes))
+    }
 }
 
 #[cfg(test)]
@@ -509,6 +462,7 @@ mod tests {
             state: types::WorkflowState {
                 id: state.into(),
                 name: state.to_string(),
+                position: 1.0,
             },
             assignee: assignee.map(|n| types::User {
                 id: n.into(),
@@ -529,9 +483,28 @@ mod tests {
         }
     }
 
+    /// Seed a team-scoped workflow state (`id`/`name` share the given
+    /// value) -- sync owns workflow states, so every state a fixture's
+    /// issues reference must already be locally known (issue upserts never
+    /// write them) for the read model's `JOIN` to resolve the row.
+    fn seed_state(conn: &Connection, team_id: &str, name: &str, position: f64) {
+        crate::db::teams::upsert_team_state(
+            conn,
+            team_id,
+            &types::WorkflowState {
+                id: name.into(),
+                name: name.to_string(),
+                position,
+            },
+        )
+        .unwrap();
+    }
+
     fn test_db() -> Connection {
         let db = crate::db::Database::memory().unwrap();
         let conn = db.connect().unwrap();
+        seed_state(&conn, "ENG", "Todo", 1.0);
+        seed_state(&conn, "ENG", "In Progress", 2.0);
         upsert_issues(
             &conn,
             &[
@@ -556,6 +529,7 @@ mod tests {
             state: types::WorkflowState {
                 id: "s1".into(),
                 name: "In Progress".to_string(),
+                position: 1.0,
             },
             assignee: Some(types::User {
                 id: "u1".into(),
@@ -602,6 +576,16 @@ mod tests {
     fn graph_db() -> Connection {
         let db = crate::db::Database::memory().unwrap();
         let conn = db.connect().unwrap();
+        crate::db::teams::upsert_team_state(
+            &conn,
+            "ENG",
+            &types::WorkflowState {
+                id: "s1".into(),
+                name: "In Progress".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
         // The parent referenced by sample_api_issue must exist for the parent
         // self-join to resolve its identifier.
         let mut parent = sample_api_issue();
@@ -612,14 +596,28 @@ mod tests {
         conn
     }
 
+    /// `IssuesVariables` selecting `filter`, with no sort/pagination override.
+    fn vars(filter: lt_types::issues::IssueFilter) -> IssuesVariables {
+        IssuesVariables {
+            filter: Some(filter),
+            sort: None,
+            first: Some(250),
+            after: None,
+        }
+    }
+
     #[test]
     fn reconstructs_issue_fragment_from_joins() {
         let conn = graph_db();
-        let args = IssueQuery {
-            title: Some("Wire it up".to_string()),
-            ..Default::default()
-        };
-        let issues = query_issues(&conn, &args).unwrap();
+        let page = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                title: Some("Wire it up".to_string()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let issues = page.nodes;
         let issue = issues.iter().find(|i| i.id.inner() == "1").unwrap();
 
         assert_eq!(issue.identifier, "ENG-1");
@@ -654,11 +652,17 @@ mod tests {
     #[test]
     fn query_issues_applies_assignee_filter() {
         let conn = test_db();
-        let args = IssueQuery {
-            assignee: Some("alice".to_string()),
-            ..Default::default()
-        };
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                assignee: Some(lt_types::issues::AssigneeFilter::Contains(
+                    "alice".to_string(),
+                )),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
         assert_eq!(issues.len(), 1);
         assert_eq!(
             issues[0].assignee.as_ref().map(|u| u.name.as_str()),
@@ -669,11 +673,15 @@ mod tests {
     #[test]
     fn query_issues_applies_no_assignee_filter() {
         let conn = test_db();
-        let args = IssueQuery {
-            no_assignee: true,
-            ..Default::default()
-        };
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                assignee: Some(lt_types::issues::AssigneeFilter::IsNull),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].id.inner(), "3");
     }
@@ -681,24 +689,92 @@ mod tests {
     #[test]
     fn query_issues_applies_state_filter_and_limit() {
         let conn = test_db();
-        let mut args = IssueQuery {
+        let filter = lt_types::issues::IssueFilter {
             state: Some("todo".to_string()),
             ..Default::default()
         };
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(&conn, &vars(filter.clone())).unwrap().nodes;
         assert_eq!(issues.len(), 2);
 
-        args.limit = 1;
-        let issues = query_issues(&conn, &args).unwrap();
+        let limited_vars = IssuesVariables {
+            filter: Some(filter),
+            sort: None,
+            first: Some(1),
+            after: None,
+        };
+        let issues = query_issues(&conn, &limited_vars).unwrap().nodes;
         assert_eq!(issues.len(), 1);
     }
 
     #[test]
     fn query_issues_without_filters_returns_all() {
         let conn = test_db();
-        let args = IssueQuery::default();
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(
+            &conn,
+            &IssuesVariables {
+                filter: None,
+                sort: None,
+                first: Some(250),
+                after: None,
+            },
+        )
+        .unwrap()
+        .nodes;
         assert_eq!(issues.len(), 3);
+    }
+
+    #[test]
+    fn query_issues_paginates_with_has_next_and_end_cursor() {
+        let conn = test_db();
+        let page = query_issues(
+            &conn,
+            &IssuesVariables {
+                filter: None,
+                sort: None,
+                first: Some(2),
+                after: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.nodes.len(), 2);
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("2"));
+
+        let next = query_issues(
+            &conn,
+            &IssuesVariables {
+                filter: None,
+                sort: None,
+                first: Some(2),
+                after: page.page_info.end_cursor.as_deref().map(str::to_string),
+            },
+        )
+        .unwrap();
+        assert_eq!(next.nodes.len(), 1);
+        assert!(!next.page_info.has_next_page);
+        assert!(next.page_info.end_cursor.is_none());
+    }
+
+    #[test]
+    fn query_issues_paginates_with_a_filter_active() {
+        let conn = test_db();
+        let filter = lt_types::issues::IssueFilter {
+            state: Some("todo".to_string()),
+            ..Default::default()
+        };
+        let page = query_issues(
+            &conn,
+            &IssuesVariables {
+                filter: Some(filter),
+                sort: None,
+                first: Some(1),
+                after: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.nodes.len(), 1);
+        assert!(page.page_info.has_next_page);
+        assert_eq!(page.page_info.end_cursor.as_deref(), Some("1"));
     }
 
     #[test]
@@ -744,19 +820,62 @@ mod tests {
 
     #[test]
     fn read_model_merges_pending_overlay_over_base() {
+        use lt_types::inputs::{Field, IssueUpdateInput};
+        use lt_types::issues::{IssueUpdateMutation, IssueUpdateVariables};
+
+        use crate::db::ops::Mutate;
+
         let conn = graph_db();
+        // The state a picker offers is already cached by that picker's own
+        // `Upsert` (`TeamStatesQuery`); mirror that precondition here.
+        crate::db::teams::upsert_team_state(
+            &conn,
+            "ENG",
+            &types::WorkflowState {
+                id: "s-done".into(),
+                name: "Done".to_string(),
+                position: 2.0,
+            },
+        )
+        .unwrap();
+
         // Enqueue a state + assignee-clear edit; the read model must render the
         // overlay values, not the base.
-        crate::db::outbox::enqueue_state_change(&conn, "1", "s-done", "Done").unwrap();
-        crate::db::outbox::enqueue_assignee_change(&conn, "1", None).unwrap();
+        IssueUpdateMutation::enqueue(
+            &conn,
+            IssueUpdateVariables {
+                id: "1".to_string(),
+                input: IssueUpdateInput {
+                    state_id: Some("s-done".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+        IssueUpdateMutation::enqueue(
+            &conn,
+            IssueUpdateVariables {
+                id: "1".to_string(),
+                input: IssueUpdateInput {
+                    assignee_id: Field::Null,
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
 
-        let args = IssueQuery {
-            title: Some("Wire it up".to_string()),
-            ..Default::default()
-        };
-        let issues = query_issues(&conn, &args).unwrap();
+        let issues = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                title: Some("Wire it up".to_string()),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
         let issue = issues.iter().find(|i| i.id.inner() == "1").unwrap();
         assert_eq!(issue.state.name, "Done");
+        assert_eq!(issue.state.position.to_bits(), 2.0_f64.to_bits());
         assert!(issue.assignee.is_none());
 
         // The base row is untouched by the overlay.
@@ -766,6 +885,54 @@ mod tests {
             })
             .unwrap();
         assert_eq!(base_state, "s1");
+    }
+
+    #[test]
+    fn state_filter_matches_an_issue_whose_overlay_moved_it_into_the_filtered_state() {
+        use lt_types::inputs::IssueUpdateInput;
+        use lt_types::issues::{IssueUpdateMutation, IssueUpdateVariables};
+
+        use crate::db::ops::Mutate;
+
+        let conn = graph_db();
+        // The issue's base state is "In Progress" (graph_db/sample_api_issue);
+        // a state overlay moves it to "Done".
+        seed_state(&conn, "ENG", "Done", 2.0);
+        IssueUpdateMutation::enqueue(
+            &conn,
+            IssueUpdateVariables {
+                id: "1".to_string(),
+                input: IssueUpdateInput {
+                    state_id: Some("Done".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+
+        // A `state:done` filter must match the overlaid state, not the base.
+        let matched = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                state: Some("done".to_string()),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
+        assert!(matched.iter().any(|i| i.id.inner() == "1"));
+
+        // The old base state no longer matches.
+        let stale = query_issues(
+            &conn,
+            &vars(lt_types::issues::IssueFilter {
+                state: Some("in progress".to_string()),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .nodes;
+        assert!(!stale.iter().any(|i| i.id.inner() == "1"));
     }
 
     #[test]
@@ -784,6 +951,7 @@ mod tests {
         updated.state = types::WorkflowState {
             id: "s2".into(),
             name: "Canceled".to_string(),
+            position: 3.0,
         };
         upsert_issues(&conn, &[updated]).unwrap();
 
@@ -802,5 +970,71 @@ mod tests {
             )
             .unwrap();
         assert_eq!(overlay, "Done");
+    }
+
+    #[test]
+    fn issues_query_reads_only_the_issue_key() {
+        let vars = IssuesVariables {
+            filter: None,
+            sort: None,
+            first: None,
+            after: None,
+        };
+        assert_eq!(IssuesQuery::reads(&vars), vec![EntityKey::Issue]);
+    }
+
+    #[test]
+    fn issues_query_upsert_reports_issue_teams_and_workflow_states() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        // The invariant this reports on: sync established the state before
+        // the issue page lands.
+        seed_state(&conn, "ENG", "Todo", 1.0);
+        let vars = IssuesVariables {
+            filter: None,
+            sort: None,
+            first: None,
+            after: None,
+        };
+        let out = IssueConnection {
+            nodes: vec![test_issue("1", Some("Alice"), "Todo")],
+            page_info: PageInfo {
+                has_next_page: false,
+                end_cursor: None,
+            },
+        };
+        let touched = IssuesQuery::upsert(&conn, &vars, &out).unwrap();
+        assert_eq!(
+            touched,
+            vec![
+                EntityKey::Issue,
+                EntityKey::Teams,
+                EntityKey::WorkflowStates {
+                    team_id: "ENG".to_string()
+                },
+            ]
+        );
+        assert_eq!(
+            query_issue_by_id(&conn, "1").unwrap().unwrap().id.inner(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn issues_query_upsert_reports_no_keys_for_an_empty_page() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        let vars = IssuesVariables {
+            filter: None,
+            sort: None,
+            first: None,
+            after: None,
+        };
+        let out = IssueConnection {
+            nodes: Vec::new(),
+            page_info: PageInfo {
+                has_next_page: false,
+                end_cursor: None,
+            },
+        };
+        assert!(IssuesQuery::upsert(&conn, &vars, &out).unwrap().is_empty());
     }
 }
