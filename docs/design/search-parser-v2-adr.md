@@ -2,7 +2,10 @@
 
 ## Status
 
-Proposed
+Accepted and delivered. As built: the shipped dependency is chumsky 0.13, not
+the 0.9.x this document evaluates, and Decision 7's preserved `ParsedQuery`/
+`run_query` were later replaced by the typed-`IssueFilter` lowering of
+[[operation-seam-adr.md#Decision 2: typed variables]].
 
 ## Context
 

@@ -3,32 +3,33 @@
 ## Context
 
 `lt` has a test suite (`make test`, run with and without the `sim` feature) but
-no measurement of what it covers and no gate against regressions. Coverage
-today, measured with `cargo-llvm-cov` over both test configurations merged:
+at the time of this decision had no measurement of what it covers and no gate
+against regressions. The baseline then was 45.85% lines; the seams it lacked
+(network fakes, a driveable event loop) have since landed as `FakeTransport` and
+the loop tests that drive a real `Runtime` without starting `run()`. Coverage as
+of 2026-07-06, measured with `cargo-llvm-cov` over both test configurations
+merged:
 
 ```text
-TOTAL   lines 45.85%   regions 45.14%   functions 47.41%
+TOTAL   lines 83.44%   regions 81.89%   functions 84.13%
 ```
 
-The covered surfaces are the pure, seam-isolated ones — display/table
-formatting, markdown rendering, the search-query parser, the `ui::render` frame
-path, and the `sim` generator (77–100% each). The uncovered mass is the
-IO-coupled code:
+The remaining uncovered mass is CLI command orchestration and the auth/sync IO
+periphery:
 
 ```text
-  0% covered                              partially covered
-  ├─ tui/mod.rs   event loop (16%, 1759   ├─ tui/ui.rs          77%
-  │               missed lines — threads, ├─ tui/search_query   85%
-  │               mpsc, DB)               ├─ tui/markdown       93%
-  ├─ linear/*     GraphQL client+types    ├─ inbox/display      94%
-  ├─ sync/*       full/delta/probe        ├─ issues/display     99%
-  ├─ issues/list, issues/new, search      └─ sim/mod            91%
-  ├─ logging, main, output
+  0% covered                                    partially covered
+  ├─ lt-cli: main, logging, output, auth,       ├─ lt-config/src/lib.rs      44%
+  │  sync, sim, search, issues/{mod,list},      ├─ lt-tui/src/ui/text_span   31%
+  │  inbox/mod                                  ├─ lt-runtime/src/sync/probe 38%
+  ├─ lt-upstream/src/auth/{refresh,logout,      ├─ lt-tui/src/new_issue      52%
+  │  status}                                    ├─ lt-tui/src/popup          57%
+  ├─ lt-runtime/src/{issues.rs, sync/full.rs}   └─ lt-tui/src/detail         60%
+  └─ lt-tui/src/present/comment.rs
 ```
 
-Reaching these requires test seams the project does not yet have (network fakes,
-a driveable event loop). The gate exists to (a) stop coverage regressing and (b)
-ratchet the floor up as those seams land.
+The gate exists to (a) stop coverage regressing and (b) ratchet the floor up as
+the remaining gaps close.
 
 ## Decision
 

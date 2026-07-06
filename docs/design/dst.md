@@ -4,6 +4,10 @@ issue: https://linear.app/willruggiano/issue/ENG-18/deterministic-simulation-tes
 
 # Deterministic Simulation Testing
 
+## Status
+
+Delivered (ENG-18).
+
 ## Context
 
 `lt` needs fake, generated data driven by deterministic RNG so we can:
@@ -43,8 +47,8 @@ smaller seam and exercises the exact code path the TUI uses.
 ## Decision
 
 Add a `sim` cargo feature (`[features] sim = ["dep:fake"]`). When enabled it
-compiles `src/sim/` — and the optional `fake` faker dependency — into both the
-binary and the test binary.
+compiles the generator (`crates/lt-storage/src/sim.rs`) — and the optional
+`fake` faker dependency — into both the binary and the test binary.
 
 ### Generator
 

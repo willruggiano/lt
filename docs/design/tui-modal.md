@@ -1,5 +1,11 @@
 # TUI Modal Redesign (bd-qei)
 
+## Status
+
+Superseded. The `Mode` enum this document is built around no longer exists: the
+mode taxonomy was replaced by the view stack of [[tui-app-event-queue-adr.md]],
+and the binding tables moved to [[keybinds.md]].
+
 ## Overview
 
 This document describes a vim-style modal design for the `lt` TUI. The current

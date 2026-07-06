@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed
+Accepted and delivered. The `run_query` this document cites as the SQL home was
+later replaced by the typed-`IssueFilter` lowering of
+[[operation-seam-adr.md#Decision 2: typed variables]].
 
 ## Context
 

@@ -22,7 +22,7 @@ A local-first [Linear] tui.
 (requires a nightly Rust toolchain)
 
 ```bash
-cargo install -git https://github.com/willruggiano/lt
+cargo install --git https://github.com/willruggiano/lt
 ```
 
 ```bash
@@ -48,7 +48,7 @@ export LINEAR_CLIENT_SECRET=
 ```
 
 Application state is kept per profile in `$XDG_STATE_HOME/lt/profiles/<name>`
-(`/.local/state/lt/profiles/default` on Linux when no profile is selected):
+(`~/.local/state/lt/profiles/default` on Linux when no profile is selected):
 
 - `auth.json` contains OAuth credentials (0600 permissions)
 - logs are timestamped in the `logs/` sub-directory

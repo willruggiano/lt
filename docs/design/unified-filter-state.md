@@ -1,5 +1,11 @@
 # Unified Filter State: QueryAst as Single Source of Truth
 
+## Status
+
+Delivered. The AST remains the single source of truth for TUI filter state; its
+SQL lowering now targets the typed `IssueFilter`
+([[operation-seam-adr.md#Decision 2: typed variables]]).
+
 ## Context
 
 The TUI header shows stale/default filters after confirming a search because

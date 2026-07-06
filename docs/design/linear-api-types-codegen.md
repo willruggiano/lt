@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed — `Refs: ENG-31`
+Delivered (ENG-31), as the PR-stack notes below record. The `SyncService` port
+described in PR 5's notes was later retired by [[operation-seam-adr.md]]; the
+TUI now holds a concrete `Runtime`.
 
 > **Revision (PR #26 review).** The first draft scoped this to "stop
 > hand-writing response structs." The review pushed back on one line —

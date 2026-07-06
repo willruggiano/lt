@@ -1,5 +1,11 @@
 # Keybinds: Linear Parity and Keymap Machinery
 
+## Status
+
+Accepted and delivered (ENG-26): the declarative keymap
+(`crates/lt-tui/src/keymap/`), chords, and the binding tables below are shipped.
+The machinery assessment and implementation plan are the historical record.
+
 ## Context
 
 The TUI should use the same (or as similar as possible) keybinds as the
@@ -254,7 +260,7 @@ crates/lt-tui/src/keymap/
 
 The keymap module is vocabulary and resolution machinery only. Each view
 declares its own binding tables and a `Keymap` — resolution layers, apply
-function, unbound policy — next to its state and handlers (lib.rs for the list,
+function, unbound policy — next to its state and handlers (list.rs for the list,
 detail.rs, popup.rs, new_issue.rs), and `View::keymap()` selects the declaration
 from the view's own state (ENG-46). No new dependencies.
 

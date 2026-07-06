@@ -2,8 +2,10 @@
 
 ## Status
 
-Accepted. Delivery items 1–7 are landed; items 8–11 (the second review round)
-are open.
+Accepted and delivered (ENG-32). The state-propagation vocabulary this document
+specifies (`StateEvent`, `Scope`, `StateCtx`, the `SyncService` port) is
+superseded by [[operation-seam-adr.md#Amendments to the AppEvent queue design]];
+the queue, the view stack, and the propagation rule stand.
 
 ## Context
 

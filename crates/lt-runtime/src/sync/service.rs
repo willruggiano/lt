@@ -1,9 +1,4 @@
 //! The vocabulary the [`crate::Runtime`] reports to its consumer (the TUI).
-//!
-//! `StateEvent` and `Scope` (docs/design/tui-app-event-queue-adr.md) are
-//! superseded: invalidation is derived from `EntityKey`/`Read::reads`
-//! (docs/design/operation-seam-adr.md, "Decision 5") rather than hand-placed,
-//! so the queue only ever needs to say *which subscription* changed.
 
 use lt_types::viewer;
 
