@@ -248,6 +248,11 @@ pub fn open_db(uri: impl AsRef<Path>) -> Result<Connection> {
     let uri = uri.as_ref();
     let mut conn = Connection::open(uri)
         .with_context(|| format!("could not open database at {}", uri.display()))?;
+    // The TUI and the CLI (e.g. `lt sync`) can open the same per-profile file
+    // concurrently; wait out a contending writer instead of failing
+    // immediately with SQLITE_BUSY.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .context("failed to set busy timeout")?;
     run_migrations(&mut conn, uri)?;
     Ok(conn)
 }
