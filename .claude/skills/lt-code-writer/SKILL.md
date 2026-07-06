@@ -70,9 +70,10 @@ Reminder: **always run commands via the nix devshell**.
   `[workspace.dependencies]`; a **single-consumer** dep is declared inline in
   the crate that uses it. `cargo machete` enforces "no unused deps".
 - Respect the layering: the Linear API is reached only by `lt-upstream`; the TUI
-  touches only the local DB. `lt-tui` must not depend on `lt-upstream` or
-  `cynic`. `cynic` is confined to `lt-types`. Cross-layer wiring goes through
-  ports/adapters (e.g. the `SyncService` port), injected by `lt-cli`.
+  reads and writes only through `lt-runtime`'s `Runtime` (subscriptions and the
+  operation drivers) and holds no `Database`/`Connection`. `lt-tui` must not
+  depend on `lt-upstream` or `cynic`. `cynic` is confined to `lt-types`. The
+  concrete `Runtime` is injected by `lt-cli`.
 - Prefer domain-scoped modules and re-exports over thin wrapper functions
   (`upstream::teams::fetch()`, not a `fetch_teams` shim).
 

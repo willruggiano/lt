@@ -7,7 +7,7 @@ description:
 
 # jscpd
 
-Copy-paste detector for programming source code, supports 150+ languages. Use
+Copy-paste detector for programming source code, supports 220+ languages. Use
 this skill to run jscpd and understand its output.
 
 ## Quick Start

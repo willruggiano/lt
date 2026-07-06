@@ -163,9 +163,8 @@ Each consuming crate's `build.rs` reads a hand-maintained allowlist
 (`build/linear-schema-definition.graphql`), validates every allowlisted filter
 and sort field against `IssueFilter`/`IssueSortInput` via `lt-schema-codegen`,
 and emits a parser into `OUT_DIR`. A schema/allowlist mismatch fails the build.
-Rationale and the parser design are in [[search-parser-v2.md]] and its ADR
-[[search-parser-v2-adr.md]]; the filter-expansion model is in
-[[search-codegen-and-filter-expansion-adr.md]].
+Rationale and the parser design are in [[search-parser-v2-adr.md]]; the
+filter-expansion model is in [[search-codegen-and-filter-expansion-adr.md]].
 
 Two front ends consume the grammar: the `lt search` command runs FTS5 queries
 against `issues_fts` (`crates/lt-cli/src/search.rs`), and the TUI search bar
@@ -202,7 +201,7 @@ and a concurrent delta sync (which writes only the base) cannot clobber it. The
 sync drainer (`crates/lt-runtime/src/sync/drain.rs`) is the single writer that
 replays the outbox against the API and reconciles the base on success. This
 split, the typed inputs, and the offline outbox are documented in
-[[linear-api-types-codegen.md]]; the modal redesign in [[tui-modal.md]].
+[[linear-api-types-codegen.md]].
 
 ### Logging
 
@@ -210,8 +209,7 @@ split, the typed inputs, and the offline outbox are documented in
 directory (`crates/lt-cli/src/logging.rs`). TUI mode logs only to file so
 stdout/stderr never corrupt the display; CLI mode also mirrors INFO to stdout.
 Default filter is DEBUG for the `lt` crate, WARN elsewhere; override with
-`RUST_LOG`. `panic!`, `unwrap`, and `expect` are denied in non-test code (see
-[[rust.md#Panic safety]]).
+`RUST_LOG`.
 
 ### Testing and simulation
 

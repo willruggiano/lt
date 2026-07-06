@@ -8,10 +8,9 @@ paths:
 - Configuration is the source of truth (`Cargo.toml`, `clippy.toml`, etc). Do
   not duplicate configuration values into documentation, per
   [[documentation.md]].
-- Do not silence a lint with `#[allow(...)]` without a one-line justification
-  comment _and_ user approval (per [[contributing.md#Strictness]]).
-- When a class of mistake could be caught by a stricter setting or an extra
-  lint, add it rather than fixing instances one by one.
+- Lint strictness — when to add a lint, when silencing one is acceptable — is
+  governed by [[contributing.md#Strictness]]. A permitted `#[allow(...)]`
+  carries a one-line justification comment.
 - `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!`, and `dbg!` are denied
   in non-test code; propagate errors with `Result` and `?` (the crate uses
   `anyhow`). Tests may use them freely.

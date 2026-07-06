@@ -63,9 +63,9 @@ posture is in [[contributing.md#Strictness]]; engineering principles in
   datasets (`sim::generate(seed, size)`) rather than hand-built fixtures where
   the shape of real data matters. The simulation model is in [[dst.md]].
 - Keep tests deterministic. Wall-clock and other ambient inputs are threaded in
-  as explicit parameters (e.g. `relative_age(iso, now_secs)`): the binary
-  supplies the real value, the test a fixed one. This is dependency wiring per
-  [[posture.md]], not a test-only shim.
+  as explicit parameters (e.g. `relative_age(now)` taking an explicit
+  `DateTime<Utc>`): the binary supplies the real value, the test a fixed one.
+  This is dependency wiring per [[posture.md]], not a test-only shim.
 
 ## Snapshots
 
@@ -77,6 +77,6 @@ posture is in [[contributing.md#Strictness]]; engineering principles in
 
 ## Panic safety
 
-- `unwrap`, `expect`, `panic!`, and `print*` are denied in non-test code but
-  allowed in test bodies (`clippy.toml`: `allow-*-in-tests`). Use them freely in
-  tests; never in the code under test (see [[rust.md#Panic safety]]).
+- The macros [[rust.md]] denies in non-test code are allowed in test bodies
+  (`clippy.toml`: `allow-*-in-tests`). Use them freely in tests; never in the
+  code under test.

@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed
+Accepted and delivered; the completer and its snapshot harness live in
+`crates/lt-tui/src/search_completer.rs`.
 
 ## Context
 
