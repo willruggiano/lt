@@ -14,8 +14,11 @@
 
 use crossterm::event::KeyModifiers;
 use lt_runtime::test_util::Database;
+use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
 use lt_types::inputs::{CommentCreateInput, IssueCreateInput, IssueUpdateInput};
-use lt_types::issues::IssueUpdateVariables;
+use lt_types::issues::{
+    IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
+};
 use lt_types::teams::TeamsQuery;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -201,7 +204,7 @@ fn pending_select_seeks_identifier_on_next_issues_update() {
 
     // A write that touches `Issue` propagates to the live list subscription.
     app.runtime
-        .update_issue(IssueUpdateVariables {
+        .execute::<IssueUpdateMutation>(IssueUpdateVariables {
             id: "1".to_string(),
             input: IssueUpdateInput {
                 priority: Some(0),
@@ -365,9 +368,11 @@ fn route_update_comments_updates_a_live_matching_detail() {
     open_detail_for(&mut app, &issue);
 
     app.runtime
-        .create_comment(&CommentCreateInput {
-            issue_id: "c1".to_string(),
-            body: "fresh".to_string(),
+        .execute::<CommentCreateMutation>(CommentCreateVariables {
+            input: CommentCreateInput {
+                issue_id: "c1".to_string(),
+                body: "fresh".to_string(),
+            },
         })
         .unwrap();
     drain_events(&mut app);
@@ -387,9 +392,11 @@ fn route_update_comments_falls_through_without_a_matching_detail() {
 
     // No consumer yet: no-op, no panic.
     app.runtime
-        .create_comment(&CommentCreateInput {
-            issue_id: "a".to_string(),
-            body: "fresh".to_string(),
+        .execute::<CommentCreateMutation>(CommentCreateVariables {
+            input: CommentCreateInput {
+                issue_id: "a".to_string(),
+                body: "fresh".to_string(),
+            },
         })
         .unwrap();
     drain_events(&mut app);
@@ -397,9 +404,11 @@ fn route_update_comments_falls_through_without_a_matching_detail() {
     // Detail(b) live: id mismatch falls through.
     open_detail_for(&mut app, &b);
     app.runtime
-        .create_comment(&CommentCreateInput {
-            issue_id: "a".to_string(),
-            body: "fresh2".to_string(),
+        .execute::<CommentCreateMutation>(CommentCreateVariables {
+            input: CommentCreateInput {
+                issue_id: "a".to_string(),
+                body: "fresh2".to_string(),
+            },
         })
         .unwrap();
     drain_events(&mut app);
@@ -419,9 +428,11 @@ fn route_update_comments_applied_twice_is_idempotent() {
     open_detail_for(&mut app, &issue);
 
     app.runtime
-        .create_comment(&CommentCreateInput {
-            issue_id: "c1".to_string(),
-            body: "fresh".to_string(),
+        .execute::<CommentCreateMutation>(CommentCreateVariables {
+            input: CommentCreateInput {
+                issue_id: "c1".to_string(),
+                body: "fresh".to_string(),
+            },
         })
         .unwrap();
     let ev = app.events_rx.recv().unwrap();
@@ -446,13 +457,15 @@ fn route_update_issues_refreshes_the_focused_base() {
     assert_eq!(app.list_mut().issues.len(), 1);
 
     app.runtime
-        .create_issue(&IssueCreateInput {
-            title: "New".to_string(),
-            team_id: "ENG".to_string(),
-            description: None,
-            state_id: None,
-            priority: None,
-            assignee_id: None,
+        .execute::<IssueCreateMutation>(IssueCreateVariables {
+            input: IssueCreateInput {
+                title: "New".to_string(),
+                team_id: "ENG".to_string(),
+                description: None,
+                state_id: None,
+                priority: None,
+                assignee_id: None,
+            },
         })
         .unwrap();
     drain_events(&mut app);
@@ -470,13 +483,15 @@ fn route_update_issues_under_an_overlay_defers_and_resume_focus_replays() {
     open_detail_for(&mut app, &issue);
 
     app.runtime
-        .create_issue(&IssueCreateInput {
-            title: "New".to_string(),
-            team_id: "ENG".to_string(),
-            description: None,
-            state_id: None,
-            priority: None,
-            assignee_id: None,
+        .execute::<IssueCreateMutation>(IssueCreateVariables {
+            input: IssueCreateInput {
+                title: "New".to_string(),
+                team_id: "ENG".to_string(),
+                description: None,
+                state_id: None,
+                priority: None,
+                assignee_id: None,
+            },
         })
         .unwrap();
     drain_events(&mut app);

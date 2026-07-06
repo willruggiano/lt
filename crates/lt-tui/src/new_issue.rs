@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::{Subscription, SubscriptionKey};
+use lt_types::issues::{IssueCreateMutation, IssueCreateVariables};
 use lt_types::new_issue::{NewIssueData, NewIssueQuery, NewIssueVariables};
 use lt_types::types::User;
 
@@ -278,12 +279,15 @@ impl super::App {
         };
 
         let input = build_issue_create_input(modal, &team_id);
-        match self.runtime.create_issue(&input) {
-            Ok(identifier) => {
+        match self
+            .runtime
+            .execute::<IssueCreateMutation>(IssueCreateVariables { input })
+        {
+            Ok(issue) => {
                 self.pop_view();
                 self.footer_msg = Some("Created issue (pending sync)".to_string());
                 if let View::List(list) = self.base_mut() {
-                    list.pending_select = Some(identifier);
+                    list.pending_select = Some(issue.identifier);
                 }
             }
             Err(e) => {

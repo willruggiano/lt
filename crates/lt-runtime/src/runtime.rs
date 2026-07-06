@@ -12,11 +12,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use lt_storage::db;
 use lt_storage::db::{Connection, Database, EntityKey, Mutation, Query};
-use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
-use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
-use lt_types::issues::{
-    IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
-};
 use lt_types::viewer::{self, ViewerQuery};
 use lt_upstream::auth::login_non_interactive;
 use lt_upstream::auth::refresh::load_or_refresh_token;
@@ -424,7 +419,7 @@ impl Runtime {
     /// `on_event` callback is never invoked while the registry lock is held
     /// (a callback that drops a subscription would otherwise deadlock on the
     /// same lock).
-    fn propagate(&self, touched: &[EntityKey]) {
+    pub(crate) fn propagate(&self, touched: &[EntityKey]) {
         let conn = match self.connect() {
             Ok(conn) => conn,
             Err(e) => {
@@ -737,39 +732,12 @@ impl Runtime {
         }
     }
 
-    /// Every write's shared tail: transactional local enqueue, propagation of
-    /// whatever it touched, then a prompt for the loop to immediately drain
-    /// the outbox rather than waiting for the next sync cycle.
-    fn enqueue_and_propagate<M: Mutation>(&self, vars: M::Variables) -> Result<Vec<EntityKey>> {
-        let conn = self.connect()?;
-        let touched = M::enqueue(&conn, vars)?;
-        self.propagate(&touched);
+    /// Nudge the loop to drain the outbox immediately after a caller-side
+    /// mutation, instead of waiting for the next periodic sync cycle.
+    pub(crate) fn request_drain(&self) {
         if self.commands_tx.send(Command::Drain).is_err() {
-            tracing::debug!("enqueue_and_propagate: runtime loop is gone");
+            tracing::debug!("request_drain: runtime loop is gone");
         }
-        Ok(touched)
-    }
-
-    /// The comment thread only -- creating a comment does not touch the
-    /// issues table.
-    pub fn create_comment(&self, input: &CommentCreateInput) -> Result<()> {
-        self.enqueue_and_propagate::<CommentCreateMutation>(CommentCreateVariables {
-            input: input.clone(),
-        })?;
-        Ok(())
-    }
-
-    pub fn update_issue(&self, vars: IssueUpdateVariables) -> Result<()> {
-        self.enqueue_and_propagate::<IssueUpdateMutation>(vars)?;
-        Ok(())
-    }
-
-    /// Returns the optimistic identifier so the caller can seek to it.
-    pub fn create_issue(&self, input: &IssueCreateInput) -> Result<String> {
-        self.enqueue_and_propagate::<IssueCreateMutation>(IssueCreateVariables {
-            input: input.clone(),
-        })?;
-        Ok(db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER.to_string())
     }
 }
 
@@ -777,7 +745,12 @@ impl Runtime {
 mod tests {
     use std::sync::mpsc as std_mpsc;
 
-    use lt_types::issues::{IssuesQuery, IssuesVariables, sample_issue_node};
+    use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
+    use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
+    use lt_types::issues::{
+        IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
+        IssuesQuery, IssuesVariables, sample_issue_node,
+    };
     use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
     use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
     use lt_types::teams::TeamsQuery;
@@ -1000,13 +973,16 @@ mod tests {
             priority: None,
             assignee_id: None,
         };
-        let identifier = runtime.create_issue(&input).unwrap();
+        let issue = runtime
+            .execute::<IssueCreateMutation>(IssueCreateVariables { input })
+            .unwrap();
+        assert_eq!(issue.identifier, db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER);
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
         let page = sub.take().unwrap();
         assert_eq!(page.nodes.len(), 1);
-        assert_eq!(page.nodes[0].identifier, identifier);
+        assert_eq!(page.nodes[0].identifier, issue.identifier);
     }
 
     #[test]
@@ -1036,12 +1012,15 @@ mod tests {
         );
         assert!(initial.unwrap().comments.is_empty());
 
-        runtime
-            .create_comment(&CommentCreateInput {
-                issue_id: "issue-1".to_string(),
-                body: "hello".to_string(),
+        let comment = runtime
+            .execute::<CommentCreateMutation>(CommentCreateVariables {
+                input: CommentCreateInput {
+                    issue_id: "issue-1".to_string(),
+                    body: "hello".to_string(),
+                },
             })
             .unwrap();
+        assert_eq!(comment.body, "hello");
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
@@ -1058,6 +1037,19 @@ mod tests {
         let db = Database::memory().unwrap();
         {
             let conn = db.connect().unwrap();
+            // `sample_base_issue`'s state must already be locally known (sync
+            // owns workflow states; issue upserts never write them), so the
+            // read-back's join resolves it.
+            db::upsert_team_state(
+                &conn,
+                "ENG",
+                &types::WorkflowState {
+                    id: "s-todo".into(),
+                    name: "Todo".to_string(),
+                    position: 1.0,
+                },
+            )
+            .unwrap();
             db::upsert_issues(
                 &conn,
                 &[
@@ -1074,8 +1066,8 @@ mod tests {
             },
         );
 
-        runtime
-            .update_issue(IssueUpdateVariables {
+        let updated = runtime
+            .execute::<IssueUpdateMutation>(IssueUpdateVariables {
                 id: "issue-2".to_string(),
                 input: lt_types::inputs::IssueUpdateInput {
                     priority: Some(1),
@@ -1083,6 +1075,7 @@ mod tests {
                 },
             })
             .unwrap();
+        assert_eq!(updated.unwrap().id.inner(), "issue-2");
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
@@ -1298,7 +1291,7 @@ mod tests {
 
     fn update_priority_to_urgent(runtime: &Runtime, id: &str) {
         runtime
-            .update_issue(IssueUpdateVariables {
+            .execute::<IssueUpdateMutation>(IssueUpdateVariables {
                 id: id.to_string(),
                 input: lt_types::inputs::IssueUpdateInput {
                     priority: Some(1),
@@ -1337,7 +1330,7 @@ mod tests {
         });
 
         update_priority_to_urgent(&runtime, "issue-1");
-        // The optimistic overlay's own propagation, from `update_issue` itself.
+        // The optimistic overlay's own propagation, from `execute` itself.
         let first = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(first, RuntimeEvent::Updated(id) if id == sub.key()));
 

@@ -41,6 +41,16 @@ pub struct AckContext<'a, V> {
     pub vars: &'a V,
 }
 
+/// The result of [`Mutation::enqueue`]: the id its optimistic local write was
+/// recorded under (`vars.id` for an update, the freshly minted temp id for a
+/// create) plus every entity slice it touched. The id lets a caller
+/// (`Runtime::execute`, docs/design/unified-execute-adr.md "Decision 1") read
+/// the optimistic entity straight back out of the cache.
+pub struct Enqueued {
+    pub entity_id: String,
+    pub touched: Vec<EntityKey>,
+}
+
 /// Every local write into the replica: applying an already-fetched operation
 /// response, and the outbox's mutation-side vocabulary -- the optimistic
 /// local write plus its enqueue and ack (docs/design/unified-execute-adr.md,
@@ -62,9 +72,9 @@ pub trait Mutation: GraphqlOperation {
 
     /// Write the operation's local optimistic effect (a `pending_overlay`
     /// row, an optimistic temp row, a local comment row, ...) and enqueue its
-    /// outbox command from `vars`, atomically. Returns the entity keys
-    /// touched. Only the outbox mutations override this.
-    fn enqueue(_conn: &Connection, _vars: Self::Variables) -> Result<Vec<EntityKey>> {
+    /// outbox command from `vars`, atomically. Returns the id it wrote and
+    /// the entity keys touched. Only the outbox mutations override this.
+    fn enqueue(_conn: &Connection, _vars: Self::Variables) -> Result<Enqueued> {
         anyhow::bail!("{} is not an outbox mutation", Self::NAME)
     }
 

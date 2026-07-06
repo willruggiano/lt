@@ -4,11 +4,12 @@
 //! dispatch trait behind [`crate::Runtime::execute`]
 //! (docs/design/unified-execute-adr.md, "Decision 2").
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use lt_storage::db;
 use lt_storage::db::{Connection, EntityKey, Mutation, Query};
-use lt_types::comments::{CommentsQuery, CommentsVariables};
+use lt_types::comments::{CommentCreateMutation, CommentsQuery, CommentsVariables};
 use lt_types::detail::IssueDetailQuery;
-use lt_types::issues::IssuesQuery;
+use lt_types::issues::{IssueCreateMutation, IssueUpdateMutation, IssuesQuery};
 use lt_types::members::TeamMembersQuery;
 use lt_types::new_issue::NewIssueQuery;
 use lt_types::states::TeamStatesQuery;
@@ -209,6 +210,45 @@ impl Operation for ViewerQuery {
 impl Operation for IssueDetailQuery {
     fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
         query_execute::<Self>(runtime, &vars)
+    }
+}
+
+/// Shared body for every mutation-kind [`Operation`] impl: enqueue the
+/// optimistic local write, propagate whatever it touched, and nudge the loop
+/// to drain promptly -- the write-side mirror of [`query_execute`]. Returns
+/// the id the write was recorded under, so the caller can read the
+/// optimistic entity back out of the cache.
+fn mutation_execute<M: Mutation>(runtime: &Runtime, vars: M::Variables) -> Result<String> {
+    let conn = runtime.connect()?;
+    let enqueued = M::enqueue(&conn, vars)?;
+    runtime.propagate(&enqueued.touched);
+    runtime.request_drain();
+    Ok(enqueued.entity_id)
+}
+
+impl Operation for IssueCreateMutation {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        let id = mutation_execute::<Self>(runtime, vars)?;
+        db::query_issue_by_id(&runtime.connect()?, &id)?
+            .context("optimistic issue create vanished from the cache")
+    }
+}
+
+impl Operation for IssueUpdateMutation {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        let id = mutation_execute::<Self>(runtime, vars)?;
+        db::query_issue_by_id(&runtime.connect()?, &id)
+    }
+}
+
+impl Operation for CommentCreateMutation {
+    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+        let issue_id = vars.input.issue_id.clone();
+        let id = mutation_execute::<Self>(runtime, vars)?;
+        db::query_comments(&runtime.connect()?, &issue_id)?
+            .into_iter()
+            .find(|c| c.id.inner() == id)
+            .context("optimistic comment create vanished from the cache")
     }
 }
 

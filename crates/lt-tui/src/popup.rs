@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use lt_runtime::{Subscription, SubscriptionKey, search_query};
 use lt_types::inputs::{Field, IssueUpdateInput};
 use lt_types::issues::{
-    IssueFilter, IssueSort, IssueUpdateVariables, IssuesQuery, IssuesVariables,
+    IssueFilter, IssueSort, IssueUpdateMutation, IssueUpdateVariables, IssuesQuery, IssuesVariables,
 };
 use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
 use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
@@ -416,10 +416,12 @@ fn popup_confirm(app: &mut App, i: usize) {
     let kind = popup.kind.clone();
     app.close_view_at(i);
     if let Some(input) = popup_edit(&kind, &item)
-        && let Err(e) = app.runtime.update_issue(IssueUpdateVariables {
-            id: issue_id,
-            input,
-        })
+        && let Err(e) = app
+            .runtime
+            .execute::<IssueUpdateMutation>(IssueUpdateVariables {
+                id: issue_id,
+                input,
+            })
     {
         app.footer_msg = Some(format!("Failed to save: {e}"));
     }

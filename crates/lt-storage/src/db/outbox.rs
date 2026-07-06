@@ -22,7 +22,7 @@ use lt_types::types;
 use rusqlite::{Connection, params};
 use serde_json::json;
 
-use crate::db::ops::{AckContext, EntityKey, Mutation};
+use crate::db::ops::{AckContext, Enqueued, EntityKey, Mutation};
 use crate::db::sql;
 
 /// The optimistic identifier every locally-created issue carries until the
@@ -177,7 +177,7 @@ impl Mutation for IssueUpdateMutation {
     /// the coalesced command from every overlay row the issue carries (not
     /// just this one), so repeated edits collapse into a single pending
     /// `issueUpdate`.
-    fn enqueue(conn: &Connection, vars: IssueUpdateVariables) -> Result<Vec<EntityKey>> {
+    fn enqueue(conn: &Connection, vars: IssueUpdateVariables) -> Result<Enqueued> {
         let tx = conn.unchecked_transaction()?;
         if let Some(state_id) = &vars.input.state_id {
             set_overlay(&tx, &vars.id, OverlayField::State, Some(state_id))?;
@@ -193,7 +193,10 @@ impl Mutation for IssueUpdateMutation {
         }
         refresh_issue_update_command(&tx, &vars.id)?;
         tx.commit().context("failed to commit issue update")?;
-        Ok(vec![EntityKey::Issue])
+        Ok(Enqueued {
+            entity_id: vars.id,
+            touched: vec![EntityKey::Issue],
+        })
     }
 
     /// Apply a confirmed issue update to the base and retire its overlay +
@@ -345,7 +348,7 @@ impl Mutation for IssueCreateMutation {
     /// `issueCreate` command. Creates never coalesce: each mints its own temp
     /// id, so the shared coalescing primitive is a no-op delete plus an
     /// insert.
-    fn enqueue(conn: &Connection, vars: IssueCreateVariables) -> Result<Vec<EntityKey>> {
+    fn enqueue(conn: &Connection, vars: IssueCreateVariables) -> Result<Enqueued> {
         let tx = conn.unchecked_transaction()?;
         let optimistic = optimistic_issue(&tx, &vars.input)?;
         let synced_at = Utc::now().to_rfc3339();
@@ -359,7 +362,10 @@ impl Mutation for IssueCreateMutation {
             &variables,
         )?;
         tx.commit().context("failed to commit issue create")?;
-        Ok(vec![EntityKey::Issue])
+        Ok(Enqueued {
+            entity_id: optimistic.id.into_inner(),
+            touched: vec![EntityKey::Issue],
+        })
     }
 
     /// Replace the optimistic temp issue with the server's full issue (server
@@ -403,7 +409,7 @@ impl Mutation for CommentCreateMutation {
     /// queue the `commentCreate` command. The issue and body come from
     /// `vars.input`; the author is the persisted viewer identity
     /// (`sync_meta`), if one has been recorded yet.
-    fn enqueue(conn: &Connection, vars: CommentCreateVariables) -> Result<Vec<EntityKey>> {
+    fn enqueue(conn: &Connection, vars: CommentCreateVariables) -> Result<Enqueued> {
         let tx = conn.unchecked_transaction()?;
         let id = temp_id();
         let now = lt_types::scalars::DateTime(Utc::now());
@@ -421,7 +427,10 @@ impl Mutation for CommentCreateMutation {
             serde_json::to_value(&vars).context("failed to serialize comment-create variables")?;
         insert_pending(&tx, CommentCreateMutation::NAME, &id, &variables)?;
         tx.commit().context("failed to commit comment create")?;
-        Ok(vec![EntityKey::Comment { issue_id }])
+        Ok(Enqueued {
+            entity_id: id,
+            touched: vec![EntityKey::Comment { issue_id }],
+        })
     }
 
     /// Replace the optimistic temp comment with the server copy and retire
@@ -732,8 +741,9 @@ mod tests {
             priority: None,
             assignee_id: None,
         };
-        let touched = IssueCreateMutation::enqueue(&conn, IssueCreateVariables { input }).unwrap();
-        assert_eq!(touched, vec![EntityKey::Issue]);
+        let enqueued = IssueCreateMutation::enqueue(&conn, IssueCreateVariables { input }).unwrap();
+        assert_eq!(enqueued.touched, vec![EntityKey::Issue]);
+        assert!(enqueued.entity_id.starts_with("local:"));
 
         let ops = pending(&conn);
         assert_eq!(ops.len(), 1);

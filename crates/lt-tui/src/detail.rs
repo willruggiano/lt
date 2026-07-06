@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lt_runtime::{Runtime, Subscription, SubscriptionKey};
+use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
 use lt_types::detail::{IssueDetailData, IssueDetailQuery, IssueDetailVariables};
 use lt_types::types::Issue;
 
@@ -192,7 +193,10 @@ fn submit_comment(app: &mut App, i: usize) {
     detail.comment_input = None;
 
     let input = lt_types::inputs::CommentCreateInput { issue_id, body };
-    if let Err(e) = app.runtime.create_comment(&input) {
+    if let Err(e) = app
+        .runtime
+        .execute::<CommentCreateMutation>(CommentCreateVariables { input })
+    {
         app.footer_msg = Some(format!("Failed to save comment: {e}"));
     }
 }
