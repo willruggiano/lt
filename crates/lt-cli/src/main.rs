@@ -1,9 +1,6 @@
 mod auth;
-mod inbox;
-mod issues;
 mod logging;
 mod output;
-mod search;
 #[cfg(feature = "sim")]
 mod sim;
 mod sync;
@@ -33,32 +30,10 @@ enum Commands {
         #[command(subcommand)]
         command: auth::AuthCommands,
     },
-    /// List Linear issues or manage issues
-    Issues {
-        #[command(flatten)]
-        args: issues::IssueArgs,
-        #[command(subcommand)]
-        subcommand: Option<issues::IssueSubcommand>,
-    },
-    /// Interactive TUI for browsing issues
-    Tui {
-        #[command(flatten)]
-        args: issues::IssueArgs,
-    },
-    /// Show Linear notification inbox
-    Inbox {
-        #[command(flatten)]
-        args: inbox::InboxArgs,
-    },
     /// Sync issues from Linear (incremental by default; use 'full' subcommand for a full sync)
     Sync {
         #[command(subcommand)]
         command: Option<sync::SyncCommands>,
-    },
-    /// Search the local SQLite FTS5 index for issues
-    Search {
-        #[command(flatten)]
-        args: search::SearchArgs,
     },
     /// Generate a deterministic fake dataset into the local DB (no Linear account needed)
     #[cfg(feature = "sim")]
@@ -123,7 +98,7 @@ fn main() -> Result<()> {
 
     // Determine whether we are entering TUI mode so we can choose the right
     // logging subscriber before any other code runs.
-    let is_tui = matches!(cli.command, None | Some(Commands::Tui { .. }));
+    let is_tui = cli.command.is_none();
 
     // Keep the guard alive for the duration of main() so the background
     // logging thread is not torn down prematurely.
@@ -143,27 +118,10 @@ fn main() -> Result<()> {
             50,
         )?,
         Some(Commands::Auth { command }) => auth::run(&mut out, &command)?,
-        Some(Commands::Inbox { args }) => inbox::run(&mut out, &args)?,
-        Some(Commands::Issues { args, subcommand }) => {
-            let runtime = build_runtime(Box::new(|_| {}));
-            issues::run(&mut out, &args, subcommand, &runtime)?;
-        }
-        Some(Commands::Tui { args }) => {
-            run_tui(
-                &args.literal_filter()?,
-                &args.sort,
-                args.sort_direction(),
-                args.limit,
-            )?;
-        }
         Some(Commands::Sync { command }) => {
             let runtime = build_runtime(Box::new(|_| {}));
             let cmd = command.unwrap_or(sync::SyncCommands::Delta);
             sync::run(&mut out, cmd, &runtime)?;
-        }
-        Some(Commands::Search { args }) => {
-            let runtime = build_runtime(Box::new(|_| {}));
-            search::run(&mut out, &args, &runtime)?;
         }
         #[cfg(feature = "sim")]
         Some(Commands::Sim { args }) => {

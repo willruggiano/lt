@@ -5,4 +5,3 @@ pub mod auth;
 pub mod client;
 pub mod comments;
 pub mod issues;
-pub mod notifications;
