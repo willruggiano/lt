@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed
+Delivered; the hand-rolled parser it specifies was replaced by the chumsky
+parser of [[search-parser-v2-adr.md]]. The AST, stem vocabulary, and completion
+model carry over.
 
 ## Context
 

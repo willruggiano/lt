@@ -4,6 +4,13 @@ issue: https://linear.app/willruggiano/issue/ENG-19/visual-rendering-tests
 
 # Visual / Rendering Tests
 
+## Status
+
+Delivered (ENG-19). The render seam has since narrowed further: views render as
+`Widget` impls with explicit geometry, and view data arrives through `Runtime`
+subscriptions
+([[operation-seam-adr.md#Decision 9: Layouts — `Widget` impls and explicit geometry]]).
+
 ## Context
 
 `lt` has three render surfaces and almost no coverage of any of them:

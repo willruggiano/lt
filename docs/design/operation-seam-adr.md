@@ -2,7 +2,19 @@
 
 ## Status
 
-Accepted and delivered; the Task decomposition is at the end.
+Accepted and delivered; the Task decomposition is at the end. As built, three
+details diverge from the sketches below:
+
+- `Read::reads` returns the `Vec<EntityKey>` set an operation depends on
+  (`crates/lt-storage/src/db/ops.rs`), not the `(vars, key) -> bool` predicate
+  of Decision 1; propagation intersects sets.
+- `SubId` shipped as `SubscriptionKey`, and there is no `Unsubscribe` command: a
+  dropped `Subscription` retracts its registry entry synchronously
+  (`crates/lt-runtime/src/subscription.rs`).
+- The Mutations non-goal was partially pulled forward: the outbox binding
+  shipped as the `Mutate` trait, keyed off `GraphqlOperation::NAME`, and a
+  `Refresh` trait hosts multi-request operations such as the detail view's
+  comment-page exhaustion (`crates/lt-runtime/src/ops.rs`).
 
 ## Context
 

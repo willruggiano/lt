@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (ENG-33; design only, implementation pending).
+Accepted and delivered (ENG-33).
 
 ## Context
 

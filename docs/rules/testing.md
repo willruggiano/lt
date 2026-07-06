@@ -48,7 +48,7 @@ posture is in [[contributing.md#Strictness]]; engineering principles in
   for normally-sized modules.
 
 - Shared fixtures and helpers go at the top of the test module — e.g. `draw`,
-  `sim_issues`, `app_with_issues` in `src/tui/mod.rs`.
+  `sim_issues`, `app_with_issues` in `crates/lt-tui/src/render_tests.rs`.
 - A test that needs the seeded data generator is gated
   `#[cfg(all(test, feature = "sim"))]`, so it compiles only under the
   `--features sim` run.
