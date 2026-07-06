@@ -1,8 +1,6 @@
 mod auth;
 mod logging;
 mod output;
-#[cfg(feature = "sim")]
-mod sim;
 mod sync;
 
 use std::sync::{Arc, mpsc};
@@ -34,12 +32,6 @@ enum Commands {
     Sync {
         #[command(subcommand)]
         command: Option<sync::SyncCommands>,
-    },
-    /// Generate a deterministic fake dataset into the local DB (no Linear account needed)
-    #[cfg(feature = "sim")]
-    Sim {
-        #[command(flatten)]
-        args: sim::SimArgs,
     },
 }
 
@@ -122,11 +114,6 @@ fn main() -> Result<()> {
             let runtime = build_runtime(Box::new(|_| {}));
             let cmd = command.unwrap_or(sync::SyncCommands::Delta);
             sync::run(&mut out, cmd, &runtime)?;
-        }
-        #[cfg(feature = "sim")]
-        Some(Commands::Sim { args }) => {
-            let runtime = build_runtime(Box::new(|_| {}));
-            sim::run(&mut out, &args, &runtime)?;
         }
     }
     Ok(())
