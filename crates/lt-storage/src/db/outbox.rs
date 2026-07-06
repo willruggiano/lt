@@ -22,7 +22,7 @@ use lt_types::types;
 use rusqlite::{Connection, params};
 use serde_json::json;
 
-use crate::db::ops::{AckContext, Enqueued, EntityKey, Mutation};
+use crate::db::ops::{AckContext, Mutation};
 use crate::db::sql;
 
 /// The optimistic identifier every locally-created issue carries until the
@@ -177,7 +177,7 @@ impl Mutation for IssueUpdateMutation {
     /// the coalesced command from every overlay row the issue carries (not
     /// just this one), so repeated edits collapse into a single pending
     /// `issueUpdate`.
-    fn enqueue(conn: &Connection, vars: IssueUpdateVariables) -> Result<Enqueued> {
+    fn enqueue(conn: &Connection, vars: IssueUpdateVariables) -> Result<String> {
         let tx = conn.unchecked_transaction()?;
         if let Some(state_id) = &vars.input.state_id {
             set_overlay(&tx, &vars.id, OverlayField::State, Some(state_id))?;
@@ -193,10 +193,7 @@ impl Mutation for IssueUpdateMutation {
         }
         refresh_issue_update_command(&tx, &vars.id)?;
         tx.commit().context("failed to commit issue update")?;
-        Ok(Enqueued {
-            entity_id: vars.id,
-            touched: vec![EntityKey::Issue],
-        })
+        Ok(vars.id)
     }
 
     /// Apply a confirmed issue update to the base and retire its overlay +
@@ -209,7 +206,7 @@ impl Mutation for IssueUpdateMutation {
         conn: &Connection,
         ctx: AckContext<'_, IssueUpdateVariables>,
         out: Option<types::Issue>,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         let AckContext { seq, entity_id, .. } = ctx;
         let tx = conn.unchecked_transaction()?;
         if let Some(issue) = &out {
@@ -255,7 +252,7 @@ impl Mutation for IssueUpdateMutation {
         )?;
         delete_command(&tx, seq)?;
         tx.commit().context("failed to commit issue-update ack")?;
-        Ok(vec![EntityKey::Issue])
+        Ok(())
     }
 }
 
@@ -348,7 +345,7 @@ impl Mutation for IssueCreateMutation {
     /// `issueCreate` command. Creates never coalesce: each mints its own temp
     /// id, so the shared coalescing primitive is a no-op delete plus an
     /// insert.
-    fn enqueue(conn: &Connection, vars: IssueCreateVariables) -> Result<Enqueued> {
+    fn enqueue(conn: &Connection, vars: IssueCreateVariables) -> Result<String> {
         let tx = conn.unchecked_transaction()?;
         let optimistic = optimistic_issue(&tx, &vars.input)?;
         let synced_at = Utc::now().to_rfc3339();
@@ -362,10 +359,7 @@ impl Mutation for IssueCreateMutation {
             &variables,
         )?;
         tx.commit().context("failed to commit issue create")?;
-        Ok(Enqueued {
-            entity_id: optimistic.id.into_inner(),
-            touched: vec![EntityKey::Issue],
-        })
+        Ok(optimistic.id.into_inner())
     }
 
     /// Replace the optimistic temp issue with the server's full issue (server
@@ -375,7 +369,7 @@ impl Mutation for IssueCreateMutation {
         conn: &Connection,
         ctx: AckContext<'_, IssueCreateVariables>,
         issue: types::Issue,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         let AckContext { seq, entity_id, .. } = ctx;
         let tx = conn.unchecked_transaction()?;
         let synced_at = Utc::now().to_rfc3339();
@@ -394,9 +388,7 @@ impl Mutation for IssueCreateMutation {
         )?;
         delete_command(&tx, seq)?;
         tx.commit().context("failed to commit issue-create ack")?;
-        Ok(crate::db::issues::issue_upsert_touched(
-            std::slice::from_ref(&issue),
-        ))
+        Ok(())
     }
 }
 
@@ -409,7 +401,7 @@ impl Mutation for CommentCreateMutation {
     /// queue the `commentCreate` command. The issue and body come from
     /// `vars.input`; the author is the persisted viewer identity
     /// (`sync_meta`), if one has been recorded yet.
-    fn enqueue(conn: &Connection, vars: CommentCreateVariables) -> Result<Enqueued> {
+    fn enqueue(conn: &Connection, vars: CommentCreateVariables) -> Result<String> {
         let tx = conn.unchecked_transaction()?;
         let id = temp_id();
         let now = lt_types::scalars::DateTime(Utc::now());
@@ -422,15 +414,11 @@ impl Mutation for CommentCreateMutation {
             issue_id: Some(vars.input.issue_id.clone()),
         };
         crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
-        let issue_id = vars.input.issue_id.clone();
         let variables =
             serde_json::to_value(&vars).context("failed to serialize comment-create variables")?;
         insert_pending(&tx, CommentCreateMutation::NAME, &id, &variables)?;
         tx.commit().context("failed to commit comment create")?;
-        Ok(Enqueued {
-            entity_id: id,
-            touched: vec![EntityKey::Comment { issue_id }],
-        })
+        Ok(id)
     }
 
     /// Replace the optimistic temp comment with the server copy and retire
@@ -443,7 +431,7 @@ impl Mutation for CommentCreateMutation {
         conn: &Connection,
         ctx: AckContext<'_, CommentCreateVariables>,
         comment: lt_types::comments::Comment,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         let AckContext {
             seq,
             entity_id,
@@ -456,15 +444,14 @@ impl Mutation for CommentCreateMutation {
             params![entity_id],
             "delete temp comment",
         )?;
-        let issue_id = vars.input.issue_id.clone();
         let comment = lt_types::comments::Comment {
-            issue_id: Some(issue_id.clone()),
+            issue_id: Some(vars.input.issue_id.clone()),
             ..comment
         };
         crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
         delete_command(&tx, seq)?;
         tx.commit().context("failed to commit comment-create ack")?;
-        Ok(vec![EntityKey::Comment { issue_id }])
+        Ok(())
     }
 }
 
@@ -741,9 +728,9 @@ mod tests {
             priority: None,
             assignee_id: None,
         };
-        let enqueued = IssueCreateMutation::enqueue(&conn, IssueCreateVariables { input }).unwrap();
-        assert_eq!(enqueued.touched, vec![EntityKey::Issue]);
-        assert!(enqueued.entity_id.starts_with("local:"));
+        let entity_id =
+            IssueCreateMutation::enqueue(&conn, IssueCreateVariables { input }).unwrap();
+        assert!(entity_id.starts_with("local:"));
 
         let ops = pending(&conn);
         assert_eq!(ops.len(), 1);
@@ -797,7 +784,7 @@ mod tests {
 
         let mut server_issue = base_issue("real-1");
         server_issue.identifier = "ENG-42".to_string();
-        let touched = IssueCreateMutation::ack(
+        IssueCreateMutation::ack(
             &conn,
             AckContext {
                 seq,
@@ -807,7 +794,6 @@ mod tests {
             server_issue,
         )
         .unwrap();
-        assert!(touched.contains(&EntityKey::Issue));
 
         let ident: String = conn
             .query_row(
@@ -885,7 +871,7 @@ mod tests {
             }),
             issue_id: Some("1".to_string()),
         };
-        let touched = CommentCreateMutation::ack(
+        CommentCreateMutation::ack(
             &conn,
             AckContext {
                 seq,
@@ -895,12 +881,6 @@ mod tests {
             comment,
         )
         .unwrap();
-        assert_eq!(
-            touched,
-            vec![EntityKey::Comment {
-                issue_id: "1".to_string()
-            }]
-        );
 
         let ids: Vec<String> = {
             let rows = crate::db::query_comments(&conn, "1").unwrap();

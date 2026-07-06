@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use lt_storage::db;
-use lt_storage::db::{Connection, EntityKey, Mutation, Query};
+use lt_storage::db::{Connection, Mutation, Query};
 use lt_types::comments::{CommentCreateMutation, CommentsQuery, CommentsVariables};
 use lt_types::detail::IssueDetailQuery;
 use lt_types::issues::{IssueCreateMutation, IssueUpdateMutation, IssuesQuery};
@@ -26,13 +26,12 @@ pub fn load<Op: Query>(conn: &Connection, vars: &Op::Variables) -> Result<Op::Ou
 }
 
 /// Upstream refresh: fetch `Op` through `transport`, then apply its output
-/// into the cache, returning the entity keys the write touched
-/// (docs/design/operation-seam-adr.md, "Decision 5").
+/// into the cache.
 pub fn refresh<Op>(
     conn: &Connection,
     transport: &dyn GraphqlTransport,
     vars: Op::Variables,
-) -> Result<Vec<EntityKey>>
+) -> Result<()>
 where
     Op: Mutation,
     Op::Variables: Clone,
@@ -42,21 +41,21 @@ where
     Op::apply(conn, &vars, &out)
 }
 
-/// How a live subscription's background freshness refresh
-/// (docs/design/operation-seam-adr.md, "Decision 6") brings its operation up
+/// How a composed view's one-shot freshness refresh at open
+/// (docs/design/unified-execute-adr.md, "Decision 3") brings its operation up
 /// to date from upstream. Distinct from [`Mutation`], which only knows how to
 /// write an already-fetched result into the cache: fetching needs
 /// `lt-upstream`, which `lt-storage` does not depend on, so this lives here
-/// rather than on the storage-side trait. Every operation [`crate::Runtime`]
-/// can `subscribe` to implements it: the generic single-page [`refresh`]
-/// driver for most operations, [`IssueDetailQuery`]'s own impl (below) for its
-/// fetch-to-exhaustion comment pagination (ADR "Decision 3").
+/// rather than on the storage-side trait. Every operation [`crate::Runtime::refresh`]
+/// can drive implements it: the generic single-page [`refresh`] driver for
+/// most operations, [`IssueDetailQuery`]'s own impl (below) for its
+/// fetch-to-exhaustion comment pagination.
 pub trait Refresh: Mutation {
     fn refresh(
         conn: &Connection,
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
-    ) -> Result<Vec<EntityKey>>;
+    ) -> Result<()>;
 }
 
 impl Refresh for IssuesQuery {
@@ -64,7 +63,7 @@ impl Refresh for IssuesQuery {
         conn: &Connection,
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         refresh::<IssuesQuery>(conn, transport, vars)
     }
 }
@@ -74,7 +73,7 @@ impl Refresh for TeamsQuery {
         conn: &Connection,
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         refresh::<TeamsQuery>(conn, transport, vars)
     }
 }
@@ -84,7 +83,7 @@ impl Refresh for TeamStatesQuery {
         conn: &Connection,
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         refresh::<TeamStatesQuery>(conn, transport, vars)
     }
 }
@@ -94,7 +93,7 @@ impl Refresh for TeamMembersQuery {
         conn: &Connection,
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         refresh::<TeamMembersQuery>(conn, transport, vars)
     }
 }
@@ -104,19 +103,18 @@ impl Refresh for IssueDetailQuery {
     /// comments/children, applied through [`IssueDetailQuery`]'s own
     /// replace-set comment semantics; then [`CommentsQuery`] pages the
     /// remainder of the comment thread to exhaustion -- multiple wire
-    /// requests, one refresh call (docs/design/operation-seam-adr.md,
-    /// "Decision 3"). Each later page appends rather than replacing
-    /// ([`CommentsQuery`]'s own `Mutation::apply`): a delete-first per page
-    /// would wipe the previous page's inserts. Children stay a single
-    /// first-page fetch (capped at 250 by the document itself).
+    /// requests, one refresh call. Each later page appends rather than
+    /// replacing ([`CommentsQuery`]'s own `Mutation::apply`): a delete-first
+    /// per page would wipe the previous page's inserts. Children stay a
+    /// single first-page fetch (capped at 250 by the document itself).
     fn refresh(
         conn: &Connection,
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         let out = execute::<IssueDetailQuery>(transport, vars.clone())?;
         let mut cursor = out.as_ref().and_then(|data| data.comments_cursor.clone());
-        let mut touched = IssueDetailQuery::apply(conn, &vars, &out)?;
+        IssueDetailQuery::apply(conn, &vars, &out)?;
 
         while let Some(after) = cursor {
             let page_vars = CommentsVariables {
@@ -129,10 +127,10 @@ impl Refresh for IssueDetailQuery {
                 .has_next_page
                 .then_some(page.page_info.end_cursor.clone())
                 .flatten();
-            touched.extend(CommentsQuery::apply(conn, &page_vars, &page)?);
+            CommentsQuery::apply(conn, &page_vars, &page)?;
         }
 
-        Ok(touched)
+        Ok(())
     }
 }
 
@@ -141,7 +139,7 @@ impl Refresh for NewIssueQuery {
         conn: &Connection,
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         refresh::<NewIssueQuery>(conn, transport, vars)
     }
 }
@@ -151,7 +149,7 @@ impl Refresh for ViewerQuery {
         conn: &Connection,
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
-    ) -> Result<Vec<EntityKey>> {
+    ) -> Result<()> {
         refresh::<ViewerQuery>(conn, transport, vars)
     }
 }
@@ -214,16 +212,16 @@ impl Operation for IssueDetailQuery {
 }
 
 /// Shared body for every mutation-kind [`Operation`] impl: enqueue the
-/// optimistic local write, propagate whatever it touched, and nudge the loop
-/// to drain promptly -- the write-side mirror of [`query_execute`]. Returns
-/// the id the write was recorded under, so the caller can read the
-/// optimistic entity back out of the cache.
+/// optimistic local write, emit `Update`, and nudge the loop to drain
+/// promptly -- the write-side mirror of [`query_execute`]. Returns the id
+/// the write was recorded under, so the caller can read the optimistic
+/// entity back out of the cache.
 fn mutation_execute<M: Mutation>(runtime: &Runtime, vars: M::Variables) -> Result<String> {
     let conn = runtime.connect()?;
-    let enqueued = M::enqueue(&conn, vars)?;
-    runtime.propagate(&enqueued.touched);
+    let entity_id = M::enqueue(&conn, vars)?;
+    runtime.emit_update();
     runtime.request_drain();
-    Ok(enqueued.entity_id)
+    Ok(entity_id)
 }
 
 impl Operation for IssueCreateMutation {
@@ -277,8 +275,7 @@ mod tests {
                 { "id": "t2", "name": "Design" }
             ] }
         })]);
-        let touched = refresh::<TeamsQuery>(&conn, &transport, ()).unwrap();
-        assert_eq!(touched, vec![EntityKey::Teams]);
+        refresh::<TeamsQuery>(&conn, &transport, ()).unwrap();
         let teams = db::query_teams(&conn).unwrap();
         assert_eq!(
             teams.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
@@ -300,7 +297,7 @@ mod tests {
             { "id": "s1", "name": "Todo", "position": 1.0 },
             { "id": "s2", "name": "Done", "position": 2.0 }
         ] } } })]);
-        let touched = refresh::<TeamStatesQuery>(
+        refresh::<TeamStatesQuery>(
             &conn,
             &transport,
             StatesTeamVariables {
@@ -308,18 +305,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            touched,
-            vec![EntityKey::WorkflowStates {
-                team_id: "t1".to_string()
-            }]
-        );
 
         let transport = FakeTransport::new(vec![json!({ "team": { "members": { "nodes": [
             { "id": "u1", "name": "Ada" },
             { "id": "u2", "name": "Grace" }
         ] } } })]);
-        let touched = refresh::<TeamMembersQuery>(
+        refresh::<TeamMembersQuery>(
             &conn,
             &transport,
             MembersTeamVariables {
@@ -327,12 +318,6 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            touched,
-            vec![EntityKey::TeamMemberships {
-                team_id: "t1".to_string()
-            }]
-        );
 
         let states = db::query_team_states(&conn, "t1").unwrap();
         assert_eq!(
@@ -453,11 +438,7 @@ mod tests {
             &[lt_types::issues::sample_issue_node("child-1")],
         )]);
 
-        let touched = IssueDetailQuery::refresh(&conn, &transport, detail_vars("i1")).unwrap();
-        assert!(touched.contains(&EntityKey::Issue));
-        assert!(touched.contains(&EntityKey::Comment {
-            issue_id: "i1".to_string()
-        }));
+        IssueDetailQuery::refresh(&conn, &transport, detail_vars("i1")).unwrap();
 
         assert!(db::query_issue_by_id(&conn, "i1").unwrap().is_some());
         assert!(db::query_issue_by_id(&conn, "child-1").unwrap().is_some());
@@ -524,17 +505,13 @@ mod tests {
             }
         })]);
 
-        let touched = refresh::<NewIssueQuery>(
+        refresh::<NewIssueQuery>(
             &conn,
             &transport,
             lt_types::new_issue::NewIssueVariables::new(Some("t1".to_string())),
         )
         .unwrap();
 
-        assert!(touched.contains(&EntityKey::Teams));
-        assert!(touched.contains(&EntityKey::WorkflowStates {
-            team_id: "t1".to_string()
-        }));
         assert_eq!(db::query_teams(&conn).unwrap()[0].name, "Eng");
         assert_eq!(db::query_team_members(&conn, "t1").unwrap()[0].name, "Ada");
     }
@@ -546,9 +523,8 @@ mod tests {
             "viewer": { "id": "u1", "name": "Ada", "organization": { "id": "o1", "name": "Acme", "urlKey": "acme" } }
         })]);
 
-        let touched = refresh::<ViewerQuery>(&conn, &transport, ()).unwrap();
+        refresh::<ViewerQuery>(&conn, &transport, ()).unwrap();
 
-        assert_eq!(touched, vec![EntityKey::Viewer]);
         assert_eq!(db::viewer(&conn).unwrap().unwrap().user.name, "Ada");
     }
 }

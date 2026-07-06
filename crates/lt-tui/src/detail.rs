@@ -1,14 +1,15 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lt_runtime::{Runtime, Subscription, SubscriptionKey};
+use lt_runtime::Runtime;
 use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
-use lt_types::detail::{IssueDetailData, IssueDetailQuery, IssueDetailVariables};
+use lt_types::detail::{IssueDetailQuery, IssueDetailVariables};
 use lt_types::types::Issue;
 
 use super::{App, Keymap, ScrollMotion, Unbound, View, keymap};
 
 /// The detail pane's complete state, owned here rather than on `App`, and
-/// populated by the one composed `IssueDetailQuery` subscription
-/// (docs/design/operation-seam-adr.md, "Decision 3").
+/// populated by re-executing the one composed `IssueDetailQuery`
+/// (docs/design/unified-execute-adr.md, "Decision 3") -- `vars` is the whole
+/// data contract; there is no live subscription slot.
 pub struct DetailView {
     pub issue: Issue,
     pub comments: Vec<lt_types::comments::Comment>,
@@ -19,21 +20,22 @@ pub struct DetailView {
     /// cursor is always at the end (same model as the new-issue description
     /// field).
     pub comment_input: Option<String>,
-    sub: Subscription<Option<IssueDetailData>>,
+    vars: IssueDetailVariables,
 }
 
 impl DetailView {
-    /// A matching subscription update re-reads issue/comments/children in
-    /// one shot. A fresh read of `None` (the issue vanished locally) is
-    /// idempotently ignored -- the pane keeps showing its last known state
-    /// rather than blanking out.
-    pub(crate) fn apply_update(&mut self, key: SubscriptionKey) {
-        if self.sub.key() == key
-            && let Some(Some(data)) = self.sub.take()
-        {
-            self.issue = data.issue;
-            self.comments = data.comments;
-            self.children = data.children;
+    /// Re-execute issue/comments/children in one shot. A fresh read of
+    /// `None` (the issue vanished locally) is idempotently ignored -- the
+    /// pane keeps showing its last known state rather than blanking out.
+    pub(crate) fn apply_update(&mut self, runtime: &Runtime) {
+        match runtime.execute::<IssueDetailQuery>(self.vars.clone()) {
+            Ok(Some(data)) => {
+                self.issue = data.issue;
+                self.comments = data.comments;
+                self.children = data.children;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "issue detail re-execute failed"),
         }
     }
 
@@ -55,9 +57,10 @@ impl DetailView {
 }
 
 impl App {
-    /// Open the detail pane for the currently selected issue: one
-    /// `IssueDetailQuery` subscription populates issue/comments/children from
-    /// its synchronous cache-first read.
+    /// Open the detail pane for the currently selected issue: a cache-first
+    /// `IssueDetailQuery` read populates issue/comments/children, and a
+    /// one-shot background refresh brings the composed view's data up to
+    /// date from upstream (docs/design/unified-execute-adr.md, "Decision 3").
     pub(crate) fn open_detail(&mut self) {
         let Some(issue) = self.selected_issue().cloned() else {
             return;
@@ -68,25 +71,33 @@ impl App {
     }
 }
 
-/// Build a detail view from a list `Issue`, subscribing the composed detail
-/// query. A `None` initial read (the id not yet in the local cache, an
-/// edge case since the pane opens from an already-listed issue) falls back
-/// to the issue already in hand, with empty comments/children.
+/// Build a detail view from a list `Issue`: a cache-first read of the
+/// composed detail query, plus a one-shot background freshness refresh. A
+/// `None` initial read (the id not yet in the local cache, an edge case
+/// since the pane opens from an already-listed issue) falls back to the
+/// issue already in hand, with empty comments/children.
 pub(crate) fn build_cached_detail(issue: &Issue, runtime: &Runtime) -> DetailView {
-    let (sub, data) = runtime.subscribe::<IssueDetailQuery>(IssueDetailVariables {
+    let vars = IssueDetailVariables {
         id: issue.id.inner().to_string(),
-    });
+    };
+    let data = runtime
+        .execute::<IssueDetailQuery>(vars.clone())
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "issue detail initial read failed");
+            None
+        });
     let (issue, comments, children) = match data {
         Some(data) => (data.issue, data.comments, data.children),
         None => (issue.clone(), Vec::new(), Vec::new()),
     };
+    runtime.refresh::<IssueDetailQuery>(vars.clone());
     DetailView {
         issue,
         comments,
         children,
         scroll: 0,
         comment_input: None,
-        sub,
+        vars,
     }
 }
 

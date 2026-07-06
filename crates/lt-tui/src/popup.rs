@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use lt_runtime::{Subscription, SubscriptionKey, search_query};
+use lt_runtime::{Runtime, search_query};
 use lt_types::inputs::{Field, IssueUpdateInput};
 use lt_types::issues::{
     IssueFilter, IssueSort, IssueUpdateMutation, IssueUpdateVariables, IssuesQuery, IssuesVariables,
@@ -57,12 +57,13 @@ impl From<lt_types::types::User> for PopupItem {
     }
 }
 
-/// The state/assignee popups' live team-scoped subscription: the two kinds
-/// read different operations, so the slot is an enum over them rather than
-/// one generic field. `None` for the static priority popup.
-pub(crate) enum PopupSub {
-    States(Subscription<lt_types::states::WorkflowStateConnection>),
-    Members(Subscription<lt_types::members::UserConnection>),
+/// The state/assignee popups' team-scoped vars: the two kinds read different
+/// operations, so this is an enum over them rather than one generic field.
+/// `None` for the static priority popup. Re-executed on every `Update`
+/// (docs/design/unified-execute-adr.md, "Decision 3").
+pub(crate) enum PopupVars {
+    States(StatesTeamVariables),
+    Members(MembersTeamVariables),
 }
 
 /// State/priority/assignee picker: the popup's items plus the target
@@ -77,7 +78,7 @@ pub struct PopupView {
     pub team_id: Option<String>,
     pub items: Vec<PopupItem>,
     pub selected: usize,
-    pub(crate) sub: Option<PopupSub>,
+    pub(crate) vars: Option<PopupVars>,
 }
 
 /// Linear priority options as popup items.
@@ -293,23 +294,29 @@ impl super::App {
         let team_id = issue.team.id.inner().to_string();
         let current_state_name = issue.state.name.clone();
 
-        let (sub, states) = self
+        let vars = StatesTeamVariables {
+            team_id: team_id.clone(),
+        };
+        let states = self
             .runtime
-            .subscribe::<TeamStatesQuery>(StatesTeamVariables {
-                team_id: team_id.clone(),
+            .execute::<TeamStatesQuery>(vars.clone())
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "team states initial read failed");
+                lt_types::states::WorkflowStateConnection::default()
             });
         let items: Vec<PopupItem> = states.nodes.into_iter().map(PopupItem::from).collect();
         let selected = items
             .iter()
             .position(|item| item.label == current_state_name)
             .unwrap_or(0);
+        self.runtime.refresh::<TeamStatesQuery>(vars.clone());
         self.push_view(View::Popup(PopupView {
             kind: PopupKind::State,
             issue_id,
             team_id: Some(team_id),
             items,
             selected,
-            sub: Some(PopupSub::States(sub)),
+            vars: Some(PopupVars::States(vars)),
         }));
         self.footer_msg = None;
     }
@@ -327,7 +334,7 @@ impl super::App {
             team_id: None,
             items: priority_popup_items(),
             selected,
-            sub: None,
+            vars: None,
         }));
         self.footer_msg = None;
     }
@@ -340,10 +347,15 @@ impl super::App {
         let team_id = issue.team.id.inner().to_string();
         let current_assignee = issue.assignee.as_ref().map(|a| a.id.inner().to_string());
 
-        let (sub, members) = self
+        let vars = MembersTeamVariables {
+            team_id: team_id.clone(),
+        };
+        let members = self
             .runtime
-            .subscribe::<TeamMembersQuery>(MembersTeamVariables {
-                team_id: team_id.clone(),
+            .execute::<TeamMembersQuery>(vars.clone())
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "team members initial read failed");
+                lt_types::members::UserConnection::default()
             });
         let items = assignee_popup_items(members.nodes);
         let selected = current_assignee
@@ -353,27 +365,29 @@ impl super::App {
                     .position(|item| item.id.as_deref() == Some(a.as_str()))
             })
             .unwrap_or(0);
+        self.runtime.refresh::<TeamMembersQuery>(vars.clone());
         self.push_view(View::Popup(PopupView {
             kind: PopupKind::Assignee,
             issue_id,
             team_id: Some(team_id),
             items,
             selected,
-            sub: Some(PopupSub::Members(sub)),
+            vars: Some(PopupVars::Members(vars)),
         }));
         self.footer_msg = None;
     }
 }
 
 impl PopupView {
-    /// A matching subscription update rebuilds `items` and re-anchors the
-    /// selection by id; the priority popup has no subscription and never
-    /// matches.
-    pub(crate) fn apply_update(&mut self, key: SubscriptionKey) {
+    /// Re-execute this popup's team-scoped vars (if any) and rebuild `items`,
+    /// re-anchoring the selection by id; the priority popup has no vars and
+    /// never re-reads.
+    pub(crate) fn apply_update(&mut self, runtime: &Runtime) {
         let current_id = self.items.get(self.selected).and_then(|i| i.id.clone());
-        match &self.sub {
-            Some(PopupSub::States(sub)) if sub.key() == key => {
-                if let Some(states) = sub.take() {
+        match &self.vars {
+            Some(PopupVars::States(vars)) => match runtime.execute::<TeamStatesQuery>(vars.clone())
+            {
+                Ok(states) => {
                     self.items = states.nodes.into_iter().map(PopupItem::from).collect();
                     self.selected = self
                         .items
@@ -381,18 +395,22 @@ impl PopupView {
                         .position(|i| i.id.as_deref() == current_id.as_deref())
                         .unwrap_or(0);
                 }
-            }
-            Some(PopupSub::Members(sub)) if sub.key() == key => {
-                if let Some(members) = sub.take() {
-                    self.items = assignee_popup_items(members.nodes);
-                    self.selected = self
-                        .items
-                        .iter()
-                        .position(|i| i.id.as_deref() == current_id.as_deref())
-                        .unwrap_or(0);
+                Err(e) => tracing::warn!(error = %e, "team states re-execute failed"),
+            },
+            Some(PopupVars::Members(vars)) => {
+                match runtime.execute::<TeamMembersQuery>(vars.clone()) {
+                    Ok(members) => {
+                        self.items = assignee_popup_items(members.nodes);
+                        self.selected = self
+                            .items
+                            .iter()
+                            .position(|i| i.id.as_deref() == current_id.as_deref())
+                            .unwrap_or(0);
+                    }
+                    Err(e) => tracing::warn!(error = %e, "team members re-execute failed"),
                 }
             }
-            _ => {}
+            None => {}
         }
     }
 
@@ -630,7 +648,7 @@ pub(crate) fn forward_search(app: &mut App, i: usize, ev: KeyEvent) {
 /// destroys the overlay anyway), flush any pending debounce, then hand the
 /// *query* -- not the overlay's viewport-capped `results` -- to the base
 /// list. The overlay's selected row is captured by identifier and set as
-/// `pending_select` so the resubscribe re-anchors the selection instead of
+/// `pending_select` so the refetch re-anchors the selection instead of
 /// reusing its (possibly stale) index.
 fn confirm_search(app: &mut App) {
     let Some(View::Search(mut overlay)) = app.views.pop() else {
@@ -656,7 +674,7 @@ fn confirm_search(app: &mut App) {
         list.query.pagination.cursor_stack.clear();
         list.query.pagination.current_cursor = None;
         list.pending_select = anchor;
-        list.resubscribe(&runtime, viewer_name.as_deref(), true);
+        list.refetch(&runtime, viewer_name.as_deref(), true);
     }
 }
 

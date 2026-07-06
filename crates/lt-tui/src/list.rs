@@ -1,6 +1,6 @@
 use crossterm::event::KeyCode;
 use lt_runtime::query::{SortDirection, SortField};
-use lt_runtime::{Runtime, Subscription, SubscriptionKey, search_query};
+use lt_runtime::{Runtime, search_query};
 use lt_types::issues::{IssueConnection, IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
 use lt_types::types::Issue;
 use ratatui::buffer::Buffer;
@@ -108,7 +108,7 @@ impl ListQuery {
     }
 
     /// Advance the cursor stack to the next page. Returns whether a
-    /// resubscribe is needed (`false` when there is no next page).
+    /// refetch is needed (`false` when there is no next page).
     pub(crate) fn next_page(&mut self) -> bool {
         if !self.pagination.has_next_page {
             return false;
@@ -122,7 +122,7 @@ impl ListQuery {
     }
 
     /// Pop the cursor stack back to the previous page. Returns whether a
-    /// resubscribe is needed (`false` when already at the first page).
+    /// refetch is needed (`false` when already at the first page).
     pub(crate) fn prev_page(&mut self) -> bool {
         let Some(cursor) = self.pagination.cursor_stack.pop() else {
             return false;
@@ -132,7 +132,7 @@ impl ListQuery {
     }
 
     /// `d`: toggle sort direction and rewrite `filter`'s `sort:` token to
-    /// match, resetting pagination cursors; the caller resubscribes.
+    /// match, resetting pagination cursors; the caller refetches.
     fn toggle_direction(&mut self) {
         self.order.direction = match self.order.direction {
             SortDirection::Ascending => SortDirection::Descending,
@@ -185,24 +185,21 @@ pub(crate) struct TableGeometry {
     pub(crate) selected_row: usize,
 }
 
-/// The issue-list view: the base-list fields, owned, plus its live
-/// `IssuesQuery` subscription.
+/// The issue-list view: the base-list fields, owned. `query` carries the
+/// `IssuesQuery` vars it re-executes on every open/change/`Update`
+/// (docs/design/unified-execute-adr.md, "Decision 3") -- there is no live
+/// subscription slot.
 pub struct ListView {
     pub issues: Vec<Issue>,
     pub table_state: TableState,
-    /// An identifier to seek on the next subscription update; one-shot,
-    /// cleared whether or not that update finds a match.
+    /// An identifier to seek on the next re-executed page; one-shot,
+    /// cleared whether or not that page finds a match.
     pub pending_select: Option<String>,
     pub query: ListQuery,
-    sub: Subscription<IssueConnection>,
 }
 
 impl ListView {
-    pub(crate) fn new(
-        issues: Vec<Issue>,
-        query: ListQuery,
-        sub: Subscription<IssueConnection>,
-    ) -> Self {
+    pub(crate) fn new(issues: Vec<Issue>, query: ListQuery) -> Self {
         let mut table_state = TableState::default();
         if !issues.is_empty() {
             table_state.select(Some(0));
@@ -212,19 +209,21 @@ impl ListView {
             table_state,
             pending_select: None,
             query,
-            sub,
         }
     }
 
-    /// Subscribe to `query`'s vars and populate the view from the
-    /// subscription's synchronous initial read -- the query defines the
-    /// view's initial data, same as every later resubscribe.
+    /// Execute `query`'s vars and populate the view from the cache read --
+    /// the query defines the view's initial data, same as every later
+    /// `refetch`.
     pub(crate) fn open(mut query: ListQuery, runtime: &Runtime, viewer_name: Option<&str>) -> Self {
         let vars = query.build_vars(viewer_name);
-        let (sub, page) = runtime.subscribe::<IssuesQuery>(vars);
+        let page = runtime.execute::<IssuesQuery>(vars).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "issues initial read failed");
+            IssueConnection::default()
+        });
         query.pagination.has_next_page = page.page_info.has_next_page;
         query.pagination.end_cursor = page.page_info.end_cursor;
-        Self::new(page.nodes, query, sub)
+        Self::new(page.nodes, query)
     }
 
     pub(crate) fn selected_issue(&self) -> Option<&Issue> {
@@ -236,51 +235,50 @@ impl ListView {
         motion.apply_table(&mut self.table_state, self.issues.len(), viewport_height);
     }
 
-    /// Consume the subscription's latest and re-apply ui-state policy, if a
-    /// newer result has arrived. A no-op when nothing has -- safe to call
-    /// unconditionally on focus return.
-    fn sync_from_subscription(&mut self, reset_selection: bool) {
-        if let Some(page) = self.sub.take() {
-            self.issues = page.nodes;
-            self.query.pagination.has_next_page = page.page_info.has_next_page;
-            self.query.pagination.end_cursor = page.page_info.end_cursor;
-            self.apply_fetched_selection(reset_selection);
-            self.seek_pending_select();
-        }
+    /// Replace `issues`/pagination from a freshly read page and re-apply the
+    /// fetched-selection ui-state policy.
+    fn apply_page(&mut self, page: IssueConnection, reset_selection: bool) {
+        self.issues = page.nodes;
+        self.query.pagination.has_next_page = page.page_info.has_next_page;
+        self.query.pagination.end_cursor = page.page_info.end_cursor;
+        self.apply_fetched_selection(reset_selection);
+        self.seek_pending_select();
     }
 
-    /// Only consume while focused: a refresh must not swap the rows a popup
-    /// is anchored to or a search overlay covers. The slot holds the latest
-    /// for focus return (`resume_focus`).
-    pub(crate) fn apply_update(&mut self, focused: bool, key: SubscriptionKey) {
-        if focused && self.sub.key() == key {
-            self.sync_from_subscription(false); // offset- and selection-preserving
-        }
-    }
-
-    /// Called when the list regains focus (an overlay above it popped):
-    /// pick up whatever the subscription accumulated while unfocused.
-    pub(crate) fn resume_focus(&mut self) {
-        self.sync_from_subscription(false);
-    }
-
-    /// Drop the current subscription and subscribe anew with `query`'s
-    /// current vars: a filter/sort/pagination change is a new vars value,
-    /// not a refetch.
-    pub(crate) fn resubscribe(
+    /// Re-execute `query`'s current vars and apply the page: a filter/sort/
+    /// pagination change (a new vars value) and a live `Update` (same vars,
+    /// fresher cache) share this body.
+    pub(crate) fn refetch(
         &mut self,
         runtime: &Runtime,
         viewer_name: Option<&str>,
         reset_selection: bool,
     ) {
         let vars = self.query.build_vars(viewer_name);
-        let (sub, page) = runtime.subscribe::<IssuesQuery>(vars);
-        self.sub = sub;
-        self.issues = page.nodes;
-        self.query.pagination.has_next_page = page.page_info.has_next_page;
-        self.query.pagination.end_cursor = page.page_info.end_cursor;
-        self.apply_fetched_selection(reset_selection);
-        self.seek_pending_select();
+        match runtime.execute::<IssuesQuery>(vars) {
+            Ok(page) => self.apply_page(page, reset_selection),
+            Err(e) => tracing::warn!(error = %e, "issues re-execute failed"),
+        }
+    }
+
+    /// Only re-execute while focused: a refresh must not swap the rows a
+    /// popup is anchored to or a search overlay covers. `resume_focus`
+    /// re-executes on focus return instead.
+    pub(crate) fn apply_update(
+        &mut self,
+        focused: bool,
+        runtime: &Runtime,
+        viewer_name: Option<&str>,
+    ) {
+        if focused {
+            self.refetch(runtime, viewer_name, false); // offset- and selection-preserving
+        }
+    }
+
+    /// Called when the list regains focus (an overlay above it popped):
+    /// re-read current truth rather than replaying a stale snapshot.
+    pub(crate) fn resume_focus(&mut self, runtime: &Runtime, viewer_name: Option<&str>) {
+        self.refetch(runtime, viewer_name, false);
     }
 
     /// After replacing `self.issues`, clamp/reset the selection and mark idle.
@@ -428,7 +426,7 @@ pub(crate) fn apply_list(app: &mut App, i: usize, action: keymap::Action) {
             let viewer_name = app.auth.viewer_name().map(str::to_string);
             let runtime = app.runtime.clone();
             if let Some(View::List(list)) = app.views.get_mut(i) {
-                let resubscribe = if action == Action::ToggleSortDirection {
+                let refetch = if action == Action::ToggleSortDirection {
                     list.query.toggle_direction();
                     true
                 } else if action == Action::NextPage {
@@ -436,8 +434,8 @@ pub(crate) fn apply_list(app: &mut App, i: usize, action: keymap::Action) {
                 } else {
                     list.query.prev_page()
                 };
-                if resubscribe {
-                    list.resubscribe(&runtime, viewer_name.as_deref(), true);
+                if refetch {
+                    list.refetch(&runtime, viewer_name.as_deref(), true);
                 }
             }
         }

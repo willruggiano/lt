@@ -1,13 +1,12 @@
 //! `lt-runtime`: the composition layer between the local store (`lt-storage`)
 //! and the Linear API edge (`lt-upstream`). It owns the sync engine, the
-//! concrete [`Runtime`] (subscriptions, entity-keyed propagation, writes,
-//! sync/login scheduling), the generic [`load`]/[`refresh`] operation
-//! drivers, and the CLI command orchestration, and re-exports the store
-//! read/write facade so `lt-tui`/`lt-cli` depend on this crate alone rather
-//! than reaching across the seam.
+//! concrete [`Runtime`] (writes, one-shot upstream freshness refreshes for a
+//! composed view opening, and sync/login scheduling), the generic
+//! [`load`]/[`refresh`] operation drivers, and the CLI command orchestration,
+//! and re-exports the store read/write facade so `lt-tui`/`lt-cli` depend on
+//! this crate alone rather than reaching across the seam.
 
 pub mod ops;
-pub mod subscription;
 pub mod sync;
 
 mod runtime;
@@ -15,7 +14,6 @@ pub use ops::{load, refresh};
 #[cfg(feature = "sim")]
 pub use runtime::SimSeed;
 pub use runtime::{HttpTransportSource, Runtime, TransportSource};
-pub use subscription::{Subscription, SubscriptionKey};
 
 // Command orchestration for the CLI.
 pub mod auth;

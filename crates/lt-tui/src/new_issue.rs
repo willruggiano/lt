@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lt_runtime::{Subscription, SubscriptionKey};
+use lt_runtime::Runtime;
 use lt_types::issues::{IssueCreateMutation, IssueCreateVariables};
 use lt_types::new_issue::{NewIssueData, NewIssueQuery, NewIssueVariables};
 use lt_types::types::User;
@@ -46,11 +46,10 @@ impl NewIssueField {
     }
 }
 
-/// All mutable state for the new-issue modal form: one `NewIssueQuery`
-/// subscription is the whole data contract
-/// (docs/design/operation-seam-adr.md, "Decision 3"); a team change is a new
-/// vars value, so the view drops the old subscription and subscribes anew
-/// (replacing the old hand-diffed `watched_team_id` bookkeeping).
+/// All mutable state for the new-issue modal form: `vars` is the whole
+/// `NewIssueQuery` data contract (docs/design/unified-execute-adr.md,
+/// "Decision 3"); a team change is a new vars value, so the view re-executes
+/// with it (replacing the old hand-diffed `watched_team_id` bookkeeping).
 pub struct NewIssueModal {
     pub focused_field: NewIssueField,
 
@@ -77,7 +76,7 @@ pub struct NewIssueModal {
     /// surfaced here (offline, every targeted refresh would fail, making the
     /// field constant noise); those go to `tracing`.
     pub error: String,
-    sub: Subscription<NewIssueData>,
+    vars: NewIssueVariables,
 }
 
 impl NewIssueModal {
@@ -88,15 +87,16 @@ impl NewIssueModal {
             .and_then(|t| t.id.clone())
     }
 
-    /// A matching subscription update re-reads the whole form: teams
-    /// re-anchored by id, states/assignees rebuilt from whatever the
-    /// current vars' team scope produced, `loading` cleared.
-    pub(crate) fn apply_update(&mut self, key: SubscriptionKey) {
-        if self.sub.key() != key {
-            return;
-        }
-        let Some(data) = self.sub.take() else {
-            return;
+    /// Re-execute `vars` and re-read the whole form: teams re-anchored by
+    /// id, states/assignees rebuilt from whatever the current vars' team
+    /// scope produced, `loading` cleared.
+    pub(crate) fn apply_update(&mut self, runtime: &Runtime) {
+        let data = match runtime.execute::<NewIssueQuery>(self.vars.clone()) {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!(error = %e, "new issue re-execute failed");
+                return;
+            }
         };
 
         let current_team = self.selected_team_id();
@@ -135,12 +135,13 @@ impl NewIssueModal {
 }
 
 /// A bare modal fixture for tests that only need `NewIssueModal`'s shape,
-/// not live updates: a throwaway team-less `NewIssueQuery` subscription over
+/// not live updates: a throwaway team-less `NewIssueQuery` vars over
 /// `runtime`, every picker empty. Callers mutate the `pub` fields to set up
 /// their scenario.
 #[cfg(all(test, feature = "sim"))]
 pub(crate) fn test_new_issue_modal(runtime: &lt_runtime::Runtime) -> NewIssueModal {
-    let (sub, _) = runtime.subscribe::<NewIssueQuery>(NewIssueVariables::new(None));
+    let vars = NewIssueVariables::new(None);
+    drop(runtime.execute::<NewIssueQuery>(vars.clone()));
     NewIssueModal {
         focused_field: NewIssueField::Team,
         title: TextInput::from(String::new()),
@@ -155,7 +156,7 @@ pub(crate) fn test_new_issue_modal(runtime: &lt_runtime::Runtime) -> NewIssueMod
         assignee_selected: 0,
         loading: true,
         error: String::new(),
-        sub,
+        vars,
     }
 }
 
@@ -172,6 +173,15 @@ fn reanchor(items: &[PopupItem], id: Option<&str>) -> usize {
 // Modal lifecycle methods
 // ---------------------------------------------------------------------------
 
+/// A cache-first `NewIssueQuery` read for `vars`, falling back to
+/// `NewIssueData::default()` (and logging) on failure.
+fn read_new_issue(runtime: &Runtime, vars: NewIssueVariables) -> NewIssueData {
+    runtime.execute::<NewIssueQuery>(vars).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "new issue read failed");
+        NewIssueData::default()
+    })
+}
+
 impl super::App {
     pub(crate) fn open_new_issue_modal(&mut self) {
         // Pre-fill team from the base list's active filter if set.
@@ -181,10 +191,9 @@ impl super::App {
         };
 
         // Team-less first: the initial vars don't know the team id until the
-        // subscription's own team list resolves the preset.
-        let (teamless_sub, teamless_data) = self
-            .runtime
-            .subscribe::<NewIssueQuery>(NewIssueVariables::new(None));
+        // team-less read resolves the preset.
+        let teamless_vars = NewIssueVariables::new(None);
+        let teamless_data = read_new_issue(&self.runtime, teamless_vars.clone());
         let teams: Vec<PopupItem> = teamless_data
             .teams
             .into_iter()
@@ -201,20 +210,19 @@ impl super::App {
             .unwrap_or(0);
         let team_id = teams.get(team_selected).and_then(|t| t.id.clone());
 
-        // A resolved team is a new vars value: drop the team-less
-        // subscription and subscribe anew with it (the same pattern a later
-        // team change reuses).
-        let (sub, states, assignees) = match team_id {
+        // A resolved team is a new vars value: re-execute with it (the same
+        // pattern a later team change reuses).
+        let (vars, states, assignees) = match team_id {
             Some(id) => {
-                let (sub, data) = self
-                    .runtime
-                    .subscribe::<NewIssueQuery>(NewIssueVariables::new(Some(id)));
+                let vars = NewIssueVariables::new(Some(id));
+                let data = read_new_issue(&self.runtime, vars.clone());
                 let states = data.states.into_iter().map(PopupItem::from).collect();
                 let assignees = build_assignee_items(data.viewer.as_ref(), data.members);
-                (sub, states, assignees)
+                (vars, states, assignees)
             }
-            None => (teamless_sub, Vec::new(), Vec::new()),
+            None => (teamless_vars, Vec::new(), Vec::new()),
         };
+        self.runtime.refresh::<NewIssueQuery>(vars.clone());
 
         self.push_view(View::NewIssue(NewIssueModal {
             focused_field: NewIssueField::Title,
@@ -230,26 +238,25 @@ impl super::App {
             assignee_selected: 0,
             loading: true,
             error: String::new(),
-            sub,
+            vars,
         }));
     }
 
-    /// Leaving the Team field: drop the old subscription and subscribe anew
-    /// for the newly-selected team (RAII replaces the old hand-diffed
-    /// watch/unwatch).
+    /// Leaving the Team field: re-execute for the newly-selected team (RAII
+    /// replaces the old hand-diffed watch/unwatch).
     fn new_issue_team_changed(&mut self, i: usize) {
         let new_team_id = match self.views.get(i) {
             Some(View::NewIssue(modal)) => modal.selected_team_id(),
             _ => return,
         };
-        let (sub, data) = self
-            .runtime
-            .subscribe::<NewIssueQuery>(NewIssueVariables::new(new_team_id));
+        let vars = NewIssueVariables::new(new_team_id);
+        let data = read_new_issue(&self.runtime, vars.clone());
         let states: Vec<PopupItem> = data.states.into_iter().map(PopupItem::from).collect();
         let assignees = build_assignee_items(data.viewer.as_ref(), data.members);
+        self.runtime.refresh::<NewIssueQuery>(vars.clone());
 
         if let Some(View::NewIssue(modal)) = self.views.get_mut(i) {
-            modal.sub = sub;
+            modal.vars = vars;
             modal.states = states;
             modal.state_selected = 0;
             modal.assignees = assignees;

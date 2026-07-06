@@ -2,14 +2,14 @@
 
 use lt_types::viewer;
 
-use crate::subscription::SubscriptionKey;
-
 /// Everything the runtime reports, delivered through the [`OnEvent`] callback
 /// the runtime is constructed with.
 pub enum RuntimeEvent {
-    /// A live subscription's slot has a fresh result; the view holding it
-    /// should `take` and re-apply its ui-state policy.
-    Updated(SubscriptionKey),
+    /// The local cache changed (docs/design/unified-execute-adr.md,
+    /// "Decision 3"): every active view should re-execute its own operation
+    /// and re-apply its ui-state policy. Payload-free and unscoped -- a
+    /// redundant re-read is an idempotent projection of current truth.
+    Update,
     /// Sync-cycle progress and outcome -- scheduling and error text, not an
     /// invalidation.
     Sync(SyncEvent),
@@ -25,8 +25,8 @@ pub enum SyncEvent {
     /// Sync succeeded, stamped with `last_synced_at` (the runtime's own
     /// `sync_meta` read), or `None` if that read finds no prior sync. The
     /// viewer identity is not carried here: a sync cycle persists it through
-    /// the same `Mutation` seam as everything else it touches, so a live
-    /// `ViewerQuery` subscription picks it up through propagation instead.
+    /// the same `Mutation` seam as everything else it touches, so the header's
+    /// own re-execute of `ViewerQuery` on `Update` picks it up instead.
     Done(Option<chrono::DateTime<chrono::Utc>>),
     Error(String),
     NotAuthenticated,

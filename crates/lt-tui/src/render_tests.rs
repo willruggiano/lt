@@ -139,7 +139,7 @@ fn popup_move_clamps_and_cancel_resets_stack() {
         team_id: None,
         items: vec![item("a", None), item("b", None), item("c", None)],
         selected: 0,
-        sub: None,
+        vars: None,
     }));
 
     app.dispatch_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -308,7 +308,7 @@ fn priority_popup() {
         team_id: None,
         items: priority_popup_items(),
         selected: 1,
-        sub: None,
+        vars: None,
     }));
     insta::assert_snapshot!(draw(&mut app, 100, 20));
 }

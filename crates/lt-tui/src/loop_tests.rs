@@ -4,13 +4,12 @@
 //
 // Tests drive the real `Runtime` over an in-memory `Database`, never
 // starting `run()` (docs/design/operation-seam-adr.md, "Decision 7"):
-// initial reads and write propagation are synchronous. Live-update routing
-// for Teams/WorkflowStates/TeamMemberships-scoped subscriptions (the
-// state/assignee popup, the new-issue modal) is exercised at the
-// `lt-runtime` layer instead (`crates/lt-runtime/src/runtime.rs`), since
-// reaching it needs an upstream refresh no `Runtime` write method can
-// synthesize; these tests cover their construction, the team-change
-// drop/resubscribe, and the pure `reanchor` helper.
+// initial reads and write propagation are synchronous. A composed view's
+// one-shot upstream freshness refresh (the state/assignee popup, the
+// new-issue modal) is exercised at the `lt-runtime` layer instead
+// (`crates/lt-runtime/src/runtime.rs`), since reaching it needs an upstream
+// fetch no `Runtime` write method can synthesize; these tests cover their
+// construction, the team-change re-execute, and the pure `reanchor` helper.
 
 use crossterm::event::KeyModifiers;
 use lt_runtime::test_util::Database;
@@ -19,7 +18,6 @@ use lt_types::inputs::{CommentCreateInput, IssueCreateInput, IssueUpdateInput};
 use lt_types::issues::{
     IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
 };
-use lt_types::teams::TeamsQuery;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -33,17 +31,17 @@ fn drain_events(app: &mut App) {
     }
 }
 
-/// Test-side resubscribe of the base list, driving the same `resubscribe`
-/// the app's own key handlers call.
+/// Test-side refetch of the base list, driving the same `refetch` the app's
+/// own key handlers call.
 fn fetch_base_list(app: &mut App, reset_selection: bool) {
     let viewer_name = app.auth.viewer_name().map(str::to_string);
     let runtime = app.runtime.clone();
     if let Some(View::List(list)) = app.views.first_mut() {
-        list.resubscribe(&runtime, viewer_name.as_deref(), reset_selection);
+        list.refetch(&runtime, viewer_name.as_deref(), reset_selection);
     }
 }
 
-/// Test-side page turn, driving the same query/resubscribe pair as the
+/// Test-side page turn, driving the same query/refetch pair as the
 /// pagination arms of `apply_list`.
 fn turn_page(app: &mut App, forward: bool) {
     let viewer_name = app.auth.viewer_name().map(str::to_string);
@@ -55,7 +53,7 @@ fn turn_page(app: &mut App, forward: bool) {
             list.query.prev_page()
         };
         if turned {
-            list.resubscribe(&runtime, viewer_name.as_deref(), true);
+            list.refetch(&runtime, viewer_name.as_deref(), true);
         }
     }
 }
@@ -145,7 +143,7 @@ fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
     Ok(app_with_db_and_handle(rows)?.0)
 }
 
-/// Push a `Detail` view for `issue`, subscribing its comment thread.
+/// Push a `Detail` view for `issue`, reading its comment thread.
 fn open_detail_for(app: &mut App, issue: &lt_types::types::Issue) {
     let detail = build_cached_detail(issue, &app.runtime);
     app.views.push(View::Detail(Box::new(detail)));
@@ -202,7 +200,7 @@ fn pending_select_seeks_identifier_on_next_issues_update() {
     fetch_base_list(&mut app, true);
     app.list_mut().pending_select = Some("ENG-3".to_string());
 
-    // A write that touches `Issue` propagates to the live list subscription.
+    // A write that touches `Issue` reaches the live list on its next re-execute.
     app.runtime
         .execute::<IssueUpdateMutation>(IssueUpdateVariables {
             id: "1".to_string(),
@@ -269,7 +267,7 @@ fn toggle_desc_refetches() {
 // -- ListView::open ---------------------------------------------------------
 
 #[test]
-fn open_with_filterful_query_matches_post_sync_resubscribe() {
+fn open_with_filterful_query_matches_post_sync_refetch() {
     let rows = [
         db_issue("1", "ENG-1", "Todo", 5),
         db_issue("2", "ENG-2", "Done", 4),
@@ -294,9 +292,9 @@ fn open_with_filterful_query_matches_post_sync_resubscribe() {
     let startup: Vec<String> = list.issues.iter().map(|i| i.identifier.clone()).collect();
     assert_eq!(startup, vec!["ENG-1".to_string(), "ENG-3".to_string()]);
 
-    // Steady-state: the same engine, driven by a resubscribe (what a sync's
-    // propagation triggers via the subscription's own re-read closure).
-    list.resubscribe(&runtime, None, true);
+    // Steady-state: the same engine, driven by a refetch (what a live
+    // `Update` triggers via `ListView::apply_update`).
+    list.refetch(&runtime, None, true);
     let post_sync: Vec<String> = list.issues.iter().map(|i| i.identifier.clone()).collect();
     assert_eq!(startup, post_sync);
 }
@@ -340,10 +338,10 @@ fn confirm_search_hands_off_the_query_not_the_viewport_capped_rows() {
     assert_eq!(app.list_mut().issues[selected].identifier, anchor);
 }
 
-// -- build_cached_detail: children come through the composed subscription --
+// -- build_cached_detail: children come through the composed read ----------
 
 #[test]
-fn build_cached_detail_populates_children_from_the_subscription() {
+fn build_cached_detail_populates_children_from_the_composed_read() {
     let mut parent = db_issue("p1", "ENG-9", "Todo", 9);
     parent.title = "the parent".to_string();
     let mut child = db_issue("c1", "ENG-10", "Done", 8);
@@ -359,10 +357,10 @@ fn build_cached_detail_populates_children_from_the_subscription() {
     assert_eq!(detail.children[0].identifier, "ENG-10");
 }
 
-// -- route_update: comments ---------------------------------------------
+// -- apply_update: comments ---------------------------------------------
 
 #[test]
-fn route_update_comments_updates_a_live_matching_detail() {
+fn apply_update_refreshes_a_live_detail_pane() {
     let issue = db_issue("c1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
     open_detail_for(&mut app, &issue);
@@ -385,12 +383,15 @@ fn route_update_comments_updates_a_live_matching_detail() {
 }
 
 #[test]
-fn route_update_comments_falls_through_without_a_matching_detail() {
+fn apply_update_reads_are_scoped_by_each_views_own_vars() {
+    // `Update` is unscoped -- a comment on issue "a" still leaves an open
+    // Detail(b) unaffected, because Detail(b) re-executes with its own vars
+    // (id "b"), not because the signal was routed to it.
     let a = db_issue("a", "ENG-1", "Todo", 5);
     let b = db_issue("b", "ENG-2", "Todo", 4);
     let mut app = app_with_db(&[a.clone(), b.clone()]).unwrap();
 
-    // No consumer yet: no-op, no panic.
+    // No detail pane yet: no-op, no panic.
     app.runtime
         .execute::<CommentCreateMutation>(CommentCreateVariables {
             input: CommentCreateInput {
@@ -401,7 +402,7 @@ fn route_update_comments_falls_through_without_a_matching_detail() {
         .unwrap();
     drain_events(&mut app);
 
-    // Detail(b) live: id mismatch falls through.
+    // Detail(b) is open; a comment on "a" must not appear in it.
     open_detail_for(&mut app, &b);
     app.runtime
         .execute::<CommentCreateMutation>(CommentCreateVariables {
@@ -420,9 +421,9 @@ fn route_update_comments_falls_through_without_a_matching_detail() {
 }
 
 #[test]
-fn route_update_comments_applied_twice_is_idempotent() {
-    // Duplicate/late events are idempotent: the second `take()` finds
-    // nothing new.
+fn apply_update_applied_twice_is_idempotent() {
+    // A redundant re-read is idempotent: applying the same `Update` twice
+    // does not duplicate the comment.
     let issue = db_issue("c1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
     open_detail_for(&mut app, &issue);
@@ -436,11 +437,9 @@ fn route_update_comments_applied_twice_is_idempotent() {
         })
         .unwrap();
     let ev = app.events_rx.recv().unwrap();
-    let AppEvent::Runtime(RuntimeEvent::Updated(id)) = ev else {
-        unreachable!("expected an Updated event")
-    };
-    app.apply(AppEvent::Runtime(RuntimeEvent::Updated(id)));
-    app.apply(AppEvent::Runtime(RuntimeEvent::Updated(id)));
+    assert!(matches!(ev, AppEvent::Runtime(RuntimeEvent::Update)));
+    app.apply(AppEvent::Runtime(RuntimeEvent::Update));
+    app.apply(AppEvent::Runtime(RuntimeEvent::Update));
 
     let Some(View::Detail(detail)) = app.views.last() else {
         unreachable!("detail view expected")
@@ -448,10 +447,10 @@ fn route_update_comments_applied_twice_is_idempotent() {
     assert_eq!(detail.comments.len(), 1);
 }
 
-// -- route_update: issues -------------------------------------------------
+// -- apply_update: issues -------------------------------------------------
 
 #[test]
-fn route_update_issues_refreshes_the_focused_base() {
+fn apply_update_refreshes_the_focused_base() {
     let mut app = app_with_db(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     fetch_base_list(&mut app, true);
     assert_eq!(app.list_mut().issues.len(), 1);
@@ -474,9 +473,10 @@ fn route_update_issues_refreshes_the_focused_base() {
 }
 
 #[test]
-fn route_update_issues_under_an_overlay_defers_and_resume_focus_replays() {
+fn apply_update_under_an_overlay_defers_and_resume_focus_rereads() {
     // An overlay above the base: the base's `focused` guard defers the
-    // update -- the subscription's slot holds the latest for focus return.
+    // re-execute -- `resume_focus` re-reads current truth when it regains
+    // focus.
     let issue = db_issue("1", "ENG-1", "Todo", 5);
     let mut app = app_with_db(std::slice::from_ref(&issue)).unwrap();
     fetch_base_list(&mut app, true);
@@ -515,8 +515,8 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
     assert_eq!(app.list_mut().issues[0].state.name, "Todo");
 
     // The id a real popup offers is already cached under its name by that
-    // picker's own `TeamStatesQuery` subscription; mirror that precondition
-    // here rather than hand-placing a name at write time.
+    // picker's own `TeamStatesQuery` read; mirror that precondition here
+    // rather than hand-placing a name at write time.
     lt_runtime::test_util::upsert_team_state(
         &db.connect().unwrap(),
         "ENG",
@@ -537,7 +537,7 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
             id: Some("done-state".to_string()),
         }],
         selected: 0,
-        sub: None,
+        vars: None,
     }));
 
     app.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -701,7 +701,7 @@ fn push_priority_popup(app: &mut App, items: Vec<PopupItem>) {
         team_id: None,
         items,
         selected: 0,
-        sub: None,
+        vars: None,
     }));
 }
 
@@ -954,7 +954,7 @@ fn consume_sync_event_started_sets_syncing() {
 fn consume_sync_event_done_sets_synced_at_from_the_payload() {
     // `Sync(Done)` carries the runtime's own `synced_at` timestamp and only
     // transitions the `sync` typestate; the viewer identity flows through
-    // the header's own `ViewerQuery` subscription instead (`apply_viewer_update`).
+    // the header's own re-executed `ViewerQuery` instead (`apply_viewer_update`).
     let mut app = app_with_db(&[]).unwrap();
     app.sync = SyncStatus::Syncing;
     let now = chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
@@ -972,21 +972,21 @@ fn consume_sync_event_done_sets_synced_at_from_the_payload() {
 }
 
 // A live `ViewerQuery` update (`apply_viewer_update` setting `Authenticated`
-// from a fresh slot value) needs an upstream refresh no `Runtime` write
-// method can synthesize -- like the team-scoped subscriptions above, that
-// path is exercised at the `lt-runtime` layer instead
-// (`crates/lt-runtime/src/runtime.rs`, `refresh_entry_*`,
+// from a fresh upstream fetch) needs an upstream refresh no `Runtime` write
+// method can synthesize -- like the team-scoped reads above, that path is
+// exercised at the `lt-runtime` layer instead
+// (`crates/lt-runtime/src/runtime.rs`, `viewer_refresh_runs_the_thunk_and_emits_update`,
 // `crates/lt-runtime/src/ops.rs`, `refresh_viewer_persists_and_reports_viewer`).
 
 #[test]
-fn apply_viewer_update_leaves_auth_unchanged_without_a_fresh_slot_value() {
-    // No propagation has touched `Viewer` since subscribing: `take()` finds
-    // nothing new, so a matching update is a no-op -- safe to call
+fn apply_viewer_update_leaves_auth_unchanged_before_any_viewer_is_cached() {
+    // No sync has ever persisted a viewer: the re-execute reads `None`, so
+    // `auth` keeps whatever it already reflected -- safe to call
     // unconditionally.
     let mut app = app_with_db(&[]).unwrap();
     app.auth = AuthStatus::Unauthenticated;
 
-    app.apply_viewer_update(app.viewer_sub.key());
+    app.apply_viewer_update();
 
     assert!(matches!(app.auth, AuthStatus::Unauthenticated));
 }
@@ -1055,9 +1055,9 @@ fn l_key_gates_on_authenticating() {
 }
 
 #[test]
-fn refresh_key_resubscribes_the_base_list_immediately() {
-    // `ctrl+r` doesn't gate on `Syncing`: an immediate resubscribe runs
-    // before the sync request goes out.
+fn refresh_key_refetches_the_base_list_immediately() {
+    // `ctrl+r` doesn't gate on `Syncing`: an immediate refetch runs before
+    // the sync request goes out.
     let (mut app, db) = app_with_db_and_handle(&[db_issue("1", "ENG-1", "Todo", 5)]).unwrap();
     fetch_base_list(&mut app, true);
     {
@@ -1094,10 +1094,9 @@ fn seed_team_states(conn: &lt_runtime::test_util::Connection, team_id: &str) -> 
 }
 
 #[test]
-fn route_update_with_no_matching_view_is_a_noop() {
+fn apply_update_with_only_the_base_list_reexecutes_without_panicking() {
     let mut app = app_with_db(&[]).unwrap();
-    let (sub, _) = app.runtime.subscribe::<TeamsQuery>(());
-    app.route_update(sub.key());
+    app.apply_update();
     assert_eq!(app.views.len(), 1);
 }
 
@@ -1126,9 +1125,9 @@ fn new_issue_team_picker_g_selects_the_last_team() {
 }
 
 #[test]
-fn new_issue_team_change_drops_the_old_scoped_subscriptions_and_subscribes_new_ones() {
-    // Leaving the Team field with a different team selected re-subscribes
-    // states/members for the new team (RAII replaces the old hand-diffed
+fn new_issue_team_change_reexecutes_for_the_newly_selected_team() {
+    // Leaving the Team field with a different team selected re-executes
+    // states/members for the new team (replacing the old hand-diffed
     // `watched_team_id` bookkeeping) and marks `loading`.
     let (mut app, db) = app_with_db_and_handle(&[]).unwrap();
     {
