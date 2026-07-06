@@ -1,9 +1,8 @@
 use std::io::Write;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Args;
-use lt_runtime::db;
-use lt_types::types::Issue;
+use lt_runtime::{Runtime, SearchOutcome};
 
 use crate::issues::display::print_table;
 
@@ -21,36 +20,26 @@ pub struct SearchArgs {
     pub live: bool,
 }
 
-pub fn run(out: &mut dyn Write, args: &SearchArgs) -> Result<()> {
+pub fn run(out: &mut dyn Write, args: &SearchArgs, runtime: &Runtime) -> Result<()> {
     if args.live {
         bail!("--live search via Linear API is not yet implemented");
     }
 
-    let conn = db::open_db(db::db_path()?).context("failed to open local database")?;
-
-    // Check whether any issues exist at all.
-    let total = db::count_issues(&conn)?;
-
-    if total == 0 {
-        bail!("Run 'lt sync' to build the local index first.");
+    match runtime.search(&args.query, args.limit)? {
+        SearchOutcome::NoIndex => bail!("Run 'lt sync' to build the local index first."),
+        SearchOutcome::Results {
+            issues,
+            approximate,
+        } => {
+            let note = if approximate {
+                "Note: FTS index is empty or stale. Run 'lt sync full' to rebuild it. \
+                 Showing approximate results from title search."
+                    .to_string()
+            } else {
+                String::new()
+            };
+            print_table(out, &issues, &note)?;
+        }
     }
-
-    // Check whether the FTS index has any content.
-    let fts_count = db::count_fts_rows(&conn).unwrap_or(0);
-
-    let note;
-
-    let issues: Vec<Issue> = if fts_count == 0 {
-        // FTS index is empty -- fall back to LIKE search on title.
-        note = "Note: FTS index is empty or stale. Run 'lt sync full' to rebuild it. \
-                Showing approximate results from title search."
-            .to_string();
-        db::search_issues_like(&conn, &args.query, args.limit)?
-    } else {
-        note = String::new();
-        db::search_issues(&conn, &args.query, args.limit)?
-    };
-
-    print_table(out, &issues, &note)?;
     Ok(())
 }

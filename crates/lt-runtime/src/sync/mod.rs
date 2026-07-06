@@ -7,23 +7,12 @@ pub mod service;
 use anyhow::Result;
 use chrono::Utc;
 use lt_storage::db;
-use lt_storage::db::{Connection, EntityKey, Upsert};
+use lt_storage::db::{EntityKey, Upsert};
 use lt_types::issues::{IssuesQuery, IssuesVariables};
 use lt_types::states::{AllWorkflowStatesQuery, AllWorkflowStatesVariables};
 use lt_types::teams::TeamsQuery;
 use lt_types::viewer::ViewerQuery;
-use lt_upstream::auth::refresh::load_or_refresh_token;
-use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
-
-/// Open a fresh production connection and an auto-refreshed HTTP transport,
-/// for one-shot CLI callers of `full::run`/`delta::run` that don't own a
-/// [`crate::Runtime`] (the CLI counterpart to `Runtime`'s injected transport
-/// source).
-pub fn open_production() -> Result<(Connection, Box<dyn GraphqlTransport>)> {
-    let conn = db::open_db(db::db_path()?)?;
-    let token = load_or_refresh_token()?;
-    Ok((conn, Box::new(HttpTransport::new(token.access_token))))
-}
+use lt_upstream::client::{GraphqlTransport, execute};
 
 /// Persist the authenticated viewer's identity into `sync_meta` so cached reads
 /// can resolve `me` without a network round-trip. Goes through the same

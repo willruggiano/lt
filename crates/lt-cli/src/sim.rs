@@ -1,13 +1,11 @@
 //! The `lt sim` command: seed the local database from the deterministic
-//! generator in `lt-storage` (reached via the runtime seam; reused by tests).
+//! generator in `lt-storage`, via the injected `Runtime`.
 
 use std::io::Write;
 
 use anyhow::Result;
-use chrono::Utc;
 use clap::Args;
-use lt_runtime::db;
-use lt_runtime::sim::generate;
+use lt_runtime::Runtime;
 
 /// Knobs for `lt sim`.
 #[derive(Args)]
@@ -25,46 +23,12 @@ pub struct SimArgs {
 /// Marks the cache fresh so the offline list/TUI serve the generated data
 /// without attempting a network sync, and records the synced viewer identity
 /// (a real assignee from the dataset) so the `--assignee=me` filter resolves.
-pub fn run(out: &mut dyn Write, args: &SimArgs) -> Result<()> {
-    let dataset = generate(args.seed, args.size);
-    let conn = db::open_db(db::db_path()?)?;
-    // No sync cycle to establish workflow states offline: derive them from
-    // the seeded issues' own state fragments (ADR "Sim compatibility").
-    for (team_id, state) in lt_runtime::sim::derive_workflow_states(&dataset.issues) {
-        db::upsert_team_state(&conn, &team_id, &state)?;
-    }
-    db::upsert_issues(&conn, &dataset.issues)?;
-    db::upsert_comments(&conn, &dataset.comments)?;
-    // No team-membership API to seed from offline: derive it from the
-    // seeded issues' team/assignee and team/creator pairs (ADR "Sim
-    // compatibility").
-    db::derive_team_memberships_from_issues(&conn)?;
-    db::set_meta(&conn, "last_synced_at", &Utc::now().to_rfc3339())?;
-    if let Some(assignee) = dataset.issues.iter().find_map(|i| i.assignee.clone()) {
-        // `lt sim` has no organization concept to seed; the identity itself
-        // is real (a real assignee from the dataset).
-        db::set_viewer(
-            &conn,
-            &lt_types::viewer::Viewer {
-                user: lt_types::types::User {
-                    id: assignee.id,
-                    name: assignee.name,
-                },
-                organization: lt_types::viewer::Organization {
-                    id: String::new().into(),
-                    name: String::new(),
-                    url_key: String::new(),
-                },
-            },
-        )?;
-    }
+pub fn run(out: &mut dyn Write, args: &SimArgs, runtime: &Runtime) -> Result<()> {
+    let seed = runtime.seed_sim(args.seed, args.size)?;
     writeln!(
         out,
         "Seeded {} issues and {} comments (seed={}, size={}).",
-        dataset.issues.len(),
-        dataset.comments.len(),
-        args.seed,
-        args.size
+        seed.issues, seed.comments, args.seed, args.size
     )?;
     Ok(())
 }

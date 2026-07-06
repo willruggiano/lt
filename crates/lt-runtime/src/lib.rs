@@ -12,7 +12,9 @@ pub mod sync;
 
 mod runtime;
 pub use ops::{load, refresh};
-pub use runtime::{HttpTransportSource, Runtime, TransportSource};
+#[cfg(feature = "sim")]
+pub use runtime::SimSeed;
+pub use runtime::{HttpTransportSource, Runtime, SearchOutcome, TransportSource};
 pub use subscription::{Subscription, SubscriptionKey};
 
 // Command orchestration for the CLI.

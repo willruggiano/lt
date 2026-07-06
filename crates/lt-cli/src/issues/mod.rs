@@ -152,6 +152,7 @@ pub fn run(
     out: &mut dyn Write,
     args: &IssueArgs,
     subcommand: Option<IssueSubcommand>,
+    runtime: &lt_runtime::Runtime,
 ) -> Result<()> {
     match subcommand {
         Some(IssueSubcommand::New {
@@ -172,6 +173,6 @@ pub fn run(
                 assignee,
             },
         ),
-        None => list::run(out, args),
+        None => list::run(out, args, runtime),
     }
 }

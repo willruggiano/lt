@@ -68,6 +68,17 @@ enum Commands {
     },
 }
 
+/// Build the `lt-runtime`-backed `Runtime` against the profile's local
+/// database and the production HTTP transport, with the given event
+/// callback. The sole place `lt-cli` names `Database`/`HttpTransportSource`.
+fn build_runtime(on_event: lt_runtime::sync::service::OnEvent) -> lt_runtime::Runtime {
+    lt_runtime::Runtime::new(
+        lt_runtime::db::Database::File,
+        Box::new(lt_runtime::HttpTransportSource),
+        on_event,
+    )
+}
+
 /// Launch the TUI with the `lt-runtime`-backed `Runtime` injected.
 ///
 /// `lt-cli` owns both ends of the `AppEvent` channel: the sender feeds both
@@ -94,11 +105,7 @@ fn run_tui(
             tracing::debug!("runtime event: TUI is gone");
         }
     });
-    let runtime = Arc::new(lt_runtime::Runtime::new(
-        lt_runtime::db::Database::File,
-        Box::new(lt_runtime::HttpTransportSource),
-        on_event,
-    ));
+    let runtime = Arc::new(build_runtime(on_event));
     let sync_runtime = Arc::clone(&runtime);
     std::thread::spawn(move || sync_runtime.run());
     lt_tui::run(launch, runtime, tx, rx)
@@ -137,7 +144,10 @@ fn main() -> Result<()> {
         )?,
         Some(Commands::Auth { command }) => auth::run(&mut out, &command)?,
         Some(Commands::Inbox { args }) => inbox::run(&mut out, &args)?,
-        Some(Commands::Issues { args, subcommand }) => issues::run(&mut out, &args, subcommand)?,
+        Some(Commands::Issues { args, subcommand }) => {
+            let runtime = build_runtime(Box::new(|_| {}));
+            issues::run(&mut out, &args, subcommand, &runtime)?;
+        }
         Some(Commands::Tui { args }) => {
             run_tui(
                 &args.literal_filter()?,
@@ -147,12 +157,19 @@ fn main() -> Result<()> {
             )?;
         }
         Some(Commands::Sync { command }) => {
+            let runtime = build_runtime(Box::new(|_| {}));
             let cmd = command.unwrap_or(sync::SyncCommands::Delta);
-            sync::run(&mut out, cmd)?;
+            sync::run(&mut out, cmd, &runtime)?;
         }
-        Some(Commands::Search { args }) => search::run(&mut out, &args)?,
+        Some(Commands::Search { args }) => {
+            let runtime = build_runtime(Box::new(|_| {}));
+            search::run(&mut out, &args, &runtime)?;
+        }
         #[cfg(feature = "sim")]
-        Some(Commands::Sim { args }) => sim::run(&mut out, &args)?,
+        Some(Commands::Sim { args }) => {
+            let runtime = build_runtime(Box::new(|_| {}));
+            sim::run(&mut out, &args, &runtime)?;
+        }
     }
     Ok(())
 }
