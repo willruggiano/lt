@@ -97,6 +97,37 @@ enum Action {
     Drain,
 }
 
+/// Every command already buffered on `rx` for this wake, starting with
+/// `first`: drained non-blockingly so a burst of buffered commands (e.g.
+/// several `Command::Drain`s from rapid mutations) is processed together
+/// instead of one wake per command.
+fn drain_buffered_commands(rx: &mpsc::Receiver<Command>, first: Command) -> Vec<Command> {
+    let mut cmds = vec![first];
+    while let Ok(next) = rx.try_recv() {
+        cmds.push(next);
+    }
+    cmds
+}
+
+/// Collapse every `Action::Drain` after the first into nothing, preserving
+/// the order and count of every other action: one drain already replays the
+/// whole outbox, so a burst of buffered drains is fully covered by one.
+fn coalesce_drains(actions: Vec<Action>) -> Vec<Action> {
+    let mut seen_drain = false;
+    actions
+        .into_iter()
+        .filter(|action| {
+            if matches!(action, Action::Drain) {
+                let first = !seen_drain;
+                seen_drain = true;
+                first
+            } else {
+                true
+            }
+        })
+        .collect()
+}
+
 /// The loop's pause gate and login-in-flight guard, decided independent of
 /// I/O so cadence/pause/login policy is testable without threads. The watch
 /// set round 1 kept here is gone: which entries need a freshness refresh is
@@ -476,22 +507,11 @@ impl Runtime {
             return CycleOutcome::NotAuthenticated;
         }
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || -> Result<Vec<EntityKey>> {
-                let conn = self.connect()?;
-                let transport = self.transports.acquire()?;
-                if full {
-                    crate::sync::full::run(&conn, transport.as_ref())
-                } else {
-                    crate::sync::delta::run(&conn, transport.as_ref())
-                }
-            },
-        ));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.sync_now(full)));
 
         match result {
-            Ok(Ok(touched)) => {
+            Ok(Ok(_touched)) => {
                 (self.on_event)(RuntimeEvent::Sync(SyncEvent::Done(self.last_synced_at())));
-                self.propagate(&touched);
                 CycleOutcome::Done
             }
             Ok(Err(e)) => {
@@ -510,9 +530,8 @@ impl Runtime {
     }
 
     /// Immediately replay every pending outbox command upstream, then
-    /// propagate whatever it touched. The single drain body: runs on the loop
-    /// thread (`Action::Drain`, triggered by a caller-side mutation) so it
-    /// shares the loop's serialization of all base writes.
+    /// propagate whatever it touched. Runs on the loop thread (`Action::Drain`)
+    /// so it shares the loop's serialization of all base writes.
     pub fn drain_now(&self) -> Result<Vec<EntityKey>> {
         let conn = self.connect()?;
         let transport = self.transports.acquire()?;
@@ -521,11 +540,8 @@ impl Runtime {
         Ok(touched)
     }
 
-    /// The shared body of [`Runtime::sync_full`]/[`Runtime::sync_delta`]:
-    /// connect, acquire a transport, run the requested sync body, then
-    /// propagate whatever it touched. Mirrors `cycle` minus its event
-    /// emission -- for a caller that never starts `run` (e.g. `lt-cli`'s `lt
-    /// sync`).
+    /// Connect, acquire a transport, run the requested full or delta sync
+    /// body, then propagate whatever it touched.
     fn sync_now(&self, full: bool) -> Result<Vec<EntityKey>> {
         let conn = self.connect()?;
         let transport = self.transports.acquire()?;
@@ -676,7 +692,13 @@ impl Runtime {
             loop {
                 let timeout = run.deadline.saturating_duration_since(Instant::now());
                 let actions = match commands_rx.recv_timeout(timeout) {
-                    Ok(cmd) => run.state.on_command(cmd),
+                    Ok(cmd) => {
+                        let actions = drain_buffered_commands(&commands_rx, cmd)
+                            .into_iter()
+                            .flat_map(|c| run.state.on_command(c))
+                            .collect();
+                        coalesce_drains(actions)
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         run.deadline = Instant::now() + SYNC_INTERVAL;
                         let mut actions = run.state.on_timeout();
@@ -815,6 +837,40 @@ mod tests {
     fn drain_command_prompts_a_drain_action() {
         let mut state = LoopState::new();
         assert_eq!(state.on_command(Command::Drain), vec![Action::Drain]);
+    }
+
+    // -- drain_buffered_commands --------------------------------------------
+
+    #[test]
+    fn drain_buffered_commands_collects_everything_already_queued() {
+        let (tx, rx) = std_mpsc::channel();
+        tx.send(Command::Drain).unwrap();
+        tx.send(Command::Drain).unwrap();
+        tx.send(Command::RequestSync).unwrap();
+
+        let cmds = drain_buffered_commands(&rx, Command::Drain);
+
+        assert_eq!(cmds.len(), 4);
+        assert!(matches!(cmds[0], Command::Drain));
+        assert!(rx.try_recv().is_err()); // fully drained
+    }
+
+    // -- coalesce_drains --------------------------------------------------
+
+    #[test]
+    fn coalesce_drains_collapses_several_buffered_drains_into_one() {
+        let actions = vec![Action::Drain, Action::Drain, Action::Drain];
+        assert_eq!(coalesce_drains(actions), vec![Action::Drain]);
+    }
+
+    #[test]
+    fn coalesce_drains_preserves_other_actions_and_their_order() {
+        let id = sub_id();
+        let actions = vec![Action::Drain, Action::RefreshEntry(id), Action::Drain];
+        assert_eq!(
+            coalesce_drains(actions),
+            vec![Action::Drain, Action::RefreshEntry(id)]
+        );
     }
 
     #[test]
