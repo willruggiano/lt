@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 pub mod affinity;
 pub mod classify;
+pub mod ref_fragment;
 pub mod schema_model;
 pub mod selection_model;
 

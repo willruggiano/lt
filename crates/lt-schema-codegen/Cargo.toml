@@ -18,5 +18,8 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", default-features = false, features = ["full", "parsing"] }
 
+[dev-dependencies]
+insta.workspace = true
+
 [lints]
 workspace = true

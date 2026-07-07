@@ -1498,6 +1498,7 @@ version = "0.7.1"
 dependencies = [
  "cynic-parser",
  "graphql-parser",
+ "insta",
  "prettyplease",
  "proc-macro2",
  "quote",

@@ -1,0 +1,27 @@
+---
+source: crates/lt-schema-codegen/src/ref_fragment.rs
+expression: pretty
+---
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
+#[cynic(graphql_type = "WorkflowState")]
+pub struct WorkflowStateIdRef {
+    pub id: cynic::Id,
+}
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
+#[cynic(graphql_type = "Team")]
+pub struct TeamIdRef {
+    pub id: cynic::Id,
+}
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
+#[cynic(graphql_type = "Issue")]
+pub struct IssueRef {
+    pub id: cynic::Id,
+    pub identifier: String,
+    pub title: String,
+    pub priority_label: String,
+    pub priority: Priority,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+    pub state: WorkflowStateIdRef,
+    pub team: TeamIdRef,
+}
