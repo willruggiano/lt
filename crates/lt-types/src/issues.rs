@@ -1,7 +1,6 @@
 //! The issues list query and the `issueUpdate`/`issueCreate` mutations,
 //! modelled as cynic `QueryFragment`s. These are the shared "currency" types;
-//! the fetch/replay lives in `lt-upstream`. The list query selects
-//! [`crate::types::Issue`] directly -- there is no separate wire projection.
+//! the fetch/replay lives in `lt-upstream`.
 //!
 //! [`IssueFilter`]/[`IssueSort`] are the typed, allowlisted filter/sort the
 //! build validates against the schema (`build/search_filter_fields.toml`).
@@ -591,9 +590,9 @@ impl TryFrom<IssueCreateMutation> for Issue {
     }
 }
 
-/// A minimal GraphQL issue node matching [`Issue`]'s deserialization, shared
-/// by this module's tests and by `lt-upstream`/`lt-runtime`'s tests (via the
-/// `test-util` feature) so the fixture has one definition.
+/// A minimal GraphQL issue node matching `wire::Issue`'s deserialization,
+/// shared by this module's tests and by `lt-upstream`/`lt-runtime`'s tests
+/// (via the `test-util` feature) so the fixture has one definition.
 #[cfg(any(test, feature = "test-util"))]
 pub fn sample_issue_node(id: &str) -> serde_json::Value {
     serde_json::json!({

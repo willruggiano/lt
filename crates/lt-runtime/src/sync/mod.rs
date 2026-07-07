@@ -7,22 +7,23 @@ pub mod service;
 use anyhow::Result;
 use chrono::Utc;
 use lt_storage::db;
-use lt_storage::db::Mutation;
 use lt_types::issues::{IssuesQuery, IssuesVariables};
 use lt_types::states::{AllWorkflowStatesQuery, AllWorkflowStatesVariables};
 use lt_types::teams::TeamsQuery;
 use lt_types::viewer::ViewerQuery;
 use lt_upstream::client::{GraphqlTransport, execute};
 
+use crate::ops::Fill;
+
 /// Persist the authenticated viewer's identity into `sync_meta` so cached reads
 /// can resolve `me` without a network round-trip. Goes through the same
-/// `Mutation` seam every other operation does.
+/// `Fill` seam every other operation does.
 fn persist_viewer(conn: &rusqlite::Connection, transport: &dyn GraphqlTransport) -> Result<()> {
     crate::ops::refresh::<ViewerQuery>(conn, transport, ())
 }
 
 /// Paginate the org-wide `AllWorkflowStatesQuery` to exhaustion, upserting
-/// each page as it arrives via its `Mutation` impl.
+/// each page as it arrives via its `Fill` impl.
 fn sync_workflow_states(
     conn: &rusqlite::Connection,
     transport: &dyn GraphqlTransport,
@@ -34,7 +35,7 @@ fn sync_workflow_states(
             after: cursor.take(),
         };
         let page = execute::<AllWorkflowStatesQuery>(transport, vars.clone())?;
-        AllWorkflowStatesQuery::apply(conn, &vars, &page)?;
+        AllWorkflowStatesQuery::fill(conn, &vars, &page)?;
 
         if !page.page_info.has_next_page {
             break;
@@ -57,7 +58,7 @@ fn sync_reference_data(
 }
 
 /// Paginate an `IssuesQuery` refresh to exhaustion, upserting each page as it
-/// arrives via [`IssuesQuery`]'s `Mutation` impl, then record the current UTC
+/// arrives via [`IssuesQuery`]'s `Fill` impl, then record the current UTC
 /// time as `last_synced_at`.
 ///
 /// `make_vars` builds one page's variables from the previous page's end
@@ -74,7 +75,7 @@ where
     loop {
         let vars = make_vars(cursor.as_deref());
         let page = execute::<IssuesQuery>(transport, vars.clone())?;
-        IssuesQuery::apply(conn, &vars, &page)?;
+        IssuesQuery::fill(conn, &vars, &page)?;
 
         if !page.page_info.has_next_page {
             break;

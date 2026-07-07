@@ -4,11 +4,10 @@
 
 use anyhow::{Context, Result};
 use lt_types::types;
-use lt_types::viewer::{Organization, Viewer, ViewerQuery};
+use lt_types::viewer::{Organization, Viewer};
 use rusqlite::{Connection, params};
 
 use crate::db::issues::{get_meta, set_meta, upsert_named_entity};
-use crate::db::ops::{Mutation, Query};
 use crate::db::sql::{self, EntityTable};
 
 /// The `sync_meta` keys the viewer identity is stored under. Kept private so
@@ -96,21 +95,6 @@ pub fn viewer(conn: &Connection) -> Result<Option<Viewer>> {
     }))
 }
 
-impl Query for ViewerQuery {
-    fn query(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
-        viewer(conn)
-    }
-}
-
-impl Mutation for ViewerQuery {
-    fn apply(conn: &Connection, _vars: &Self::Variables, out: &Self::Output) -> Result<()> {
-        let Some(viewer) = out else {
-            return Ok(());
-        };
-        set_viewer(conn, viewer)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,29 +146,5 @@ mod tests {
         );
         assert!(get_meta(&conn, "viewer_name").unwrap().is_none());
         assert!(get_meta(&conn, "viewer_org_name").unwrap().is_none());
-    }
-
-    #[test]
-    fn viewer_query_read_is_none_before_any_sync() {
-        let conn = test_db();
-        assert!(ViewerQuery::query(&conn, &()).unwrap().is_none());
-    }
-
-    #[test]
-    fn viewer_query_apply_persists_the_viewer() {
-        let conn = test_db();
-        let out = Some(ada());
-        ViewerQuery::apply(&conn, &(), &out).unwrap();
-        assert_eq!(
-            ViewerQuery::query(&conn, &()).unwrap().unwrap().user.name,
-            "Ada"
-        );
-    }
-
-    #[test]
-    fn viewer_query_apply_of_none_is_a_noop() {
-        let conn = test_db();
-        ViewerQuery::apply(&conn, &(), &None).unwrap();
-        assert!(ViewerQuery::query(&conn, &()).unwrap().is_none());
     }
 }

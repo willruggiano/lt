@@ -47,52 +47,18 @@ macro_rules! statements {
     };
 }
 
-/// The effective state id: a state overlay's value is never NULL (there is
-/// no "clear the state" edit), so `COALESCE` picks the overlay's id when a
-/// pending row exists.
-macro_rules! effective_state_id {
-    () => {
-        "COALESCE(po_state.value, i.state_id)"
-    };
-}
-
-/// The effective assignee id. Unlike state, a `NULL` overlay value here means
-/// "cleared", so `COALESCE` would wrongly fall through to the base id; the
-/// `CASE` distinguishes "no overlay row" from "overlay clears it".
-macro_rules! effective_assignee_id {
-    () => {
-        "CASE WHEN po_assignee.entity_id IS NOT NULL THEN po_assignee.value ELSE i.assignee_id END"
-    };
-}
-
-/// The effective priority label. The overlay stores the label directly
-/// (`Priority::label`, the one source of truth for the mapping), so no SQL
-/// re-derives it from the numeric level.
-macro_rules! effective_priority_label {
-    () => {
-        "COALESCE(po_priority.value, i.priority_label)"
-    };
-}
-
 /// The fragment-typed read model's column list: every field
 /// [`crate::types::Issue`](lt_types::types::Issue) selects, every column
 /// explicitly aliased so [`crate::db::issues::issue_from_row`] reads by name
 /// (ADR decision 4) rather than positional index. Labels are aggregated by a
-/// correlated subquery. `state_id`/`assignee_id`/`priority_label` select the
-/// *effective* value -- the pending overlay merged over the base, via
-/// [`issue_joins`] -- so every issue-shaped statement renders un-synced local
-/// edits without a separate in-memory merge.
+/// correlated subquery.
 macro_rules! issue_columns {
     () => {
-        concat!(
-            "i.id AS id, i.identifier AS identifier, i.title AS title, ",
-            effective_priority_label!(),
-            " AS priority_label, i.description AS description, \
-         i.created_at AS created_at, i.updated_at AS updated_at, ",
-            effective_state_id!(),
-            " AS state_id, s.name AS state_name, s.position AS state_position, ",
-            effective_assignee_id!(),
-            " AS assignee_id, ua.name AS assignee_name, \
+        "i.id AS id, i.identifier AS identifier, i.title AS title, \
+         i.priority_label AS priority_label, i.description AS description, \
+         i.created_at AS created_at, i.updated_at AS updated_at, \
+         i.state_id AS state_id, s.name AS state_name, s.position AS state_position, \
+         i.assignee_id AS assignee_id, ua.name AS assignee_name, \
          i.team_id AS team_id, t.name AS team_name, \
          i.project_id AS project_id, p.name AS project_name, \
          i.cycle_id AS cycle_id, c.name AS cycle_name, \
@@ -100,35 +66,23 @@ macro_rules! issue_columns {
          i.parent_id AS parent_id, pp.identifier AS parent_identifier, \
          (SELECT GROUP_CONCAT(l.name, ',') FROM issue_labels il \
             JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id) AS labels"
-        )
     };
 }
 
-/// The entity joins that reconstruct an issue's referenced rows, resolving
-/// `state`/`assignee`/`priority` through their overlay-effective ids (see
-/// [`issue_columns`]). The base table is aliased `i`; callers prepend `FROM
-/// issues i` (optionally with an FTS join) before this fragment.
+/// The entity joins that reconstruct an issue's referenced rows. The base
+/// table is aliased `i`; callers prepend `FROM issues i` (optionally with an
+/// FTS join) before this fragment. The state join stays `INNER`: a skeleton
+/// issue (not yet synced) has `state_id IS NULL` and is dropped from every
+/// joined read.
 macro_rules! issue_joins {
     () => {
-        concat!(
-            "LEFT JOIN pending_overlay po_state ON po_state.entity_id = i.id \
-                AND po_state.field = 'state' \
-             JOIN workflow_states s ON s.id = ",
-            effective_state_id!(),
-            " \
-             JOIN teams t ON t.id = i.team_id \
-             LEFT JOIN pending_overlay po_assignee ON po_assignee.entity_id = i.id \
-                AND po_assignee.field = 'assignee' \
-             LEFT JOIN users ua ON ua.id = ",
-            effective_assignee_id!(),
-            " \
-             LEFT JOIN pending_overlay po_priority ON po_priority.entity_id = i.id \
-                AND po_priority.field = 'priority' \
-             LEFT JOIN projects p    ON p.id = i.project_id \
-             LEFT JOIN cycles c      ON c.id = i.cycle_id \
-             LEFT JOIN users uc      ON uc.id = i.creator_id \
-             LEFT JOIN issues pp     ON pp.id = i.parent_id"
-        )
+        "JOIN workflow_states s ON s.id = i.state_id \
+         JOIN teams t ON t.id = i.team_id \
+         LEFT JOIN users ua ON ua.id = i.assignee_id \
+         LEFT JOIN projects p ON p.id = i.project_id \
+         LEFT JOIN cycles c ON c.id = i.cycle_id \
+         LEFT JOIN users uc ON uc.id = i.creator_id \
+         LEFT JOIN issues pp ON pp.id = i.parent_id"
     };
 }
 
@@ -184,13 +138,24 @@ impl EntityTable {
 }
 
 statements! {
-    /// Upsert a fetched issue fragment's intrinsic and FK columns.
+    /// Upsert a fetched issue fragment's intrinsic and FK columns. `ON
+    /// CONFLICT DO UPDATE`, not `INSERT OR REPLACE`: a REPLACE is a
+    /// DELETE+INSERT, which would cascade-delete the issue's comments/labels
+    /// and churn its `rowid`.
     UPSERT_ISSUE, 15,
-        "INSERT OR REPLACE INTO issues \
+        "INSERT INTO issues \
             (id, identifier, title, priority_label, description, \
              created_at, updated_at, synced_at, parent_id, \
              team_id, state_id, assignee_id, creator_id, project_id, cycle_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+         ON CONFLICT(id) DO UPDATE SET \
+            identifier = excluded.identifier, title = excluded.title, \
+            priority_label = excluded.priority_label, description = excluded.description, \
+            created_at = excluded.created_at, updated_at = excluded.updated_at, \
+            synced_at = excluded.synced_at, parent_id = excluded.parent_id, \
+            team_id = excluded.team_id, state_id = excluded.state_id, \
+            assignee_id = excluded.assignee_id, creator_id = excluded.creator_id, \
+            project_id = excluded.project_id, cycle_id = excluded.cycle_id";
 
     /// Clear an issue's label links before rebuilding them.
     DELETE_ISSUE_LABELS_FOR_ISSUE, 1,
@@ -246,9 +211,10 @@ statements! {
             " WHERE i.id = ?1"
         );
 
-    /// Count every locally cached issue, regardless of filters.
+    /// Count every locally cached issue, regardless of filters. A skeleton
+    /// row (not yet synced) carries no title and is excluded.
     COUNT_ISSUES, 0,
-        "SELECT COUNT(*) FROM issues";
+        "SELECT COUNT(*) FROM issues WHERE title IS NOT NULL";
 
     /// Count rows in the FTS5 shadow index.
     COUNT_FTS_ROWS, 0,
@@ -284,68 +250,125 @@ statements! {
     QUERY_ORGANIZATION_BY_ID, 1,
         "SELECT id, name, url_key FROM organizations WHERE id = ?1";
 
-    /// Upsert one `(entity_id, field)` pending-overlay row.
-    SET_OVERLAY, 3,
-        "INSERT INTO pending_overlay (entity_id, field, value) VALUES (?1, ?2, ?3) \
-         ON CONFLICT(entity_id, field) DO UPDATE SET value = excluded.value";
+    /// Insert an optimistic issue-update op, coalesced: a no-op if one is
+    /// already pending for this `(operation, id)`.
+    INSERT_OP, 2,
+        "INSERT INTO op_log (operation, id) SELECT ?1, ?2 \
+         WHERE NOT EXISTS (SELECT 1 FROM op_log WHERE operation = ?1 AND id = ?2)";
 
-    /// Clear a pending outbox command of `op_type` for `entity_id`, ahead of
-    /// re-inserting the coalesced replacement.
-    DELETE_SUPERSEDED_PENDING, 2,
-        "DELETE FROM outbox WHERE op_type = ?1 AND entity_id = ?2 AND status = 'pending'";
+    /// Record a failed drain attempt; the op stays pending for the next sync.
+    RECORD_OP_ERROR, 2,
+        "UPDATE op_log SET attempts = attempts + 1, last_error = ?1 WHERE seq = ?2";
 
-    /// Insert a new pending outbox command.
-    INSERT_PENDING, 4,
-        "INSERT INTO outbox (op_type, entity_id, variables, status, attempts, created_at) \
-         VALUES (?1, ?2, ?3, 'pending', 0, ?4)";
+    /// Retire an op once its ack has been applied.
+    DELETE_OP, 1,
+        "DELETE FROM op_log WHERE seq = ?1";
 
-    /// Every `(field, value)` overlay row for one issue.
-    OVERLAY_ROWS, 1,
-        "SELECT field, value FROM pending_overlay WHERE entity_id = ?1";
+    /// Every pending op, in `seq` order.
+    PENDING_OPS, 0,
+        "SELECT seq, operation, id FROM op_log ORDER BY seq";
 
-    /// Every pending outbox command, in `seq` order.
-    PENDING_OPERATIONS, 0,
-        "SELECT seq, op_type, entity_id, variables FROM outbox \
-         WHERE status = 'pending' ORDER BY seq";
+    /// Mint a skeleton team row (name NULL) so a state or issue FK holds.
+    MINT_TEAM, 1,
+        "INSERT OR IGNORE INTO teams (id) VALUES (?1)";
 
-    /// Apply an acked overlay's state onto the base `issues` row.
-    ACK_UPDATE_STATE, 2,
+    /// Mint a skeleton user row (name NULL) so an assignee/creator FK holds.
+    MINT_USER, 1,
+        "INSERT OR IGNORE INTO users (id) VALUES (?1)";
+
+    /// Mint a skeleton issue row (title NULL) so a parent or comment FK
+    /// holds, without clobbering an already-cached row.
+    MINT_ISSUE_SKELETON, 2,
+        "INSERT OR IGNORE INTO issues (id, identifier) VALUES (?1, ?2)";
+
+    /// Resolve a workflow state id to itself if cached, else NULL.
+    SELECT_STATE_ID_BY_ID, 1,
+        "SELECT id FROM workflow_states WHERE id = ?1";
+
+    /// Apply the optimistic edit's state onto the base `issues` row.
+    UPDATE_ISSUE_STATE, 2,
         "UPDATE issues SET state_id = ?1 WHERE id = ?2";
 
-    /// Apply an acked overlay's assignee onto the base `issues` row.
-    ACK_UPDATE_ASSIGNEE, 2,
+    /// Apply the optimistic edit's assignee onto the base `issues` row.
+    UPDATE_ISSUE_ASSIGNEE, 2,
         "UPDATE issues SET assignee_id = ?1 WHERE id = ?2";
 
-    /// Apply an acked overlay's priority onto the base `issues` row.
-    ACK_UPDATE_PRIORITY, 2,
+    /// Apply the optimistic edit's priority onto the base `issues` row.
+    UPDATE_ISSUE_PRIORITY, 2,
         "UPDATE issues SET priority_label = ?1 WHERE id = ?2";
 
-    /// Retire every overlay row for an issue once its command is acked.
-    DELETE_PENDING_OVERLAY_FOR_ENTITY, 1,
-        "DELETE FROM pending_overlay WHERE entity_id = ?1";
+    /// Re-stamp `synced_at` on an acked `issueUpdate` whose ack carried no
+    /// server issue (the in-place edit already stands).
+    ACK_ISSUE_UPDATE, 2,
+        "UPDATE issues SET synced_at = ?1 WHERE id = ?2";
 
-    /// Delete an issue row (used to drop the optimistic temp row on create-ack).
-    DELETE_ISSUE_BY_ID, 1,
-        "DELETE FROM issues WHERE id = ?1";
+    /// Attach a create-ack's server identity onto the optimistic row: the id
+    /// change cascades (`ON UPDATE CASCADE`) to every referrer.
+    ACK_ISSUE_CREATE, 16,
+        "UPDATE issues SET \
+            id = ?2, identifier = ?3, title = ?4, priority_label = ?5, description = ?6, \
+            created_at = ?7, updated_at = ?8, synced_at = ?9, parent_id = ?10, \
+            team_id = ?11, state_id = ?12, assignee_id = ?13, creator_id = ?14, \
+            project_id = ?15, cycle_id = ?16 \
+         WHERE id = ?1";
 
-    /// Delete a comment row by id (used to drop the optimistic temp row on
-    /// comment-create-ack).
-    DELETE_ISSUE_COMMENT_BY_ID, 1,
-        "DELETE FROM issue_comments WHERE id = ?1";
+    /// Attach a comment create-ack's server identity onto the optimistic row.
+    ACK_COMMENT_CREATE, 3,
+        "UPDATE issue_comments SET id = ?1, synced_at = ?2 WHERE id = ?3";
 
-    /// Record a failed drain attempt against a pending outbox command.
-    RECORD_ERROR, 2,
-        "UPDATE outbox SET attempts = attempts + 1, last_error = ?1 WHERE seq = ?2";
+    /// The current state/priority/assignee of a pending `issueUpdate`'s row,
+    /// for rebuilding its replay variables.
+    SELECT_ISSUE_REPLAY_ROW, 1,
+        "SELECT id, state_id, priority_label, assignee_id FROM issues WHERE id = ?1";
 
-    /// Retire an outbox command once its ack has been applied.
-    DELETE_COMMAND, 1,
-        "DELETE FROM outbox WHERE seq = ?1";
+    /// The current fields of a pending `issueCreate`'s row, for rebuilding
+    /// its replay variables.
+    SELECT_ISSUE_CREATE_REPLAY_ROW, 1,
+        "SELECT title, description, priority_label, team_id, state_id, assignee_id \
+         FROM issues WHERE id = ?1";
 
-    /// Insert or replace a comment row.
+    /// The current fields of a pending `commentCreate`'s row, for rebuilding
+    /// its replay variables.
+    SELECT_COMMENT_CREATE_REPLAY_ROW, 1,
+        "SELECT body, issue_id FROM issue_comments WHERE id = ?1";
+
+    /// Whether a pending `issueUpdate`'s own issue has synced (is sendable).
+    SENDABLE_ISSUE_UPDATE, 1,
+        "SELECT (synced_at IS NOT NULL) FROM issues WHERE id = ?1";
+
+    /// Whether an issue is present locally, as a full (not skeleton) row, but
+    /// not yet synced upstream. `title IS NOT NULL` excludes a skeleton row
+    /// minted only to anchor an FK (e.g. a comment's issue reference), which
+    /// also carries `synced_at IS NULL` but is not an optimistic create. A
+    /// missing id is not "locally unsynced" (`EXISTS` is false), distinct
+    /// from `SENDABLE_ISSUE_UPDATE`, which assumes the row exists.
+    ISSUE_IS_LOCALLY_UNSYNCED, 1,
+        "SELECT EXISTS(SELECT 1 FROM issues \
+         WHERE id = ?1 AND synced_at IS NULL AND title IS NOT NULL)";
+
+    /// Whether a pending `commentCreate`'s target issue has synced.
+    SENDABLE_COMMENT_CREATE, 1,
+        "SELECT (i.synced_at IS NOT NULL) FROM issue_comments c \
+         JOIN issues i ON i.id = c.issue_id WHERE c.id = ?1";
+
+    /// Whether a pending `issueCreate` has no locally-created (un-synced)
+    /// parent blocking it.
+    SENDABLE_ISSUE_CREATE, 1,
+        "SELECT NOT EXISTS ( \
+            SELECT 1 FROM issues child JOIN issues p ON p.id = child.parent_id \
+            WHERE child.id = ?1 AND p.synced_at IS NULL )";
+
+    /// Insert or replace a comment row. `ON CONFLICT DO UPDATE`, not `INSERT
+    /// OR REPLACE`: a REPLACE would cascade-delete via the issue FK's rowid
+    /// churn.
     UPSERT_COMMENT, 7,
-        "INSERT OR REPLACE INTO issue_comments \
+        "INSERT INTO issue_comments \
             (id, issue_id, body, user_id, created_at, updated_at, synced_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         ON CONFLICT(id) DO UPDATE SET \
+            issue_id = excluded.issue_id, body = excluded.body, user_id = excluded.user_id, \
+            created_at = excluded.created_at, updated_at = excluded.updated_at, \
+            synced_at = excluded.synced_at";
 
     /// A single issue's comments, oldest first, with author name joined in.
     QUERY_COMMENTS, 1,
@@ -356,9 +379,10 @@ statements! {
          WHERE ic.issue_id = ?1 \
          ORDER BY ic.created_at ASC";
 
-    /// Delete the synced comments of an issue, preserving un-acked `local:` rows.
+    /// Delete the synced comments of an issue, preserving un-acked
+    /// (`synced_at IS NULL`) rows.
     DELETE_COMMENTS_FOR_ISSUE, 1,
-        "DELETE FROM issue_comments WHERE issue_id = ?1 AND id NOT LIKE 'local:%'";
+        "DELETE FROM issue_comments WHERE issue_id = ?1 AND synced_at IS NOT NULL";
 
     /// Upsert one workflow state scoped to its team. Every caller -- a
     /// targeted team sync or an issue upsert's state fragment -- carries the
@@ -372,9 +396,10 @@ statements! {
             team_id = excluded.team_id, \
             position = excluded.position";
 
-    /// Every team, alphabetically by name.
+    /// Every team, alphabetically by name. A skeleton row (minted by a
+    /// state or issue FK, not yet named) is excluded.
     QUERY_TEAMS, 0,
-        "SELECT id, name FROM teams ORDER BY name";
+        "SELECT id, name FROM teams WHERE name IS NOT NULL ORDER BY name";
 
     /// A team's workflow states, carrying `position`, in Linear's stored
     /// order (ties broken by name).
@@ -467,13 +492,12 @@ fragments! {
     FRAG_ASSIGNEE_EQ, 1, "ua.name = ?";
     /// `assignee`, substring: case-insensitive match against the name.
     FRAG_ASSIGNEE_LOWER_LIKE, 1, "LOWER(COALESCE(ua.name,'')) LIKE ?";
-    /// `assignee`, null: no assignee (the overlay-effective id, not the base).
-    FRAG_NO_ASSIGNEE, 0, concat!(effective_assignee_id!(), " IS NULL");
+    /// `assignee`, null: no assignee.
+    FRAG_NO_ASSIGNEE, 0, "i.assignee_id IS NULL";
     /// `state`: case-insensitive substring match.
     FRAG_STATE_LOWER_LIKE, 1, "LOWER(s.name) LIKE ?";
-    /// `priority`: exact match against the normalised label (the
-    /// overlay-effective label, not the base).
-    FRAG_PRIORITY_EQ, 1, concat!(effective_priority_label!(), " = ?");
+    /// `priority`: exact match against the normalised label.
+    FRAG_PRIORITY_EQ, 1, "i.priority_label = ?";
     /// `title`: case-insensitive substring match.
     FRAG_TITLE_LIKE, 1, "i.title LIKE ?";
     /// `created_after`.
@@ -528,10 +552,8 @@ sort_cols! {
     SORT_CREATED_AT, "i.created_at";
     /// `sort:updated` / `--sort updated` (the default).
     SORT_UPDATED_AT, "i.updated_at";
-    /// `sort:priority` / `--sort priority` (the overlay-effective label, for
-    /// parity with `sort:state`/`sort:assignee`, which pick up the effective
-    /// value for free through their joined aliases).
-    SORT_PRIORITY_LABEL, effective_priority_label!();
+    /// `sort:priority` / `--sort priority`.
+    SORT_PRIORITY_LABEL, "i.priority_label";
     /// `sort:title` / `--sort title`.
     SORT_TITLE, "i.title";
     /// `sort:assignee` / `--sort assignee`.
@@ -568,10 +590,11 @@ pub(crate) fn select_issues(
         ""
     };
 
-    let mut clauses: Vec<&str> = Vec::with_capacity(conditions.len() + 1);
+    let mut clauses: Vec<&str> = Vec::with_capacity(conditions.len() + 2);
     if fts {
         clauses.push("issues_fts MATCH ?");
     }
+    clauses.push("i.title IS NOT NULL");
     clauses.extend(conditions.iter().map(|f| f.0));
     let where_sql = if clauses.is_empty() {
         String::new()

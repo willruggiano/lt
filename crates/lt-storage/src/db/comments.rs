@@ -1,17 +1,16 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use lt_types::comments::{Comment, CommentsQuery};
+use lt_types::comments::Comment;
 use lt_types::types::User;
 use rusqlite::{Connection, params};
 
-use crate::db::ops::Mutation;
 use crate::db::parse_datetime_column;
 use crate::db::sql::{self, EntityTable};
 
-/// Insert or replace a slice of comments: upsert each comment's author into
-/// the `users` table (relational storage, no more flattened `author_name`),
-/// then the comment row, stamping `synced_at` to now (UTC). Errors if a
-/// comment has no `issue_id` -- a comment reaching storage without one is a
+/// Insert or replace a slice of comments: mint the issue anchor so
+/// `issue_id`'s FK holds, upsert each comment's author into the `users`
+/// table, then the comment row, stamping `synced_at` to now (UTC). Errors if
+/// a comment has no `issue_id` -- a comment reaching storage without one is a
 /// bug, since `issue_comments` is keyed on it.
 pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
     let synced_at = Utc::now().to_rfc3339();
@@ -23,6 +22,7 @@ pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
             .issue_id
             .as_deref()
             .with_context(|| format!("comment {} has no issue id", c.id.inner()))?;
+        crate::db::issues::mint_issue_skeleton(conn, issue_id, None)?;
         if let Some(user) = &c.user {
             crate::db::issues::upsert_named_entity(
                 conn,
@@ -91,21 +91,8 @@ pub fn delete_comments_for_issue(conn: &Connection, issue_id: &str) -> Result<()
     )
 }
 
-impl Mutation for CommentsQuery {
-    /// Appends the page rather than replacing the set: this operation only
-    /// ever runs mid-pagination, in `lt-runtime`'s `IssueDetailQuery` refresh,
-    /// after that operation's own upsert has already replaced the set with
-    /// the first page. A delete-first here would wipe that page's inserts.
-    fn apply(conn: &Connection, _vars: &Self::Variables, out: &Self::Output) -> Result<()> {
-        upsert_comments(conn, &out.nodes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use lt_types::comments::{CommentConnection, CommentsVariables};
-    use lt_types::pagination::PageInfo;
-
     use super::*;
 
     fn comment(id: &str, issue_id: &str, created_at: &str) -> Comment {
@@ -206,16 +193,10 @@ mod tests {
         let conn = test_db();
         upsert_comments(&conn, &[comment("c1", "i1", "2026-01-01T00:00:00Z")]).unwrap();
 
-        let vars = CommentsVariables {
-            id: "i1".to_string(),
-            after: Some("cur".to_string()),
-        };
-        let page = CommentConnection {
-            nodes: vec![comment("c2", "i1", "2026-01-02T00:00:00Z")],
-            page_info: PageInfo::default(),
-        };
-
-        CommentsQuery::apply(&conn, &vars, &page).unwrap();
+        // A second page's fill is a plain upsert: it appends rather than
+        // replacing the set, since a delete-first here would wipe the
+        // previous page's inserts.
+        upsert_comments(&conn, &[comment("c2", "i1", "2026-01-02T00:00:00Z")]).unwrap();
 
         let rows = query_comments(&conn, "i1").unwrap();
         assert_eq!(

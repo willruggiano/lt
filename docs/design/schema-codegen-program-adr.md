@@ -48,7 +48,7 @@ rejected; the fragment is what we author, and codegen mechanizes the rest.
    FRAGMENTS  (the curated allowlist, type-safe, whole-schema reach)   ← SOURCE
         │ codegen follows from THESE types
         ├─ GraphqlOperation impl        (operation() + NAME)
-        ├─ Query / Mutation             (SQL projection over the selected fields)
+        ├─ Query / Fill / Mutation      (SQL projection over the selected fields)
         ├─ Operation impl               (ENG-67's execute dispatch)
         └─ search grammar               (from IssueFilter's fields)
 ```
@@ -76,23 +76,29 @@ local-cache behavior (hand-write):
   ([[unified-execute-adr.md]] Decision 5), the impl reduces to
   `operation() = Self::build` plus `NAME` — identical across all operations,
   pure boilerplate.
-- `Query`/`Mutation` (the two seam traits, [[unified-execute-adr.md]] Decision
-  2): the SELECT projects the fragment's selected columns; the write applies the
-  fragment's node types into their tables. The 6 reference-entity upserts
-  already share `entity_upsert_sql!`
+- `Query`/`Fill`/`Mutation` (the seam traits, [[unified-execute-adr.md]]
+  Decision 2): the SELECT projects the fragment's selected columns; the fill
+  applies the fragment's node types into their tables. The 6 reference-entity
+  upserts already share `entity_upsert_sql!`
   (`crates/lt-storage/src/db/sql.rs:138-147`); the row-mappers are
   macro-factored (`upsert_entities_fn!`, `teams.rs:35-63`). ~70% of the ~43
   registered statements are id-keyed CRUD of this shape.
-- The `Operation` impl and the outbox replay registry
+- The `Operation` impl and the op-log replay dispatch
   ([[unified-execute-adr.md]] Decisions 2, 4).
 - The search grammar, from `IssueFilter`'s fields.
 
 **A function of local-cache policy — hand-write, permanently:**
 
-- The overlay-merge read model: `COALESCE`/`CASE` effective-field expressions
-  (`sql.rs:53-133`), FTS join + `LIKE` fallback (`sql.rs:212-229`).
-- The outbox machinery: optimistic writes, temp-id rewrite, command coalescing,
-  replace-set deletes (`crates/lt-storage/src/db/outbox.rs`).
+- The read model: plain SELECTs over the collapsed fragment type
+  (`issue_columns!`/`issue_joins!`, `sql.rs`), the rowid-keyed FTS5 index with
+  title-guarded triggers and a `LIKE` fallback (`sql.rs`, `mod.rs`), and
+  mint-on-first-sighting skeleton rows — a referenced-but-unfetched parent
+  minted before its referrer, excluded from reads by the
+  `INNER JOIN workflow_states` and `WHERE title IS NOT NULL` guards.
+- The op-log machinery: optimistic in-place writes, the create-ack `id`-cascade
+  (SQLite `ON UPDATE CASCADE` carries a fabricated id to the server id across
+  every referrer), command coalescing, replace-set deletes, and the sendability
+  gate on `synced_at` (`crates/lt-storage/src/db/op_log.rs`).
 - Composed operations' bespoke wire→domain logic (the `From`/`TryFrom` impls
   that replace `extract`, [[unified-execute-adr.md]] Decision 5):
   `IssueDetailQuery`'s cursor derivation (`detail.rs:69-81`), `NewIssueQuery`'s
@@ -187,9 +193,9 @@ Ordered derive-the-shell → structural → net-new. Each is a future sub-issue.
   used to hold (`ViewerEnvelope -> Viewer`, the composed `IssueDetailData`)
   become `From`/`TryFrom` impls; the mutation success-gate moves to the write
   seam.
-- **T2 — `#[derive(Query)]`/`#[derive(Mutation)]`** for id-keyed reference
-  entities (team, user, project, cycle, label): the SELECT and the local write
-  from the fragment's selected node types. Excludes issues/comments (overlay,
+- **T2 — `#[derive(Query)]`/`#[derive(Fill)]`** for id-keyed reference entities
+  (team, user, project, cycle, label): the SELECT and the fetched-response write
+  from the fragment's selected node types. Excludes issues/comments (op-log,
   replace-set, FTS).
 - **T3 — the `Operation` impl + the replay registry**
   ([[unified-execute-adr.md]] Decisions 2, 4). Depends on ENG-67 landing them by
@@ -199,7 +205,7 @@ Ordered derive-the-shell → structural → net-new. Each is a future sub-issue.
   ([[linear-api-types-codegen.md]] deferred this) dies. Enables T5–T8.
 - **T5 — `IssueFilter`-directed grammar + SQL lowering**: the search grammar and
   the mechanical part of `filters.rs` derive from `IssueFilter` + per-field
-  metadata; the TOML is deleted. FTS and overlay-effective expressions stay
+  metadata; the TOML is deleted. FTS and the irreducible comparator policy stay
   hand-written.
 - **T6 — resolvable ID fields** (net-new): id comparators on the wire and in
   SQL, standalone name→id cache lookups (projects/cycles/labels are upserted
@@ -220,9 +226,10 @@ Ordered derive-the-shell → structural → net-new. Each is a future sub-issue.
 - **Generating the fragments/selection sets.** They are the source of truth. The
   whole-schema type generation [[linear-api-types-codegen.md]] rejected stays
   rejected.
-- **Generating policy-shaped SQL.** Overlay merge, FTS, temp-id rewrite,
-  composed-op cursor pagination, and the irreducible comparator policy are a
-  function of local-cache behavior, not of the types.
+- **Generating policy-shaped SQL.** The op-log write path (in-place writes, the
+  create-ack `id`-cascade, the sendability gate), the rowid-keyed FTS,
+  composed-op cursor pagination, mint-on-first-sighting, and the irreducible
+  comparator policy are a function of local-cache behavior, not of the types.
 - **`NotificationsQuery` / the inbox**, consistent with
   [[operation-seam-adr.md]]'s Notifications non-goal, until a cache table
   exists.

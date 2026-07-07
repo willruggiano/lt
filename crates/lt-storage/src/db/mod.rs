@@ -1,9 +1,7 @@
 pub mod comments;
-pub mod detail;
 pub mod filters;
 pub mod issues;
-pub mod ops;
-pub mod outbox;
+pub mod op_log;
 pub(crate) mod sql;
 pub mod teams;
 pub mod viewer;
@@ -14,10 +12,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 pub use comments::{delete_comments_for_issue, query_comments, upsert_comments};
 pub use issues::{
-    count_fts_rows, count_issues, get_meta, query_children, query_issue_by_id, query_issues,
-    search_issues, search_issues_like, set_meta, upsert_issues,
+    count_fts_rows, count_issues, get_meta, issue_is_locally_unsynced, query_children,
+    query_issue_by_id, query_issues, search_issues, search_issues_like, set_meta, upsert_issues,
 };
-pub use ops::{AckContext, Mutation, Query};
 pub use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 pub use teams::{
@@ -201,6 +198,134 @@ const MIGRATION_3: &str = "\
 const MIGRATION_4: &str = "\
     UPDATE workflow_states SET position = 0 WHERE position IS NULL;";
 
+/// Identity + op-log reset. The cache is a disposable replica; the only
+/// non-refetchable state (un-acked local edits) lived in the tables this drops,
+/// so a reset is correct. Foreign keys join on `id` (TEXT); `ON UPDATE CASCADE`
+/// carries a create-ack's `UPDATE issues SET id=…` to every referrer. Old
+/// (M1-M4) tables carry no FK constraints, so drop order is unconstrained; the
+/// new CREATEs are parent-before-child.
+const MIGRATION_5: &str = "\
+    DROP TRIGGER IF EXISTS issues_ai;
+    DROP TRIGGER IF EXISTS issues_ad;
+    DROP TRIGGER IF EXISTS issues_au;
+    DROP TABLE   IF EXISTS issues_fts;
+    DROP TABLE   IF EXISTS pending_overlay;
+    DROP TABLE   IF EXISTS outbox;
+    DROP TABLE   IF EXISTS issue_labels;
+    DROP TABLE   IF EXISTS issue_comments;
+    DROP TABLE   IF EXISTS team_memberships;
+    DROP TABLE   IF EXISTS workflow_states;
+    DROP TABLE   IF EXISTS issues;
+    DROP TABLE   IF EXISTS teams;
+    DROP TABLE   IF EXISTS users;
+    DROP TABLE   IF EXISTS projects;
+    DROP TABLE   IF EXISTS cycles;
+    DROP TABLE   IF EXISTS labels;
+    DROP TABLE   IF EXISTS organizations;
+    DROP TABLE   IF EXISTS sync_meta;
+
+    CREATE TABLE teams    (id TEXT PRIMARY KEY, name TEXT);
+    CREATE TABLE users    (id TEXT PRIMARY KEY, name TEXT);
+    CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT);
+    CREATE TABLE cycles   (id TEXT PRIMARY KEY, name TEXT);
+    CREATE TABLE labels   (id TEXT PRIMARY KEY, name TEXT);
+
+    CREATE TABLE workflow_states (
+        id       TEXT PRIMARY KEY,
+        name     TEXT,
+        team_id  TEXT REFERENCES teams(id) ON UPDATE CASCADE,
+        position REAL
+    );
+    CREATE INDEX idx_workflow_states_team_id ON workflow_states (team_id);
+
+    CREATE TABLE issues (
+        id             TEXT PRIMARY KEY,
+        identifier     TEXT,
+        title          TEXT,
+        priority_label TEXT,
+        description    TEXT,
+        created_at     TEXT,
+        updated_at     TEXT,
+        synced_at      TEXT,
+        parent_id      TEXT REFERENCES issues(id)          ON UPDATE CASCADE ON DELETE SET NULL,
+        team_id        TEXT REFERENCES teams(id)           ON UPDATE CASCADE,
+        state_id       TEXT REFERENCES workflow_states(id) ON UPDATE CASCADE,
+        assignee_id    TEXT REFERENCES users(id)           ON UPDATE CASCADE,
+        creator_id     TEXT REFERENCES users(id)           ON UPDATE CASCADE,
+        project_id     TEXT REFERENCES projects(id)        ON UPDATE CASCADE,
+        cycle_id       TEXT REFERENCES cycles(id)          ON UPDATE CASCADE
+    );
+    CREATE INDEX idx_issues_team_id    ON issues (team_id);
+    CREATE INDEX idx_issues_state_id   ON issues (state_id);
+    CREATE INDEX idx_issues_team_state ON issues (team_id, state_id);
+    CREATE INDEX idx_issues_parent_id  ON issues (parent_id);
+    CREATE INDEX idx_issues_updated_at ON issues (updated_at);
+
+    CREATE VIRTUAL TABLE issues_fts USING fts5(
+        identifier,
+        title,
+        content='issues',
+        content_rowid='rowid'
+    );
+    CREATE TRIGGER issues_ai AFTER INSERT ON issues WHEN new.title IS NOT NULL BEGIN
+        INSERT INTO issues_fts(rowid, identifier, title)
+        VALUES (new.rowid, new.identifier, new.title);
+    END;
+    CREATE TRIGGER issues_ad AFTER DELETE ON issues WHEN old.title IS NOT NULL BEGIN
+        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
+        VALUES ('delete', old.rowid, old.identifier, old.title);
+    END;
+    CREATE TRIGGER issues_au_del AFTER UPDATE ON issues WHEN old.title IS NOT NULL BEGIN
+        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
+        VALUES ('delete', old.rowid, old.identifier, old.title);
+    END;
+    CREATE TRIGGER issues_au_ins AFTER UPDATE ON issues WHEN new.title IS NOT NULL BEGIN
+        INSERT INTO issues_fts(rowid, identifier, title)
+        VALUES (new.rowid, new.identifier, new.title);
+    END;
+
+    CREATE TABLE issue_comments (
+        id         TEXT PRIMARY KEY,
+        issue_id   TEXT NOT NULL REFERENCES issues(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        body       TEXT NOT NULL,
+        user_id    TEXT REFERENCES users(id) ON UPDATE CASCADE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        synced_at  TEXT
+    );
+    CREATE INDEX idx_issue_comments_issue_id   ON issue_comments (issue_id);
+    CREATE INDEX idx_issue_comments_created_at ON issue_comments (issue_id, created_at);
+
+    CREATE TABLE issue_labels (
+        issue_id TEXT NOT NULL REFERENCES issues(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        label_id TEXT NOT NULL REFERENCES labels(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        PRIMARY KEY (issue_id, label_id)
+    );
+    CREATE INDEX idx_issue_labels_label_id ON issue_labels (label_id);
+
+    CREATE TABLE team_memberships (
+        team_id TEXT NOT NULL REFERENCES teams(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        PRIMARY KEY (team_id, user_id)
+    );
+
+    CREATE TABLE organizations (
+        id      TEXT PRIMARY KEY,
+        name    TEXT,
+        url_key TEXT
+    );
+
+    CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+    CREATE TABLE op_log (
+        seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation  TEXT NOT NULL,
+        id         TEXT NOT NULL,
+        attempts   INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT
+    );
+    CREATE INDEX idx_op_log_operation_id ON op_log (operation, id);";
+
 /// The migration list: the single schema source for both `open_db()` and the
 /// `sql_validation` gate (docs/design/type-safe-sql-adr.md, "Migrations").
 fn migrations() -> Migrations<'static> {
@@ -209,6 +334,7 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_2),
         M::up(MIGRATION_3),
         M::up(MIGRATION_4),
+        M::up(MIGRATION_5),
     ])
 }
 
@@ -253,6 +379,8 @@ pub fn open_db(uri: impl AsRef<Path>) -> Result<Connection> {
     // immediately with SQLITE_BUSY.
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .context("failed to set busy timeout")?;
+    conn.pragma_update(None, "foreign_keys", true)
+        .context("failed to enable foreign key enforcement")?;
     run_migrations(&mut conn, uri)?;
     Ok(conn)
 }
@@ -337,7 +465,7 @@ mod tests {
             },
         )
         .unwrap();
-        upsert_issues(&conn, &[outbox::sample_base_issue("9")]).unwrap();
+        upsert_issues(&conn, &[op_log::sample_base_issue("9")]).unwrap();
 
         let found = query_issue_by_id(&conn, "9").unwrap().unwrap();
         assert_eq!(found.identifier, "ENG-9");

@@ -1,8 +1,7 @@
-//! The per-issue comment thread query and the `commentCreate` mutation,
-//! modelled as cynic `QueryFragment`s. These are the shared "currency" types;
-//! the fetch/replay lives in `lt-upstream`, and `lt-storage` reconstructs the
-//! same [`Comment`] from its relational joins -- there is one `Comment` type,
-//! not a wire projection plus a mirrored domain type.
+//! The per-issue comment thread query and the `commentCreate` mutation. This
+//! module's [`Comment`]/[`CommentConnection`] decode straight off the wire;
+//! `lt-storage` also reconstructs [`Comment`] directly from its relational
+//! joins.
 
 use cynic::{MutationBuilder, QueryBuilder};
 

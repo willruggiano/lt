@@ -1,4 +1,6 @@
-//! The shared entity fragment types and the GraphQL response envelope.
+//! The shared entity types: cynic `QueryFragment`s that decode off the Linear
+//! API and double as the domain/storage/render types. The GraphQL response
+//! envelope also lives here since it is transport-level, not an entity.
 
 use serde::Deserialize;
 
@@ -23,7 +25,7 @@ pub struct IssueLabel {
     pub name: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "Issue")]
 pub struct Parent {
     pub id: cynic::Id,
@@ -47,21 +49,21 @@ pub struct User {
     pub name: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "Team")]
 pub struct Team {
     pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "Project")]
 pub struct Project {
     pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "Cycle")]
 pub struct Cycle {
     pub id: cynic::Id,
@@ -75,7 +77,7 @@ pub struct IssueLabelConnection {
     pub nodes: Vec<IssueLabel>,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cynic(graphql_type = "Issue")]
 pub struct Issue {
     pub id: cynic::Id,

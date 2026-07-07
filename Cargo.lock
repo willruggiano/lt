@@ -1455,7 +1455,6 @@ dependencies = [
  "lt-types",
  "lt-upstream",
  "rusqlite",
- "serde",
  "serde_json",
  "tracing",
  "ureq",
@@ -1491,7 +1490,6 @@ dependencies = [
  "rand 0.10.2",
  "rusqlite",
  "rusqlite_migration",
- "serde_json",
  "toml",
  "tracing",
 ]

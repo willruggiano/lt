@@ -46,7 +46,7 @@ impl TransportSource for HttpTransportSource {
 
 /// A one-shot upstream refresh, erased by [`Runtime::refresh`] into a thunk
 /// the loop runs once (docs/design/unified-execute-adr.md, "Decision 3"):
-/// fetch via `client::execute`, apply via `Mutation`.
+/// fetch via `client::execute`, apply via `Fill`.
 type RefreshThunk = Box<dyn FnOnce(&Connection, &dyn GraphqlTransport) -> Result<()> + Send>;
 
 /// A command sent through the runtime's internal channel: the public methods
@@ -263,7 +263,7 @@ impl Runtime {
 
     /// Best-effort viewer identity via the injected transport source, for the
     /// login worker's direct report (`LoginEvent::Success`, not a cache
-    /// read). Ordinary sync cycles persist the viewer through the `Mutation`
+    /// read). Ordinary sync cycles persist the viewer through the `Fill`
     /// seam instead (`sync::persist_viewer`); the header re-executes
     /// `ViewerQuery` on every `Update` and picks that up.
     fn viewer_identity(&self) -> Option<viewer::Viewer> {
@@ -306,7 +306,7 @@ impl Runtime {
     }
 
     /// Trigger a one-shot background upstream refresh of `Op`, applied into
-    /// the cache via its `Mutation` impl, then emit `Update` on success --
+    /// the cache via its `Fill` impl, then emit `Update` on success --
     /// the freshness a composed view (Detail, `NewIssue`, a state/assignee
     /// picker) needs when it opens (docs/design/unified-execute-adr.md,
     /// "Decision 3"). The issues list stays covered by the periodic delta
@@ -780,6 +780,16 @@ mod tests {
         let db = Database::memory().unwrap();
         {
             let conn = db.connect().unwrap();
+            // The team itself must already be cached (`enqueue_issue_create`
+            // only mints a nameless skeleton row for an uncached team id).
+            db::upsert_teams(
+                &conn,
+                &[types::Team {
+                    id: "t1".into(),
+                    name: "Eng".to_string(),
+                }],
+            )
+            .unwrap();
             // The optimistic create defaults to the team's first cached state
             // (sync owns workflow states; issue upserts never write them).
             db::upsert_team_state(
@@ -813,7 +823,7 @@ mod tests {
         let issue = runtime
             .execute::<IssueCreateMutation>(IssueCreateVariables { input })
             .unwrap();
-        assert_eq!(issue.identifier, db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER);
+        assert_eq!(issue.identifier, db::op_log::OPTIMISTIC_ISSUE_IDENTIFIER);
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Update));
@@ -825,23 +835,7 @@ mod tests {
 
     #[test]
     fn create_comment_emits_update_and_a_reexecute_of_the_detail_sees_it() {
-        let db = Database::memory().unwrap();
-        {
-            let conn = db.connect().unwrap();
-            // `sample_base_issue`'s state must already be locally known (sync
-            // owns workflow states; issue upserts never write them).
-            db::upsert_team_state(
-                &conn,
-                "ENG",
-                &types::WorkflowState {
-                    id: "s-todo".into(),
-                    name: "Todo".to_string(),
-                    position: 1.0,
-                },
-            )
-            .unwrap();
-            db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
-        }
+        let db = db_with_a_todo_issue("issue-1");
         let (runtime, rx) = runtime_over(db);
         let detail_vars = lt_types::detail::IssueDetailVariables {
             id: "issue-1".to_string(),
@@ -880,23 +874,7 @@ mod tests {
     fn update_issue_emits_a_single_unscoped_update() {
         // `Update` is unscoped: it carries no entity id, so any write's
         // signal is indistinguishable from any other's.
-        let db = Database::memory().unwrap();
-        {
-            let conn = db.connect().unwrap();
-            // `sample_base_issue`'s state must already be locally known (sync
-            // owns workflow states; issue upserts never write them).
-            db::upsert_team_state(
-                &conn,
-                "ENG",
-                &types::WorkflowState {
-                    id: "s-todo".into(),
-                    name: "Todo".to_string(),
-                    position: 1.0,
-                },
-            )
-            .unwrap();
-            db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
-        }
+        let db = db_with_a_todo_issue("issue-1");
         let (runtime, rx) = runtime_over(db);
 
         let updated = runtime
@@ -1127,7 +1105,7 @@ mod tests {
             },
         )
         .unwrap();
-        db::upsert_issues(&conn, &[db::outbox::sample_base_issue(id)]).unwrap();
+        db::upsert_issues(&conn, &[db::op_log::sample_base_issue(id)]).unwrap();
         db
     }
 
@@ -1178,11 +1156,7 @@ mod tests {
 
         let conn = runtime.connect().unwrap();
         let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM outbox WHERE status = 'pending'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM op_log", [], |r| r.get(0))
             .unwrap();
         assert_eq!(pending, 0);
         let priority_label: String = conn
@@ -1221,7 +1195,7 @@ mod tests {
         let conn = runtime.connect().unwrap();
         let (attempts, last_error): (i64, Option<String>) = conn
             .query_row(
-                "SELECT attempts, last_error FROM outbox WHERE entity_id = 'issue-1'",
+                "SELECT attempts, last_error FROM op_log WHERE id = 'issue-1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )

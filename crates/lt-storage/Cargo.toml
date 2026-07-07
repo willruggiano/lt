@@ -19,7 +19,6 @@ chrono.workspace = true
 dirs.workspace = true
 rand.workspace = true
 rusqlite.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 chumsky = "0.13"
 fake = { version = "5.1.0", default-features = false, optional = true }
