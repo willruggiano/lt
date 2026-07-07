@@ -23,6 +23,10 @@ pub struct FragmentField {
     pub base_type: String,
     pub nullable: bool,
     pub list: bool,
+    /// The names of every `#[cynic(...)]` meta item on this field (e.g.
+    /// `["rename"]`, `["flatten"]`), so callers can reject selection shapes
+    /// they do not model.
+    pub cynic_attrs: Vec<String>,
 }
 
 /// Parse fragment source text and extract every struct deriving
@@ -89,6 +93,7 @@ fn parse_field(field: &Field) -> syn::Result<FragmentField> {
 
     let gql_field =
         attr_str_value(&field.attrs, "rename")?.unwrap_or_else(|| to_camel_case(&rust_ident));
+    let cynic_attrs = attr_cynic_names(&field.attrs)?;
 
     let (nullable, ty) = strip_wrapper(&field.ty, "Option");
     let (list, ty) = strip_wrapper(ty, "Vec");
@@ -100,6 +105,7 @@ fn parse_field(field: &Field) -> syn::Result<FragmentField> {
         base_type,
         nullable,
         list,
+        cynic_attrs,
     })
 }
 
@@ -119,6 +125,25 @@ fn attr_str_value(attrs: &[Attribute], key: &str) -> syn::Result<Option<String>>
         })?;
     }
     Ok(found)
+}
+
+/// The meta-item names of every `#[cynic(...)]` attribute on `attrs` (e.g.
+/// `rename`, `flatten`, `spread`, `recurse`), in source order.
+fn attr_cynic_names(attrs: &[Attribute]) -> syn::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("cynic") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            names.push(meta.path.require_ident()?.to_string());
+            if meta.input.peek(syn::Token![=]) {
+                let _: syn::Expr = meta.value()?.parse()?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(names)
 }
 
 /// Strip a leading `wrapper<_>` (e.g. `Option` or `Vec`) from `ty`, returning
@@ -208,6 +233,8 @@ mod tests {
         struct Custom {
             #[cynic(rename = "customName")]
             pub custom_field: Option<Vec<Label>>,
+            #[cynic(flatten)]
+            pub extra: Vec<Label>,
         }
     "#;
 
@@ -240,6 +267,7 @@ mod tests {
         assert_eq!(priority_label.base_type, "String");
         assert!(!priority_label.nullable);
         assert!(!priority_label.list);
+        assert!(priority_label.cynic_attrs.is_empty());
 
         assert_eq!(
             field(&fragments, "Issue", "created_at").gql_field,
@@ -273,6 +301,14 @@ mod tests {
         assert!(custom.nullable);
         assert!(custom.list);
         assert_eq!(custom.base_type, "Label");
+        assert_eq!(custom.cynic_attrs, vec!["rename".to_string()]);
+    }
+
+    #[test]
+    fn parse_fragments_extracts_non_rename_cynic_attrs() {
+        let fragments = parse_fragments(FIXTURE).expect("fixture parses");
+        let extra = field(&fragments, "Custom", "extra");
+        assert_eq!(extra.cynic_attrs, vec!["flatten".to_string()]);
     }
 
     #[test]

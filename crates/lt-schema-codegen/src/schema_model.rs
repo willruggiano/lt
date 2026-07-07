@@ -20,6 +20,40 @@ impl Schema {
             _ => None,
         })
     }
+
+    /// The schema-level kind of the named type, if it is defined.
+    ///
+    /// GraphQL's five built-in scalars (`String`, `Int`, `Float`, `Boolean`,
+    /// `ID`) are never `scalar`-declared in SDL -- confirmed against
+    /// `build/linear-schema-definition.graphql`, which declares only its
+    /// custom scalars (`DateTime`, `JSON`, `UUID`, ...) -- so they are
+    /// recognised without a document lookup.
+    pub fn type_kind(&self, name: &str) -> Option<TypeKind> {
+        if is_builtin_scalar(name) {
+            return Some(TypeKind::Scalar);
+        }
+        self.0.definitions().find_map(|def| match def.as_type()? {
+            TypeDefinition::Scalar(scalar) if scalar.name() == name => Some(TypeKind::Scalar),
+            TypeDefinition::Enum(enum_def) if enum_def.name() == name => Some(TypeKind::Enum),
+            TypeDefinition::Object(obj) if obj.name() == name => Some(TypeKind::Object {
+                implements_node: obj.implements_interfaces().any(|iface| iface == "Node"),
+            }),
+            _ => None,
+        })
+    }
+}
+
+fn is_builtin_scalar(name: &str) -> bool {
+    matches!(name, "String" | "Int" | "Float" | "Boolean" | "ID")
+}
+
+/// The schema-level kind of a named type, as needed to classify a fragment
+/// field's storage role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeKind {
+    Scalar,
+    Enum,
+    Object { implements_node: bool },
 }
 
 /// A single GraphQL object type definition.
@@ -42,7 +76,7 @@ impl<'a> Object<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::Schema;
+    use super::{Schema, TypeKind};
 
     const SDL: &str = r"
         interface Node {
@@ -58,6 +92,13 @@ mod tests {
 
         type Comment {
             id: ID!
+        }
+
+        scalar DateTime
+
+        enum Priority {
+            LOW
+            HIGH
         }
     ";
 
@@ -93,6 +134,28 @@ mod tests {
                 .expect("Comment object present")
                 .implements_node()
         );
+    }
+
+    #[test]
+    fn type_kind_identifies_scalar_enum_and_object() {
+        let schema = Schema::parse(SDL).expect("SDL parses");
+        assert_eq!(schema.type_kind("DateTime"), Some(TypeKind::Scalar));
+        assert_eq!(schema.type_kind("Priority"), Some(TypeKind::Enum));
+        assert_eq!(schema.type_kind("String"), Some(TypeKind::Scalar));
+        assert_eq!(schema.type_kind("ID"), Some(TypeKind::Scalar));
+        assert_eq!(
+            schema.type_kind("Issue"),
+            Some(TypeKind::Object {
+                implements_node: true
+            })
+        );
+        assert_eq!(
+            schema.type_kind("Comment"),
+            Some(TypeKind::Object {
+                implements_node: false
+            })
+        );
+        assert_eq!(schema.type_kind("Nonexistent"), None);
     }
 
     #[test]
