@@ -1,13 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use lt_types::issues::{IssueConnection, IssuesQuery, IssuesVariables};
+use lt_types::issues::{IssueConnection, IssuesVariables};
 use lt_types::pagination::PageInfo;
 use lt_types::query::{SortDirection, SortField};
 use lt_types::scalars::Priority;
 use lt_types::types;
 use rusqlite::{Connection, params};
 
-use crate::db::ops::{Mutation, Query};
 use crate::db::parse_datetime_column;
 use crate::db::sql::{self, BindParams, EntityTable, Sql};
 
@@ -398,20 +397,6 @@ pub fn count_fts_rows(conn: &Connection) -> Result<i64> {
     count_rows(conn, sql::COUNT_FTS_ROWS, "count fts rows")
 }
 
-impl Query for IssuesQuery {
-    fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
-        query_issues(conn, vars)
-    }
-}
-
-impl Mutation for IssuesQuery {
-    /// An issue upsert also writes its referenced team and workflow-state
-    /// rows (`upsert_issue_tx`).
-    fn apply(conn: &Connection, _vars: &Self::Variables, out: &Self::Output) -> Result<()> {
-        upsert_issues(conn, &out.nodes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,13 +772,13 @@ mod tests {
     #[test]
     fn read_model_merges_pending_overlay_over_base() {
         use lt_types::inputs::{Field, IssueUpdateInput};
-        use lt_types::issues::{IssueUpdateMutation, IssueUpdateVariables};
+        use lt_types::issues::IssueUpdateVariables;
 
-        use crate::db::ops::Mutation;
+        use crate::db::outbox::enqueue_issue_update;
 
         let conn = graph_db();
         // The state a picker offers is already cached by that picker's own
-        // `Mutation` (`TeamStatesQuery`); mirror that precondition here.
+        // `Fill` (`TeamStatesQuery`); mirror that precondition here.
         crate::db::teams::upsert_team_state(
             &conn,
             "ENG",
@@ -807,7 +792,7 @@ mod tests {
 
         // Enqueue a state + assignee-clear edit; the read model must render the
         // overlay values, not the base.
-        IssueUpdateMutation::enqueue(
+        enqueue_issue_update(
             &conn,
             IssueUpdateVariables {
                 id: "1".to_string(),
@@ -818,7 +803,7 @@ mod tests {
             },
         )
         .unwrap();
-        IssueUpdateMutation::enqueue(
+        enqueue_issue_update(
             &conn,
             IssueUpdateVariables {
                 id: "1".to_string(),
@@ -856,15 +841,15 @@ mod tests {
     #[test]
     fn state_filter_matches_an_issue_whose_overlay_moved_it_into_the_filtered_state() {
         use lt_types::inputs::IssueUpdateInput;
-        use lt_types::issues::{IssueUpdateMutation, IssueUpdateVariables};
+        use lt_types::issues::IssueUpdateVariables;
 
-        use crate::db::ops::Mutation;
+        use crate::db::outbox::enqueue_issue_update;
 
         let conn = graph_db();
         // The issue's base state is "In Progress" (graph_db/sample_api_issue);
         // a state overlay moves it to "Done".
         seed_state(&conn, "ENG", "Done", 2.0);
-        IssueUpdateMutation::enqueue(
+        enqueue_issue_update(
             &conn,
             IssueUpdateVariables {
                 id: "1".to_string(),
@@ -944,12 +929,6 @@ mod tests {
         // The invariant this reports on: sync established the state before
         // the issue page lands.
         seed_state(&conn, "ENG", "Todo", 1.0);
-        let vars = IssuesVariables {
-            filter: None,
-            sort: None,
-            first: None,
-            after: None,
-        };
         let out = IssueConnection {
             nodes: vec![test_issue("1", Some("Alice"), "Todo")],
             page_info: PageInfo {
@@ -957,7 +936,7 @@ mod tests {
                 end_cursor: None,
             },
         };
-        IssuesQuery::apply(&conn, &vars, &out).unwrap();
+        upsert_issues(&conn, &out.nodes).unwrap();
         assert_eq!(
             query_issue_by_id(&conn, "1").unwrap().unwrap().id.inner(),
             "1"
@@ -967,12 +946,6 @@ mod tests {
     #[test]
     fn issues_query_apply_of_an_empty_page_is_a_noop() {
         let conn = crate::db::Database::memory().unwrap().connect().unwrap();
-        let vars = IssuesVariables {
-            filter: None,
-            sort: None,
-            first: None,
-            after: None,
-        };
         let out = IssueConnection {
             nodes: Vec::new(),
             page_info: PageInfo {
@@ -980,7 +953,7 @@ mod tests {
                 end_cursor: None,
             },
         };
-        IssuesQuery::apply(&conn, &vars, &out).unwrap();
+        upsert_issues(&conn, &out.nodes).unwrap();
         assert_eq!(count_issues(&conn).unwrap(), 0);
     }
 }

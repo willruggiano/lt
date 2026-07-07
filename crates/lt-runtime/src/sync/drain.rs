@@ -8,13 +8,14 @@
 
 use anyhow::{Result, bail};
 use lt_storage::db::outbox::{self, PendingOp};
-use lt_storage::db::{AckContext, Mutation};
 use lt_types::comments::CommentCreateMutation;
 use lt_types::graphql::GraphqlOperation;
 use lt_types::issues::{IssueCreateMutation, IssueUpdateMutation};
 use lt_upstream::client::{GraphqlTransport, execute};
 use rusqlite::Connection;
 use serde::de::DeserializeOwned;
+
+use crate::ops::{AckContext, Mutation};
 
 /// Replay every pending outbox command, recording (not aborting on)
 /// per-command failures so a single bad command never aborts the

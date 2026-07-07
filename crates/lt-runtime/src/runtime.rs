@@ -46,7 +46,7 @@ impl TransportSource for HttpTransportSource {
 
 /// A one-shot upstream refresh, erased by [`Runtime::refresh`] into a thunk
 /// the loop runs once (docs/design/unified-execute-adr.md, "Decision 3"):
-/// fetch via `client::execute`, apply via `Mutation`.
+/// fetch via `client::execute`, apply via `Fill`.
 type RefreshThunk = Box<dyn FnOnce(&Connection, &dyn GraphqlTransport) -> Result<()> + Send>;
 
 /// A command sent through the runtime's internal channel: the public methods
@@ -263,7 +263,7 @@ impl Runtime {
 
     /// Best-effort viewer identity via the injected transport source, for the
     /// login worker's direct report (`LoginEvent::Success`, not a cache
-    /// read). Ordinary sync cycles persist the viewer through the `Mutation`
+    /// read). Ordinary sync cycles persist the viewer through the `Fill`
     /// seam instead (`sync::persist_viewer`); the header re-executes
     /// `ViewerQuery` on every `Update` and picks that up.
     fn viewer_identity(&self) -> Option<viewer::Viewer> {
@@ -306,7 +306,7 @@ impl Runtime {
     }
 
     /// Trigger a one-shot background upstream refresh of `Op`, applied into
-    /// the cache via its `Mutation` impl, then emit `Update` on success --
+    /// the cache via its `Fill` impl, then emit `Update` on success --
     /// the freshness a composed view (Detail, `NewIssue`, a state/assignee
     /// picker) needs when it opens (docs/design/unified-execute-adr.md,
     /// "Decision 3"). The issues list stays covered by the periodic delta

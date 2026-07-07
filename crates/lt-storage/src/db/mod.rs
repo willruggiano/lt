@@ -1,8 +1,6 @@
 pub mod comments;
-pub mod detail;
 pub mod filters;
 pub mod issues;
-pub mod ops;
 pub mod outbox;
 pub(crate) mod sql;
 pub mod teams;
@@ -17,7 +15,6 @@ pub use issues::{
     count_fts_rows, count_issues, get_meta, query_children, query_issue_by_id, query_issues,
     search_issues, search_issues_like, set_meta, upsert_issues,
 };
-pub use ops::{AckContext, Mutation, Query};
 pub use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 pub use teams::{

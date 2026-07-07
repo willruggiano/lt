@@ -5,8 +5,8 @@
 //! `pending_overlay` (so the read model renders it immediately) and a command
 //! into `outbox`, both in one transaction. The sync drainer is the
 //! single writer that replays the outbox against the API and reconciles the
-//! base on success. [`Mutation`] binds each mutation operation to that local
-//! effect and its ack, alongside a query operation's fetched-response write
+//! base on success. Each `enqueue_*`/`ack_*` pair here backs one outbox
+//! mutation operation's `lt_runtime::ops::Mutation` impl
 //! (docs/design/unified-execute-adr.md, "Decision 2").
 
 use anyhow::{Context, Result};
@@ -22,7 +22,6 @@ use lt_types::types;
 use rusqlite::{Connection, params};
 use serde_json::json;
 
-use crate::db::ops::{AckContext, Mutation};
 use crate::db::sql;
 
 /// The optimistic identifier every locally-created issue carries until the
@@ -170,90 +169,88 @@ fn refresh_issue_update_command(tx: &Connection, issue_id: &str) -> Result<()> {
 // IssueUpdateMutation
 // ---------------------------------------------------------------------------
 
-impl Mutation for IssueUpdateMutation {
-    /// Overlay whichever of `vars.input`'s fields are set -- the id/name join
-    /// each field resolves through is already cached, since every id offered
-    /// by a picker came from that same picker's own `Mutation::apply` -- then rebuild
-    /// the coalesced command from every overlay row the issue carries (not
-    /// just this one), so repeated edits collapse into a single pending
-    /// `issueUpdate`.
-    fn enqueue(conn: &Connection, vars: IssueUpdateVariables) -> Result<String> {
-        let tx = conn.unchecked_transaction()?;
-        if let Some(state_id) = &vars.input.state_id {
-            set_overlay(&tx, &vars.id, OverlayField::State, Some(state_id))?;
-        }
-        if let Some(priority) = vars.input.priority {
-            let label = Priority(u8::try_from(priority).unwrap_or(0)).label();
-            set_overlay(&tx, &vars.id, OverlayField::Priority, Some(label))?;
-        }
-        match &vars.input.assignee_id {
-            Field::Value(id) => set_overlay(&tx, &vars.id, OverlayField::Assignee, Some(id))?,
-            Field::Null => set_overlay(&tx, &vars.id, OverlayField::Assignee, None)?,
-            Field::Absent => {}
-        }
-        refresh_issue_update_command(&tx, &vars.id)?;
-        tx.commit().context("failed to commit issue update")?;
-        Ok(vars.id)
+/// Overlay whichever of `vars.input`'s fields are set -- the id/name join
+/// each field resolves through is already cached, since every id offered
+/// by a picker came from that same picker's own `Fill::fill` -- then rebuild
+/// the coalesced command from every overlay row the issue carries (not
+/// just this one), so repeated edits collapse into a single pending
+/// `issueUpdate`.
+pub fn enqueue_issue_update(conn: &Connection, vars: IssueUpdateVariables) -> Result<String> {
+    let tx = conn.unchecked_transaction()?;
+    if let Some(state_id) = &vars.input.state_id {
+        set_overlay(&tx, &vars.id, OverlayField::State, Some(state_id))?;
     }
+    if let Some(priority) = vars.input.priority {
+        let label = Priority(u8::try_from(priority).unwrap_or(0)).label();
+        set_overlay(&tx, &vars.id, OverlayField::Priority, Some(label))?;
+    }
+    match &vars.input.assignee_id {
+        Field::Value(id) => set_overlay(&tx, &vars.id, OverlayField::Assignee, Some(id))?,
+        Field::Null => set_overlay(&tx, &vars.id, OverlayField::Assignee, None)?,
+        Field::Absent => {}
+    }
+    refresh_issue_update_command(&tx, &vars.id)?;
+    tx.commit().context("failed to commit issue update")?;
+    Ok(vars.id)
+}
 
-    /// Apply a confirmed issue update to the base and retire its overlay +
-    /// command, atomically. When the server returned the updated issue
-    /// (nullable in the schema even on success), its fields become the new
-    /// base truth via a full upsert; otherwise falls back to applying the
-    /// overlay's per-field intent, as before. Either way the read model never
-    /// flickers back to the pre-edit value.
-    fn ack(
-        conn: &Connection,
-        ctx: AckContext<'_, IssueUpdateVariables>,
-        out: Option<types::Issue>,
-    ) -> Result<()> {
-        let AckContext { seq, entity_id, .. } = ctx;
-        let tx = conn.unchecked_transaction()?;
-        if let Some(issue) = &out {
-            let synced_at = Utc::now().to_rfc3339();
-            crate::db::issues::upsert_issue_tx(&tx, issue, &synced_at)?;
-        } else {
-            for (field, value) in overlay_rows(&tx, entity_id)? {
-                match field.as_str() {
-                    "state" => {
-                        sql::execute(
-                            &tx,
-                            sql::ACK_UPDATE_STATE,
-                            params![value, entity_id],
-                            "apply acked state",
-                        )?;
-                    }
-                    "assignee" => {
-                        sql::execute(
-                            &tx,
-                            sql::ACK_UPDATE_ASSIGNEE,
-                            params![value, entity_id],
-                            "apply acked assignee",
-                        )?;
-                    }
-                    "priority" => {
-                        let label = value.as_deref().unwrap_or("No priority");
-                        sql::execute(
-                            &tx,
-                            sql::ACK_UPDATE_PRIORITY,
-                            params![label, entity_id],
-                            "apply acked priority",
-                        )?;
-                    }
-                    _ => {}
+/// Apply a confirmed issue update to the base and retire its overlay +
+/// command, atomically. When the server returned the updated issue
+/// (nullable in the schema even on success), its fields become the new
+/// base truth via a full upsert; otherwise falls back to applying the
+/// overlay's per-field intent, as before. Either way the read model never
+/// flickers back to the pre-edit value.
+pub fn ack_issue_update(
+    conn: &Connection,
+    seq: i64,
+    entity_id: &str,
+    out: Option<&types::Issue>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    if let Some(issue) = out {
+        let synced_at = Utc::now().to_rfc3339();
+        crate::db::issues::upsert_issue_tx(&tx, issue, &synced_at)?;
+    } else {
+        for (field, value) in overlay_rows(&tx, entity_id)? {
+            match field.as_str() {
+                "state" => {
+                    sql::execute(
+                        &tx,
+                        sql::ACK_UPDATE_STATE,
+                        params![value, entity_id],
+                        "apply acked state",
+                    )?;
                 }
+                "assignee" => {
+                    sql::execute(
+                        &tx,
+                        sql::ACK_UPDATE_ASSIGNEE,
+                        params![value, entity_id],
+                        "apply acked assignee",
+                    )?;
+                }
+                "priority" => {
+                    let label = value.as_deref().unwrap_or("No priority");
+                    sql::execute(
+                        &tx,
+                        sql::ACK_UPDATE_PRIORITY,
+                        params![label, entity_id],
+                        "apply acked priority",
+                    )?;
+                }
+                _ => {}
             }
         }
-        sql::execute(
-            &tx,
-            sql::DELETE_PENDING_OVERLAY_FOR_ENTITY,
-            params![entity_id],
-            "clear acked overlay",
-        )?;
-        delete_command(&tx, seq)?;
-        tx.commit().context("failed to commit issue-update ack")?;
-        Ok(())
     }
+    sql::execute(
+        &tx,
+        sql::DELETE_PENDING_OVERLAY_FOR_ENTITY,
+        params![entity_id],
+        "clear acked overlay",
+    )?;
+    delete_command(&tx, seq)?;
+    tx.commit().context("failed to commit issue-update ack")?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -340,119 +337,108 @@ fn optimistic_issue(conn: &Connection, input: &IssueCreateInput) -> Result<types
     })
 }
 
-impl Mutation for IssueCreateMutation {
-    /// Insert an optimistic base row under a client temp id and queue the
-    /// `issueCreate` command. Creates never coalesce: each mints its own temp
-    /// id, so the shared coalescing primitive is a no-op delete plus an
-    /// insert.
-    fn enqueue(conn: &Connection, vars: IssueCreateVariables) -> Result<String> {
-        let tx = conn.unchecked_transaction()?;
-        let optimistic = optimistic_issue(&tx, &vars.input)?;
-        let synced_at = Utc::now().to_rfc3339();
-        crate::db::issues::upsert_issue_tx(&tx, &optimistic, &synced_at)?;
-        let variables =
-            serde_json::to_value(&vars).context("failed to serialize issue-create variables")?;
-        insert_pending(
-            &tx,
-            IssueCreateMutation::NAME,
-            optimistic.id.inner(),
-            &variables,
-        )?;
-        tx.commit().context("failed to commit issue create")?;
-        Ok(optimistic.id.into_inner())
-    }
+/// Insert an optimistic base row under a client temp id and queue the
+/// `issueCreate` command. Creates never coalesce: each mints its own temp
+/// id, so the shared coalescing primitive is a no-op delete plus an
+/// insert.
+pub fn enqueue_issue_create(conn: &Connection, vars: &IssueCreateVariables) -> Result<String> {
+    let tx = conn.unchecked_transaction()?;
+    let optimistic = optimistic_issue(&tx, &vars.input)?;
+    let synced_at = Utc::now().to_rfc3339();
+    crate::db::issues::upsert_issue_tx(&tx, &optimistic, &synced_at)?;
+    let variables =
+        serde_json::to_value(vars).context("failed to serialize issue-create variables")?;
+    insert_pending(
+        &tx,
+        IssueCreateMutation::NAME,
+        optimistic.id.inner(),
+        &variables,
+    )?;
+    tx.commit().context("failed to commit issue create")?;
+    Ok(optimistic.id.into_inner())
+}
 
-    /// Replace the optimistic temp issue with the server's full issue (server
-    /// truth, not a hand-stitched id/identifier rewrite) and retire the
-    /// command.
-    fn ack(
-        conn: &Connection,
-        ctx: AckContext<'_, IssueCreateVariables>,
-        issue: types::Issue,
-    ) -> Result<()> {
-        let AckContext { seq, entity_id, .. } = ctx;
-        let tx = conn.unchecked_transaction()?;
-        let synced_at = Utc::now().to_rfc3339();
-        crate::db::issues::upsert_issue_tx(&tx, &issue, &synced_at)?;
-        sql::execute(
-            &tx,
-            sql::DELETE_ISSUE_LABELS_FOR_ISSUE,
-            params![entity_id],
-            "clear temp issue labels",
-        )?;
-        sql::execute(
-            &tx,
-            sql::DELETE_ISSUE_BY_ID,
-            params![entity_id],
-            "delete temp issue",
-        )?;
-        delete_command(&tx, seq)?;
-        tx.commit().context("failed to commit issue-create ack")?;
-        Ok(())
-    }
+/// Replace the optimistic temp issue with the server's full issue (server
+/// truth, not a hand-stitched id/identifier rewrite) and retire the
+/// command.
+pub fn ack_issue_create(
+    conn: &Connection,
+    seq: i64,
+    entity_id: &str,
+    issue: &types::Issue,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let synced_at = Utc::now().to_rfc3339();
+    crate::db::issues::upsert_issue_tx(&tx, issue, &synced_at)?;
+    sql::execute(
+        &tx,
+        sql::DELETE_ISSUE_LABELS_FOR_ISSUE,
+        params![entity_id],
+        "clear temp issue labels",
+    )?;
+    sql::execute(
+        &tx,
+        sql::DELETE_ISSUE_BY_ID,
+        params![entity_id],
+        "delete temp issue",
+    )?;
+    delete_command(&tx, seq)?;
+    tx.commit().context("failed to commit issue-create ack")?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // CommentCreateMutation
 // ---------------------------------------------------------------------------
 
-impl Mutation for CommentCreateMutation {
-    /// Insert an optimistic comment row under a freshly-minted `temp_id` and
-    /// queue the `commentCreate` command. The issue and body come from
-    /// `vars.input`; the author is the persisted viewer identity
-    /// (`sync_meta`), if one has been recorded yet.
-    fn enqueue(conn: &Connection, vars: CommentCreateVariables) -> Result<String> {
-        let tx = conn.unchecked_transaction()?;
-        let id = temp_id();
-        let now = lt_types::scalars::DateTime(Utc::now());
-        let comment = lt_types::comments::Comment {
-            id: id.clone().into(),
-            body: vars.input.body.clone(),
-            created_at: now,
-            updated_at: now,
-            user: crate::db::viewer::viewer(&tx)?.map(|v| v.user),
-            issue_id: Some(vars.input.issue_id.clone()),
-        };
-        crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
-        let variables =
-            serde_json::to_value(&vars).context("failed to serialize comment-create variables")?;
-        insert_pending(&tx, CommentCreateMutation::NAME, &id, &variables)?;
-        tx.commit().context("failed to commit comment create")?;
-        Ok(id)
-    }
+/// Insert an optimistic comment row under a freshly-minted `temp_id` and
+/// queue the `commentCreate` command. The issue and body come from
+/// `vars.input`; the author is the persisted viewer identity
+/// (`sync_meta`), if one has been recorded yet.
+pub fn enqueue_comment_create(conn: &Connection, vars: &CommentCreateVariables) -> Result<String> {
+    let tx = conn.unchecked_transaction()?;
+    let id = temp_id();
+    let now = lt_types::scalars::DateTime(Utc::now());
+    let comment = lt_types::comments::Comment {
+        id: id.clone().into(),
+        body: vars.input.body.clone(),
+        created_at: now,
+        updated_at: now,
+        user: crate::db::viewer::viewer(&tx)?.map(|v| v.user),
+        issue_id: Some(vars.input.issue_id.clone()),
+    };
+    crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
+    let variables =
+        serde_json::to_value(vars).context("failed to serialize comment-create variables")?;
+    insert_pending(&tx, CommentCreateMutation::NAME, &id, &variables)?;
+    tx.commit().context("failed to commit comment create")?;
+    Ok(id)
+}
 
-    /// Replace the optimistic temp comment with the server copy and retire
-    /// the command, atomically -- so the comment never blinks out between ack
-    /// and the next per-issue comment sync. Stamps the issue id from `vars`
-    /// rather than trusting the server's comment payload for it: the
-    /// mutation's `issueId` is nullable in the schema, but the outbox command
-    /// it replays always carries the issue it was queued against.
-    fn ack(
-        conn: &Connection,
-        ctx: AckContext<'_, CommentCreateVariables>,
-        comment: lt_types::comments::Comment,
-    ) -> Result<()> {
-        let AckContext {
-            seq,
-            entity_id,
-            vars,
-        } = ctx;
-        let tx = conn.unchecked_transaction()?;
-        sql::execute(
-            &tx,
-            sql::DELETE_ISSUE_COMMENT_BY_ID,
-            params![entity_id],
-            "delete temp comment",
-        )?;
-        let comment = lt_types::comments::Comment {
-            issue_id: Some(vars.input.issue_id.clone()),
-            ..comment
-        };
-        crate::db::comments::upsert_comments(&tx, std::slice::from_ref(&comment))?;
-        delete_command(&tx, seq)?;
-        tx.commit().context("failed to commit comment-create ack")?;
-        Ok(())
-    }
+/// Replace the optimistic temp comment with `comment` and retire the
+/// command, atomically -- so the comment never blinks out between ack and
+/// the next per-issue comment sync. The caller is responsible for stamping
+/// `comment`'s issue id from the enqueued variables rather than trusting the
+/// server's payload for it: the mutation's `issueId` is nullable in the
+/// schema, but the outbox command it replays always carries the issue it was
+/// queued against.
+pub fn ack_comment_create(
+    conn: &Connection,
+    seq: i64,
+    entity_id: &str,
+    comment: &lt_types::comments::Comment,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    sql::execute(
+        &tx,
+        sql::DELETE_ISSUE_COMMENT_BY_ID,
+        params![entity_id],
+        "delete temp comment",
+    )?;
+    crate::db::comments::upsert_comments(&tx, std::slice::from_ref(comment))?;
+    delete_command(&tx, seq)?;
+    tx.commit().context("failed to commit comment-create ack")?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +553,7 @@ mod tests {
     #[test]
     fn per_field_edits_coalesce_into_one_command_preserving_null() {
         let conn = db_with_issue("1");
-        IssueUpdateMutation::enqueue(
+        enqueue_issue_update(
             &conn,
             update_vars(
                 "1",
@@ -578,7 +564,7 @@ mod tests {
             ),
         )
         .unwrap();
-        IssueUpdateMutation::enqueue(
+        enqueue_issue_update(
             &conn,
             update_vars(
                 "1",
@@ -590,7 +576,7 @@ mod tests {
         )
         .unwrap();
         // Clearing the assignee must survive coalescing as an explicit null.
-        IssueUpdateMutation::enqueue(
+        enqueue_issue_update(
             &conn,
             update_vars(
                 "1",
@@ -617,7 +603,7 @@ mod tests {
     #[test]
     fn ack_issue_update_applies_overlay_to_base_when_no_server_issue() {
         let conn = db_with_issue("1");
-        IssueUpdateMutation::enqueue(
+        enqueue_issue_update(
             &conn,
             update_vars(
                 "1",
@@ -628,7 +614,7 @@ mod tests {
             ),
         )
         .unwrap();
-        IssueUpdateMutation::enqueue(
+        enqueue_issue_update(
             &conn,
             update_vars(
                 "1",
@@ -640,19 +626,8 @@ mod tests {
         )
         .unwrap();
 
-        let op = &pending(&conn)[0];
-        let seq = op.seq;
-        let vars: IssueUpdateVariables = serde_json::from_str(&op.variables).unwrap();
-        IssueUpdateMutation::ack(
-            &conn,
-            AckContext {
-                seq,
-                entity_id: "1",
-                vars: &vars,
-            },
-            None,
-        )
-        .unwrap();
+        let seq = pending(&conn)[0].seq;
+        ack_issue_update(&conn, seq, "1", None).unwrap();
 
         // Base now carries the acked values; overlay and command are gone.
         let (state_id, assignee): (String, Option<String>) = conn
@@ -675,7 +650,7 @@ mod tests {
     #[test]
     fn ack_issue_update_prefers_server_issue_over_overlay() {
         let conn = db_with_issue("1");
-        IssueUpdateMutation::enqueue(
+        enqueue_issue_update(
             &conn,
             update_vars(
                 "1",
@@ -687,25 +662,14 @@ mod tests {
         )
         .unwrap();
 
-        let op = &pending(&conn)[0];
-        let seq = op.seq;
-        let vars: IssueUpdateVariables = serde_json::from_str(&op.variables).unwrap();
+        let seq = pending(&conn)[0].seq;
         let mut server_issue = base_issue("1");
         server_issue.state = types::WorkflowState {
             id: "s-merged".into(),
             name: "Merged".to_string(),
             position: 2.0,
         };
-        IssueUpdateMutation::ack(
-            &conn,
-            AckContext {
-                seq,
-                entity_id: "1",
-                vars: &vars,
-            },
-            Some(server_issue),
-        )
-        .unwrap();
+        ack_issue_update(&conn, seq, "1", Some(&server_issue)).unwrap();
 
         let state_id: String = conn
             .query_row("SELECT state_id FROM issues WHERE id = '1'", [], |r| {
@@ -728,8 +692,7 @@ mod tests {
             priority: None,
             assignee_id: None,
         };
-        let entity_id =
-            IssueCreateMutation::enqueue(&conn, IssueCreateVariables { input }).unwrap();
+        let entity_id = enqueue_issue_create(&conn, &IssueCreateVariables { input }).unwrap();
         assert!(entity_id.starts_with("local:"));
 
         let ops = pending(&conn);
@@ -771,9 +734,9 @@ mod tests {
             priority: None,
             assignee_id: None,
         };
-        IssueCreateMutation::enqueue(
+        enqueue_issue_create(
             &conn,
-            IssueCreateVariables {
+            &IssueCreateVariables {
                 input: input.clone(),
             },
         )
@@ -784,16 +747,7 @@ mod tests {
 
         let mut server_issue = base_issue("real-1");
         server_issue.identifier = "ENG-42".to_string();
-        IssueCreateMutation::ack(
-            &conn,
-            AckContext {
-                seq,
-                entity_id: &temp_id,
-                vars: &IssueCreateVariables { input },
-            },
-            server_issue,
-        )
-        .unwrap();
+        ack_issue_create(&conn, seq, &temp_id, &server_issue).unwrap();
 
         let ident: String = conn
             .query_row(
@@ -836,7 +790,7 @@ mod tests {
             issue_id: "1".to_string(),
             body: "hi".to_string(),
         };
-        CommentCreateMutation::enqueue(&conn, CommentCreateVariables { input }).unwrap();
+        enqueue_comment_create(&conn, &CommentCreateVariables { input }).unwrap();
 
         let rows = crate::db::query_comments(&conn, "1").unwrap();
         assert_eq!(rows[0].author(), "Ada");
@@ -849,9 +803,9 @@ mod tests {
             issue_id: "1".to_string(),
             body: "hi".to_string(),
         };
-        CommentCreateMutation::enqueue(
+        enqueue_comment_create(
             &conn,
-            CommentCreateVariables {
+            &CommentCreateVariables {
                 input: input.clone(),
             },
         )
@@ -871,16 +825,7 @@ mod tests {
             }),
             issue_id: Some("1".to_string()),
         };
-        CommentCreateMutation::ack(
-            &conn,
-            AckContext {
-                seq,
-                entity_id: &temp_id,
-                vars: &CommentCreateVariables { input },
-            },
-            comment,
-        )
-        .unwrap();
+        ack_comment_create(&conn, seq, &temp_id, &comment).unwrap();
 
         let ids: Vec<String> = {
             let rows = crate::db::query_comments(&conn, "1").unwrap();
