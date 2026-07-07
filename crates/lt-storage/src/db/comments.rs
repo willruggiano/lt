@@ -7,10 +7,10 @@ use rusqlite::{Connection, params};
 use crate::db::parse_datetime_column;
 use crate::db::sql::{self, EntityTable};
 
-/// Insert or replace a slice of comments: upsert each comment's author into
-/// the `users` table (relational storage, no more flattened `author_name`),
-/// then the comment row, stamping `synced_at` to now (UTC). Errors if a
-/// comment has no `issue_id` -- a comment reaching storage without one is a
+/// Insert or replace a slice of comments: mint the issue anchor so
+/// `issue_id`'s FK holds, upsert each comment's author into the `users`
+/// table, then the comment row, stamping `synced_at` to now (UTC). Errors if
+/// a comment has no `issue_id` -- a comment reaching storage without one is a
 /// bug, since `issue_comments` is keyed on it.
 pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
     let synced_at = Utc::now().to_rfc3339();
@@ -22,6 +22,7 @@ pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
             .issue_id
             .as_deref()
             .with_context(|| format!("comment {} has no issue id", c.id.inner()))?;
+        crate::db::issues::mint_issue_skeleton(conn, issue_id, None)?;
         if let Some(user) = &c.user {
             crate::db::issues::upsert_named_entity(
                 conn,

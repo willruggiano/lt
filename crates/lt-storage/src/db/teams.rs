@@ -11,9 +11,17 @@ use rusqlite::{Connection, params};
 
 use crate::db::sql::{self, EntityTable, Sql};
 
+/// Ensure a skeleton team row exists (id only) so a team-scoped state FK
+/// holds; a later [`upsert_teams`] names it.
+pub(crate) fn mint_team(conn: &Connection, id: &str) -> Result<()> {
+    sql::execute(conn, sql::MINT_TEAM, params![id], "mint team skeleton")
+}
+
 /// Upsert one workflow state scoped to its team, with Linear's stored
-/// position.
+/// position. Mints the team first (a skeleton row if not yet cached) so the
+/// state's `team_id` FK always holds.
 pub fn upsert_team_state(conn: &Connection, team_id: &str, state: &WorkflowState) -> Result<()> {
+    mint_team(conn, team_id)?;
     sql::execute(
         conn,
         sql::UPSERT_WORKFLOW_STATE_SCOPED,
@@ -134,11 +142,13 @@ pub fn query_team_states(conn: &Connection, team_id: &str) -> Result<Vec<Workflo
 
 /// Replace a team's membership set with `user_ids`: delete then insert in one
 /// transaction, so a member no longer on the team is removed rather than left
-/// stale.
+/// stale. Mints the team first (a skeleton row if not yet cached) so the
+/// membership rows' `team_id` FK always holds.
 pub fn replace_team_memberships(conn: &Connection, team_id: &str, user_ids: &[&str]) -> Result<()> {
     let tx = conn
         .unchecked_transaction()
         .context("failed to begin membership replace transaction")?;
+    mint_team(&tx, team_id)?;
     sql::execute(
         &tx,
         sql::DELETE_TEAM_MEMBERSHIPS_FOR_TEAM,
@@ -172,7 +182,7 @@ pub fn derive_team_memberships_from_issues(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::outbox;
+    use crate::db::op_log;
 
     fn test_db() -> Connection {
         let db = crate::db::Database::memory().unwrap();
@@ -290,10 +300,36 @@ mod tests {
         );
     }
 
+    /// `upsert_team_state` mints a skeleton team row (`name IS NULL`) for a
+    /// team never itself fetched; `query_teams` must exclude it until
+    /// `upsert_teams` names it.
+    #[test]
+    fn skeleton_team_is_excluded_from_query_teams_until_named() {
+        let conn = test_db();
+        upsert_state(&conn, "t1", ("s1", "Todo", 1.0));
+
+        assert!(query_teams(&conn).unwrap().is_empty());
+
+        upsert_teams(
+            &conn,
+            &[types::Team {
+                id: "t1".into(),
+                name: "Team One".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let teams = query_teams(&conn).unwrap();
+        assert_eq!(
+            teams.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["Team One"]
+        );
+    }
+
     #[test]
     fn derive_team_memberships_from_issues_covers_assignee_and_creator() {
         let conn = test_db();
-        let mut issue = outbox::sample_base_issue("1");
+        let mut issue = op_log::sample_base_issue("1");
         issue.team = types::Team {
             id: "ENG".into(),
             name: "Engineering".to_string(),

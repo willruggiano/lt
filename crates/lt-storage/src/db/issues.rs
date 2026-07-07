@@ -5,7 +5,7 @@ use lt_types::pagination::PageInfo;
 use lt_types::query::{SortDirection, SortField};
 use lt_types::scalars::Priority;
 use lt_types::types;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::parse_datetime_column;
 use crate::db::sql::{self, BindParams, EntityTable, Sql};
@@ -105,6 +105,84 @@ pub(crate) fn upsert_named_entity(
     )
 }
 
+/// Resolve a workflow state id to itself if cached, else `None` (sync owns
+/// workflow states; an issue upsert never mints one).
+pub(crate) fn resolve_state_id(tx: &Connection, state_id: &str) -> Result<Option<String>> {
+    sql::prepare(tx, sql::SELECT_STATE_ID_BY_ID)
+        .context("failed to prepare state id lookup")?
+        .query_row(params![state_id], |r| r.get(0))
+        .optional()
+        .context("failed to resolve state id")
+}
+
+/// Ensure a skeleton issue row exists for an FK reference (a not-yet-fetched
+/// parent, or a comment's issue anchor), without clobbering an already-cached
+/// row.
+pub(crate) fn mint_issue_skeleton(
+    tx: &Connection,
+    id: &str,
+    identifier: Option<&str>,
+) -> Result<()> {
+    sql::execute(
+        tx,
+        sql::MINT_ISSUE_SKELETON,
+        params![id, identifier],
+        "mint issue skeleton",
+    )
+}
+
+/// Every FK id an issue row carries, resolved so its `upsert`/create-ack can
+/// bind them directly.
+pub(crate) struct IssueFkIds {
+    pub(crate) team: Option<String>,
+    pub(crate) assignee: Option<String>,
+    pub(crate) creator: Option<String>,
+    pub(crate) project: Option<String>,
+    pub(crate) cycle: Option<String>,
+    pub(crate) state: Option<String>,
+    pub(crate) parent: Option<String>,
+}
+
+/// Every FK target of an issue fragment, resolved to its id: named entities
+/// (team/assignee/creator/project/cycle) upserted so their name is current;
+/// the state resolved-or-`None` (sync owns workflow states, so a state an
+/// issue references but the cache has never seen resolves to `NULL` rather
+/// than minting a positionless skeleton); the parent minted as a skeleton so
+/// its FK holds. Shared by [`upsert_issue_tx`] and
+/// [`crate::db::op_log::ack_issue_create`].
+pub(crate) fn resolve_issue_fk_ids(tx: &Connection, issue: &types::Issue) -> Result<IssueFkIds> {
+    upsert_named_entity(
+        tx,
+        EntityTable::Teams,
+        issue.team.id.inner(),
+        Some(&issue.team.name),
+    )?;
+    if let Some(a) = &issue.assignee {
+        upsert_named_entity(tx, EntityTable::Users, a.id.inner(), Some(&a.name))?;
+    }
+    if let Some(c) = &issue.creator {
+        upsert_named_entity(tx, EntityTable::Users, c.id.inner(), Some(&c.name))?;
+    }
+    if let Some(p) = &issue.project {
+        upsert_named_entity(tx, EntityTable::Projects, p.id.inner(), Some(&p.name))?;
+    }
+    if let Some(c) = &issue.cycle {
+        upsert_named_entity(tx, EntityTable::Cycles, c.id.inner(), c.name.as_deref())?;
+    }
+    if let Some(p) = &issue.parent {
+        mint_issue_skeleton(tx, p.id.inner(), Some(p.identifier.as_str()))?;
+    }
+    Ok(IssueFkIds {
+        team: Some(issue.team.id.inner().to_string()),
+        assignee: issue.assignee.as_ref().map(|u| u.id.inner().to_string()),
+        creator: issue.creator.as_ref().map(|u| u.id.inner().to_string()),
+        project: issue.project.as_ref().map(|p| p.id.inner().to_string()),
+        cycle: issue.cycle.as_ref().map(|c| c.id.inner().to_string()),
+        state: resolve_state_id(tx, issue.state.id.inner())?,
+        parent: issue.parent.as_ref().map(|p| p.id.inner().to_string()),
+    })
+}
+
 /// Upsert fetched issue fragments into the relational base: upsert each
 /// referenced entity, write the issue row with its FK columns, and rebuild its
 /// label links. Runs in one transaction per call.
@@ -126,32 +204,15 @@ pub fn upsert_issues(conn: &Connection, issues: &[types::Issue]) -> Result<()> {
 }
 
 /// Upsert a single issue fragment into the relational base within an existing
-/// transaction: its referenced entities, the issue row with FK columns, and its
-/// label links. Shared by [`upsert_issues`] and the outbox's optimistic create.
+/// transaction: its referenced entities (mint-first, so every FK holds under
+/// `PRAGMA foreign_keys = ON`), the issue row, and its label links. Shared by
+/// [`upsert_issues`] and the op log's optimistic create.
 pub(crate) fn upsert_issue_tx(
     tx: &Connection,
     issue: &types::Issue,
     synced_at: &str,
 ) -> Result<()> {
-    upsert_named_entity(
-        tx,
-        EntityTable::Teams,
-        issue.team.id.inner(),
-        Some(&issue.team.name),
-    )?;
-    if let Some(a) = &issue.assignee {
-        upsert_named_entity(tx, EntityTable::Users, a.id.inner(), Some(&a.name))?;
-    }
-    if let Some(c) = &issue.creator {
-        upsert_named_entity(tx, EntityTable::Users, c.id.inner(), Some(&c.name))?;
-    }
-    if let Some(p) = &issue.project {
-        upsert_named_entity(tx, EntityTable::Projects, p.id.inner(), Some(&p.name))?;
-    }
-    if let Some(c) = &issue.cycle {
-        upsert_named_entity(tx, EntityTable::Cycles, c.id.inner(), c.name.as_deref())?;
-    }
-
+    let fks = resolve_issue_fk_ids(tx, issue)?;
     sql::execute(
         tx,
         sql::UPSERT_ISSUE,
@@ -164,13 +225,13 @@ pub(crate) fn upsert_issue_tx(
             issue.created_at.to_rfc3339_millis(),
             issue.updated_at.to_rfc3339_millis(),
             synced_at,
-            issue.parent.as_ref().map(|p| p.id.inner()),
-            issue.team.id.inner(),
-            issue.state.id.inner(),
-            issue.assignee.as_ref().map(|u| u.id.inner()),
-            issue.creator.as_ref().map(|u| u.id.inner()),
-            issue.project.as_ref().map(|p| p.id.inner()),
-            issue.cycle.as_ref().map(|c| c.id.inner()),
+            fks.parent,
+            fks.team,
+            fks.state,
+            fks.assignee,
+            fks.creator,
+            fks.project,
+            fks.cycle,
         ],
         "upsert issue",
     )?;
@@ -769,158 +830,71 @@ mod tests {
         assert_eq!(has_state_name, 0);
     }
 
+    /// A parent minted as a skeleton by the child's upsert (never itself
+    /// synced) must not surface in the list or count, while the child still
+    /// resolves `parent.identifier` from the skeleton row.
     #[test]
-    fn read_model_merges_pending_overlay_over_base() {
-        use lt_types::inputs::{Field, IssueUpdateInput};
-        use lt_types::issues::IssueUpdateVariables;
+    fn skeleton_parent_excluded_from_list_and_count_but_child_resolves_parent() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        seed_state(&conn, "ENG", "Todo", 1.0);
 
-        use crate::db::outbox::enqueue_issue_update;
-
-        let conn = graph_db();
-        // The state a picker offers is already cached by that picker's own
-        // `Fill` (`TeamStatesQuery`); mirror that precondition here.
-        crate::db::teams::upsert_team_state(
-            &conn,
-            "ENG",
-            &types::WorkflowState {
-                id: "s-done".into(),
-                name: "Done".to_string(),
-                position: 2.0,
-            },
-        )
-        .unwrap();
-
-        // Enqueue a state + assignee-clear edit; the read model must render the
-        // overlay values, not the base.
-        enqueue_issue_update(
-            &conn,
-            IssueUpdateVariables {
-                id: "1".to_string(),
-                input: IssueUpdateInput {
-                    state_id: Some("s-done".to_string()),
-                    ..Default::default()
-                },
-            },
-        )
-        .unwrap();
-        enqueue_issue_update(
-            &conn,
-            IssueUpdateVariables {
-                id: "1".to_string(),
-                input: IssueUpdateInput {
-                    assignee_id: Field::Null,
-                    ..Default::default()
-                },
-            },
-        )
-        .unwrap();
+        let mut child = test_issue("1", None, "Todo");
+        child.parent = Some(types::Parent {
+            id: "p1".into(),
+            identifier: "ENG-P1".to_string(),
+        });
+        upsert_issues(&conn, &[child]).unwrap();
 
         let issues = query_issues(
             &conn,
-            &vars(lt_types::issues::IssueFilter {
-                title: Some("Wire it up".to_string()),
-                ..Default::default()
-            }),
-        )
-        .unwrap()
-        .nodes;
-        let issue = issues.iter().find(|i| i.id.inner() == "1").unwrap();
-        assert_eq!(issue.state.name, "Done");
-        assert_eq!(issue.state.position.to_bits(), 2.0_f64.to_bits());
-        assert!(issue.assignee.is_none());
-
-        // The base row is untouched by the overlay.
-        let base_state: String = conn
-            .query_row("SELECT state_id FROM issues WHERE id = '1'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(base_state, "s1");
-    }
-
-    #[test]
-    fn state_filter_matches_an_issue_whose_overlay_moved_it_into_the_filtered_state() {
-        use lt_types::inputs::IssueUpdateInput;
-        use lt_types::issues::IssueUpdateVariables;
-
-        use crate::db::outbox::enqueue_issue_update;
-
-        let conn = graph_db();
-        // The issue's base state is "In Progress" (graph_db/sample_api_issue);
-        // a state overlay moves it to "Done".
-        seed_state(&conn, "ENG", "Done", 2.0);
-        enqueue_issue_update(
-            &conn,
-            IssueUpdateVariables {
-                id: "1".to_string(),
-                input: IssueUpdateInput {
-                    state_id: Some("Done".to_string()),
-                    ..Default::default()
-                },
+            &IssuesVariables {
+                filter: None,
+                sort: None,
+                first: Some(250),
+                after: None,
             },
         )
-        .unwrap();
-
-        // A `state:done` filter must match the overlaid state, not the base.
-        let matched = query_issues(
-            &conn,
-            &vars(lt_types::issues::IssueFilter {
-                state: Some("done".to_string()),
-                ..Default::default()
-            }),
-        )
         .unwrap()
         .nodes;
-        assert!(matched.iter().any(|i| i.id.inner() == "1"));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id.inner(), "1");
+        assert_eq!(
+            issues[0].parent.as_ref().map(|p| p.identifier.as_str()),
+            Some("ENG-P1")
+        );
 
-        // The old base state no longer matches.
-        let stale = query_issues(
-            &conn,
-            &vars(lt_types::issues::IssueFilter {
-                state: Some("in progress".to_string()),
-                ..Default::default()
-            }),
-        )
-        .unwrap()
-        .nodes;
-        assert!(!stale.iter().any(|i| i.id.inner() == "1"));
+        assert_eq!(count_issues(&conn).unwrap(), 1);
+
+        let found = search_issues(&conn, "issue", 10).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.inner(), "1");
     }
 
+    /// A skeleton parent (`title IS NULL`) must not be written into the FTS
+    /// shadow index -- so a MATCH query never surfaces it -- until it syncs
+    /// as a full, titled issue, at which point it becomes searchable.
     #[test]
-    fn delta_base_write_leaves_pending_overlay_intact() {
-        let conn = graph_db();
+    fn skeleton_parent_is_not_indexed_until_it_syncs() {
+        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        seed_state(&conn, "ENG", "Todo", 1.0);
 
-        // Local intent the UI would record on an edit.
-        conn.execute(
-            "INSERT INTO pending_overlay (entity_id, field, value) VALUES ('1', 'state', 'Done')",
-            [],
-        )
-        .unwrap();
+        let mut child = test_issue("1", None, "Todo");
+        child.parent = Some(types::Parent {
+            id: "p1".into(),
+            identifier: "ENG-P1".to_string(),
+        });
+        upsert_issues(&conn, &[child]).unwrap();
 
-        // A delta pull rewrites the base (state changed server-side).
-        let mut updated = sample_api_issue();
-        updated.state = types::WorkflowState {
-            id: "s2".into(),
-            name: "Canceled".to_string(),
-            position: 3.0,
-        };
-        upsert_issues(&conn, &[updated]).unwrap();
+        assert!(search_issues(&conn, "parent", 10).unwrap().is_empty());
 
-        // Base moved; the overlay row is physically untouched by the base write.
-        let base_state: String = conn
-            .query_row("SELECT state_id FROM issues WHERE id = '1'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(base_state, "s2");
-        let overlay: String = conn
-            .query_row(
-                "SELECT value FROM pending_overlay WHERE entity_id = '1' AND field = 'state'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(overlay, "Done");
+        let mut parent = test_issue("p1", None, "Todo");
+        parent.identifier = "ENG-P1".to_string();
+        parent.title = "Parent issue".to_string();
+        upsert_issues(&conn, &[parent]).unwrap();
+
+        let found = search_issues(&conn, "parent", 10).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.inner(), "p1");
     }
 
     #[test]
