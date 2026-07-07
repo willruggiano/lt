@@ -5,8 +5,8 @@ use cynic::QueryBuilder;
 
 use crate::graphql::GraphqlOperation;
 use crate::pagination::PageInfo;
-use crate::schema;
 use crate::types::WorkflowState;
+use crate::{schema, wire};
 
 #[derive(cynic::QueryVariables, Clone)]
 pub struct TeamVariables {
@@ -35,19 +35,27 @@ impl TryFrom<WorkflowStatesQuery> for WorkflowStateConnection {
     type Error = anyhow::Error;
 
     fn try_from(op: WorkflowStatesQuery) -> anyhow::Result<Self> {
-        Ok(op.team.states)
+        Ok(op.team.states.into())
     }
 }
 
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Team")]
 pub struct TeamWithStates {
-    pub states: WorkflowStateConnection,
+    pub states: wire::WorkflowStateConnection,
 }
 
-#[derive(Default, cynic::QueryFragment)]
+#[derive(Default)]
 pub struct WorkflowStateConnection {
     pub nodes: Vec<WorkflowState>,
+}
+
+impl From<wire::WorkflowStateConnection> for WorkflowStateConnection {
+    fn from(w: wire::WorkflowStateConnection) -> Self {
+        Self {
+            nodes: w.nodes.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +89,7 @@ impl TryFrom<TeamStatesQuery> for WorkflowStateConnection {
     type Error = anyhow::Error;
 
     fn try_from(op: TeamStatesQuery) -> anyhow::Result<Self> {
-        Ok(op.team.states)
+        Ok(op.team.states.into())
     }
 }
 
@@ -101,7 +109,7 @@ pub struct AllWorkflowStatesVariables {
 #[cynic(graphql_type = "Query", variables = "AllWorkflowStatesVariables")]
 pub struct AllWorkflowStatesQuery {
     #[arguments(first: $first, after: $after)]
-    pub workflow_states: WorkflowStateWithTeamConnection,
+    pub workflow_states: wire::WorkflowStateWithTeamConnection,
 }
 
 impl GraphqlOperation for AllWorkflowStatesQuery {
@@ -118,21 +126,27 @@ impl TryFrom<AllWorkflowStatesQuery> for WorkflowStateWithTeamConnection {
     type Error = anyhow::Error;
 
     fn try_from(op: AllWorkflowStatesQuery) -> anyhow::Result<Self> {
-        Ok(op.workflow_states)
+        Ok(op.workflow_states.into())
     }
 }
 
-#[derive(Default, cynic::QueryFragment)]
-#[cynic(graphql_type = "WorkflowStateConnection")]
+#[derive(Default)]
 pub struct WorkflowStateWithTeamConnection {
     pub nodes: Vec<WorkflowStateWithTeam>,
     pub page_info: PageInfo,
 }
 
+impl From<wire::WorkflowStateWithTeamConnection> for WorkflowStateWithTeamConnection {
+    fn from(w: wire::WorkflowStateWithTeamConnection) -> Self {
+        Self {
+            nodes: w.nodes.into_iter().map(Into::into).collect(),
+            page_info: w.page_info,
+        }
+    }
+}
+
 /// A workflow state carrying its own team's id, so the org-wide fetch above
 /// can upsert each state team-scoped without a second, per-team round trip.
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "WorkflowState")]
 pub struct WorkflowStateWithTeam {
     pub id: cynic::Id,
     pub name: String,
@@ -140,10 +154,25 @@ pub struct WorkflowStateWithTeam {
     pub team: TeamRef,
 }
 
-#[derive(cynic::QueryFragment)]
-#[cynic(graphql_type = "Team")]
+impl From<wire::WorkflowStateWithTeam> for WorkflowStateWithTeam {
+    fn from(w: wire::WorkflowStateWithTeam) -> Self {
+        Self {
+            id: w.id,
+            name: w.name,
+            position: w.position,
+            team: w.team.into(),
+        }
+    }
+}
+
 pub struct TeamRef {
     pub id: cynic::Id,
+}
+
+impl From<wire::TeamRef> for TeamRef {
+    fn from(w: wire::TeamRef) -> Self {
+        Self { id: w.id }
+    }
 }
 
 #[cfg(test)]

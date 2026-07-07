@@ -1,7 +1,8 @@
 //! The issues list query and the `issueUpdate`/`issueCreate` mutations,
 //! modelled as cynic `QueryFragment`s. These are the shared "currency" types;
-//! the fetch/replay lives in `lt-upstream`. The list query selects
-//! [`crate::types::Issue`] directly -- there is no separate wire projection.
+//! the fetch/replay lives in `lt-upstream`. The wire-decoded envelope
+//! (`wire::Issue`, `wire::IssueConnection`) recomposes into this module's
+//! domain [`Issue`]/[`IssueConnection`].
 //!
 //! [`IssueFilter`]/[`IssueSort`] are the typed, allowlisted filter/sort the
 //! build validates against the schema (`build/search_filter_fields.toml`).
@@ -19,8 +20,8 @@ use crate::inputs::{IssueCreateInput, IssueUpdateInput};
 use crate::pagination::PageInfo;
 use crate::query::{SortDirection, SortField};
 use crate::scalars::Priority;
-use crate::schema;
 use crate::types::Issue;
+use crate::{schema, wire};
 
 /// The allowlisted assignee filter: no assignee, an exact (typically
 /// viewer-resolved) name, or a substring match. `Exact` and `Contains` lower
@@ -481,17 +482,26 @@ pub struct IssuesVariables {
     pub after: Option<String>,
 }
 
-#[derive(Default, cynic::QueryFragment)]
+#[derive(Default)]
 pub struct IssueConnection {
     pub nodes: Vec<Issue>,
     pub page_info: PageInfo,
+}
+
+impl From<wire::IssueConnection> for IssueConnection {
+    fn from(w: wire::IssueConnection) -> Self {
+        Self {
+            nodes: w.nodes.into_iter().map(Into::into).collect(),
+            page_info: w.page_info,
+        }
+    }
 }
 
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query", variables = "IssuesVariables")]
 pub struct IssuesQuery {
     #[arguments(filter: $filter, sort: $sort, first: $first, after: $after)]
-    pub issues: IssueConnection,
+    pub issues: wire::IssueConnection,
 }
 
 impl GraphqlOperation for IssuesQuery {
@@ -508,7 +518,7 @@ impl TryFrom<IssuesQuery> for IssueConnection {
     type Error = anyhow::Error;
 
     fn try_from(op: IssuesQuery) -> anyhow::Result<Self> {
-        Ok(op.issues)
+        Ok(op.issues.into())
     }
 }
 
@@ -546,7 +556,7 @@ impl TryFrom<IssueUpdateMutation> for Option<Issue> {
         extract_on_success(
             IssueUpdateMutation::NAME,
             op.issue_update.success,
-            op.issue_update.issue,
+            op.issue_update.issue.map(Into::into),
         )
     }
 }
@@ -560,7 +570,7 @@ pub struct IssueCreateVariables {
 #[cynic(graphql_type = "IssuePayload")]
 pub struct IssuePayload {
     pub success: bool,
-    pub issue: Option<Issue>,
+    pub issue: Option<wire::Issue>,
 }
 
 #[derive(cynic::QueryFragment)]
@@ -587,13 +597,14 @@ impl TryFrom<IssueCreateMutation> for Issue {
         ensure_success(IssueCreateMutation::NAME, op.issue_create.success)?;
         op.issue_create
             .issue
+            .map(Into::into)
             .ok_or_else(|| anyhow::anyhow!("issueCreate returned no entity"))
     }
 }
 
-/// A minimal GraphQL issue node matching [`Issue`]'s deserialization, shared
-/// by this module's tests and by `lt-upstream`/`lt-runtime`'s tests (via the
-/// `test-util` feature) so the fixture has one definition.
+/// A minimal GraphQL issue node matching `wire::Issue`'s deserialization,
+/// shared by this module's tests and by `lt-upstream`/`lt-runtime`'s tests
+/// (via the `test-util` feature) so the fixture has one definition.
 #[cfg(any(test, feature = "test-util"))]
 pub fn sample_issue_node(id: &str) -> serde_json::Value {
     serde_json::json!({

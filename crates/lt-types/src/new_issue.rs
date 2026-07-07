@@ -15,11 +15,8 @@
 use cynic::QueryBuilder;
 
 use crate::graphql::GraphqlOperation;
-use crate::members::UserConnection;
-use crate::states::WorkflowStateConnection;
-use crate::teams::TeamConnection;
 use crate::types::{Team, User, WorkflowState};
-use crate::{schema, viewer};
+use crate::{schema, viewer, wire};
 
 #[derive(cynic::QueryVariables, Clone)]
 pub struct NewIssueVariables {
@@ -42,7 +39,7 @@ impl NewIssueVariables {
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query", variables = "NewIssueVariables")]
 pub struct NewIssueQuery {
-    pub teams: TeamConnection,
+    pub teams: wire::TeamConnection,
     #[arguments(id: $team_id)]
     #[directives(include(if: $has_team))]
     pub team: Option<TeamWithStatesAndMembers>,
@@ -51,8 +48,8 @@ pub struct NewIssueQuery {
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Team")]
 pub struct TeamWithStatesAndMembers {
-    pub states: WorkflowStateConnection,
-    pub members: UserConnection,
+    pub states: wire::WorkflowStateConnection,
+    pub members: wire::UserConnection,
 }
 
 /// The new-issue modal's whole data contract. `viewer` is sourced from the
@@ -88,9 +85,9 @@ impl TryFrom<NewIssueQuery> for NewIssueData {
             |t| (t.states.nodes, t.members.nodes),
         );
         Ok(NewIssueData {
-            teams: op.teams.nodes,
-            states,
-            members,
+            teams: op.teams.nodes.into_iter().map(Into::into).collect(),
+            states: states.into_iter().map(Into::into).collect(),
+            members: members.into_iter().map(Into::into).collect(),
             viewer: None,
         })
     }

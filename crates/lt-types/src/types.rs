@@ -1,9 +1,12 @@
-//! The shared entity fragment types and the GraphQL response envelope.
+//! The domain entity types storage and the TUI hold and render, decoded from
+//! their `crate::wire` counterparts by the `impl From<wire::X>` beside each.
+//! The GraphQL response envelope also lives here since it is transport-level,
+//! not an entity.
 
 use serde::Deserialize;
 
 use crate::scalars::{DateTime, Priority};
-use crate::schema;
+use crate::wire;
 
 #[derive(Deserialize)]
 pub struct GraphqlResponse<T> {
@@ -16,67 +19,127 @@ pub struct GraphqlError {
     pub message: String,
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
-#[cynic(graphql_type = "IssueLabel")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IssueLabel {
     pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
-#[cynic(graphql_type = "Issue")]
+impl From<wire::IssueLabel> for IssueLabel {
+    fn from(w: wire::IssueLabel) -> Self {
+        Self {
+            id: w.id,
+            name: w.name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Parent {
     pub id: cynic::Id,
     pub identifier: String,
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
-#[cynic(graphql_type = "WorkflowState")]
+impl From<wire::Parent> for Parent {
+    fn from(w: wire::Parent) -> Self {
+        Self {
+            id: w.id,
+            identifier: w.identifier,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowState {
     pub id: cynic::Id,
     pub name: String,
-    /// Linear's stored ordering within the team's workflow
-    /// (`WorkflowState.position: Float!`).
     pub position: f64,
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
-#[cynic(graphql_type = "User")]
+impl From<wire::WorkflowState> for WorkflowState {
+    fn from(w: wire::WorkflowState) -> Self {
+        Self {
+            id: w.id,
+            name: w.name,
+            position: w.position,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct User {
     pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
-#[cynic(graphql_type = "Team")]
+impl From<wire::User> for User {
+    fn from(w: wire::User) -> Self {
+        Self {
+            id: w.id,
+            name: w.name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Team {
     pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
-#[cynic(graphql_type = "Project")]
+impl From<wire::Team> for Team {
+    fn from(w: wire::Team) -> Self {
+        Self {
+            id: w.id,
+            name: w.name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Project {
     pub id: cynic::Id,
     pub name: String,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
-#[cynic(graphql_type = "Cycle")]
+impl From<wire::Project> for Project {
+    fn from(w: wire::Project) -> Self {
+        Self {
+            id: w.id,
+            name: w.name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Cycle {
     pub id: cynic::Id,
-    // Nullable in Linear's schema -- unnamed cycles identify by number.
     pub name: Option<String>,
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
-#[cynic(graphql_type = "IssueLabelConnection")]
+impl From<wire::Cycle> for Cycle {
+    fn from(w: wire::Cycle) -> Self {
+        Self {
+            id: w.id,
+            name: w.name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct IssueLabelConnection {
     pub nodes: Vec<IssueLabel>,
 }
 
-#[derive(cynic::QueryFragment, Clone, PartialEq)]
-#[cynic(graphql_type = "Issue")]
+impl From<wire::IssueLabelConnection> for IssueLabelConnection {
+    fn from(w: wire::IssueLabelConnection) -> Self {
+        Self {
+            nodes: w.nodes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Issue {
     pub id: cynic::Id,
     pub identifier: String,
@@ -94,4 +157,27 @@ pub struct Issue {
     pub parent: Option<Parent>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
+}
+
+impl From<wire::Issue> for Issue {
+    fn from(w: wire::Issue) -> Self {
+        Self {
+            id: w.id,
+            identifier: w.identifier,
+            title: w.title,
+            priority_label: w.priority_label,
+            priority: w.priority,
+            state: w.state.into(),
+            assignee: w.assignee.map(Into::into),
+            team: w.team.into(),
+            description: w.description,
+            labels: w.labels.into(),
+            project: w.project.map(Into::into),
+            cycle: w.cycle.map(Into::into),
+            creator: w.creator.map(Into::into),
+            parent: w.parent.map(Into::into),
+            created_at: w.created_at,
+            updated_at: w.updated_at,
+        }
+    }
 }

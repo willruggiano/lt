@@ -6,11 +6,10 @@
 
 use cynic::QueryBuilder;
 
-use crate::comments::{Comment, CommentConnection};
+use crate::comments::Comment;
 use crate::graphql::GraphqlOperation;
-use crate::issues::IssueConnection;
-use crate::schema;
 use crate::types::Issue;
+use crate::{schema, wire};
 
 #[derive(cynic::QueryVariables, Clone)]
 pub struct IssueDetailVariables {
@@ -30,14 +29,14 @@ pub struct IssueDetailQuery {
 #[cynic(graphql_type = "Issue")]
 pub struct IssueDetailFragment {
     #[cynic(spread)]
-    pub base: Issue,
+    pub base: wire::Issue,
     #[arguments(first: 100)]
-    pub comments: CommentConnection,
+    pub comments: wire::CommentConnection,
     /// Never fetched upstream before this operation existed (only
     /// reconstructed locally); a first-page fetch is an upgrade, not a
     /// regression -- `docs/design/operation-seam-adr.md` Task 4.
     #[arguments(first: 250)]
-    pub children: IssueConnection,
+    pub children: wire::IssueConnection,
 }
 
 /// The detail pane's whole data contract. `None` when the id is locally
@@ -76,9 +75,21 @@ impl TryFrom<IssueDetailQuery> for Option<IssueDetailData> {
             .then_some(page_info.end_cursor)
             .flatten();
         Ok(Some(IssueDetailData {
-            issue: op.issue.base,
-            comments: op.issue.comments.nodes,
-            children: op.issue.children.nodes,
+            issue: op.issue.base.into(),
+            comments: op
+                .issue
+                .comments
+                .nodes
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            children: op
+                .issue
+                .children
+                .nodes
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             comments_cursor,
         }))
     }

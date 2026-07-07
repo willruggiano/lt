@@ -14,6 +14,7 @@ pub mod states;
 pub mod teams;
 pub mod types;
 pub mod viewer;
+pub mod wire;
 
 // Re-exported so downstream crates (`lt-storage`, `lt-runtime`, ...) can
 // construct/read the `id` fields on the fragment types in `types` without
