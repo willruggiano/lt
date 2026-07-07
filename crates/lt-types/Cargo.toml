@@ -14,7 +14,7 @@ cynic = { version = "3.13", default-features = false }
 chrono = { workspace = true, features = ["serde"] }
 
 [build-dependencies]
-cynic-codegen = "3.13"
+cynic-codegen = { version = "3.13", features = ["rkyv"] }
 lt-schema-codegen.workspace = true
 toml = "1"
 
