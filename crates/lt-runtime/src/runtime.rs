@@ -835,23 +835,7 @@ mod tests {
 
     #[test]
     fn create_comment_emits_update_and_a_reexecute_of_the_detail_sees_it() {
-        let db = Database::memory().unwrap();
-        {
-            let conn = db.connect().unwrap();
-            // `sample_base_issue`'s state must already be locally known (sync
-            // owns workflow states; issue upserts never write them).
-            db::upsert_team_state(
-                &conn,
-                "ENG",
-                &types::WorkflowState {
-                    id: "s-todo".into(),
-                    name: "Todo".to_string(),
-                    position: 1.0,
-                },
-            )
-            .unwrap();
-            db::upsert_issues(&conn, &[db::op_log::sample_base_issue("issue-1")]).unwrap();
-        }
+        let db = db_with_a_todo_issue("issue-1");
         let (runtime, rx) = runtime_over(db);
         let detail_vars = lt_types::detail::IssueDetailVariables {
             id: "issue-1".to_string(),
@@ -890,23 +874,7 @@ mod tests {
     fn update_issue_emits_a_single_unscoped_update() {
         // `Update` is unscoped: it carries no entity id, so any write's
         // signal is indistinguishable from any other's.
-        let db = Database::memory().unwrap();
-        {
-            let conn = db.connect().unwrap();
-            // `sample_base_issue`'s state must already be locally known (sync
-            // owns workflow states; issue upserts never write them).
-            db::upsert_team_state(
-                &conn,
-                "ENG",
-                &types::WorkflowState {
-                    id: "s-todo".into(),
-                    name: "Todo".to_string(),
-                    position: 1.0,
-                },
-            )
-            .unwrap();
-            db::upsert_issues(&conn, &[db::op_log::sample_base_issue("issue-1")]).unwrap();
-        }
+        let db = db_with_a_todo_issue("issue-1");
         let (runtime, rx) = runtime_over(db);
 
         let updated = runtime

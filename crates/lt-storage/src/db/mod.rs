@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 pub use comments::{delete_comments_for_issue, query_comments, upsert_comments};
 pub use issues::{
-    count_fts_rows, count_issues, get_meta, query_children, query_issue_by_id, query_issues,
-    search_issues, search_issues_like, set_meta, upsert_issues,
+    count_fts_rows, count_issues, get_meta, issue_is_locally_unsynced, query_children,
+    query_issue_by_id, query_issues, search_issues, search_issues_like, set_meta, upsert_issues,
 };
 pub use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};

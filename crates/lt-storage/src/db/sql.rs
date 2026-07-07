@@ -336,6 +336,16 @@ statements! {
     SENDABLE_ISSUE_UPDATE, 1,
         "SELECT (synced_at IS NOT NULL) FROM issues WHERE id = ?1";
 
+    /// Whether an issue is present locally, as a full (not skeleton) row, but
+    /// not yet synced upstream. `title IS NOT NULL` excludes a skeleton row
+    /// minted only to anchor an FK (e.g. a comment's issue reference), which
+    /// also carries `synced_at IS NULL` but is not an optimistic create. A
+    /// missing id is not "locally unsynced" (`EXISTS` is false), distinct
+    /// from `SENDABLE_ISSUE_UPDATE`, which assumes the row exists.
+    ISSUE_IS_LOCALLY_UNSYNCED, 1,
+        "SELECT EXISTS(SELECT 1 FROM issues \
+         WHERE id = ?1 AND synced_at IS NULL AND title IS NOT NULL)";
+
     /// Whether a pending `commentCreate`'s target issue has synced.
     SENDABLE_COMMENT_CREATE, 1,
         "SELECT (i.synced_at IS NOT NULL) FROM issue_comments c \

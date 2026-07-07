@@ -187,7 +187,7 @@ fn detail_view_mut(app: &mut App, i: usize) -> Option<&mut DetailView> {
 }
 
 /// Enqueue the comment buffer as a local create: the optimistic `local:` row
-/// plus a `commentCreate` outbox command, in one transaction. A failure
+/// plus a `commentCreate` op-log entry, in one transaction. A failure
 /// surfaces in the footer.
 fn submit_comment(app: &mut App, i: usize) {
     let Some(detail) = detail_view_mut(app, i) else {

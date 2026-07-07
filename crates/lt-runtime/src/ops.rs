@@ -406,6 +406,13 @@ impl Refresh for IssueDetailQuery {
         transport: &dyn GraphqlTransport,
         vars: Self::Variables,
     ) -> Result<()> {
+        // A just-created optimistic issue (synced_at NULL) has no upstream
+        // counterpart; refreshing its fabricated id would be a doomed wire
+        // call. An absent id is not locally-unsynced, so a first-fetch of an
+        // un-cached issue still refreshes.
+        if db::issue_is_locally_unsynced(conn, &vars.id)? {
+            return Ok(());
+        }
         let out = execute::<IssueDetailQuery>(transport, vars.clone())?;
         let mut cursor = out.as_ref().and_then(|data| data.comments_cursor.clone());
         IssueDetailQuery::fill(conn, &vars, &out)?;
@@ -549,6 +556,8 @@ mod tests {
     use lt_storage::db;
     use lt_types::comments::Comment;
     use lt_types::detail::IssueDetailVariables;
+    use lt_types::inputs::IssueCreateInput;
+    use lt_types::issues::IssueCreateVariables;
     use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
     use lt_types::states::{
         AllWorkflowStatesVariables, TeamRef, TeamStatesQuery, TeamVariables as StatesTeamVariables,
@@ -1074,6 +1083,45 @@ mod tests {
         let conn = conn();
         let transport = FakeTransport::new(vec![json!({ "issue": null })]);
         assert!(IssueDetailQuery::refresh(&conn, &transport, detail_vars("i1")).is_err());
+    }
+
+    #[test]
+    fn refresh_skips_the_wire_for_an_unsynced_optimistic_issue() {
+        let conn = conn();
+        // Seed a team state so the optimistic create can resolve/default its state.
+        db::upsert_team_state(
+            &conn,
+            "ENG",
+            &lt_types::types::WorkflowState {
+                id: "s-todo".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
+        let id = db::op_log::enqueue_issue_create(
+            &conn,
+            &IssueCreateVariables {
+                input: IssueCreateInput {
+                    title: "New".to_string(),
+                    team_id: "ENG".to_string(),
+                    description: None,
+                    state_id: None,
+                    priority: None,
+                    assignee_id: None,
+                },
+            },
+        )
+        .unwrap();
+
+        // Empty transport: any wire call would panic/err. The gate must return
+        // Ok without touching it.
+        let transport = FakeTransport::new(vec![]);
+        IssueDetailQuery::refresh(&conn, &transport, IssueDetailVariables { id }).unwrap();
+        assert!(
+            transport.calls.borrow().is_empty(),
+            "unsynced issue must not hit the wire"
+        );
     }
 
     #[test]

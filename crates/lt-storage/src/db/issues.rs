@@ -458,6 +458,18 @@ pub fn count_fts_rows(conn: &Connection) -> Result<i64> {
     count_rows(conn, sql::COUNT_FTS_ROWS, "count fts rows")
 }
 
+/// Whether an issue is present locally as a full row (not a bare FK skeleton)
+/// but not yet synced upstream (`synced_at IS NULL`) -- i.e. an optimistic
+/// local create whose id is fabricated and has no upstream counterpart to
+/// fetch. A missing id, or a skeleton row minted only to anchor another row's
+/// FK, is not "locally unsynced" (false), so a first-fetch refresh of an
+/// un-cached (or only FK-anchored) issue still proceeds.
+pub fn issue_is_locally_unsynced(conn: &Connection, id: &str) -> Result<bool> {
+    sql::prepare(conn, sql::ISSUE_IS_LOCALLY_UNSYNCED)?
+        .query_row(params![id], |r| r.get(0))
+        .context("failed to check local sync state")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,11 +842,10 @@ mod tests {
         assert_eq!(has_state_name, 0);
     }
 
-    /// A parent minted as a skeleton by the child's upsert (never itself
-    /// synced) must not surface in the list or count, while the child still
-    /// resolves `parent.identifier` from the skeleton row.
-    #[test]
-    fn skeleton_parent_excluded_from_list_and_count_but_child_resolves_parent() {
+    /// A fresh database with one child issue upserted whose parent (`p1`) is
+    /// referenced but never itself synced -- so the upsert mints it as a bare
+    /// skeleton row (`title IS NULL`).
+    fn db_with_skeleton_parent_child() -> Connection {
         let conn = crate::db::Database::memory().unwrap().connect().unwrap();
         seed_state(&conn, "ENG", "Todo", 1.0);
 
@@ -844,6 +855,15 @@ mod tests {
             identifier: "ENG-P1".to_string(),
         });
         upsert_issues(&conn, &[child]).unwrap();
+        conn
+    }
+
+    /// A parent minted as a skeleton by the child's upsert (never itself
+    /// synced) must not surface in the list or count, while the child still
+    /// resolves `parent.identifier` from the skeleton row.
+    #[test]
+    fn skeleton_parent_excluded_from_list_and_count_but_child_resolves_parent() {
+        let conn = db_with_skeleton_parent_child();
 
         let issues = query_issues(
             &conn,
@@ -875,15 +895,7 @@ mod tests {
     /// as a full, titled issue, at which point it becomes searchable.
     #[test]
     fn skeleton_parent_is_not_indexed_until_it_syncs() {
-        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
-        seed_state(&conn, "ENG", "Todo", 1.0);
-
-        let mut child = test_issue("1", None, "Todo");
-        child.parent = Some(types::Parent {
-            id: "p1".into(),
-            identifier: "ENG-P1".to_string(),
-        });
-        upsert_issues(&conn, &[child]).unwrap();
+        let conn = db_with_skeleton_parent_child();
 
         assert!(search_issues(&conn, "parent", 10).unwrap().is_empty());
 

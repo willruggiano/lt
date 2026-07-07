@@ -508,11 +508,13 @@ pub fn sample_base_issue(id: &str) -> types::Issue {
 mod tests {
     use super::{sample_base_issue as base_issue, *};
 
-    fn db_with_issue(id: &str) -> Connection {
+    /// A fresh in-memory database seeded with the `ENG`/`s-todo` workflow
+    /// state -- sync owns workflow states, so every fixture issue's state
+    /// must already be locally known before an upsert or an optimistic
+    /// create resolves it.
+    fn db_with_todo_state() -> Connection {
         let db = crate::db::Database::memory().unwrap();
         let conn = db.connect().unwrap();
-        // `sample_base_issue`'s state must already be locally known (sync
-        // owns workflow states; issue upserts never write them).
         crate::db::teams::upsert_team_state(
             &conn,
             "ENG",
@@ -523,6 +525,11 @@ mod tests {
             },
         )
         .unwrap();
+        conn
+    }
+
+    fn db_with_issue(id: &str) -> Connection {
+        let conn = db_with_todo_state();
         crate::db::upsert_issues(&conn, &[base_issue(id)]).unwrap();
         conn
     }
@@ -698,18 +705,7 @@ mod tests {
 
     #[test]
     fn enqueue_create_inserts_an_unsynced_fabricated_row_and_records_an_op() {
-        let db = crate::db::Database::memory().unwrap();
-        let conn = db.connect().unwrap();
-        crate::db::teams::upsert_team_state(
-            &conn,
-            "ENG",
-            &types::WorkflowState {
-                id: "s-todo".into(),
-                name: "Todo".to_string(),
-                position: 1.0,
-            },
-        )
-        .unwrap();
+        let conn = db_with_todo_state();
         let input = IssueCreateInput {
             title: "New".to_string(),
             team_id: "ENG".to_string(),
@@ -741,18 +737,7 @@ mod tests {
 
     #[test]
     fn ack_create_cascades_the_fabricated_id_to_server_id() {
-        let db = crate::db::Database::memory().unwrap();
-        let conn = db.connect().unwrap();
-        crate::db::teams::upsert_team_state(
-            &conn,
-            "ENG",
-            &types::WorkflowState {
-                id: "s-todo".into(),
-                name: "Todo".to_string(),
-                position: 1.0,
-            },
-        )
-        .unwrap();
+        let conn = db_with_todo_state();
         let input = IssueCreateInput {
             title: "New".to_string(),
             team_id: "ENG".to_string(),
