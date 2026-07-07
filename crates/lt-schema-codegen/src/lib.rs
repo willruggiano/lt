@@ -16,6 +16,9 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use serde::Deserialize;
 
+pub mod schema_model;
+pub mod selection_model;
+
 #[derive(Debug, Deserialize)]
 pub struct SortFieldSpec {
     /// Sort key as typed by the user after "sort:" (e.g. "updated").

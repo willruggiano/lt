@@ -10,6 +10,9 @@ serde.workspace = true
 # Crate-specific: this crate exists to parse the GraphQL schema snapshot and
 # generate source for the two consuming build scripts.
 graphql-parser = "0.4"
+# Crate-specific: offline SDL parser for the schema-driven codegen extraction
+# core (selection_model/schema_model), replacing graphql-parser there.
+cynic-parser = "0.11"
 prettyplease = "0.2"
 proc-macro2 = "1"
 quote = "1"

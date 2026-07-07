@@ -1496,6 +1496,7 @@ dependencies = [
 name = "lt-schema-codegen"
 version = "0.7.1"
 dependencies = [
+ "cynic-parser",
  "graphql-parser",
  "prettyplease",
  "proc-macro2",
