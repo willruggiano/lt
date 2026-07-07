@@ -16,6 +16,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use serde::Deserialize;
 
+pub mod affinity;
 pub mod classify;
 pub mod schema_model;
 pub mod selection_model;
