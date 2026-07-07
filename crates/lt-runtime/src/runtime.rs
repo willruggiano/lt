@@ -780,6 +780,16 @@ mod tests {
         let db = Database::memory().unwrap();
         {
             let conn = db.connect().unwrap();
+            // The team itself must already be cached (`enqueue_issue_create`
+            // only mints a nameless skeleton row for an uncached team id).
+            db::upsert_teams(
+                &conn,
+                &[types::Team {
+                    id: "t1".into(),
+                    name: "Eng".to_string(),
+                }],
+            )
+            .unwrap();
             // The optimistic create defaults to the team's first cached state
             // (sync owns workflow states; issue upserts never write them).
             db::upsert_team_state(
@@ -813,7 +823,7 @@ mod tests {
         let issue = runtime
             .execute::<IssueCreateMutation>(IssueCreateVariables { input })
             .unwrap();
-        assert_eq!(issue.identifier, db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER);
+        assert_eq!(issue.identifier, db::op_log::OPTIMISTIC_ISSUE_IDENTIFIER);
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(ev, RuntimeEvent::Update));
@@ -840,7 +850,7 @@ mod tests {
                 },
             )
             .unwrap();
-            db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
+            db::upsert_issues(&conn, &[db::op_log::sample_base_issue("issue-1")]).unwrap();
         }
         let (runtime, rx) = runtime_over(db);
         let detail_vars = lt_types::detail::IssueDetailVariables {
@@ -895,7 +905,7 @@ mod tests {
                 },
             )
             .unwrap();
-            db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
+            db::upsert_issues(&conn, &[db::op_log::sample_base_issue("issue-1")]).unwrap();
         }
         let (runtime, rx) = runtime_over(db);
 
@@ -1127,7 +1137,7 @@ mod tests {
             },
         )
         .unwrap();
-        db::upsert_issues(&conn, &[db::outbox::sample_base_issue(id)]).unwrap();
+        db::upsert_issues(&conn, &[db::op_log::sample_base_issue(id)]).unwrap();
         db
     }
 
@@ -1178,11 +1188,7 @@ mod tests {
 
         let conn = runtime.connect().unwrap();
         let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM outbox WHERE status = 'pending'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM op_log", [], |r| r.get(0))
             .unwrap();
         assert_eq!(pending, 0);
         let priority_label: String = conn
@@ -1221,7 +1227,7 @@ mod tests {
         let conn = runtime.connect().unwrap();
         let (attempts, last_error): (i64, Option<String>) = conn
             .query_row(
-                "SELECT attempts, last_error FROM outbox WHERE entity_id = 'issue-1'",
+                "SELECT attempts, last_error FROM op_log WHERE id = 'issue-1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )

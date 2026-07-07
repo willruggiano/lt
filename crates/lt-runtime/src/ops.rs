@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use lt_storage::db;
 use lt_storage::db::Connection;
-use lt_types::comments::{Comment, CommentCreateMutation, CommentsQuery, CommentsVariables};
+use lt_types::comments::{CommentCreateMutation, CommentsQuery, CommentsVariables};
 use lt_types::detail::{IssueDetailData, IssueDetailQuery};
 use lt_types::graphql::GraphqlOperation;
 use lt_types::issues::{IssueCreateMutation, IssueUpdateMutation, IssuesQuery};
@@ -38,37 +38,32 @@ pub trait Fill: GraphqlOperation {
     fn fill(conn: &Connection, vars: &Self::Variables, out: &Self::Output) -> Result<()>;
 }
 
-/// The drainer's ack context: the outbox row's own identity (`seq`,
-/// `entity_id`, as recorded by [`Mutation::enqueue`]) and the variables it
-/// replayed, grouped so [`Mutation::ack`] stays under the argument-count lint.
-pub struct AckContext<'a, V> {
+/// The drainer's ack context: the op-log row's own identity, as recorded by
+/// [`Mutation::enqueue`] and read back at replay.
+pub struct AckContext<'a> {
     pub seq: i64,
-    pub entity_id: &'a str,
-    pub vars: &'a V,
+    pub id: &'a str,
 }
 
-/// The outbox's mutation-side vocabulary: the optimistic local write plus its
+/// The op-log's mutation-side vocabulary: the optimistic local write plus its
 /// enqueue and ack. Implemented only by the three real mutations
 /// (`IssueUpdateMutation`, `IssueCreateMutation`, `CommentCreateMutation`) --
 /// a query operation's fetched-response cache write is [`Fill`] instead, so
 /// this trait carries no query-only "unsupported" defaults.
 pub trait Mutation: GraphqlOperation {
-    /// Write the operation's local optimistic effect (a `pending_overlay`
-    /// row, an optimistic temp row, a local comment row, ...) and enqueue its
-    /// outbox command from `vars`, atomically. Returns the id it wrote the
-    /// effect under (`vars.id` for an update, the freshly minted temp id for
-    /// a create), so a caller (`Runtime::execute`,
-    /// docs/design/unified-execute-adr.md "Decision 1") can read the
-    /// optimistic entity straight back out of the cache.
+    /// Write the operation's optimistic local effect and enqueue its op-log
+    /// row from `vars`, atomically. Returns the id it wrote under (`vars.id`
+    /// for an update, the fabricated id for a create) so the caller can read
+    /// the optimistic entity straight back out of the cache.
     fn enqueue(conn: &Connection, vars: Self::Variables) -> Result<String>;
 
-    /// Reconcile the base and retire the command's local effect once the
-    /// drainer has `out`, the mutation's decoded response.
-    fn ack(
-        conn: &Connection,
-        ctx: AckContext<'_, Self::Variables>,
-        out: Self::Output,
-    ) -> Result<()>;
+    /// Rebuild the wire variables for a pending replay by re-reading the row
+    /// the op-log points at (the op-log stores no variables).
+    fn replay_vars(conn: &Connection, id: &str) -> Result<Self::Variables>;
+
+    /// Reconcile the base and retire the op once the drainer has `out`, the
+    /// mutation's decoded response.
+    fn ack(conn: &Connection, ctx: AckContext<'_>, out: Self::Output) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,56 +262,50 @@ impl Fill for CommentsQuery {
 }
 
 // ---------------------------------------------------------------------------
-// Mutation impls -- the three real outbox mutations
+// Mutation impls -- the three real op-log mutations
 // ---------------------------------------------------------------------------
 
 impl Mutation for IssueUpdateMutation {
     fn enqueue(conn: &Connection, vars: Self::Variables) -> Result<String> {
-        db::outbox::enqueue_issue_update(conn, vars)
+        db::op_log::enqueue_issue_update(conn, vars)
     }
 
-    fn ack(
-        conn: &Connection,
-        ctx: AckContext<'_, Self::Variables>,
-        out: Self::Output,
-    ) -> Result<()> {
-        db::outbox::ack_issue_update(conn, ctx.seq, ctx.entity_id, out.as_ref())
+    fn replay_vars(conn: &Connection, id: &str) -> Result<Self::Variables> {
+        db::op_log::issue_update_replay_vars(conn, id)
+    }
+
+    fn ack(conn: &Connection, ctx: AckContext<'_>, out: Self::Output) -> Result<()> {
+        db::op_log::ack_issue_update(conn, ctx.seq, ctx.id, out.as_ref())
     }
 }
 
 impl Mutation for IssueCreateMutation {
     fn enqueue(conn: &Connection, vars: Self::Variables) -> Result<String> {
-        db::outbox::enqueue_issue_create(conn, &vars)
+        db::op_log::enqueue_issue_create(conn, &vars)
     }
 
-    fn ack(
-        conn: &Connection,
-        ctx: AckContext<'_, Self::Variables>,
-        out: Self::Output,
-    ) -> Result<()> {
-        db::outbox::ack_issue_create(conn, ctx.seq, ctx.entity_id, &out)
+    fn replay_vars(conn: &Connection, id: &str) -> Result<Self::Variables> {
+        db::op_log::issue_create_replay_vars(conn, id)
+    }
+
+    fn ack(conn: &Connection, ctx: AckContext<'_>, out: Self::Output) -> Result<()> {
+        db::op_log::ack_issue_create(conn, ctx.seq, ctx.id, &out)
     }
 }
 
 impl Mutation for CommentCreateMutation {
     fn enqueue(conn: &Connection, vars: Self::Variables) -> Result<String> {
-        db::outbox::enqueue_comment_create(conn, &vars)
+        db::op_log::enqueue_comment_create(conn, &vars)
     }
 
-    /// Stamps the issue id from `ctx.vars` rather than trusting the server's
-    /// comment payload for it: the mutation's `issueId` is nullable in the
-    /// schema, but the outbox command it replays always carries the issue it
-    /// was queued against.
-    fn ack(
-        conn: &Connection,
-        ctx: AckContext<'_, Self::Variables>,
-        out: Self::Output,
-    ) -> Result<()> {
-        let comment = Comment {
-            issue_id: Some(ctx.vars.input.issue_id.clone()),
-            ..out
-        };
-        db::outbox::ack_comment_create(conn, ctx.seq, ctx.entity_id, &comment)
+    fn replay_vars(conn: &Connection, id: &str) -> Result<Self::Variables> {
+        db::op_log::comment_create_replay_vars(conn, id)
+    }
+
+    /// The comment row already carries its `issue_id` (set at enqueue); ack
+    /// only attaches the server id and stamps `synced_at`.
+    fn ack(conn: &Connection, ctx: AckContext<'_>, out: Self::Output) -> Result<()> {
+        db::op_log::ack_comment_create(conn, ctx.seq, ctx.id, &out)
     }
 }
 
@@ -523,10 +512,10 @@ impl Operation for IssueDetailQuery {
 /// entity back out of the cache.
 fn mutation_execute<M: Mutation>(runtime: &Runtime, vars: M::Variables) -> Result<String> {
     let conn = runtime.connect()?;
-    let entity_id = M::enqueue(&conn, vars)?;
+    let id = M::enqueue(&conn, vars)?;
     runtime.emit_update();
     runtime.request_drain();
-    Ok(entity_id)
+    Ok(id)
 }
 
 impl Operation for IssueCreateMutation {
@@ -558,6 +547,7 @@ impl Operation for CommentCreateMutation {
 #[cfg(test)]
 mod tests {
     use lt_storage::db;
+    use lt_types::comments::Comment;
     use lt_types::detail::IssueDetailVariables;
     use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
     use lt_types::states::{
@@ -928,8 +918,8 @@ mod tests {
             },
         )
         .unwrap();
-        let parent = lt_storage::db::outbox::sample_base_issue("1");
-        let mut child = lt_storage::db::outbox::sample_base_issue("2");
+        let parent = lt_storage::db::op_log::sample_base_issue("1");
+        let mut child = lt_storage::db::op_log::sample_base_issue("2");
         child.parent = Some(lt_types::types::Parent {
             id: "1".into(),
             identifier: "ENG-1".to_string(),
@@ -978,7 +968,7 @@ mod tests {
         )
         .unwrap();
         let data = IssueDetailData {
-            issue: lt_storage::db::outbox::sample_base_issue("1"),
+            issue: lt_storage::db::op_log::sample_base_issue("1"),
             comments: vec![Comment {
                 id: "c1".into(),
                 body: "hi".to_string(),
@@ -987,7 +977,7 @@ mod tests {
                 user: None,
                 issue_id: Some("1".to_string()),
             }],
-            children: vec![lt_storage::db::outbox::sample_base_issue("2")],
+            children: vec![lt_storage::db::op_log::sample_base_issue("2")],
             comments_cursor: None,
         };
         IssueDetailQuery::fill(&conn, &detail_vars("1"), &Some(data)).unwrap();
