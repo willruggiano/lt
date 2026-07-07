@@ -4,7 +4,7 @@ use lt_types::comments::{Comment, CommentsQuery};
 use lt_types::types::User;
 use rusqlite::{Connection, params};
 
-use crate::db::ops::{EntityKey, Upsert};
+use crate::db::ops::Mutation;
 use crate::db::parse_datetime_column;
 use crate::db::sql::{self, EntityTable};
 
@@ -91,20 +91,13 @@ pub fn delete_comments_for_issue(conn: &Connection, issue_id: &str) -> Result<()
     )
 }
 
-impl Upsert for CommentsQuery {
+impl Mutation for CommentsQuery {
     /// Appends the page rather than replacing the set: this operation only
     /// ever runs mid-pagination, in `lt-runtime`'s `IssueDetailQuery` refresh,
     /// after that operation's own upsert has already replaced the set with
     /// the first page. A delete-first here would wipe that page's inserts.
-    fn upsert(
-        conn: &Connection,
-        vars: &Self::Variables,
-        out: &Self::Output,
-    ) -> Result<Vec<EntityKey>> {
-        upsert_comments(conn, &out.nodes)?;
-        Ok(vec![EntityKey::Comment {
-            issue_id: vars.id.clone(),
-        }])
+    fn apply(conn: &Connection, _vars: &Self::Variables, out: &Self::Output) -> Result<()> {
+        upsert_comments(conn, &out.nodes)
     }
 }
 
@@ -222,13 +215,7 @@ mod tests {
             page_info: PageInfo::default(),
         };
 
-        let touched = CommentsQuery::upsert(&conn, &vars, &page).unwrap();
-        assert_eq!(
-            touched,
-            vec![EntityKey::Comment {
-                issue_id: "i1".to_string()
-            }]
-        );
+        CommentsQuery::apply(&conn, &vars, &page).unwrap();
 
         let rows = query_comments(&conn, "i1").unwrap();
         assert_eq!(

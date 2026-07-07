@@ -8,7 +8,7 @@
 
 use anyhow::{Result, bail};
 use lt_storage::db::outbox::{self, PendingOp};
-use lt_storage::db::{AckContext, EntityKey, Mutate};
+use lt_storage::db::{AckContext, Mutation};
 use lt_types::comments::CommentCreateMutation;
 use lt_types::graphql::GraphqlOperation;
 use lt_types::issues::{IssueCreateMutation, IssueUpdateMutation};
@@ -16,27 +16,24 @@ use lt_upstream::client::{GraphqlTransport, execute};
 use rusqlite::Connection;
 use serde::de::DeserializeOwned;
 
-/// Replay every pending outbox command, recording (not propagating) per-command
-/// failures so a single bad command never aborts the surrounding sync. Returns
-/// the union of entity keys every successfully-replayed command touched
-/// (docs/design/operation-seam-adr.md, "Decision 5"), for the sync cycle's own
-/// propagation.
-pub fn drain(conn: &Connection, transport: &dyn GraphqlTransport) -> Result<Vec<EntityKey>> {
-    let mut touched = Vec::new();
+/// Replay every pending outbox command, recording (not aborting on)
+/// per-command failures so a single bad command never aborts the
+/// surrounding sync. Returns whether at least one command was successfully
+/// replayed -- the caller's own signal for whether the cache actually
+/// changed (docs/design/unified-execute-adr.md, "Decision 3": `Update` fires
+/// on a change, not on a no-op attempt).
+pub fn drain(conn: &Connection, transport: &dyn GraphqlTransport) -> Result<bool> {
+    let mut changed = false;
     for op in outbox::pending_operations(conn)? {
         match replay(conn, transport, &op) {
-            Ok(keys) => touched.extend(keys),
+            Ok(()) => changed = true,
             Err(e) => outbox::record_error(conn, op.seq, &e.to_string())?,
         }
     }
-    Ok(touched)
+    Ok(changed)
 }
 
-fn replay(
-    conn: &Connection,
-    transport: &dyn GraphqlTransport,
-    op: &PendingOp,
-) -> Result<Vec<EntityKey>> {
+fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -> Result<()> {
     match op.op_type.as_str() {
         IssueUpdateMutation::NAME => replay_op::<IssueUpdateMutation>(conn, transport, op),
         IssueCreateMutation::NAME => replay_op::<IssueCreateMutation>(conn, transport, op),
@@ -46,16 +43,13 @@ fn replay(
 }
 
 /// Replay one operation: decode its stored variables, execute the mutation on
-/// the wire, then let the operation's own [`Mutate::ack`] reconcile the base
+/// the wire, then let the operation's own [`Mutation::ack`] reconcile the base
 /// and retire the command.
-fn replay_op<M>(
-    conn: &Connection,
-    transport: &dyn GraphqlTransport,
-    op: &PendingOp,
-) -> Result<Vec<EntityKey>>
+fn replay_op<M>(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -> Result<()>
 where
-    M: Mutate,
+    M: Mutation,
     M::Variables: DeserializeOwned + Clone,
+    M::Output: TryFrom<M, Error = anyhow::Error>,
 {
     let vars: M::Variables = serde_json::from_str(&op.variables)?;
     let out = execute::<M>(transport, vars.clone())?;
@@ -120,7 +114,7 @@ mod tests {
         let transport = FakeTransport::new(vec![
             json!({ "issueUpdate": { "success": true, "issue": null } }),
         ]);
-        let touched = drain(&conn, &transport).unwrap();
+        assert!(drain(&conn, &transport).unwrap());
 
         let state: String = conn
             .query_row("SELECT state_id FROM issues WHERE id = '1'", [], |r| {
@@ -129,7 +123,6 @@ mod tests {
             .unwrap();
         assert_eq!(state, "s-done");
         assert_eq!(pending_count(&conn), 0);
-        assert_eq!(touched, vec![EntityKey::Issue]);
         // The replayed command carried the coalesced variables.
         assert_eq!(transport.variables(0)["input"]["stateId"], json!("s-done"));
     }
@@ -199,8 +192,7 @@ mod tests {
         let transport = FakeTransport::new(vec![
             json!({ "issueCreate": { "success": true, "issue": server_issue } }),
         ]);
-        let touched = drain(&conn, &transport).unwrap();
-        assert!(touched.contains(&EntityKey::Issue));
+        drain(&conn, &transport).unwrap();
 
         let ident: String = conn
             .query_row(
@@ -239,13 +231,7 @@ mod tests {
                 "issueId": "1"
             }}
         })]);
-        let touched = drain(&conn, &transport).unwrap();
-        assert_eq!(
-            touched,
-            vec![EntityKey::Comment {
-                issue_id: "1".to_string()
-            }]
-        );
+        drain(&conn, &transport).unwrap();
 
         let ids: Vec<String> = lt_storage::db::query_comments(&conn, "1")
             .unwrap()
@@ -273,8 +259,7 @@ mod tests {
 
         // No scripted responses: the transport errors, simulating offline.
         let transport = FakeTransport::new(vec![]);
-        let touched = drain(&conn, &transport).unwrap();
-        assert!(touched.is_empty());
+        assert!(!drain(&conn, &transport).unwrap());
 
         assert_eq!(pending_count(&conn), 1);
         let (attempts, last_error): (i64, Option<String>) = conn
@@ -305,7 +290,7 @@ mod tests {
         .unwrap();
 
         let transport = FakeTransport::new(vec![]);
-        drain(&conn, &transport).unwrap();
+        assert!(!drain(&conn, &transport).unwrap());
 
         let last_error: Option<String> = conn
             .query_row(

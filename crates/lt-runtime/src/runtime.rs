@@ -1,29 +1,25 @@
-//! The concrete data runtime. It owns the sync/login loop, the live
-//! subscription registry, and every write; it is the only place in the
-//! TUI's runtime that touches `HttpTransport`/cynic directly (behind the
-//! injected [`TransportSource`]). `lt-cli` constructs it and injects it into
-//! `tui::run`.
+//! The concrete data runtime. It owns the sync/login loop, one-shot
+//! background upstream refreshes for a composed view opening
+//! (docs/design/unified-execute-adr.md, "Decision 3"), and every write; it is
+//! the only place in the TUI's runtime that touches `HttpTransport`/cynic
+//! directly (behind the injected [`TransportSource`]). `lt-cli` constructs it
+//! and injects it into `tui::run`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use lt_storage::db;
-use lt_storage::db::{Connection, Database, EntityKey, Mutate, Read, Upsert};
-use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
-use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
-use lt_types::issues::{
-    IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
-};
+use lt_storage::db::{Connection, Database};
 use lt_types::viewer::{self, ViewerQuery};
 use lt_upstream::auth::login_non_interactive;
 use lt_upstream::auth::refresh::load_or_refresh_token;
 use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
 
-use crate::ops::Refresh;
-use crate::subscription::{Subscription, SubscriptionKey};
+use crate::ops::{Operation, Refresh};
 use crate::sync::service::{LoginEvent, OnEvent, RuntimeEvent, SyncEvent};
 
 /// The loop's periodic delta-sync cadence.
@@ -48,37 +44,21 @@ impl TransportSource for HttpTransportSource {
     }
 }
 
-/// A local cache-only re-read: fills a subscription's slot and emits
-/// `Updated`.
-type RereadFn = Arc<dyn Fn(&Connection) + Send + Sync>;
-
-/// An upstream refresh: fetches and upserts, returning the touched keys (or
-/// the subscription's own `reads`, on failure -- "the refresh attempt
-/// finished; re-read whatever is cached").
-type RefreshFn = Arc<dyn Fn(&Connection, &dyn GraphqlTransport) -> Vec<EntityKey> + Send + Sync>;
-
-/// A live subscription's registration: the concrete `reads` set it was
-/// subscribed with, and the operation erased into closures over its typed
-/// variables (docs/design/operation-seam-adr.md, "Decision 4").
-#[derive(Clone)]
-struct Entry {
-    reads: Vec<EntityKey>,
-    reread: RereadFn,
-    refresh: RefreshFn,
-}
+/// A one-shot upstream refresh, erased by [`Runtime::refresh`] into a thunk
+/// the loop runs once (docs/design/unified-execute-adr.md, "Decision 3"):
+/// fetch via `client::execute`, apply via `Mutation`.
+type RefreshThunk = Box<dyn FnOnce(&Connection, &dyn GraphqlTransport) -> Result<()> + Send>;
 
 /// A command sent through the runtime's internal channel: the public methods
-/// (`subscribe`/`request_sync`/`login`) plus the login worker's private
+/// (`refresh`/`request_sync`/`login`) plus the login worker's private
 /// completion signal, which the loop needs so it -- the sole owner of the
 /// pause gate -- decides the follow-up. Every variant is `Copy`: nothing here
 /// is worth avoiding a cheap duplication for.
 #[derive(Clone, Copy)]
 enum Command {
-    /// Prompts the loop to upstream-refresh this entry if its `reads` extend
-    /// beyond the delta cycle's baseline coverage (Decision 6); a no-op
-    /// otherwise. Registration and the caller-side initial read already
-    /// happened synchronously on `subscribe`'s caller thread.
-    Subscribe(SubscriptionKey),
+    /// Run the registered one-shot refresh thunk under this id
+    /// (`Runtime::refresh`).
+    Refresh(u64),
     RequestSync,
     Login,
     LoginFinished(bool),
@@ -92,7 +72,7 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Cycle { full: bool },
-    RefreshEntry(SubscriptionKey),
+    Refresh(u64),
     SpawnLogin,
     Drain,
 }
@@ -129,13 +109,11 @@ fn coalesce_drains(actions: Vec<Action>) -> Vec<Action> {
 }
 
 /// The loop's pause gate and login-in-flight guard, decided independent of
-/// I/O so cadence/pause/login policy is testable without threads. The watch
-/// set round 1 kept here is gone: which entries need a freshness refresh is
-/// read straight off the registry (`Entry::reads`), not tracked separately.
+/// I/O so cadence/pause/login policy is testable without threads.
 struct LoopState {
     /// Set on `NotAuthenticated` or a failed login; cleared by a login
     /// success or `request_sync`. While paused, periodic full/delta cycles
-    /// are skipped, but a subscription's freshness refresh still runs.
+    /// are skipped, but a requested refresh still runs.
     paused: bool,
     login_in_flight: bool,
 }
@@ -150,7 +128,7 @@ impl LoopState {
 
     fn on_command(&mut self, cmd: Command) -> Vec<Action> {
         match cmd {
-            Command::Subscribe(id) => vec![Action::RefreshEntry(id)],
+            Command::Refresh(id) => vec![Action::Refresh(id)],
             Command::Drain => vec![Action::Drain],
             Command::RequestSync => {
                 self.paused = false;
@@ -177,9 +155,7 @@ impl LoopState {
         }
     }
 
-    /// The periodic tick's cycle decision; the caller extends this with a
-    /// `RefreshEntry` per registry entry needing a freshness refresh (`run`),
-    /// since that needs the registry this pure core does not hold.
+    /// The periodic tick's cycle decision.
     fn on_timeout(&self) -> Vec<Action> {
         if self.paused {
             Vec::new()
@@ -191,15 +167,6 @@ impl LoopState {
     fn mark_not_authenticated(&mut self) {
         self.paused = true;
     }
-}
-
-/// Whether an entry's `reads` extend beyond the delta cycle's baseline
-/// coverage (`EntityKey::Issue`), the loop's one piece of freshness policy
-/// (docs/design/operation-seam-adr.md, "Decision 6"): a pure-issues
-/// subscription is never redundantly re-fetched, since the delta cycle's own
-/// upserts feed it through `propagate`.
-fn needs_freshness_refresh(reads: &[EntityKey]) -> bool {
-    !reads.iter().all(|k| matches!(k, EntityKey::Issue))
 }
 
 /// A panicking closure's payload as text, for propagation into the emitted
@@ -253,10 +220,11 @@ pub struct Runtime {
     db: Mutex<Database>,
     transports: Box<dyn TransportSource>,
     on_event: Arc<OnEvent>,
-    /// The live subscription registry, reachable synchronously from both the
-    /// caller thread (registration, write-path propagation, retraction) and
-    /// the loop thread (freshness refresh, sync-cycle propagation).
-    entries: Arc<Mutex<HashMap<SubscriptionKey, Entry>>>,
+    /// One-shot refresh thunks awaiting the loop (`Runtime::refresh`), keyed
+    /// by a fresh id so `Command`/`Action` stay plain `Copy` data; removed
+    /// once run.
+    pending_refreshes: Mutex<HashMap<u64, RefreshThunk>>,
+    next_refresh_id: AtomicU64,
     commands_tx: mpsc::Sender<Command>,
     /// `run` takes this once, at the start of its loop; `None` after that
     /// signals a second call, which is a programming error (`run` is
@@ -271,7 +239,8 @@ impl Runtime {
             db: Mutex::new(db),
             transports,
             on_event: Arc::new(on_event),
-            entries: Arc::new(Mutex::new(HashMap::new())),
+            pending_refreshes: Mutex::new(HashMap::new()),
+            next_refresh_id: AtomicU64::new(0),
             commands_tx,
             commands_rx: Mutex::new(Some(commands_rx)),
         }
@@ -285,7 +254,7 @@ impl Runtime {
     }
 
     /// A fresh connection to the injected database.
-    fn connect(&self) -> Result<Connection> {
+    pub(crate) fn connect(&self) -> Result<Connection> {
         self.db
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -294,9 +263,9 @@ impl Runtime {
 
     /// Best-effort viewer identity via the injected transport source, for the
     /// login worker's direct report (`LoginEvent::Success`, not a cache
-    /// read). Ordinary sync cycles persist the viewer through the `Upsert`
-    /// seam instead (`sync::persist_viewer`); the header subscribes to
-    /// `ViewerQuery` and picks that up through propagation.
+    /// read). Ordinary sync cycles persist the viewer through the `Mutation`
+    /// seam instead (`sync::persist_viewer`); the header re-executes
+    /// `ViewerQuery` on every `Update` and picks that up.
     fn viewer_identity(&self) -> Option<viewer::Viewer> {
         let transport = match self.transports.acquire() {
             Ok(t) => t,
@@ -327,176 +296,81 @@ impl Runtime {
             .map(|dt| dt.with_timezone(&chrono::Utc))
     }
 
-    /// Synchronous cache-first subscribe: register the entry (before the
-    /// caller-side read, closing the race window between them), read once
-    /// for the caller, then prompt the loop to upstream-refresh it if its
-    /// `reads` extend beyond the delta cycle's baseline coverage.
-    pub fn subscribe<Op>(&self, vars: Op::Variables) -> (Subscription<Op::Output>, Op::Output)
+    /// The entire data surface (docs/design/unified-execute-adr.md, "Decision
+    /// 1"): a query op reads the cache projection, instant, no network. A
+    /// view holds its `vars` and re-executes them on every `Update`
+    /// (docs/design/unified-execute-adr.md, "Decision 3") rather than holding
+    /// a live slot.
+    pub fn execute<Op: Operation>(&self, vars: Op::Variables) -> Result<Op::Output> {
+        Op::execute(self, vars)
+    }
+
+    /// Trigger a one-shot background upstream refresh of `Op`, applied into
+    /// the cache via its `Mutation` impl, then emit `Update` on success --
+    /// the freshness a composed view (Detail, `NewIssue`, a state/assignee
+    /// picker) needs when it opens (docs/design/unified-execute-adr.md,
+    /// "Decision 3"). The issues list stays covered by the periodic delta
+    /// cycle. Never touches the network on the caller's thread: `Op` is
+    /// erased into a thunk the loop runs on its own thread scope.
+    pub fn refresh<Op>(&self, vars: Op::Variables)
     where
-        Op: Read + Upsert + Refresh + 'static,
-        Op::Variables: Clone + Send + Sync + 'static,
-        Op::Output: Default + Send + 'static,
+        Op: Refresh,
+        Op::Variables: Send + 'static,
     {
-        let key = SubscriptionKey::next();
-        let reads = Op::reads(&vars);
-        let slot: Arc<Mutex<Option<Op::Output>>> = Arc::new(Mutex::new(None));
-
-        let on_event = Arc::clone(&self.on_event);
-        let slot_for_reread = Arc::clone(&slot);
-        let vars_for_reread = vars.clone();
-        let reread: RereadFn =
-            Arc::new(
-                move |conn: &Connection| match Op::read(conn, &vars_for_reread) {
-                    Ok(out) => {
-                        *slot_for_reread
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner) = Some(out);
-                        on_event(RuntimeEvent::Updated(key));
-                    }
-                    Err(e) => tracing::warn!(error = %e, "subscription re-read failed"),
-                },
-            );
-
-        let vars_for_refresh = vars.clone();
-        let refresh: RefreshFn = Arc::new(
-            move |conn: &Connection, transport: &dyn GraphqlTransport| match Op::refresh(
-                conn,
-                transport,
-                vars_for_refresh.clone(),
-            ) {
-                Ok(touched) => touched,
-                Err(e) => {
-                    tracing::warn!(error = %e, "subscription refresh failed");
-                    Op::reads(&vars_for_refresh)
-                }
-            },
-        );
-
-        {
-            let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            entries.insert(
-                key,
-                Entry {
-                    reads,
-                    reread,
-                    refresh,
-                },
-            );
-        }
-
-        let initial = self
-            .connect()
-            .and_then(|conn| Op::read(&conn, &vars))
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "subscription initial read failed");
-                Op::Output::default()
-            });
-
-        if self.commands_tx.send(Command::Subscribe(key)).is_err() {
-            tracing::debug!("subscribe: runtime loop is gone");
-        }
-
-        let entries_for_retract = Arc::clone(&self.entries);
-        let sub = Subscription {
-            key,
-            latest: slot,
-            retract: Box::new(move |key| {
-                entries_for_retract
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&key);
-            }),
-        };
-        (sub, initial)
-    }
-
-    /// One-shot local read over a fresh connection: no registration, no live
-    /// updates.
-    pub fn load<Op: Read>(&self, vars: &Op::Variables) -> Result<Op::Output> {
-        let conn = self.connect()?;
-        Op::read(&conn, vars)
-    }
-
-    /// Re-run every live entry whose `reads` intersects `touched`
-    /// (docs/design/operation-seam-adr.md, "Decision 5"). Snapshots the
-    /// matching re-read closures before running any of them, so a re-read's
-    /// `on_event` callback is never invoked while the registry lock is held
-    /// (a callback that drops a subscription would otherwise deadlock on the
-    /// same lock).
-    fn propagate(&self, touched: &[EntityKey]) {
-        let conn = match self.connect() {
-            Ok(conn) => conn,
-            Err(e) => {
-                tracing::warn!(error = %e, "propagate: failed to open db connection");
-                return;
-            }
-        };
-        let matches: Vec<RereadFn> = {
-            let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            entries
-                .values()
-                .filter(|e| e.reads.iter().any(|k| touched.contains(k)))
-                .map(|e| Arc::clone(&e.reread))
-                .collect()
-        };
-        for reread in matches {
-            reread(&conn);
-        }
-    }
-
-    /// Upstream-refresh one entry, if its `reads` extend beyond the delta
-    /// cycle's baseline coverage, then propagate whatever it touched (or its
-    /// own `reads`, on failure).
-    fn refresh_entry(&self, id: SubscriptionKey) {
-        let entry = {
-            let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            entries.get(&id).cloned()
-        };
-        let Some(entry) = entry else {
-            return; // retracted before the loop got to it
-        };
-        if !needs_freshness_refresh(&entry.reads) {
-            return;
-        }
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.refresh_entry_body(&entry)
-        }));
-        match outcome {
-            Ok(Ok(touched)) => self.propagate(&touched),
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "background refresh failed");
-                self.propagate(&entry.reads);
-            }
-            Err(_) => {
-                tracing::warn!("background refresh panicked");
-                self.propagate(&entry.reads);
-            }
-        }
-    }
-
-    fn refresh_entry_body(&self, entry: &Entry) -> Result<Vec<EntityKey>> {
-        let conn = self.connect()?;
-        let transport = self.transports.acquire()?;
-        Ok((entry.refresh)(&conn, transport.as_ref()))
-    }
-
-    /// Every registered entry whose `reads` extend beyond the delta cycle's
-    /// baseline coverage -- the periodic tick's freshness fan-out.
-    fn entries_needing_freshness(&self) -> Vec<SubscriptionKey> {
-        self.entries
+        let id = self.next_refresh_id.fetch_add(1, Ordering::Relaxed);
+        let thunk: RefreshThunk =
+            Box::new(move |conn, transport| Op::refresh(conn, transport, vars));
+        self.pending_refreshes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .filter(|(_, e)| needs_freshness_refresh(&e.reads))
-            .map(|(id, _)| *id)
-            .collect()
+            .insert(id, thunk);
+        if self.commands_tx.send(Command::Refresh(id)).is_err() {
+            tracing::debug!("refresh: runtime loop is gone");
+        }
+    }
+
+    /// The one unscoped signal every cache change emits
+    /// (docs/design/unified-execute-adr.md, "Decision 3"): every active view
+    /// re-executes its own operation in response, rather than the runtime
+    /// tracking which view needs which entity.
+    pub(crate) fn emit_update(&self) {
+        (self.on_event)(RuntimeEvent::Update);
+    }
+
+    /// Run one registered refresh thunk and emit `Update` on success; a
+    /// missing id (already run, or retracted) is a no-op. `catch_unwind`-
+    /// guarded like a sync cycle, since it shares the same DB/network I/O on
+    /// the loop thread.
+    fn perform_refresh(&self, id: u64) {
+        let Some(thunk) = self
+            .pending_refreshes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id)
+        else {
+            return;
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.run_refresh_thunk(thunk)
+        }));
+        match outcome {
+            Ok(Ok(())) => self.emit_update(),
+            Ok(Err(e)) => tracing::warn!(error = %e, "background refresh failed"),
+            Err(_) => tracing::warn!("background refresh panicked"),
+        }
+    }
+
+    fn run_refresh_thunk(&self, thunk: RefreshThunk) -> Result<()> {
+        let conn = self.connect()?;
+        let transport = self.transports.acquire()?;
+        thunk(&conn, transport.as_ref())
     }
 
     /// One full or delta sync cycle: emits `Sync(Started)`, then the cycle's
-    /// outcome, then propagates whatever it touched on success (the viewer
-    /// identity flows through this same propagation -- `sync::persist_viewer`
-    /// touches `Viewer` every cycle, so a live `ViewerQuery` subscription
-    /// picks it up without this loop separately fetching or reporting it).
+    /// outcome, then emits `Update` on success (the viewer identity flows
+    /// through this same signal -- `sync::persist_viewer` touches `Viewer`
+    /// every cycle, so the header's re-executed `ViewerQuery` picks it up
+    /// without this loop separately fetching or reporting it).
     /// `catch_unwind`-guarded so a panicking sync body surfaces as
     /// `Sync(Error)` and the loop survives.
     fn cycle(&self, full: bool) -> CycleOutcome {
@@ -510,7 +384,7 @@ impl Runtime {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.sync_now(full)));
 
         match result {
-            Ok(Ok(_touched)) => {
+            Ok(Ok(())) => {
                 (self.on_event)(RuntimeEvent::Sync(SyncEvent::Done(self.last_synced_at())));
                 CycleOutcome::Done
             }
@@ -529,37 +403,40 @@ impl Runtime {
         }
     }
 
-    /// Immediately replay every pending outbox command upstream, then
-    /// propagate whatever it touched. Runs on the loop thread (`Action::Drain`)
-    /// so it shares the loop's serialization of all base writes.
-    pub fn drain_now(&self) -> Result<Vec<EntityKey>> {
+    /// Immediately replay every pending outbox command upstream, then emit
+    /// `Update` if at least one command was successfully replayed (a fully
+    /// failed drain -- e.g. offline -- changed nothing, so there is nothing
+    /// to signal). Runs on the loop thread (`Action::Drain`) so it shares the
+    /// loop's serialization of all base writes.
+    pub fn drain_now(&self) -> Result<()> {
         let conn = self.connect()?;
         let transport = self.transports.acquire()?;
-        let touched = crate::sync::drain::drain(&conn, transport.as_ref())?;
-        self.propagate(&touched);
-        Ok(touched)
+        if crate::sync::drain::drain(&conn, transport.as_ref())? {
+            self.emit_update();
+        }
+        Ok(())
     }
 
     /// Connect, acquire a transport, run the requested full or delta sync
-    /// body, then propagate whatever it touched.
-    fn sync_now(&self, full: bool) -> Result<Vec<EntityKey>> {
+    /// body, then emit `Update`.
+    fn sync_now(&self, full: bool) -> Result<()> {
         let conn = self.connect()?;
         let transport = self.transports.acquire()?;
-        let touched = if full {
-            crate::sync::full::run(&conn, transport.as_ref())?
+        if full {
+            crate::sync::full::run(&conn, transport.as_ref())?;
         } else {
-            crate::sync::delta::run(&conn, transport.as_ref())?
-        };
-        self.propagate(&touched);
-        Ok(touched)
+            crate::sync::delta::run(&conn, transport.as_ref())?;
+        }
+        self.emit_update();
+        Ok(())
     }
 
-    pub fn sync_full(&self) -> Result<Vec<EntityKey>> {
+    pub fn sync_full(&self) -> Result<()> {
         self.sync_now(true)
     }
 
     /// The delta counterpart of [`Runtime::sync_full`].
-    pub fn sync_delta(&self) -> Result<Vec<EntityKey>> {
+    pub fn sync_delta(&self) -> Result<()> {
         self.sync_now(false)
     }
 
@@ -619,7 +496,7 @@ impl Runtime {
 
 impl Runtime {
     /// Execute one action: a full/delta cycle updates `run`'s bookkeeping in
-    /// place; an entry refresh and a login spawn are self-contained.
+    /// place; a refresh and a login spawn are self-contained.
     fn perform<'scope>(
         &'scope self,
         action: Action,
@@ -628,7 +505,7 @@ impl Runtime {
     ) {
         match action {
             Action::Cycle { full } => self.run_cycle(full, run),
-            Action::RefreshEntry(id) => self.refresh_entry(id),
+            Action::Refresh(id) => self.perform_refresh(id),
             Action::SpawnLogin => self.spawn_login(scope),
             Action::Drain => self.perform_drain(),
         }
@@ -638,7 +515,7 @@ impl Runtime {
     /// since it shares the same DB/network I/O on the loop thread.
     fn perform_drain(&self) {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.drain_now())) {
-            Ok(Ok(_)) => {}
+            Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::warn!(error = %e, "immediate outbox drain failed"),
             Err(_) => tracing::warn!("immediate outbox drain panicked"),
         }
@@ -677,9 +554,9 @@ impl Runtime {
 
     /// The runtime loop: blocks for the life of the process. `lt-cli` spawns
     /// it on a detached background thread before the TUI starts. Owns all
-    /// scheduling: the startup sync, the 30s delta cadence, prompt and
-    /// periodic freshness refreshes of live subscriptions beyond the delta
-    /// cycle's coverage, and full syncs on request.
+    /// scheduling: the startup sync, the 30s delta cadence, a composed view's
+    /// one-shot upstream refresh requested on open, and full syncs on
+    /// request.
     pub fn run(&self) {
         let Some(commands_rx) = self.take_commands_rx() else {
             tracing::error!("Runtime::run must be called at most once");
@@ -701,13 +578,7 @@ impl Runtime {
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         run.deadline = Instant::now() + SYNC_INTERVAL;
-                        let mut actions = run.state.on_timeout();
-                        actions.extend(
-                            self.entries_needing_freshness()
-                                .into_iter()
-                                .map(Action::RefreshEntry),
-                        );
-                        actions
+                        run.state.on_timeout()
                     }
                     // Unreachable in production: `self` holds `commands_tx`
                     // for the lifetime of `run`, so the channel never
@@ -736,39 +607,12 @@ impl Runtime {
         }
     }
 
-    /// Every write's shared tail: transactional local enqueue, propagation of
-    /// whatever it touched, then a prompt for the loop to immediately drain
-    /// the outbox rather than waiting for the next sync cycle.
-    fn enqueue_and_propagate<M: Mutate>(&self, vars: M::Variables) -> Result<Vec<EntityKey>> {
-        let conn = self.connect()?;
-        let touched = M::enqueue(&conn, vars)?;
-        self.propagate(&touched);
+    /// Nudge the loop to drain the outbox immediately after a caller-side
+    /// mutation, instead of waiting for the next periodic sync cycle.
+    pub(crate) fn request_drain(&self) {
         if self.commands_tx.send(Command::Drain).is_err() {
-            tracing::debug!("enqueue_and_propagate: runtime loop is gone");
+            tracing::debug!("request_drain: runtime loop is gone");
         }
-        Ok(touched)
-    }
-
-    /// The comment thread only -- creating a comment does not touch the
-    /// issues table.
-    pub fn create_comment(&self, input: &CommentCreateInput) -> Result<()> {
-        self.enqueue_and_propagate::<CommentCreateMutation>(CommentCreateVariables {
-            input: input.clone(),
-        })?;
-        Ok(())
-    }
-
-    pub fn update_issue(&self, vars: IssueUpdateVariables) -> Result<()> {
-        self.enqueue_and_propagate::<IssueUpdateMutation>(vars)?;
-        Ok(())
-    }
-
-    /// Returns the optimistic identifier so the caller can seek to it.
-    pub fn create_issue(&self, input: &IssueCreateInput) -> Result<String> {
-        self.enqueue_and_propagate::<IssueCreateMutation>(IssueCreateVariables {
-            input: input.clone(),
-        })?;
-        Ok(db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER.to_string())
     }
 }
 
@@ -776,7 +620,12 @@ impl Runtime {
 mod tests {
     use std::sync::mpsc as std_mpsc;
 
-    use lt_types::issues::{IssuesQuery, IssuesVariables, sample_issue_node};
+    use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
+    use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
+    use lt_types::issues::{
+        IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
+        IssuesQuery, IssuesVariables, sample_issue_node,
+    };
     use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
     use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
     use lt_types::teams::TeamsQuery;
@@ -786,19 +635,14 @@ mod tests {
 
     use super::*;
 
-    fn sub_id() -> SubscriptionKey {
-        SubscriptionKey::next()
-    }
-
     // -- LoopState (pure decisions) ------------------------------------
 
     #[test]
-    fn subscribe_command_prompts_a_refresh_entry_action() {
+    fn refresh_command_prompts_a_refresh_action() {
         let mut state = LoopState::new();
-        let id = sub_id();
         assert_eq!(
-            state.on_command(Command::Subscribe(id)),
-            vec![Action::RefreshEntry(id)]
+            state.on_command(Command::Refresh(7)),
+            vec![Action::Refresh(7)]
         );
     }
 
@@ -865,11 +709,10 @@ mod tests {
 
     #[test]
     fn coalesce_drains_preserves_other_actions_and_their_order() {
-        let id = sub_id();
-        let actions = vec![Action::Drain, Action::RefreshEntry(id), Action::Drain];
+        let actions = vec![Action::Drain, Action::Refresh(3), Action::Drain];
         assert_eq!(
             coalesce_drains(actions),
-            vec![Action::Drain, Action::RefreshEntry(id)]
+            vec![Action::Drain, Action::Refresh(3)]
         );
     }
 
@@ -883,23 +726,7 @@ mod tests {
         assert_eq!(state.on_timeout(), Vec::new()); // paused: no cycle
     }
 
-    // -- needs_freshness_refresh ----------------------------------------
-
-    #[test]
-    fn pure_issue_reads_never_need_a_freshness_refresh() {
-        assert!(!needs_freshness_refresh(&[EntityKey::Issue]));
-    }
-
-    #[test]
-    fn reads_beyond_issue_need_a_freshness_refresh() {
-        assert!(needs_freshness_refresh(&[EntityKey::Teams]));
-        assert!(needs_freshness_refresh(&[
-            EntityKey::Issue,
-            EntityKey::Teams
-        ]));
-    }
-
-    // -- Runtime: subscribe / propagate / retract, thread-free -----------
+    // -- Runtime: execute / write / Update, thread-free -------------------
 
     fn on_event_channel() -> (OnEvent, std_mpsc::Receiver<RuntimeEvent>) {
         let (tx, rx) = std_mpsc::channel();
@@ -917,8 +744,17 @@ mod tests {
         )
     }
 
+    fn issues_vars() -> IssuesVariables {
+        IssuesVariables {
+            filter: None,
+            sort: None,
+            first: None,
+            after: None,
+        }
+    }
+
     #[test]
-    fn subscribe_returns_the_synchronous_initial_read() {
+    fn execute_reads_the_cache_synchronously() {
         let db = Database::memory().unwrap();
         {
             let conn = db.connect().unwrap();
@@ -933,40 +769,14 @@ mod tests {
         }
         let (runtime, _rx) = runtime_over(db);
 
-        let (_sub, initial) = runtime.subscribe::<TeamsQuery>(());
+        let teams = runtime.execute::<TeamsQuery>(()).unwrap();
 
-        assert_eq!(initial.len(), 1);
-        assert_eq!(initial[0].name, "Eng");
+        assert_eq!(teams.nodes.len(), 1);
+        assert_eq!(teams.nodes[0].name, "Eng");
     }
 
     #[test]
-    fn dropping_a_subscription_retracts_its_registry_entry() {
-        let db = Database::memory().unwrap();
-        let (runtime, _rx) = runtime_over(db);
-
-        let (sub, _initial) = runtime.subscribe::<TeamsQuery>(());
-        let id = sub.key();
-        assert!(
-            runtime
-                .entries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(&id)
-        );
-
-        drop(sub);
-
-        assert!(
-            !runtime
-                .entries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(&id)
-        );
-    }
-
-    #[test]
-    fn create_issue_propagates_to_a_live_issues_subscription() {
+    fn create_issue_emits_update_and_a_reexecute_sees_it() {
         let db = Database::memory().unwrap();
         {
             let conn = db.connect().unwrap();
@@ -984,12 +794,13 @@ mod tests {
             .unwrap();
         }
         let (runtime, rx) = runtime_over(db);
-        let (sub, _initial) = runtime.subscribe::<IssuesQuery>(IssuesVariables {
-            filter: None,
-            sort: None,
-            first: None,
-            after: None,
-        });
+        assert!(
+            runtime
+                .execute::<IssuesQuery>(issues_vars())
+                .unwrap()
+                .nodes
+                .is_empty()
+        );
 
         let input = IssueCreateInput {
             title: "New issue".to_string(),
@@ -999,17 +810,21 @@ mod tests {
             priority: None,
             assignee_id: None,
         };
-        let identifier = runtime.create_issue(&input).unwrap();
+        let issue = runtime
+            .execute::<IssueCreateMutation>(IssueCreateVariables { input })
+            .unwrap();
+        assert_eq!(issue.identifier, db::outbox::OPTIMISTIC_ISSUE_IDENTIFIER);
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
-        let page = sub.take().unwrap();
+        assert!(matches!(ev, RuntimeEvent::Update));
+
+        let page = runtime.execute::<IssuesQuery>(issues_vars()).unwrap();
         assert_eq!(page.nodes.len(), 1);
-        assert_eq!(page.nodes[0].identifier, identifier);
+        assert_eq!(page.nodes[0].identifier, issue.identifier);
     }
 
     #[test]
-    fn create_comment_propagates_to_a_live_issue_detail_subscription() {
+    fn create_comment_emits_update_and_a_reexecute_of_the_detail_sees_it() {
         let db = Database::memory().unwrap();
         {
             let conn = db.connect().unwrap();
@@ -1028,66 +843,78 @@ mod tests {
             db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
         }
         let (runtime, rx) = runtime_over(db);
-        let (sub, initial) = runtime.subscribe::<lt_types::detail::IssueDetailQuery>(
-            lt_types::detail::IssueDetailVariables {
-                id: "issue-1".to_string(),
-            },
+        let detail_vars = lt_types::detail::IssueDetailVariables {
+            id: "issue-1".to_string(),
+        };
+        assert!(
+            runtime
+                .execute::<lt_types::detail::IssueDetailQuery>(detail_vars.clone())
+                .unwrap()
+                .unwrap()
+                .comments
+                .is_empty()
         );
-        assert!(initial.unwrap().comments.is_empty());
 
-        runtime
-            .create_comment(&CommentCreateInput {
-                issue_id: "issue-1".to_string(),
-                body: "hello".to_string(),
+        let comment = runtime
+            .execute::<CommentCreateMutation>(CommentCreateVariables {
+                input: CommentCreateInput {
+                    issue_id: "issue-1".to_string(),
+                    body: "hello".to_string(),
+                },
             })
             .unwrap();
+        assert_eq!(comment.body, "hello");
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
-        let data = sub.take().unwrap().unwrap();
+        assert!(matches!(ev, RuntimeEvent::Update));
+
+        let data = runtime
+            .execute::<lt_types::detail::IssueDetailQuery>(detail_vars)
+            .unwrap()
+            .unwrap();
         assert_eq!(data.comments.len(), 1);
         assert_eq!(data.comments[0].body, "hello");
     }
 
     #[test]
-    fn update_issue_refreshes_an_open_detail_pane_for_a_different_issue() {
-        // Any `Issue`-touching write refreshes every open detail pane:
-        // `IssueDetailQuery` reads `Issue` broadly, not scoped to its own id
-        // (docs/design/operation-seam-adr.md, user-visible change 3).
+    fn update_issue_emits_a_single_unscoped_update() {
+        // `Update` is unscoped: it carries no entity id, so any write's
+        // signal is indistinguishable from any other's.
         let db = Database::memory().unwrap();
         {
             let conn = db.connect().unwrap();
-            db::upsert_issues(
+            // `sample_base_issue`'s state must already be locally known (sync
+            // owns workflow states; issue upserts never write them).
+            db::upsert_team_state(
                 &conn,
-                &[
-                    db::outbox::sample_base_issue("issue-1"),
-                    db::outbox::sample_base_issue("issue-2"),
-                ],
+                "ENG",
+                &types::WorkflowState {
+                    id: "s-todo".into(),
+                    name: "Todo".to_string(),
+                    position: 1.0,
+                },
             )
             .unwrap();
+            db::upsert_issues(&conn, &[db::outbox::sample_base_issue("issue-1")]).unwrap();
         }
         let (runtime, rx) = runtime_over(db);
-        let (sub, _initial) = runtime.subscribe::<lt_types::detail::IssueDetailQuery>(
-            lt_types::detail::IssueDetailVariables {
-                id: "issue-1".to_string(),
-            },
-        );
 
-        runtime
-            .update_issue(IssueUpdateVariables {
-                id: "issue-2".to_string(),
+        let updated = runtime
+            .execute::<IssueUpdateMutation>(IssueUpdateVariables {
+                id: "issue-1".to_string(),
                 input: lt_types::inputs::IssueUpdateInput {
                     priority: Some(1),
                     ..Default::default()
                 },
             })
             .unwrap();
+        assert_eq!(updated.unwrap().id.inner(), "issue-1");
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
+        assert!(matches!(ev, RuntimeEvent::Update));
     }
 
-    // -- freshness refresh: beyond-Issue subscriptions refresh upstream ---
+    // -- Runtime::refresh: one-shot upstream freshness --------------------
 
     struct FakeGraphql(Arc<Mutex<FakeTransport>>);
 
@@ -1119,7 +946,7 @@ mod tests {
     }
 
     /// A single scripted `team.states` page, shared by every test that drives
-    /// a `TeamStatesQuery` refresh (background or explicit).
+    /// a `TeamStatesQuery` refresh.
     fn team_states_page_transport() -> FakeTransport {
         FakeTransport::new(vec![json!({ "team": { "states": { "nodes": [
             { "id": "s1", "name": "Todo", "position": 1.0 }
@@ -1127,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_entry_refreshes_and_propagates_when_reads_extend_beyond_issue() {
+    fn refresh_runs_the_thunk_and_emits_update() {
         let db = Database::memory().unwrap();
         let (on_event, rx) = on_event_channel();
         let runtime = Runtime::new(
@@ -1135,76 +962,87 @@ mod tests {
             Box::new(FakeSource::new(team_states_page_transport())),
             on_event,
         );
-        let (sub, _initial) = runtime.subscribe::<TeamStatesQuery>(StatesTeamVariables {
+        let commands_rx = runtime.take_commands_rx().unwrap();
+
+        runtime.refresh::<TeamStatesQuery>(StatesTeamVariables {
             team_id: "t1".to_string(),
         });
-
-        // Call the loop's private entry point directly rather than starting
-        // the (unbounded) `run` loop, so the test stays thread-free.
-        runtime.refresh_entry(sub.key());
+        let Ok(Command::Refresh(id)) = commands_rx.try_recv() else {
+            unreachable!("expected a Refresh command");
+        };
+        runtime.perform_refresh(id);
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
-        let states = sub.take().unwrap();
-        assert_eq!(states[0].name, "Todo");
+        assert!(matches!(ev, RuntimeEvent::Update));
+        let states = runtime
+            .execute::<TeamStatesQuery>(StatesTeamVariables {
+                team_id: "t1".to_string(),
+            })
+            .unwrap();
+        assert_eq!(states.nodes[0].name, "Todo");
     }
 
     #[test]
-    fn refresh_entry_is_a_noop_for_a_pure_issue_subscription() {
-        let db = Database::memory().unwrap();
-        let (runtime, rx) = runtime_over(db);
-        let (sub, _initial) = runtime.subscribe::<IssuesQuery>(IssuesVariables {
-            filter: None,
-            sort: None,
-            first: None,
-            after: None,
-        });
-
-        runtime.refresh_entry(sub.key());
-
-        // No upstream refresh attempted (would need a real transport), and
-        // no propagate -- only the `Subscribe` command's send happened.
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn team_members_query_can_also_subscribe_and_refresh() {
+    fn team_members_refresh_runs_the_thunk_and_emits_update() {
         let db = Database::memory().unwrap();
         let fake = FakeTransport::new(vec![json!({ "team": { "members": { "nodes": [
             { "id": "u1", "name": "Ada" }
         ] } } })]);
         let (on_event, rx) = on_event_channel();
         let runtime = Runtime::new(db, Box::new(FakeSource::new(fake)), on_event);
-        let (sub, _initial) = runtime.subscribe::<TeamMembersQuery>(MembersTeamVariables {
+        let commands_rx = runtime.take_commands_rx().unwrap();
+
+        runtime.refresh::<TeamMembersQuery>(MembersTeamVariables {
             team_id: "t1".to_string(),
         });
-
-        runtime.refresh_entry(sub.key());
+        let Ok(Command::Refresh(id)) = commands_rx.try_recv() else {
+            unreachable!("expected a Refresh command");
+        };
+        runtime.perform_refresh(id);
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
-        assert_eq!(sub.take().unwrap()[0].name, "Ada");
+        assert!(matches!(ev, RuntimeEvent::Update));
+        let members = runtime
+            .execute::<TeamMembersQuery>(MembersTeamVariables {
+                team_id: "t1".to_string(),
+            })
+            .unwrap();
+        assert_eq!(members.nodes[0].name, "Ada");
     }
 
     #[test]
-    fn viewer_query_subscription_refreshes_and_updates_the_header() {
-        // The header's `ViewerQuery` subscription lives at the App level,
-        // not on a view; its live-update path is the same beyond-Issue
-        // freshness refresh every other composed subscription uses.
+    fn viewer_refresh_runs_the_thunk_and_emits_update() {
         let db = Database::memory().unwrap();
         let fake = FakeTransport::new(vec![json!({
             "viewer": { "id": "u1", "name": "Ada", "organization": { "id": "o1", "name": "Acme", "urlKey": "acme" } }
         })]);
         let (on_event, rx) = on_event_channel();
         let runtime = Runtime::new(db, Box::new(FakeSource::new(fake)), on_event);
-        let (sub, initial) = runtime.subscribe::<lt_types::viewer::ViewerQuery>(());
-        assert!(initial.is_none());
+        let commands_rx = runtime.take_commands_rx().unwrap();
+        assert!(
+            runtime
+                .execute::<lt_types::viewer::ViewerQuery>(())
+                .unwrap()
+                .is_none()
+        );
 
-        runtime.refresh_entry(sub.key());
+        runtime.refresh::<lt_types::viewer::ViewerQuery>(());
+        let Ok(Command::Refresh(id)) = commands_rx.try_recv() else {
+            unreachable!("expected a Refresh command");
+        };
+        runtime.perform_refresh(id);
 
         let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(ev, RuntimeEvent::Updated(id) if id == sub.key()));
-        assert_eq!(sub.take().unwrap().unwrap().user.name, "Ada");
+        assert!(matches!(ev, RuntimeEvent::Update));
+        assert_eq!(
+            runtime
+                .execute::<lt_types::viewer::ViewerQuery>(())
+                .unwrap()
+                .unwrap()
+                .user
+                .name,
+            "Ada"
+        );
     }
 
     // -- sync_full / sync_delta: a synchronous sync cycle -----------------
@@ -1232,9 +1070,8 @@ mod tests {
             on_event,
         );
 
-        let touched = runtime.sync_full().unwrap();
+        runtime.sync_full().unwrap();
 
-        assert!(touched.contains(&EntityKey::Issue));
         let conn = runtime.connect().unwrap();
         assert!(db::query_issue_by_id(&conn, "1").unwrap().is_some());
         assert!(runtime.last_synced_at().is_some());
@@ -1249,9 +1086,8 @@ mod tests {
             on_event,
         );
 
-        let touched = runtime.sync_delta().unwrap();
+        runtime.sync_delta().unwrap();
 
-        assert!(touched.contains(&EntityKey::Issue));
         let conn = runtime.connect().unwrap();
         assert!(db::query_issue_by_id(&conn, "1").unwrap().is_some());
         assert!(runtime.last_synced_at().is_some());
@@ -1297,7 +1133,7 @@ mod tests {
 
     fn update_priority_to_urgent(runtime: &Runtime, id: &str) {
         runtime
-            .update_issue(IssueUpdateVariables {
+            .execute::<IssueUpdateMutation>(IssueUpdateVariables {
                 id: id.to_string(),
                 input: lt_types::inputs::IssueUpdateInput {
                     priority: Some(1),
@@ -1318,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_now_replays_a_pending_update_and_reaches_the_subscription_again() {
+    fn drain_now_replays_a_pending_update_and_emits_update_again() {
         let fake = FakeTransport::new(vec![
             json!({ "issueUpdate": { "success": true, "issue": null } }),
         ]);
@@ -1328,24 +1164,17 @@ mod tests {
             Box::new(FakeSource::new(fake)),
             on_event,
         );
-        let (sub, _initial) = runtime.subscribe::<IssuesQuery>(IssuesVariables {
-            filter: None,
-            sort: None,
-            first: None,
-            after: None,
-        });
 
         update_priority_to_urgent(&runtime, "issue-1");
-        // The optimistic overlay's own propagation, from `update_issue` itself.
+        // The optimistic overlay's own `Update`, from `execute` itself.
         let first = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(first, RuntimeEvent::Updated(id) if id == sub.key()));
+        assert!(matches!(first, RuntimeEvent::Update));
 
-        let touched = runtime.drain_now().unwrap();
-        assert_eq!(touched, vec![EntityKey::Issue]);
+        runtime.drain_now().unwrap();
 
-        // The ack's own propagation reaches the subscription a second time.
+        // The ack's own `Update` follows.
         let second = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(second, RuntimeEvent::Updated(id) if id == sub.key()));
+        assert!(matches!(second, RuntimeEvent::Update));
 
         let conn = runtime.connect().unwrap();
         let pending: i64 = conn
@@ -1376,24 +1205,17 @@ mod tests {
             Box::new(FakeSource::new(fake)),
             on_event,
         );
-        let (sub, _initial) = runtime.subscribe::<IssuesQuery>(IssuesVariables {
-            filter: None,
-            sort: None,
-            first: None,
-            after: None,
-        });
 
         update_priority_to_urgent(&runtime, "issue-1");
-        // The optimistic overlay's own propagation.
+        // The optimistic overlay's own `Update`.
         rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
-        let touched = runtime.drain_now().unwrap();
-        assert!(touched.is_empty());
-        // The failed drain propagates nothing further.
+        runtime.drain_now().unwrap();
+        // The failed drain emits nothing further.
         assert!(rx.try_recv().is_err());
 
         // The read model still carries the overlay's optimistic edit.
-        let page = sub.take().unwrap();
+        let page = runtime.execute::<IssuesQuery>(issues_vars()).unwrap();
         assert_eq!(page.nodes[0].priority_label, "Urgent");
 
         let conn = runtime.connect().unwrap();

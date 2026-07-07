@@ -30,9 +30,13 @@ impl GraphqlOperation for NotificationsQuery {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
-        Ok(self.notifications)
+impl TryFrom<NotificationsQuery> for NotificationConnection {
+    type Error = anyhow::Error;
+
+    fn try_from(op: NotificationsQuery) -> anyhow::Result<Self> {
+        Ok(op.notifications)
     }
 }
 
@@ -173,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_maps_page() {
+    fn recomposes_into_the_notification_connection() {
         let data = serde_json::json!({ "notifications": {
             "nodes": [{
                 "__typename": "ProjectNotification",
@@ -186,9 +190,9 @@ mod tests {
             }],
             "pageInfo": { "hasNextPage": true, "endCursor": "c1" }
         }});
-        let page = serde_json::from_value::<NotificationsQuery>(data)
+        let page: NotificationConnection = serde_json::from_value::<NotificationsQuery>(data)
             .unwrap()
-            .extract()
+            .try_into()
             .unwrap();
         assert_eq!(page.nodes.len(), 1);
         assert!(page.page_info.has_next_page);

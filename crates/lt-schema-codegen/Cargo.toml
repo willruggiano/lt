@@ -7,9 +7,13 @@ publish = false
 
 [dependencies]
 serde.workspace = true
-# Crate-specific: this crate exists to parse the GraphQL schema snapshot for
-# the two consuming build scripts.
+# Crate-specific: this crate exists to parse the GraphQL schema snapshot and
+# generate source for the two consuming build scripts.
 graphql-parser = "0.4"
+prettyplease = "0.2"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", default-features = false, features = ["full", "parsing"] }
 
 [lints]
 workspace = true

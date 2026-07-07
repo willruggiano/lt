@@ -29,7 +29,7 @@ pub(crate) use detail::build_cached_detail;
 pub use list::{ListLaunch, ListQuery, ListView};
 pub use lt_runtime::sync::service::RuntimeEvent;
 use lt_runtime::sync::service::{LoginEvent, SyncEvent};
-use lt_runtime::{Clock, Subscription, SubscriptionKey, search_query};
+use lt_runtime::{Clock, search_query};
 use lt_types::types::Issue;
 use lt_types::viewer;
 use lt_types::viewer::ViewerQuery;
@@ -97,16 +97,21 @@ pub(crate) enum Unbound {
 }
 
 impl View {
-    /// `focused` is true iff this is the top of the stack; Search/Help hold
-    /// no subscription. Each view checks internally whether `key` matches
-    /// one of its own subscriptions -- there is no separate declared-scope
-    /// registry to keep in sync.
-    fn apply_update(&mut self, focused: bool, key: SubscriptionKey) {
+    /// Re-execute this view's own operation(s) in response to an unscoped
+    /// `Update` (docs/design/unified-execute-adr.md, "Decision 3"); `focused`
+    /// is true iff this is the top of the stack. Search/Help hold no
+    /// operation and never re-execute.
+    fn apply_update(
+        &mut self,
+        focused: bool,
+        runtime: &lt_runtime::Runtime,
+        viewer_name: Option<&str>,
+    ) {
         match self {
-            View::List(list) => list.apply_update(focused, key),
-            View::Detail(detail) => detail.apply_update(key),
-            View::Popup(popup) => popup.apply_update(key),
-            View::NewIssue(modal) => modal.apply_update(key),
+            View::List(list) => list.apply_update(focused, runtime, viewer_name),
+            View::Detail(detail) => detail.apply_update(runtime),
+            View::Popup(popup) => popup.apply_update(runtime),
+            View::NewIssue(modal) => modal.apply_update(runtime),
             View::Search(_) | View::Help(_) => {}
         }
     }
@@ -337,15 +342,9 @@ pub struct App {
     /// clock so time-derived labels are deterministic.
     pub clock: Clock,
 
-    /// The data runtime: subscriptions, entity-keyed propagation, writes,
-    /// and sync/login scheduling.
+    /// The data runtime: writes, one-shot upstream freshness refreshes, and
+    /// sync/login scheduling.
     pub runtime: Arc<lt_runtime::Runtime>,
-
-    /// The header identity: an app-level (not per-view) subscription, since
-    /// it is not owned by any one view (docs/design/operation-seam-adr.md,
-    /// Amendments). `apply` routes a matching `Updated` into `auth` before
-    /// falling through to the view stack.
-    viewer_sub: Subscription<Option<viewer::Viewer>>,
 
     /// The single consumer of the app event queue, drained once per frame.
     events_rx: mpsc::Receiver<AppEvent>,
@@ -378,7 +377,6 @@ impl App {
     fn new(
         list: ListView,
         runtime: Arc<lt_runtime::Runtime>,
-        viewer_sub: Subscription<Option<viewer::Viewer>>,
         events_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
         Self {
@@ -395,7 +393,6 @@ impl App {
             last_esc_time: None,
             clock: Clock::System,
             runtime,
-            viewer_sub,
             events_rx,
         }
     }
@@ -414,18 +411,18 @@ impl App {
             search_query::parse_query_ast(search_query::DEFAULT_QUERY),
             50,
         );
-        // The memory db is still empty at this point, so the subscription's
-        // own initial read is discarded in favor of the given fixture rows.
-        let (sub, _) =
-            runtime.subscribe::<lt_types::issues::IssuesQuery>(lt_types::issues::IssuesVariables {
+        // The memory db is still empty at this point, so the initial read is
+        // discarded in favor of the given fixture rows.
+        drop(
+            runtime.execute::<lt_types::issues::IssuesQuery>(lt_types::issues::IssuesVariables {
                 filter: None,
                 sort: None,
                 first: None,
                 after: None,
-            });
-        let list = ListView::new(issues, query, sub);
-        let (viewer_sub, _) = runtime.subscribe::<ViewerQuery>(());
-        Ok(Self::new(list, runtime, viewer_sub, rx))
+            }),
+        );
+        let list = ListView::new(issues, query);
+        Ok(Self::new(list, runtime, rx))
     }
 
     /// Swap in a fresh database, shared with a fresh [`lt_runtime::Runtime`]
@@ -475,16 +472,16 @@ impl App {
         }
     }
 
-    /// Push a view. RAII replaces the old watch/unwatch bookkeeping: a
-    /// pushed view's subscription(s) are already live from its own
-    /// construction, and dropping the view retracts them.
+    /// Push a view. Its data is already populated from its own construction
+    /// (a cache-first `execute`, plus a one-shot upstream refresh for a
+    /// composed view); every active view re-executes on the next `Update`.
     fn push_view(&mut self, view: View) {
         self.views.push(view);
     }
 
     /// Pop the focused view. The stack is never empty: popping the base
-    /// resets it to the default instead. If List regains focus, it picks up
-    /// whatever its subscription accumulated while unfocused.
+    /// resets it to the default instead. If List regains focus, it re-reads
+    /// current truth rather than replaying a stale snapshot.
     fn pop_view(&mut self) {
         if self.views.len() > 1 {
             self.close_view_at(self.views.len() - 1);
@@ -495,7 +492,7 @@ impl App {
     }
 
     /// Remove the view at `i` without disturbing whatever else is on the
-    /// stack; dropping it retracts its subscription(s).
+    /// stack.
     fn close_view_at(&mut self, i: usize) {
         if i < self.views.len() {
             self.views.remove(i);
@@ -503,13 +500,15 @@ impl App {
         self.resume_list_focus();
     }
 
-    /// If the base list is now the focused (only) view, replay whatever its
-    /// subscription accumulated while an overlay had focus.
+    /// If the base list is now the focused (only) view, re-read current
+    /// truth: an overlay above it may have deferred a live `Update`.
     fn resume_list_focus(&mut self) {
-        if self.views.len() == 1
-            && let View::List(list) = &mut self.views[0]
-        {
-            list.resume_focus();
+        if self.views.len() == 1 {
+            let viewer_name = self.auth.viewer_name().map(str::to_string);
+            let runtime = self.runtime.clone();
+            if let View::List(list) = &mut self.views[0] {
+                list.resume_focus(&runtime, viewer_name.as_deref());
+            }
         }
     }
 
@@ -520,7 +519,7 @@ impl App {
         let runtime = self.runtime.clone();
         if let Some(View::List(list)) = self.views.first_mut() {
             list.query.reset();
-            list.resubscribe(&runtime, viewer_name.as_deref(), true);
+            list.refetch(&runtime, viewer_name.as_deref(), true);
         }
         self.last_esc_time = None;
     }
@@ -530,9 +529,9 @@ impl App {
     fn refresh(&mut self) {
         let viewer_name = self.auth.viewer_name().map(str::to_string);
         let runtime = self.runtime.clone();
-        // immediate resubscribe for responsiveness
+        // immediate refetch for responsiveness
         if let Some(View::List(list)) = self.views.first_mut() {
-            list.resubscribe(&runtime, viewer_name.as_deref(), false);
+            list.refetch(&runtime, viewer_name.as_deref(), false);
         }
         self.runtime.request_sync();
     }
@@ -561,7 +560,7 @@ impl App {
             let viewer_name = self.auth.viewer_name().map(str::to_string);
             let runtime = self.runtime.clone();
             if let Some(View::List(list)) = self.views.first_mut() {
-                list.resubscribe(&runtime, viewer_name.as_deref(), true);
+                list.refetch(&runtime, viewer_name.as_deref(), true);
             }
         }
     }
@@ -586,32 +585,31 @@ impl App {
         self.push_view(View::Search(overlay));
     }
 
-    /// Apply a queued app event: a key cascades through `dispatch_key`; a
-    /// state invalidation updates the header identity (if it is the match)
-    /// and walks the view stack; a sync/login outcome transitions the
-    /// typestates.
+    /// Apply a queued app event: a key cascades through `dispatch_key`; an
+    /// unscoped cache `Update` re-executes the header identity, then walks
+    /// the view stack; a sync/login outcome transitions the typestates.
     fn apply(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.dispatch_key(key),
-            AppEvent::Runtime(RuntimeEvent::Updated(key)) => {
-                self.apply_viewer_update(key);
-                self.route_update(key);
+            AppEvent::Runtime(RuntimeEvent::Update) => {
+                self.apply_viewer_update();
+                self.apply_update();
             }
             AppEvent::Runtime(RuntimeEvent::Sync(ev)) => self.consume_sync_event(ev),
             AppEvent::Runtime(RuntimeEvent::Login(ev)) => self.consume_login_event(ev),
         }
     }
 
-    /// The header identity's own subscription: a matching update populates
-    /// `auth` from the cache, instantly at startup and live on every sync
-    /// that touches `Viewer` (docs/design/operation-seam-adr.md,
-    /// Amendments). A fresh read of `None` (no viewer persisted yet) is a
-    /// no-op -- `auth` keeps whatever it already reflected.
-    fn apply_viewer_update(&mut self, key: SubscriptionKey) {
-        if self.viewer_sub.key() == key
-            && let Some(Some(viewer)) = self.viewer_sub.take()
-        {
-            self.auth = AuthStatus::Authenticated { viewer };
+    /// The header identity: unconditionally re-executes `ViewerQuery`
+    /// (docs/design/unified-execute-adr.md, "Decision 3") -- instant at
+    /// startup and live on every sync that touches `Viewer`. A fresh read of
+    /// `None` (no viewer persisted yet) is a no-op -- `auth` keeps whatever
+    /// it already reflected.
+    fn apply_viewer_update(&mut self) {
+        match self.runtime.execute::<ViewerQuery>(()) {
+            Ok(Some(viewer)) => self.auth = AuthStatus::Authenticated { viewer },
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "viewer re-execute failed"),
         }
     }
 
@@ -686,20 +684,22 @@ impl App {
         }
     }
 
-    /// Route a subscription update down the stack, top first (order is
-    /// semantically irrelevant; chosen for coherence with the key cascade).
-    /// Exactly the view holding the matching subscription (if any) acts;
-    /// every other view's internal key check is a no-op.
-    fn route_update(&mut self, key: SubscriptionKey) {
+    /// Re-execute every active view's own operation down the stack, top
+    /// first (order is semantically irrelevant; chosen for coherence with the
+    /// key cascade) -- the App's response to one unscoped `Update`
+    /// (docs/design/unified-execute-adr.md, "Decision 3").
+    fn apply_update(&mut self) {
+        let viewer_name = self.auth.viewer_name().map(str::to_string);
+        let runtime = self.runtime.clone();
         let len = self.views.len();
         for (i, view) in self.views.iter_mut().enumerate().rev() {
-            view.apply_update(i + 1 == len, key);
+            view.apply_update(i + 1 == len, &runtime, viewer_name.as_deref());
         }
     }
 
     /// Transition the `sync` typestate. `auth` is no longer touched here: the
-    /// viewer identity flows through the header's own `ViewerQuery`
-    /// subscription (`apply_viewer_update`), propagated the same as every
+    /// viewer identity flows through the header's own re-executed
+    /// `ViewerQuery` (`apply_viewer_update`), refreshed the same as every
     /// other entity a sync cycle touches.
     fn consume_sync_event(&mut self, ev: SyncEvent) {
         match ev {
@@ -749,19 +749,22 @@ pub fn run(
 ) -> Result<()> {
     // Cache-first header identity: no blocking network fetch at startup
     // (docs/design/operation-seam-adr.md, user-visible change 2). Absence
-    // pre-first-sync keeps `AuthStatus::Unknown`; the first sync's
-    // propagation (or an existing cache) updates it live.
-    let (viewer_sub, viewer) = runtime.subscribe::<ViewerQuery>(());
+    // pre-first-sync keeps `AuthStatus::Unknown`; the first sync's `Update`
+    // (or an existing cache) resolves it live.
+    let viewer = runtime.execute::<ViewerQuery>(()).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "startup viewer read failed");
+        None
+    });
 
     // The query defines the view's initial data (local-first UX): `open`
     // warns and starts empty on a failed/missing db read, same as every
-    // later resubscribe.
+    // later refetch.
     let list = ListView::open(
         ListQuery::new(launch.filter, launch.limit),
         &runtime,
         viewer.as_ref().map(|v| v.user.name.as_str()),
     );
-    let mut app = App::new(list, runtime, viewer_sub, events_rx);
+    let mut app = App::new(list, runtime, events_rx);
 
     app.auth = match viewer {
         Some(viewer) => AuthStatus::Authenticated { viewer },

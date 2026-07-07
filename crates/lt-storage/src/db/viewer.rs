@@ -8,7 +8,7 @@ use lt_types::viewer::{Organization, Viewer, ViewerQuery};
 use rusqlite::{Connection, params};
 
 use crate::db::issues::{get_meta, set_meta, upsert_named_entity};
-use crate::db::ops::{EntityKey, Read, Upsert};
+use crate::db::ops::{Mutation, Query};
 use crate::db::sql::{self, EntityTable};
 
 /// The `sync_meta` keys the viewer identity is stored under. Kept private so
@@ -96,27 +96,18 @@ pub fn viewer(conn: &Connection) -> Result<Option<Viewer>> {
     }))
 }
 
-impl Read for ViewerQuery {
-    fn read(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
+impl Query for ViewerQuery {
+    fn query(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
         viewer(conn)
-    }
-
-    fn reads(_vars: &Self::Variables) -> Vec<EntityKey> {
-        vec![EntityKey::Viewer]
     }
 }
 
-impl Upsert for ViewerQuery {
-    fn upsert(
-        conn: &Connection,
-        _vars: &Self::Variables,
-        out: &Self::Output,
-    ) -> Result<Vec<EntityKey>> {
+impl Mutation for ViewerQuery {
+    fn apply(conn: &Connection, _vars: &Self::Variables, out: &Self::Output) -> Result<()> {
         let Some(viewer) = out else {
-            return Ok(Vec::new());
+            return Ok(());
         };
-        set_viewer(conn, viewer)?;
-        Ok(vec![EntityKey::Viewer])
+        set_viewer(conn, viewer)
     }
 }
 
@@ -174,31 +165,26 @@ mod tests {
     }
 
     #[test]
-    fn viewer_query_reads_only_the_viewer_key() {
-        assert_eq!(ViewerQuery::reads(&()), vec![EntityKey::Viewer]);
-    }
-
-    #[test]
     fn viewer_query_read_is_none_before_any_sync() {
         let conn = test_db();
-        assert!(ViewerQuery::read(&conn, &()).unwrap().is_none());
+        assert!(ViewerQuery::query(&conn, &()).unwrap().is_none());
     }
 
     #[test]
-    fn viewer_query_upsert_persists_and_reports_viewer() {
+    fn viewer_query_apply_persists_the_viewer() {
         let conn = test_db();
         let out = Some(ada());
-        let touched = ViewerQuery::upsert(&conn, &(), &out).unwrap();
-        assert_eq!(touched, vec![EntityKey::Viewer]);
+        ViewerQuery::apply(&conn, &(), &out).unwrap();
         assert_eq!(
-            ViewerQuery::read(&conn, &()).unwrap().unwrap().user.name,
+            ViewerQuery::query(&conn, &()).unwrap().unwrap().user.name,
             "Ada"
         );
     }
 
     #[test]
-    fn viewer_query_upsert_of_none_is_a_noop() {
+    fn viewer_query_apply_of_none_is_a_noop() {
         let conn = test_db();
-        assert!(ViewerQuery::upsert(&conn, &(), &None).unwrap().is_empty());
+        ViewerQuery::apply(&conn, &(), &None).unwrap();
+        assert!(ViewerQuery::query(&conn, &()).unwrap().is_none());
     }
 }

@@ -1,6 +1,5 @@
 use anyhow::Result;
 use lt_storage::db;
-use lt_storage::db::EntityKey;
 use lt_types::issues::{IssueFilter, IssueSort, IssuesVariables};
 use lt_types::query::{SortDirection, SortField};
 use lt_upstream::client::GraphqlTransport;
@@ -30,13 +29,7 @@ fn variables(since: &str, after: Option<&str>) -> IssuesVariables {
 /// - If no `last_synced_at` is recorded, delegates to `sync full`.
 /// - Otherwise fetches issues where updatedAt > `last_synced_at`, upserts them,
 ///   and updates `last_synced_at`.
-///
-/// Returns the union of entity keys the sync touched
-/// (docs/design/operation-seam-adr.md, "Decision 5").
-pub fn run(
-    conn: &rusqlite::Connection,
-    transport: &dyn GraphqlTransport,
-) -> Result<Vec<EntityKey>> {
+pub fn run(conn: &rusqlite::Connection, transport: &dyn GraphqlTransport) -> Result<()> {
     let last_synced_at = db::get_meta(conn, "last_synced_at")?;
 
     // No previous sync -- fall back to full sync.
@@ -46,17 +39,14 @@ pub fn run(
 
     // Drain queued local mutations first so the base reflects acked edits before
     // the delta fetch overwrites it.
-    let mut touched = super::drain::drain(conn, transport)?;
+    super::drain::drain(conn, transport)?;
     // Persist the viewer so cached reads can resolve `me` offline.
-    touched.extend(super::persist_viewer(conn, transport)?);
+    super::persist_viewer(conn, transport)?;
     // Teams, then every workflow state across every team, before any issue
     // page: an issue's `state_id` must already be locally known.
-    touched.extend(super::sync_reference_data(conn, transport)?);
+    super::sync_reference_data(conn, transport)?;
 
-    touched.extend(super::sync_pages(conn, transport, |after| {
-        variables(&since, after)
-    })?);
-    Ok(touched)
+    super::sync_pages(conn, transport, |after| variables(&since, after))
 }
 
 #[cfg(test)]

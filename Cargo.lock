@@ -1466,7 +1466,11 @@ name = "lt-schema-codegen"
 version = "0.7.1"
 dependencies = [
  "graphql-parser",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
  "serde",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -1482,15 +1486,12 @@ dependencies = [
  "lt-config",
  "lt-schema-codegen",
  "lt-types",
- "prettyplease",
  "proc-macro2",
  "quote",
  "rand 0.10.2",
  "rusqlite",
  "rusqlite_migration",
- "serde",
  "serde_json",
- "syn 2.0.118",
  "toml",
  "tracing",
 ]
@@ -1520,12 +1521,8 @@ dependencies = [
  "cynic",
  "cynic-codegen",
  "lt-schema-codegen",
- "prettyplease",
- "proc-macro2",
- "quote",
  "serde",
  "serde_json",
- "syn 2.0.118",
  "toml",
 ]
 

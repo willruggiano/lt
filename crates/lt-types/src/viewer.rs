@@ -20,21 +20,25 @@ impl GraphqlOperation for ViewerQuery {
     fn operation(variables: Self::Variables) -> cynic::Operation<Self, Self::Variables> {
         Self::build(variables)
     }
+}
 
-    fn extract(self) -> anyhow::Result<Self::Output> {
+impl TryFrom<ViewerQuery> for Option<Viewer> {
+    type Error = anyhow::Error;
+
+    fn try_from(op: ViewerQuery) -> anyhow::Result<Self> {
         Ok(Some(Viewer {
             user: types::User {
-                id: self.viewer.id,
-                name: self.viewer.name,
+                id: op.viewer.id,
+                name: op.viewer.name,
             },
-            organization: self.viewer.organization,
+            organization: op.viewer.organization,
         }))
     }
 }
 
 /// The wire selection for `Query.viewer`: the shared [`types::User`] fields
 /// plus `organization`. Private -- callers see only [`Viewer`], composed from
-/// it in [`ViewerQuery::extract`].
+/// it by `impl TryFrom<ViewerQuery> for Option<Viewer>`.
 #[derive(cynic::QueryFragment, Debug, Clone)]
 #[cynic(graphql_type = "User")]
 struct ViewerEnvelope {
@@ -65,7 +69,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_maps_nested_fields() {
+    fn recompose_maps_nested_fields() {
         let data = serde_json::json!({
             "viewer": {
                 "id": "u1",
@@ -73,11 +77,11 @@ mod tests {
                 "organization": { "id": "o1", "name": "Acme", "urlKey": "acme" }
             }
         });
-        let viewer = serde_json::from_value::<ViewerQuery>(data)
+        let viewer: Option<Viewer> = serde_json::from_value::<ViewerQuery>(data)
             .unwrap()
-            .extract()
-            .unwrap()
+            .try_into()
             .unwrap();
+        let viewer = viewer.unwrap();
         assert_eq!(viewer.user.id.inner(), "u1");
         assert_eq!(viewer.user.name, "Ada");
         assert_eq!(viewer.organization.id.inner(), "o1");

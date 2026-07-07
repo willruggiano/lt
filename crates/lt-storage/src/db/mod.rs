@@ -17,7 +17,7 @@ pub use issues::{
     count_fts_rows, count_issues, get_meta, query_children, query_issue_by_id, query_issues,
     search_issues, search_issues_like, set_meta, upsert_issues,
 };
-pub use ops::{AckContext, EntityKey, Mutate, Read, Upsert};
+pub use ops::{AckContext, Mutation, Query};
 pub use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 pub use teams::{
