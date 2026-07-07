@@ -10,7 +10,7 @@
     ...
   }: {
     devshells.default = {
-      packages = [inputs'.cpd.packages.default pkgs.scc];
+      packages = [inputs'.cpd.packages.default pkgs.scc pkgs.sqlite];
       motd = lib.mkForce "";
     };
   };
