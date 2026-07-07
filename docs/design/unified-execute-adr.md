@@ -40,7 +40,7 @@ The intent of ENG-67 is to expose one verb over all of it:
 pub fn execute<Op>(&self, vars: Op::Variables) -> Result<Op::Output>;
 ```
 
-Everything else — optimistic writes, the outbox, live refresh and invalidation,
+Everything else — optimistic writes, the op-log, live refresh and invalidation,
 the SQL — is an implementation detail, hidden behind that surface and derived
 from `Op`.
 
@@ -54,7 +54,7 @@ from `Op`.
    update_issue(vars)    -> ()               │      mutation → optimistic apply,
    create_comment(input) -> ()               ┘      read the optimistic Output back)
 
-   Subscription<T>, the outbox, scoped invalidation  ── all internal, derived from Op
+   Subscription<T>, the op-log, scoped invalidation  ── all internal, derived from Op
 ```
 
 ## Decision 1: the single surface, dispatched by operation kind
@@ -72,7 +72,7 @@ impl Runtime {
   instant, no network, exactly today's `load`. `execute::<IssuesQuery>(vars)`
   returns the `IssueConnection` from the replica.
 - **Mutation `Op`** — `execute` runs the operation's optimistic local write and
-  outbox enqueue (atomically), then returns the **optimistic `Op::Output` read
+  op-log enqueue (atomically), then returns the **optimistic `Op::Output` read
   back from the cache** — the created or updated entity as it now renders.
   `IssueCreateMutation::Output = Issue` (`issues.rs:567`), so
   `execute::<IssueCreateMutation>(vars)` returns the optimistic `Issue`,
@@ -97,37 +97,52 @@ Rejected alternatives:
 | `execute` returns `()` for writes                            | discards the optimistic entity the create path needs (its new identifier)                                         |
 | `execute` returns the wire response for writes               | not available synchronously — the mutation drains later; the synchronous truth is the optimistic cache projection |
 
-## Decision 2: exactly two seam traits — `Query` and `Mutation`
+## Decision 2: three seam traits — `Query`, `Fill`, and `Mutation`
 
-The local seam is exactly two operation-kind traits, named for what they are:
+The local seam is three operation-kind traits, named for what they are
+(`crates/lt-runtime/src/ops.rs`):
 
 ```rust
-// lt-storage — the two local-cache seams.
+// lt-runtime — the local-cache seams (crates/lt-runtime/src/ops.rs).
 pub trait Query: GraphqlOperation {
     /// Read the operation's result out of the local replica.
     fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output>;
 }
 
+pub trait Fill: GraphqlOperation {
+    /// Write an already-fetched response into the cache — the read path's
+    /// fetch-and-fill. Every query-kind operation implements this.
+    fn fill(conn: &Connection, vars: &Self::Variables, out: &Self::Output) -> Result<()>;
+}
+
 pub trait Mutation: GraphqlOperation {
-    /// Any write into the local replica: the optimistic user write plus its
-    /// outbox command, and (subsuming the old `Upsert`) the application of a
-    /// fetched upstream response. Every local write is a mutation.
-    fn apply(conn: &Connection, vars: &Self::Variables, /* … */) -> Result<()>;
+    /// The op-log write side: the optimistic in-place local write plus its
+    /// op-log enqueue, the replay-variables rebuild, and the drain ack. The
+    /// op-log stores no variables — `replay_vars` re-reads the row.
+    fn enqueue(conn: &Connection, vars: Self::Variables) -> Result<String>;
+    fn replay_vars(conn: &Connection, id: &str) -> Result<Self::Variables>;
+    fn ack(conn: &Connection, ctx: AckContext<'_>, out: Self::Output) -> Result<()>;
 }
 ```
 
 - `Query` replaces `Read` (and drops the `reads` predicate — Decision 3 removes
   scoped invalidation, so nothing consumes it).
-- `Mutation` replaces `Mutate` and **subsumes `Upsert`**: applying a fetched
-  query response into the cache and applying an optimistic user edit are both
-  writes to the local replica, so they are one seam, not two.
+- `Fill` replaces `Upsert`: writing a fetched query response into the cache is
+  the read path's own concern, not a mutation. **No query operation implements
+  `Mutation`** — the two never overlap on one operation
+  (`crates/lt-runtime/src/ops.rs:37-39`).
+- `Mutation` replaces `Mutate` and is the op-log seam: only the three real
+  mutations (`IssueCreateMutation`, `IssueUpdateMutation`,
+  `CommentCreateMutation`) implement it, each supplying
+  `enqueue`/`replay_vars`/`ack` (`crates/lt-runtime/src/ops.rs:53-67`).
 
-There is **no `Refresh` trait and no `Upsert` trait**. Pulling an operation from
-upstream is already generic —
-`client::execute::<Op>(transport, vars) -> Op::Output`
-(`crates/lt-upstream/src/client.rs:74`) — so the runtime's internal freshness
-path fetches with that and writes the result through `Mutation::apply`. A
-per-operation fetch trait would add nothing over the generic transport call.
+The upstream-freshness path is the **`Refresh` trait**
+(`crates/lt-runtime/src/ops.rs:347`). Most operations get a blanket single-page
+`refresh` — `fill ∘ client::execute::<Op>`
+(`crates/lt-upstream/src/client.rs:74`) — while a composed operation whose
+refresh spans multiple wire requests supplies its own impl: `IssueDetailQuery`
+paginates its comment thread to exhaustion
+(`crates/lt-runtime/src/ops.rs:395-436`).
 
 `execute<Op: Operation>` dispatches through a thin `Operation` supertrait
 implemented per operation — a query op wires to `Query`, a mutation op to the
@@ -153,10 +168,11 @@ single-`execute` surface; drop that requirement and `Operation` goes with it.
 
 Rejected alternatives:
 
-| Option                                             | Why rejected                                                                                                                           |
-| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Keep `Read`/`Upsert`/`Mutate`/`Refresh` (4 traits) | `Read`/`Mutate` are opaque, `Upsert` is just a local write (fold into `Mutation`), and `Refresh` is just the generic `client::execute` |
-| A distinct `Refresh`/fetch trait per operation     | fetching is already `client::execute::<Op>`; the only local seams are read (`Query`) and write (`Mutation`)                            |
+| Option                                                  | Why rejected                                                                                                                                 |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Keep the opaque `Read`/`Mutate` names                   | renamed for what they are: `Query` (cache read), `Fill` (fetched-response write), `Mutation` (op-log write)                                  |
+| Fold the fetched-response write into `Mutation`         | a query's cache-fill is not an optimistic user write and never enqueues an op-log row; `Fill` keeps the read and write paths disjoint        |
+| Fetch through a write seam instead of a `Refresh` trait | fetching needs `lt-upstream`, which `lt-storage` does not depend on; the on-open refresh is the `Refresh` trait in `lt-runtime` (Decision 3) |
 
 ## Decision 3: one unscoped `Update` refreshes every active view
 
@@ -183,9 +199,12 @@ re-reading, not by receiving.
   fan-out ENG-28 built was precision the app does not need. Correctness is
   last-write-wins of current truth: a redundant re-read is idempotent.
 - **Freshness** is likewise simple: a view's operation is refreshed upstream
-  while it is active (the delta cycle for issues; a background
-  `client::execute::<Op>` applied via `Mutation` for a composed view when it
-  opens). Finer scheduling is deferred, not designed here.
+  while it is active (the delta cycle for issues; the composed view's `Refresh`
+  impl when it opens, filled via `Fill`). The on-open refresh skips an issue
+  whose optimistic create has not yet synced (`synced_at IS NULL`): its
+  fabricated id has no upstream counterpart, so the fetch would be doomed
+  (`crates/lt-runtime/src/ops.rs:409-415`). Finer scheduling is deferred, not
+  designed here.
 
 Rejected alternatives:
 
@@ -197,23 +216,23 @@ Rejected alternatives:
 
 ## Decision 4: the manual drive stays a control verb
 
-ENG-67 wants "the 'now' part" — driving the outbox drain immediately — as a
+ENG-67 wants "the 'now' part" — driving the op-log drain immediately — as a
 separate API. It is not a data operation, so it does not belong on `execute`; it
 is a lifecycle control like `run`/`login`/`request_sync`. Today's `drain_now`
 (`runtime.rs:535`) becomes the public control verb:
 
 ```rust
-pub fn drain(&self) -> Result<()>;   // replay the outbox upstream now
+pub fn drain(&self) -> Result<()>;   // replay the op-log upstream now
 ```
 
 `execute` on a mutation still nudges the loop to drain promptly (a latency
 optimization — the periodic delta cycle drains anyway); `drain` is the
-caller-driven, loop-free equivalent the CLI and tests use. The outbox replay
-dispatch (`op_type` string → concrete mutation,
-`crates/lt-runtime/src/sync/drain.rs:40-46`) becomes a `NAME`-keyed registry —
-the one runtime-string→type boundary no single generic call spans — each entry
-replaying an operation and, on success, firing `Update`. Hand-written now,
-generated by ENG-16 ([[schema-codegen-program-adr.md]]).
+caller-driven, loop-free equivalent the CLI and tests use. The op-log replay
+dispatch (the op's `operation` name → concrete mutation,
+`crates/lt-runtime/src/sync/drain.rs:40-45`) is a `NAME`-keyed match — the one
+runtime-string→type boundary no single generic call spans — each arm replaying
+an operation and, on success, signalling `Update`. Hand-written now, generated
+by ENG-16 ([[schema-codegen-program-adr.md]]).
 
 ## Decision 5: `GraphqlOperation` sheds `extract`; `Op::Output` is the full payload
 
@@ -261,8 +280,9 @@ rg 'pub fn (create|update|delete|load|refresh|subscribe)' crates/lt-runtime/src/
 
 ## Non-goals
 
-- **The read model.** Overlay merge, coalescing, temp-id rewrite, composed-op
-  cursor pagination are unchanged; ENG-67 is a surface refactor.
+- **The read model.** Reads are plain SELECTs over the collapsed fragment type;
+  composed-op cursor pagination is unchanged. ENG-67 is a surface refactor over
+  that model, not a change to it.
 - **Uncached operations.** `execute` requires a `Query` or a `Mutation` impl; an
   operation with neither (e.g. `NotificationsQuery`, no cache table) is out of
   scope until its table exists — consistent with [[operation-seam-adr.md]]'s
@@ -293,7 +313,7 @@ rg 'pub fn (create|update|delete|load|refresh|subscribe)' crates/lt-runtime/src/
 
 ## Tasks
 
-1. `Query`/`Mutation` rename (folding `Upsert` into `Mutation`); the `Operation`
+1. `Query`/`Fill`/`Mutation` traits (`Upsert` becomes `Fill`); the `Operation`
    dispatch trait; `Runtime::execute`; remove `GraphqlOperation::extract`
    (`Op::Output` = full payload, gate → write seam, recomposition → `From`);
    port the read callers off `load`/`refresh` — verify: the `rg` surface check

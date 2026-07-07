@@ -2,8 +2,21 @@
 
 ## Status
 
-Accepted and delivered; the Task decomposition is at the end. As built, three
-details diverge from the sketches below:
+Accepted and delivered; the Task decomposition is at the end.
+
+**Superseded by ENG-84 (as-built, 2026-07):** the read/write seam and the write
+path shipped differently than sketched below. The local seam is three traits —
+`Query` (cache read), `Fill` (write a fetched response into the cache), and
+`Mutation` (the op-log optimistic write + `replay_vars` + `ack`) — all in
+`lt-runtime` (`crates/lt-runtime/src/ops.rs`), not the `Read`/`Upsert`/`Mutate`
+set below; no query implements `Mutation`. Identity is `id TEXT PRIMARY KEY`
+with the not-yet-synced marker `synced_at`; an optimistic create fabricates a
+random id and the drain-ack rewrites it to the server id via SQLite
+`ON UPDATE CASCADE` (`crates/lt-storage/src/db/op_log.rs`). The `op_log` table
+replaces the `pending_overlay` + `outbox` model, and reads are plain SELECTs
+with no overlay merge. See [[unified-execute-adr.md]].
+
+As built for ENG-28, three details diverge from the sketches below:
 
 - `Read::reads` returns the `Vec<EntityKey>` set an operation depends on
   (`crates/lt-storage/src/db/ops.rs`), not the `(vars, key) -> bool` predicate
