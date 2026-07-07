@@ -7,7 +7,7 @@ use crate::graphql::GraphqlOperation;
 use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
 use crate::schema;
-use crate::wire::{Issue, User};
+use crate::types::{Issue, User};
 
 #[derive(cynic::QueryVariables)]
 pub struct NotificationsVariables {

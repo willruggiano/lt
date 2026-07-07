@@ -1,7 +1,7 @@
-//! The per-issue comment thread query and the `commentCreate` mutation. The
-//! wire-decoded envelope (`wire::Comment`, `wire::CommentConnection`)
-//! recomposes into this module's domain [`Comment`]/[`CommentConnection`],
-//! which `lt-storage` also reconstructs directly from its relational joins.
+//! The per-issue comment thread query and the `commentCreate` mutation. This
+//! module's [`Comment`]/[`CommentConnection`] decode straight off the wire;
+//! `lt-storage` also reconstructs [`Comment`] directly from its relational
+//! joins.
 
 use cynic::{MutationBuilder, QueryBuilder};
 
@@ -9,8 +9,8 @@ use crate::graphql::{GraphqlOperation, extract_on_success};
 use crate::inputs::CommentCreateInput;
 use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
+use crate::schema;
 use crate::types::User;
-use crate::{schema, wire};
 
 #[derive(cynic::QueryVariables, Clone)]
 pub struct CommentsVariables {
@@ -39,7 +39,7 @@ impl TryFrom<CommentsQuery> for CommentConnection {
     type Error = anyhow::Error;
 
     fn try_from(op: CommentsQuery) -> anyhow::Result<Self> {
-        Ok(op.issue.comments.into())
+        Ok(op.issue.comments)
     }
 }
 
@@ -47,25 +47,17 @@ impl TryFrom<CommentsQuery> for CommentConnection {
 #[cynic(graphql_type = "Issue", variables = "CommentsVariables")]
 pub struct IssueWithComments {
     #[arguments(first: 100, after: $after)]
-    pub comments: wire::CommentConnection,
+    pub comments: CommentConnection,
 }
 
-#[derive(Default)]
+#[derive(Default, cynic::QueryFragment)]
 pub struct CommentConnection {
     pub nodes: Vec<Comment>,
     pub page_info: PageInfo,
 }
 
-impl From<wire::CommentConnection> for CommentConnection {
-    fn from(w: wire::CommentConnection) -> Self {
-        Self {
-            nodes: w.nodes.into_iter().map(Into::into).collect(),
-            page_info: w.page_info,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
+#[cynic(graphql_type = "Comment")]
 pub struct Comment {
     pub id: cynic::Id,
     pub body: String,
@@ -75,19 +67,6 @@ pub struct Comment {
     /// The comment's issue, nullable since a comment can attach to something
     /// other than an issue (e.g. a project update).
     pub issue_id: Option<String>,
-}
-
-impl From<wire::Comment> for Comment {
-    fn from(w: wire::Comment) -> Self {
-        Self {
-            id: w.id,
-            body: w.body,
-            created_at: w.created_at,
-            updated_at: w.updated_at,
-            user: w.user.map(Into::into),
-            issue_id: w.issue_id,
-        }
-    }
 }
 
 impl Comment {
@@ -119,7 +98,7 @@ pub struct CommentCreateMutation {
 #[cynic(graphql_type = "CommentPayload")]
 pub struct CommentPayload {
     pub success: bool,
-    pub comment: wire::Comment,
+    pub comment: Comment,
 }
 
 impl GraphqlOperation for CommentCreateMutation {
@@ -139,7 +118,7 @@ impl TryFrom<CommentCreateMutation> for Comment {
         extract_on_success(
             CommentCreateMutation::NAME,
             op.comment_create.success,
-            op.comment_create.comment.into(),
+            op.comment_create.comment,
         )
     }
 }

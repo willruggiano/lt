@@ -4,8 +4,8 @@
 use cynic::QueryBuilder;
 
 use crate::graphql::GraphqlOperation;
+use crate::schema;
 use crate::types::User;
-use crate::{schema, wire};
 
 #[derive(cynic::QueryVariables, Clone)]
 pub struct TeamVariables {
@@ -34,27 +34,19 @@ impl TryFrom<TeamMembersQuery> for UserConnection {
     type Error = anyhow::Error;
 
     fn try_from(op: TeamMembersQuery) -> anyhow::Result<Self> {
-        Ok(op.team.members.into())
+        Ok(op.team.members)
     }
 }
 
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Team")]
 pub struct TeamWithMembers {
-    pub members: wire::UserConnection,
+    pub members: UserConnection,
 }
 
-#[derive(Default)]
+#[derive(Default, cynic::QueryFragment)]
 pub struct UserConnection {
     pub nodes: Vec<User>,
-}
-
-impl From<wire::UserConnection> for UserConnection {
-    fn from(w: wire::UserConnection) -> Self {
-        Self {
-            nodes: w.nodes.into_iter().map(Into::into).collect(),
-        }
-    }
 }
 
 #[cfg(test)]

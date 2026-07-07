@@ -4,13 +4,13 @@
 use cynic::QueryBuilder;
 
 use crate::graphql::GraphqlOperation;
+use crate::schema;
 use crate::types::Team;
-use crate::{schema, wire};
 
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query")]
 pub struct TeamsQuery {
-    pub teams: wire::TeamConnection,
+    pub teams: TeamConnection,
 }
 
 impl GraphqlOperation for TeamsQuery {
@@ -27,21 +27,13 @@ impl TryFrom<TeamsQuery> for TeamConnection {
     type Error = anyhow::Error;
 
     fn try_from(op: TeamsQuery) -> anyhow::Result<Self> {
-        Ok(op.teams.into())
+        Ok(op.teams)
     }
 }
 
-#[derive(Default)]
+#[derive(Default, cynic::QueryFragment)]
 pub struct TeamConnection {
     pub nodes: Vec<Team>,
-}
-
-impl From<wire::TeamConnection> for TeamConnection {
-    fn from(w: wire::TeamConnection) -> Self {
-        Self {
-            nodes: w.nodes.into_iter().map(Into::into).collect(),
-        }
-    }
 }
 
 #[cfg(test)]
