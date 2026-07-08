@@ -21,7 +21,7 @@ pub enum SyncCommands {
     },
 }
 
-pub fn run(out: &mut dyn Write, cmd: SyncCommands, runtime: &lt_runtime::Runtime) -> Result<()> {
+pub fn run(out: &mut dyn Write, cmd: SyncCommands, runtime: &crate::ProdRuntime) -> Result<()> {
     match cmd {
         SyncCommands::Delta => {
             runtime.sync_delta()?;

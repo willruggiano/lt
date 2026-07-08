@@ -1,7 +1,7 @@
 use lt_runtime::query::SortDirection;
 use lt_runtime::text;
-use lt_types::comments::Comment;
-use lt_types::types::Issue;
+use lt_upstream::query::comments::Comment;
+use lt_upstream::query::types::Issue;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};

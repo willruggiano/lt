@@ -10,13 +10,13 @@ mod sync;
 mod text_input;
 mod ui;
 
-#[cfg(all(test, feature = "sim"))]
+#[cfg(all(test, feature = "fake"))]
 mod render_tests;
 
-#[cfg(all(test, feature = "sim"))]
+#[cfg(all(test, feature = "fake"))]
 mod loop_tests;
 
-#[cfg(all(test, feature = "sim"))]
+#[cfg(all(test, feature = "fake"))]
 use std::collections::VecDeque;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -24,17 +24,17 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 pub use detail::DetailView;
-#[cfg(all(test, feature = "sim"))]
+#[cfg(all(test, feature = "fake"))]
 pub(crate) use detail::build_cached_detail;
 pub use list::{ListLaunch, ListQuery, ListView};
 pub use lt_runtime::sync::service::RuntimeEvent;
 use lt_runtime::sync::service::{LoginEvent, SyncEvent};
-use lt_runtime::{Clock, search_query};
-use lt_types::types::Issue;
-use lt_types::viewer;
-use lt_types::viewer::ViewerQuery;
+use lt_runtime::{Clock, RuntimeApi, search_query};
+use lt_upstream::query::types::Issue;
+use lt_upstream::query::viewer;
+use lt_upstream::query::viewer::ViewerQuery;
 pub(crate) use new_issue::{NewIssueField, NewIssueModal};
-#[cfg(all(test, feature = "sim"))]
+#[cfg(all(test, feature = "fake"))]
 pub(crate) use new_issue::{build_assignee_items, test_new_issue_modal};
 pub(crate) use popup::{
     HelpPopup, PopupItem, PopupKind, PopupView, SearchOverlay, poll_search_debounce,
@@ -80,20 +80,22 @@ pub enum View {
 }
 
 /// A view's declared key handling: its resolution layers, the apply
-/// function for non-navigation actions, and the unbound-key policy.
-pub(crate) struct Keymap {
+/// function for non-navigation actions, and the unbound-key policy. Built
+/// fresh per lookup (rather than a `'static` table) since `App` is generic
+/// over the runtime.
+pub(crate) struct Keymap<R: RuntimeApi> {
     pub(crate) layers: keymap::Layers,
-    pub(crate) apply: Option<fn(&mut App, usize, keymap::Action)>,
-    pub(crate) unbound: Unbound,
+    pub(crate) apply: Option<fn(&mut App<R>, usize, keymap::Action)>,
+    pub(crate) unbound: Unbound<R>,
 }
 
 /// What a key no layer binds does: cascade, be swallowed, or forward
 /// verbatim to the view's editor widget. `esc` is exempt: it always passes
 /// to the floor before this policy is consulted.
-pub(crate) enum Unbound {
+pub(crate) enum Unbound<R: RuntimeApi> {
     Cascade,
     Swallow,
-    Forward(fn(&mut App, usize, KeyEvent)),
+    Forward(fn(&mut App<R>, usize, KeyEvent)),
 }
 
 impl View {
@@ -101,10 +103,10 @@ impl View {
     /// `Update` (docs/design/unified-execute-adr.md, "Decision 3"); `focused`
     /// is true iff this is the top of the stack. Search/Help hold no
     /// operation and never re-execute.
-    fn apply_update(
+    fn apply_update<R: RuntimeApi>(
         &mut self,
         focused: bool,
-        runtime: &lt_runtime::Runtime,
+        runtime: &R,
         viewer_name: Option<&str>,
     ) {
         match self {
@@ -131,14 +133,14 @@ impl View {
 
     /// This view's declared keymap, delegating any sub-focus decision to
     /// the view type itself.
-    fn keymap(&self) -> &'static Keymap {
+    fn keymap<R: RuntimeApi>(&self) -> Keymap<R> {
         match self {
-            View::List(_) => &list::LIST_KEYMAP,
+            View::List(_) => list::list_keymap(),
             View::Detail(d) => d.keymap(),
-            View::Popup(_) => &popup::POPUP_KEYMAP,
+            View::Popup(_) => popup::popup_keymap(),
             View::NewIssue(m) => m.keymap(),
-            View::Search(_) => &popup::SEARCH_KEYMAP,
-            View::Help(_) => &popup::HELP_KEYMAP,
+            View::Search(_) => popup::search_keymap(),
+            View::Help(_) => popup::help_keymap(),
         }
     }
 }
@@ -312,7 +314,7 @@ pub struct Session {
     pub keyboard_enhanced: bool,
 }
 
-pub struct App {
+pub struct App<R: RuntimeApi> {
     /// The view stack, bottom to top; the top is focused. Never empty:
     /// `views[0]` is always the base view (today, the issue list).
     pub views: Vec<View>,
@@ -344,41 +346,46 @@ pub struct App {
 
     /// The data runtime: writes, one-shot upstream freshness refreshes, and
     /// sync/login scheduling.
-    pub runtime: Arc<lt_runtime::Runtime>,
+    pub runtime: Arc<R>,
 
     /// The single consumer of the app event queue, drained once per frame.
     events_rx: mpsc::Receiver<AppEvent>,
 }
 
-/// Wire a fresh [`lt_runtime::Runtime`] over `db`, its `OnEvent` callback
-/// feeding `tx`. Tests never start `run()`: initial reads and write
-/// propagation are synchronous, so loop tests stay thread-free while
-/// exercising the real runtime.
-#[cfg(all(test, feature = "sim"))]
-fn test_runtime(
-    db: lt_runtime::test_util::Database,
-    tx: mpsc::Sender<AppEvent>,
-) -> Arc<lt_runtime::Runtime> {
+/// The test-only runtime instantiation: an in-memory database and a scripted
+/// transport, shared by the render/loop tests and the keymap invariant tests.
+#[cfg(test)]
+pub(crate) type TestRuntime =
+    lt_runtime::Runtime<lt_runtime::test_util::Memory, lt_upstream::transport::FakeTransport>;
+
+/// Wire a fresh [`TestRuntime`] over `db`, its `OnEvent` callback feeding
+/// `tx`. Tests never start `run()`: initial reads and write propagation are
+/// synchronous, so loop tests stay thread-free while exercising the real
+/// runtime. The transport is never actually called (`run()` never starts, so
+/// no refresh thunk or sync cycle runs), so an empty script suffices.
+#[cfg(all(test, feature = "fake"))]
+fn test_runtime(db: lt_runtime::test_util::Memory, tx: mpsc::Sender<AppEvent>) -> Arc<TestRuntime> {
     let on_event: lt_runtime::sync::service::OnEvent = Box::new(move |ev| {
         // Test fixture: the receiving `App` outlives every send in these
         // tests, so a disconnect is not expected; drop rather than assert.
         drop(tx.send(AppEvent::Runtime(ev)));
     });
-    Arc::new(lt_runtime::Runtime::new(
+    // `FakeTransport` is deliberately `!Sync` (lt-runtime's own thread-free
+    // tests rely on this); `App::runtime` is `Arc<R>` regardless of `R`, and
+    // this `Arc` never crosses a thread (these tests never call `run()`).
+    #[allow(clippy::arc_with_non_send_sync)]
+    let runtime = Arc::new(lt_runtime::Runtime::new(
         db,
-        Box::new(lt_runtime::HttpTransportSource),
+        lt_upstream::transport::FakeTransport::new(Vec::new()),
         on_event,
-    ))
+    ));
+    runtime
 }
 
-impl App {
+impl<R: RuntimeApi> App<R> {
     // `sync`/`auth` start unstarted (`Idle`/`Unknown`); they transition once
     // the loop's own events arrive.
-    fn new(
-        list: ListView,
-        runtime: Arc<lt_runtime::Runtime>,
-        events_rx: mpsc::Receiver<AppEvent>,
-    ) -> Self {
+    fn new(list: ListView, runtime: Arc<R>, events_rx: mpsc::Receiver<AppEvent>) -> Self {
         Self {
             views: vec![View::List(Box::new(list))],
             quit: false,
@@ -397,54 +404,6 @@ impl App {
         }
     }
 
-    /// An `App` for rendering tests: a throwaway in-memory database and
-    /// event channel, backed by a real [`lt_runtime::Runtime`] that never
-    /// starts `run()`. Seeds `issues` directly rather than through
-    /// `ListView::open`, since the memory db is still empty at this point.
-    /// Fallible (in-memory SQLite setup).
-    #[cfg(all(test, feature = "sim"))]
-    fn for_test(issues: Vec<Issue>) -> Result<Self> {
-        let db = lt_runtime::test_util::Database::memory()?;
-        let (tx, rx) = mpsc::channel();
-        let runtime = test_runtime(db.share()?, tx);
-        let query = ListQuery::new(
-            search_query::parse_query_ast(search_query::DEFAULT_QUERY),
-            50,
-        );
-        // The memory db is still empty at this point, so the initial read is
-        // discarded in favor of the given fixture rows.
-        drop(
-            runtime.execute::<lt_types::issues::IssuesQuery>(lt_types::issues::IssuesVariables {
-                filter: None,
-                sort: None,
-                first: None,
-                after: None,
-            }),
-        );
-        let list = ListView::new(issues, query);
-        Ok(Self::new(list, runtime, rx))
-    }
-
-    /// Swap in a fresh database, shared with a fresh [`lt_runtime::Runtime`]
-    /// and event channel, so `db`/`runtime` agree on the same rows.
-    #[cfg(all(test, feature = "sim"))]
-    fn install_db(&mut self, db: &lt_runtime::test_util::Database) -> Result<()> {
-        self.install_runtime(db.share()?);
-        Ok(())
-    }
-
-    /// Swap in a fresh `Runtime` (and its paired event channel) sharing
-    /// `db`, returning it so callers can drive its write methods and assert
-    /// on the resulting events/reads.
-    #[cfg(all(test, feature = "sim"))]
-    fn install_runtime(&mut self, db: lt_runtime::test_util::Database) -> Arc<lt_runtime::Runtime> {
-        let (tx, rx) = mpsc::channel();
-        let runtime = test_runtime(db, tx);
-        self.runtime = runtime.clone();
-        self.events_rx = rx;
-        runtime
-    }
-
     /// The base view (`views[0]`), always present.
     fn base(&self) -> &View {
         &self.views[0]
@@ -457,7 +416,7 @@ impl App {
     /// Test-only infallible accessor: render/loop tests always seed a list
     /// base, so a panic here signals a broken fixture, not a runtime state to
     /// handle.
-    #[cfg(all(test, feature = "sim"))]
+    #[cfg(all(test, feature = "fake"))]
     fn list_mut(&mut self) -> &mut ListView {
         match self.base_mut() {
             View::List(list) => list,
@@ -737,13 +696,61 @@ impl App {
     }
 }
 
+#[cfg(all(test, feature = "fake"))]
+impl App<TestRuntime> {
+    /// An `App` for rendering tests: a throwaway in-memory database and
+    /// event channel, backed by a real [`TestRuntime`] that never starts
+    /// `run()`. Seeds `issues` directly rather than through `ListView::open`,
+    /// since the memory db is still empty at this point. Fallible (in-memory
+    /// SQLite setup).
+    fn for_test(issues: Vec<Issue>) -> Result<Self> {
+        let db = lt_runtime::test_util::Memory::new()?;
+        let (tx, rx) = mpsc::channel();
+        let runtime = test_runtime(db.share()?, tx);
+        let query = ListQuery::new(
+            search_query::parse_query_ast(search_query::DEFAULT_QUERY),
+            50,
+        );
+        // The memory db is still empty at this point, so the initial read is
+        // discarded in favor of the given fixture rows.
+        drop(runtime.execute::<lt_upstream::query::issues::IssuesQuery>(
+            lt_upstream::query::issues::IssuesVariables {
+                filter: None,
+                sort: None,
+                first: None,
+                after: None,
+            },
+        ));
+        let list = ListView::new(issues, query);
+        Ok(Self::new(list, runtime, rx))
+    }
+
+    /// Swap in a fresh database, shared with a fresh [`TestRuntime`] and
+    /// event channel, so `db`/`runtime` agree on the same rows.
+    fn install_db(&mut self, db: &lt_runtime::test_util::Memory) -> Result<()> {
+        self.install_runtime(db.share()?);
+        Ok(())
+    }
+
+    /// Swap in a fresh `Runtime` (and its paired event channel) sharing
+    /// `db`, returning it so callers can drive its write methods and assert
+    /// on the resulting events/reads.
+    fn install_runtime(&mut self, db: lt_runtime::test_util::Memory) -> Arc<TestRuntime> {
+        let (tx, rx) = mpsc::channel();
+        let runtime = test_runtime(db, tx);
+        self.runtime = runtime.clone();
+        self.events_rx = rx;
+        runtime
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
 
-pub fn run(
+pub fn run<R: RuntimeApi>(
     launch: ListLaunch,
-    runtime: Arc<lt_runtime::Runtime>,
+    runtime: Arc<R>,
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
@@ -824,7 +831,7 @@ enum EventPump {
     Channel,
     /// Scripted events for loop tests; errors when exhausted so a test that
     /// forgot to quit fails fast instead of hanging.
-    #[cfg(all(test, feature = "sim"))]
+    #[cfg(all(test, feature = "fake"))]
     Scripted(VecDeque<AppEvent>),
 }
 
@@ -835,9 +842,9 @@ impl EventPump {
     /// the lifetime of the loop -- so the `Channel` arm treats it as an idle
     /// tick, same as a timeout.
     // `Scripted`'s exhaustion error only exists under `#[cfg(test, feature =
-    // "sim")]`; without it this function's only path is infallible, which
+    // "fake")]`; without it this function's only path is infallible, which
     // clippy flags on that compile.
-    #[cfg_attr(not(all(test, feature = "sim")), allow(clippy::unnecessary_wraps))]
+    #[cfg_attr(not(all(test, feature = "fake")), allow(clippy::unnecessary_wraps))]
     fn next(
         &mut self,
         rx: &mpsc::Receiver<AppEvent>,
@@ -850,7 +857,7 @@ impl EventPump {
                     Ok(None)
                 }
             },
-            #[cfg(all(test, feature = "sim"))]
+            #[cfg(all(test, feature = "fake"))]
             EventPump::Scripted(events) => events
                 .pop_front()
                 .map(Some)
@@ -859,10 +866,10 @@ impl EventPump {
     }
 }
 
-fn run_app<B: Backend>(
+fn run_app<R: RuntimeApi, B: Backend>(
     terminal: &mut Terminal<B>,
     pump: &mut EventPump,
-    app: &mut App,
+    app: &mut App<R>,
 ) -> Result<()>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
@@ -915,18 +922,22 @@ pub(crate) static HELP_CONTEXTS: &[(&str, &[keymap::Table])] = &[
     ("help", &[popup::HELP_BINDINGS]),
 ];
 
-/// Every declared keymap, named for test diagnostics.
+/// Every declared keymap, named for test diagnostics. A function rather than
+/// a `'static` table since `Keymap` is generic over the runtime; any
+/// `RuntimeApi` witness works here, since these tests only inspect bindings.
 #[cfg(test)]
-pub(crate) static ALL_KEYMAPS: &[(&str, &Keymap)] = &[
-    ("list", &list::LIST_KEYMAP),
-    ("detail", &detail::DETAIL_KEYMAP),
-    ("comment_input", &detail::COMMENT_INPUT_KEYMAP),
-    ("popup", &popup::POPUP_KEYMAP),
-    ("new_issue_picker", &new_issue::PICKER_KEYMAP),
-    ("new_issue_text", &new_issue::TEXT_KEYMAP),
-    ("search", &popup::SEARCH_KEYMAP),
-    ("help", &popup::HELP_KEYMAP),
-];
+pub(crate) fn all_keymaps() -> Vec<(&'static str, Keymap<TestRuntime>)> {
+    vec![
+        ("list", list::list_keymap()),
+        ("detail", detail::detail_keymap()),
+        ("comment_input", detail::comment_input_keymap()),
+        ("popup", popup::popup_keymap()),
+        ("new_issue_picker", new_issue::picker_keymap()),
+        ("new_issue_text", new_issue::text_keymap()),
+        ("search", popup::search_keymap()),
+        ("help", popup::help_keymap()),
+    ]
+}
 
 #[cfg(test)]
 mod tests {

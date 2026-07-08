@@ -1,8 +1,10 @@
 use crossterm::event::KeyCode;
 use lt_runtime::query::{SortDirection, SortField};
-use lt_runtime::{Runtime, search_query};
-use lt_types::issues::{IssueConnection, IssueFilter, IssueSort, IssuesQuery, IssuesVariables};
-use lt_types::types::Issue;
+use lt_runtime::{RuntimeApi, search_query};
+use lt_upstream::query::issues::{
+    IssueConnection, IssueFilter, IssueSort, IssuesQuery, IssuesVariables,
+};
+use lt_upstream::query::types::Issue;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Paragraph, StatefulWidget, TableState, Widget};
@@ -215,7 +217,11 @@ impl ListView {
     /// Execute `query`'s vars and populate the view from the cache read --
     /// the query defines the view's initial data, same as every later
     /// `refetch`.
-    pub(crate) fn open(mut query: ListQuery, runtime: &Runtime, viewer_name: Option<&str>) -> Self {
+    pub(crate) fn open<R: RuntimeApi>(
+        mut query: ListQuery,
+        runtime: &R,
+        viewer_name: Option<&str>,
+    ) -> Self {
         let vars = query.build_vars(viewer_name);
         let page = runtime.execute::<IssuesQuery>(vars).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "issues initial read failed");
@@ -248,9 +254,9 @@ impl ListView {
     /// Re-execute `query`'s current vars and apply the page: a filter/sort/
     /// pagination change (a new vars value) and a live `Update` (same vars,
     /// fresher cache) share this body.
-    pub(crate) fn refetch(
+    pub(crate) fn refetch<R: RuntimeApi>(
         &mut self,
-        runtime: &Runtime,
+        runtime: &R,
         viewer_name: Option<&str>,
         reset_selection: bool,
     ) {
@@ -264,10 +270,10 @@ impl ListView {
     /// Only re-execute while focused: a refresh must not swap the rows a
     /// popup is anchored to or a search overlay covers. `resume_focus`
     /// re-executes on focus return instead.
-    pub(crate) fn apply_update(
+    pub(crate) fn apply_update<R: RuntimeApi>(
         &mut self,
         focused: bool,
-        runtime: &Runtime,
+        runtime: &R,
         viewer_name: Option<&str>,
     ) {
         if focused {
@@ -277,7 +283,7 @@ impl ListView {
 
     /// Called when the list regains focus (an overlay above it popped):
     /// re-read current truth rather than replaying a stale snapshot.
-    pub(crate) fn resume_focus(&mut self, runtime: &Runtime, viewer_name: Option<&str>) {
+    pub(crate) fn resume_focus<R: RuntimeApi>(&mut self, runtime: &R, viewer_name: Option<&str>) {
         self.refetch(runtime, viewer_name, false);
     }
 
@@ -404,14 +410,21 @@ pub(crate) static LIST_BINDINGS: keymap::Table = &[
     ),
 ];
 
-pub(crate) static LIST_KEYMAP: Keymap = Keymap {
-    layers: &[LIST_BINDINGS, keymap::GLOBAL],
-    apply: Some(apply_list),
-    unbound: Unbound::Cascade,
-};
+/// The list view's resolution layers, exposed separately from
+/// [`list_keymap`] so chord-resolution tests can reach them without naming a
+/// concrete runtime type.
+pub(crate) static LIST_LAYERS: keymap::Layers = &[LIST_BINDINGS, keymap::GLOBAL];
+
+pub(crate) fn list_keymap<R: RuntimeApi>() -> Keymap<R> {
+    Keymap {
+        layers: LIST_LAYERS,
+        apply: Some(apply_list),
+        unbound: Unbound::Cascade,
+    }
+}
 
 /// The list view's non-navigation actions.
-pub(crate) fn apply_list(app: &mut App, i: usize, action: keymap::Action) {
+pub(crate) fn apply_list<R: RuntimeApi>(app: &mut App<R>, i: usize, action: keymap::Action) {
     use keymap::Action;
     match action {
         Action::OpenDetail => app.open_detail(),

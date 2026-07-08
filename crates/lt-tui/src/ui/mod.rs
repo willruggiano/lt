@@ -9,6 +9,7 @@ mod text_span;
 mod util;
 
 use chrome::{Footer, Header, HeaderWithSearch};
+use lt_runtime::RuntimeApi;
 use lt_runtime::query::{SortDirection, SortField};
 use new_issue::{NewIssueForm, submit_key_label};
 use popup::Popup;
@@ -20,7 +21,7 @@ use search::{SearchResults, SortOrder};
 use crate::list::TableGeometry;
 use crate::{App, View, search_query, sync_status_label};
 
-pub fn render(frame: &mut Frame, app: &mut App) {
+pub fn render<R: RuntimeApi>(frame: &mut Frame, app: &mut App<R>) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -85,7 +86,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 /// Render the bottom status row (chunk 4), which switches between the detail
 /// footer, a transient footer message, the pending-chord indicator, and the
 /// list footer, matching on the stack top.
-fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Footer) {
+fn render_status_row<R: RuntimeApi>(
+    frame: &mut Frame,
+    chunks: &[Rect],
+    app: &App<R>,
+    footer: &Footer,
+) {
     if let Some(pending) = &app.pending_key {
         // Highest priority: a pending prefix can never coexist with the
         // comment-input hint below, since text contexts never start chords.
@@ -114,7 +120,7 @@ fn render_status_row(frame: &mut Frame, chunks: &[Rect], app: &App, footer: &Foo
 /// Render the whole view stack, bottom to top, each drawing over what's
 /// beneath. Per-view data is derived in the arm that needs it, not hoisted
 /// where every view would pay for it.
-fn render_views(frame: &mut Frame, chunks: &[Rect], app: &mut App) {
+fn render_views<R: RuntimeApi>(frame: &mut Frame, chunks: &[Rect], app: &mut App<R>) {
     let len = app.views.len();
     let mut list_geometry: Option<TableGeometry> = None;
     let mut list_order = crate::list::SortOrder {

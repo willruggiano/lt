@@ -1,13 +1,13 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use lt_runtime::{Runtime, search_query};
-use lt_types::inputs::{Field, IssueUpdateInput};
-use lt_types::issues::{
+use lt_runtime::{RuntimeApi, search_query};
+use lt_upstream::query::inputs::{Field, IssueUpdateInput};
+use lt_upstream::query::issues::{
     IssueFilter, IssueSort, IssueUpdateMutation, IssueUpdateVariables, IssuesQuery, IssuesVariables,
 };
-use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
-use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
+use lt_upstream::query::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
+use lt_upstream::query::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
 use ratatui::widgets::TableState;
 
 use super::search_completer::Completer;
@@ -30,8 +30,8 @@ pub struct PopupItem {
     pub id: Option<String>,
 }
 
-impl From<lt_types::types::Team> for PopupItem {
-    fn from(team: lt_types::types::Team) -> Self {
+impl From<lt_upstream::query::types::Team> for PopupItem {
+    fn from(team: lt_upstream::query::types::Team) -> Self {
         Self {
             label: team.name,
             id: Some(team.id.into_inner()),
@@ -39,8 +39,8 @@ impl From<lt_types::types::Team> for PopupItem {
     }
 }
 
-impl From<lt_types::types::WorkflowState> for PopupItem {
-    fn from(state: lt_types::types::WorkflowState) -> Self {
+impl From<lt_upstream::query::types::WorkflowState> for PopupItem {
+    fn from(state: lt_upstream::query::types::WorkflowState) -> Self {
         Self {
             label: state.name,
             id: Some(state.id.into_inner()),
@@ -48,8 +48,8 @@ impl From<lt_types::types::WorkflowState> for PopupItem {
     }
 }
 
-impl From<lt_types::types::User> for PopupItem {
-    fn from(user: lt_types::types::User) -> Self {
+impl From<lt_upstream::query::types::User> for PopupItem {
+    fn from(user: lt_upstream::query::types::User) -> Self {
         Self {
             label: user.name,
             id: Some(user.id.into_inner()),
@@ -165,7 +165,7 @@ impl HelpPopup {
 /// Mutable state for the FTS search overlay.
 pub struct SearchOverlay {
     pub query: TextInput,
-    pub results: Vec<lt_types::types::Issue>,
+    pub results: Vec<lt_upstream::query::types::Issue>,
     pub table_state: TableState,
     /// When the query was last modified (used for 150ms debounce).
     pub last_changed: Option<Instant>,
@@ -207,7 +207,7 @@ impl SearchOverlay {
     /// `viewport_rows` so the overlay never grows taller than the list. A
     /// one-shot `execute` over the runtime -- the search overlay's debounced
     /// preview never registers a subscription.
-    pub fn run_search(&mut self, runtime: &lt_runtime::Runtime, viewport_rows: u16) {
+    pub fn run_search<R: RuntimeApi>(&mut self, runtime: &R, viewport_rows: u16) {
         self.fts_unavailable = false;
         self.has_searched = true;
         let raw = self.query.value.trim().to_string();
@@ -276,7 +276,7 @@ impl SearchOverlay {
 // ---------------------------------------------------------------------------
 
 /// The assignee popup's items: "Unassign" plus a team's members.
-fn assignee_popup_items(members: Vec<lt_types::types::User>) -> Vec<PopupItem> {
+fn assignee_popup_items(members: Vec<lt_upstream::query::types::User>) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = vec![PopupItem {
         label: "Unassign".to_string(),
         id: None,
@@ -285,7 +285,7 @@ fn assignee_popup_items(members: Vec<lt_types::types::User>) -> Vec<PopupItem> {
     items
 }
 
-impl super::App {
+impl<R: RuntimeApi> super::App<R> {
     pub(crate) fn open_state_popup(&mut self) {
         let Some(issue) = self.selected_issue() else {
             return;
@@ -302,7 +302,7 @@ impl super::App {
             .execute::<TeamStatesQuery>(vars.clone())
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "team states initial read failed");
-                lt_types::states::WorkflowStateConnection::default()
+                lt_upstream::query::states::WorkflowStateConnection::default()
             });
         let items: Vec<PopupItem> = states.nodes.into_iter().map(PopupItem::from).collect();
         let selected = items
@@ -355,7 +355,7 @@ impl super::App {
             .execute::<TeamMembersQuery>(vars.clone())
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "team members initial read failed");
-                lt_types::members::UserConnection::default()
+                lt_upstream::query::members::UserConnection::default()
             });
         let items = assignee_popup_items(members.nodes);
         let selected = current_assignee
@@ -382,7 +382,7 @@ impl PopupView {
     /// Re-execute this popup's team-scoped vars (if any) and rebuild `items`,
     /// re-anchoring the selection by id; the priority popup has no vars and
     /// never re-reads.
-    pub(crate) fn apply_update(&mut self, runtime: &Runtime) {
+    pub(crate) fn apply_update<R: RuntimeApi>(&mut self, runtime: &R) {
         let current_id = self.items.get(self.selected).and_then(|i| i.id.clone());
         match &self.vars {
             Some(PopupVars::States(vars)) => match runtime.execute::<TeamStatesQuery>(vars.clone())
@@ -423,7 +423,7 @@ impl PopupView {
 /// Confirm the popup choice: close the popup at its own index `i` (not
 /// necessarily the stack top), then edit the issue it was opened for -- the
 /// captured `issue_id`, not the current list selection.
-fn popup_confirm(app: &mut App, i: usize) {
+fn popup_confirm<R: RuntimeApi>(app: &mut App<R>, i: usize) {
     let Some(View::Popup(popup)) = app.views.get(i) else {
         return;
     };
@@ -488,14 +488,18 @@ pub(crate) static POPUP_BINDINGS: keymap::Table = &[(
     keymap::Action::Confirm,
 )];
 
-pub(crate) static POPUP_KEYMAP: Keymap = Keymap {
-    layers: &[POPUP_BINDINGS, keymap::GLOBAL],
-    apply: Some(apply_popup),
-    unbound: Unbound::Cascade,
-};
+static POPUP_LAYERS: keymap::Layers = &[POPUP_BINDINGS, keymap::GLOBAL];
+
+pub(crate) fn popup_keymap<R: RuntimeApi>() -> Keymap<R> {
+    Keymap {
+        layers: POPUP_LAYERS,
+        apply: Some(apply_popup),
+        unbound: Unbound::Cascade,
+    }
+}
 
 /// The state/priority/assignee popup's non-navigation action.
-pub(crate) fn apply_popup(app: &mut App, i: usize, action: keymap::Action) {
+pub(crate) fn apply_popup<R: RuntimeApi>(app: &mut App<R>, i: usize, action: keymap::Action) {
     if let keymap::Action::Confirm = action {
         popup_confirm(app, i);
     }
@@ -524,16 +528,20 @@ pub(crate) static HELP_BINDINGS: keymap::Table = &[
     ),
 ];
 
-pub(crate) static HELP_KEYMAP: Keymap = Keymap {
-    layers: &[HELP_BINDINGS],
-    apply: None,
-    unbound: Unbound::Forward(forward_help),
-};
+static HELP_LAYERS: keymap::Layers = &[HELP_BINDINGS];
+
+pub(crate) fn help_keymap<R: RuntimeApi>() -> Keymap<R> {
+    Keymap {
+        layers: HELP_LAYERS,
+        apply: None,
+        unbound: Unbound::Forward(forward_help),
+    }
+}
 
 /// Forward an unbound key to the help popup's filter bar; `j`/`k` never
 /// reach here since `HELP_BINDINGS` resolves them to `MoveDown`/`MoveUp`
 /// first.
-pub(crate) fn forward_help(app: &mut App, i: usize, ev: KeyEvent) {
+pub(crate) fn forward_help<R: RuntimeApi>(app: &mut App<R>, i: usize, ev: KeyEvent) {
     if let Some(View::Help(popup)) = app.views.get_mut(i)
         && popup.search.handle_key(ev.code, ev.modifiers)
     {
@@ -585,14 +593,18 @@ pub(crate) static SEARCH_BINDINGS: keymap::Table = &[
     ),
 ];
 
-pub(crate) static SEARCH_KEYMAP: Keymap = Keymap {
-    layers: &[SEARCH_BINDINGS],
-    apply: Some(apply_search),
-    unbound: Unbound::Forward(forward_search),
-};
+static SEARCH_LAYERS: keymap::Layers = &[SEARCH_BINDINGS];
+
+pub(crate) fn search_keymap<R: RuntimeApi>() -> Keymap<R> {
+    Keymap {
+        layers: SEARCH_LAYERS,
+        apply: Some(apply_search),
+        unbound: Unbound::Forward(forward_search),
+    }
+}
 
 /// The FTS search overlay's non-navigation actions.
-pub(crate) fn apply_search(app: &mut App, i: usize, action: keymap::Action) {
+pub(crate) fn apply_search<R: RuntimeApi>(app: &mut App<R>, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Confirm => confirm_search(app),
         keymap::Action::ClearQuery => {
@@ -636,7 +648,7 @@ pub(crate) fn apply_search(app: &mut App, i: usize, action: keymap::Action) {
 /// Forward an unbound key to the query bar. `tab`/`shift+tab` never reach
 /// here (`SEARCH_BINDINGS` binds them to completion); plain `j`/`k` are
 /// deliberately unbound so they land here as typeable filter text.
-pub(crate) fn forward_search(app: &mut App, i: usize, ev: KeyEvent) {
+pub(crate) fn forward_search<R: RuntimeApi>(app: &mut App<R>, i: usize, ev: KeyEvent) {
     if let Some(View::Search(overlay)) = app.views.get_mut(i)
         && overlay.query.handle_key(ev.code, ev.modifiers)
     {
@@ -650,7 +662,7 @@ pub(crate) fn forward_search(app: &mut App, i: usize, ev: KeyEvent) {
 /// list. The overlay's selected row is captured by identifier and set as
 /// `pending_select` so the refetch re-anchors the selection instead of
 /// reusing its (possibly stale) index.
-fn confirm_search(app: &mut App) {
+fn confirm_search<R: RuntimeApi>(app: &mut App<R>) {
     let Some(View::Search(mut overlay)) = app.views.pop() else {
         return;
     };
@@ -680,7 +692,7 @@ fn confirm_search(app: &mut App) {
 
 /// Apply stem-key completion in the given direction (Tab forward, Shift-Tab
 /// backward) and re-parse the query AST.
-fn apply_completion_tab(app: &mut App, i: usize, forward: bool) {
+fn apply_completion_tab<R: RuntimeApi>(app: &mut App<R>, i: usize, forward: bool) {
     if let Some(View::Search(overlay)) = app.views.get_mut(i) {
         let ast_snapshot = search_query::parse_query_ast(&overlay.query.value);
         overlay
@@ -694,7 +706,7 @@ fn apply_completion_tab(app: &mut App, i: usize, forward: bool) {
 }
 
 /// Fire the FTS search once the 150ms debounce elapses.
-pub(crate) fn poll_search_debounce(app: &mut App) {
+pub(crate) fn poll_search_debounce<R: RuntimeApi>(app: &mut App<R>) {
     let viewport_height = app.viewport_height;
     let should_search = matches!(
         app.views.last(),

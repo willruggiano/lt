@@ -33,7 +33,7 @@ fn format_sync_label(synced_at: chrono::DateTime<chrono::Utc>, clock: &Clock) ->
     }
 }
 
-#[cfg(all(test, feature = "sim"))]
+#[cfg(all(test, feature = "fake"))]
 mod tests {
     use super::{AuthStatus, Clock, SyncStatus, format_sync_label, sync_status_label};
 

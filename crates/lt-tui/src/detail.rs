@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lt_runtime::Runtime;
-use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
-use lt_types::detail::{IssueDetailQuery, IssueDetailVariables};
-use lt_types::types::Issue;
+use lt_runtime::RuntimeApi;
+use lt_upstream::query::comments::{Comment, CommentCreateMutation, CommentCreateVariables};
+use lt_upstream::query::detail::{IssueDetailQuery, IssueDetailVariables};
+use lt_upstream::query::types::Issue;
 
 use super::{App, Keymap, ScrollMotion, Unbound, View, keymap};
 
@@ -12,7 +12,7 @@ use super::{App, Keymap, ScrollMotion, Unbound, View, keymap};
 /// data contract; there is no live subscription slot.
 pub struct DetailView {
     pub issue: Issue,
-    pub comments: Vec<lt_types::comments::Comment>,
+    pub comments: Vec<Comment>,
     pub children: Vec<Issue>,
     /// Vertical scroll offset inside the detail pane (in lines).
     pub scroll: u16,
@@ -27,7 +27,7 @@ impl DetailView {
     /// Re-execute issue/comments/children in one shot. A fresh read of
     /// `None` (the issue vanished locally) is idempotently ignored -- the
     /// pane keeps showing its last known state rather than blanking out.
-    pub(crate) fn apply_update(&mut self, runtime: &Runtime) {
+    pub(crate) fn apply_update<R: RuntimeApi>(&mut self, runtime: &R) {
         match runtime.execute::<IssueDetailQuery>(self.vars.clone()) {
             Ok(Some(data)) => {
                 self.issue = data.issue;
@@ -47,16 +47,16 @@ impl DetailView {
     /// This pane's declared keymap: the open comment input narrows to its
     /// own keymap (`esc` cancels the draft rather than popping the pane);
     /// otherwise the pane's own keymap.
-    pub(crate) fn keymap(&self) -> &'static Keymap {
+    pub(crate) fn keymap<R: RuntimeApi>(&self) -> Keymap<R> {
         if self.comment_input.is_some() {
-            &COMMENT_INPUT_KEYMAP
+            comment_input_keymap()
         } else {
-            &DETAIL_KEYMAP
+            detail_keymap()
         }
     }
 }
 
-impl App {
+impl<R: RuntimeApi> App<R> {
     /// Open the detail pane for the currently selected issue: a cache-first
     /// `IssueDetailQuery` read populates issue/comments/children, and a
     /// one-shot background refresh brings the composed view's data up to
@@ -76,7 +76,7 @@ impl App {
 /// `None` initial read (the id not yet in the local cache, an edge case
 /// since the pane opens from an already-listed issue) falls back to the
 /// issue already in hand, with empty comments/children.
-pub(crate) fn build_cached_detail(issue: &Issue, runtime: &Runtime) -> DetailView {
+pub(crate) fn build_cached_detail<R: RuntimeApi>(issue: &Issue, runtime: &R) -> DetailView {
     let vars = IssueDetailVariables {
         id: issue.id.inner().to_string(),
     };
@@ -114,11 +114,15 @@ pub(crate) static DETAIL_BINDINGS: keymap::Table = &[
     ),
 ];
 
-pub(crate) static DETAIL_KEYMAP: Keymap = Keymap {
-    layers: &[DETAIL_BINDINGS, keymap::GLOBAL],
-    apply: Some(apply_detail),
-    unbound: Unbound::Cascade,
-};
+static DETAIL_LAYERS: keymap::Layers = &[DETAIL_BINDINGS, keymap::GLOBAL];
+
+pub(crate) fn detail_keymap<R: RuntimeApi>() -> Keymap<R> {
+    Keymap {
+        layers: DETAIL_LAYERS,
+        apply: Some(apply_detail),
+        unbound: Unbound::Cascade,
+    }
+}
 
 /// The detail pane's comment box: the one keymap that binds `esc` -- narrower
 /// than the floor's pop (cancels the draft, keeps the pane open).
@@ -137,14 +141,18 @@ pub(crate) static COMMENT_INPUT_BINDINGS: keymap::Table = &[
     ),
 ];
 
-pub(crate) static COMMENT_INPUT_KEYMAP: Keymap = Keymap {
-    layers: &[COMMENT_INPUT_BINDINGS],
-    apply: Some(apply_comment_input),
-    unbound: Unbound::Forward(forward_comment_input),
-};
+static COMMENT_INPUT_LAYERS: keymap::Layers = &[COMMENT_INPUT_BINDINGS];
+
+pub(crate) fn comment_input_keymap<R: RuntimeApi>() -> Keymap<R> {
+    Keymap {
+        layers: COMMENT_INPUT_LAYERS,
+        apply: Some(apply_comment_input),
+        unbound: Unbound::Forward(forward_comment_input),
+    }
+}
 
 /// The detail pane's non-navigation actions.
-pub(crate) fn apply_detail(app: &mut App, i: usize, action: keymap::Action) {
+pub(crate) fn apply_detail<R: RuntimeApi>(app: &mut App<R>, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Comment => {
             if let Some(d) = detail_view_mut(app, i) {
@@ -165,7 +173,11 @@ pub(crate) fn apply_detail(app: &mut App, i: usize, action: keymap::Action) {
 
 /// The comment box's actions: `Back` cancels the draft without popping the
 /// pane beneath it.
-pub(crate) fn apply_comment_input(app: &mut App, i: usize, action: keymap::Action) {
+pub(crate) fn apply_comment_input<R: RuntimeApi>(
+    app: &mut App<R>,
+    i: usize,
+    action: keymap::Action,
+) {
     match action {
         keymap::Action::Submit => submit_comment(app, i),
         keymap::Action::Back => {
@@ -179,7 +191,7 @@ pub(crate) fn apply_comment_input(app: &mut App, i: usize, action: keymap::Actio
     }
 }
 
-fn detail_view_mut(app: &mut App, i: usize) -> Option<&mut DetailView> {
+fn detail_view_mut<R: RuntimeApi>(app: &mut App<R>, i: usize) -> Option<&mut DetailView> {
     app.view_at_mut(i, |v| match v {
         View::Detail(d) => Some(d.as_mut()),
         _ => None,
@@ -189,7 +201,7 @@ fn detail_view_mut(app: &mut App, i: usize) -> Option<&mut DetailView> {
 /// Enqueue the comment buffer as a local create: the optimistic `local:` row
 /// plus a `commentCreate` op-log entry, in one transaction. A failure
 /// surfaces in the footer.
-fn submit_comment(app: &mut App, i: usize) {
+fn submit_comment<R: RuntimeApi>(app: &mut App<R>, i: usize) {
     let Some(detail) = detail_view_mut(app, i) else {
         return;
     };
@@ -203,7 +215,7 @@ fn submit_comment(app: &mut App, i: usize) {
     let issue_id = detail.issue.id.inner().to_string();
     detail.comment_input = None;
 
-    let input = lt_types::inputs::CommentCreateInput { issue_id, body };
+    let input = lt_upstream::query::inputs::CommentCreateInput { issue_id, body };
     if let Err(e) = app
         .runtime
         .execute::<CommentCreateMutation>(CommentCreateVariables { input })
@@ -214,7 +226,7 @@ fn submit_comment(app: &mut App, i: usize) {
 
 /// Forward an unbound key to the comment buffer verbatim, using the raw
 /// crossterm event so the widget sees the exact `KeyCode`/`KeyModifiers`.
-pub(crate) fn forward_comment_input(app: &mut App, i: usize, ev: KeyEvent) {
+pub(crate) fn forward_comment_input<R: RuntimeApi>(app: &mut App<R>, i: usize, ev: KeyEvent) {
     let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
     let Some(detail) = detail_view_mut(app, i) else {
         return;

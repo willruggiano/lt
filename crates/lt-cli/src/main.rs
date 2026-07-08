@@ -35,13 +35,19 @@ enum Commands {
     },
 }
 
-/// Build the `lt-runtime`-backed `Runtime` against the profile's local
+/// The concrete production runtime: the per-profile SQLite file and the
+/// token-refreshing HTTP transport. The sole place `lt-cli` names
+/// `Sqlite`/`RefreshingHttpTransport`.
+pub(crate) type ProdRuntime =
+    lt_runtime::Runtime<lt_runtime::db::Sqlite, lt_upstream::transport::RefreshingHttpTransport>;
+
+/// Build the `lt-runtime`-backed [`ProdRuntime`] against the profile's local
 /// database and the production HTTP transport, with the given event
-/// callback. The sole place `lt-cli` names `Database`/`HttpTransportSource`.
-fn build_runtime(on_event: lt_runtime::sync::service::OnEvent) -> lt_runtime::Runtime {
+/// callback.
+fn build_runtime(on_event: lt_runtime::sync::service::OnEvent) -> ProdRuntime {
     lt_runtime::Runtime::new(
-        lt_runtime::db::Database::File,
-        Box::new(lt_runtime::HttpTransportSource),
+        lt_runtime::db::Sqlite,
+        lt_upstream::transport::RefreshingHttpTransport,
         on_event,
     )
 }
@@ -55,7 +61,7 @@ fn build_runtime(on_event: lt_runtime::sync::service::OnEvent) -> lt_runtime::Ru
 /// `run` loop is spawned on a detached, process-lifetime background thread
 /// before the TUI starts.
 fn run_tui(
-    filter: &lt_types::issues::IssueFilter,
+    filter: &lt_upstream::query::issues::IssueFilter,
     sort: &lt_runtime::query::SortField,
     direction: lt_runtime::query::SortDirection,
     limit: u32,
@@ -94,7 +100,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => run_tui(
-            &lt_types::issues::IssueFilter::default(),
+            &lt_upstream::query::issues::IssueFilter::default(),
             &lt_runtime::query::SortField::Updated,
             lt_runtime::query::SortDirection::Descending,
             50,

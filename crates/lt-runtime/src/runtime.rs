@@ -617,6 +617,69 @@ impl Default for Runtime<Sqlite, RefreshingHttpTransport> {
     }
 }
 
+/// The minimal runtime surface `lt-tui`'s `App` depends on: cache-first
+/// reads, one-shot upstream refreshes, and sync/login scheduling. Lets `App`
+/// (and every view/widget it threads a runtime through) stay generic over one
+/// type parameter instead of naming `Storage`/`Transport` itself -- production
+/// instantiates `Runtime<Sqlite, RefreshingHttpTransport>`, tests
+/// `Runtime<Memory, FakeTransport>`.
+pub trait RuntimeApi {
+    fn execute<Op: Operation>(&self, vars: Op::Variables) -> Result<Op::Output>;
+
+    fn refresh<Op: Refresh>(&self, vars: Op::Variables)
+    where
+        Op::Variables: Send + 'static;
+
+    fn request_sync(&self);
+
+    fn login(&self);
+}
+
+impl<S: Storage, T: Transport> RuntimeApi for Runtime<S, T> {
+    fn execute<Op: Operation>(&self, vars: Op::Variables) -> Result<Op::Output> {
+        Runtime::execute::<Op>(self, vars)
+    }
+
+    fn refresh<Op: Refresh>(&self, vars: Op::Variables)
+    where
+        Op::Variables: Send + 'static,
+    {
+        Runtime::refresh::<Op>(self, vars);
+    }
+
+    fn request_sync(&self) {
+        Runtime::request_sync(self);
+    }
+
+    fn login(&self) {
+        Runtime::login(self);
+    }
+}
+
+/// Delegates through the `Arc`: `App` clones `Arc<R>` out of its own field to
+/// detach the borrow before handing it to a view method, so every such call
+/// site passes `&Arc<R>` rather than `&R`.
+impl<R: RuntimeApi> RuntimeApi for Arc<R> {
+    fn execute<Op: Operation>(&self, vars: Op::Variables) -> Result<Op::Output> {
+        (**self).execute::<Op>(vars)
+    }
+
+    fn refresh<Op: Refresh>(&self, vars: Op::Variables)
+    where
+        Op::Variables: Send + 'static,
+    {
+        (**self).refresh::<Op>(vars);
+    }
+
+    fn request_sync(&self) {
+        (**self).request_sync();
+    }
+
+    fn login(&self) {
+        (**self).login();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc as std_mpsc;

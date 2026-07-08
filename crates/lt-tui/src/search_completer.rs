@@ -339,7 +339,7 @@ mod tests {
     use lt_runtime::search_query::{
         StemKind, Token, args_to_ast, parse_query_ast, render_filter_context,
     };
-    use lt_types::issues::{AssigneeFilter, IssueFilter};
+    use lt_upstream::query::issues::{AssigneeFilter, IssueFilter};
 
     use super::*;
     use crate::text_input::TextInput;

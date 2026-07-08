@@ -253,16 +253,12 @@ mod tests {
 
     #[test]
     fn chord_hit_g_g_selects_top() {
-        let pending = match resolve(crate::list::LIST_KEYMAP.layers, None, Key::char('g')) {
+        let pending = match resolve(crate::list::LIST_LAYERS, None, Key::char('g')) {
             Resolved::Pending(k) => k,
             other => unreachable!("expected Pending, got {other:?}"),
         };
         assert_eq!(
-            resolve(
-                crate::list::LIST_KEYMAP.layers,
-                Some(pending),
-                Key::char('g')
-            ),
+            resolve(crate::list::LIST_LAYERS, Some(pending), Key::char('g')),
             Resolved::Act(Action::MoveTop)
         );
     }
@@ -271,7 +267,7 @@ mod tests {
     fn chord_miss_g_j_falls_through_to_move_down() {
         assert_eq!(
             resolve(
-                crate::list::LIST_KEYMAP.layers,
+                crate::list::LIST_LAYERS,
                 Some(Key::char('g')),
                 Key::char('j')
             ),
@@ -298,7 +294,7 @@ mod tests {
 
     #[test]
     fn no_context_duplicates_a_binding() {
-        for (name, keymap) in crate::ALL_KEYMAPS {
+        for (name, keymap) in crate::all_keymaps() {
             let bindings: Vec<Binding> = layer_bindings(keymap.layers)
                 .into_iter()
                 .map(|(b, _)| b)
@@ -312,7 +308,7 @@ mod tests {
 
     #[test]
     fn no_key_is_both_single_bound_and_a_chord_prefix() {
-        for (name, keymap) in crate::ALL_KEYMAPS {
+        for (name, keymap) in crate::all_keymaps() {
             let bindings = layer_bindings(keymap.layers);
             let singles: Vec<Key> = bindings
                 .iter()
@@ -336,7 +332,7 @@ mod tests {
 
     #[test]
     fn every_table_binding_round_trips_through_display_and_from_str() {
-        for (_, keymap) in crate::ALL_KEYMAPS {
+        for (_, keymap) in crate::all_keymaps() {
             for key in layer_keys(keymap.layers) {
                 assert_eq!(key.to_string().parse::<Key>(), Ok(key));
             }
@@ -345,7 +341,7 @@ mod tests {
 
     #[test]
     fn no_table_binds_q_and_only_comment_input_binds_esc() {
-        for (name, keymap) in crate::ALL_KEYMAPS {
+        for (name, keymap) in crate::all_keymaps() {
             for key in layer_keys(keymap.layers) {
                 assert!(
                     !matches!(key.code, KeyCode::Char('q')),
@@ -353,7 +349,7 @@ mod tests {
                 );
                 if key.code == KeyCode::Esc {
                     assert_eq!(
-                        *name, "comment_input",
+                        name, "comment_input",
                         "{name}: table binds esc (Back/quit are the floor's, except comment_input's cancel)"
                     );
                 }

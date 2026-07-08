@@ -1,18 +1,46 @@
 // Rendering tests: drive `ui::render` into a `TestBackend` and snapshot the
 // buffer with `insta`, using `App::for_test` state and the deterministic
-// `sim` generator. See [[visual-rendering-tests.md]].
+// `fake` generator. See [[visual-rendering-tests.md]].
 
 use crossterm::event::KeyModifiers;
-use lt_types::types::User;
-use lt_types::viewer;
+use lt_runtime::db::Storage;
+use lt_upstream::query::types::User;
+use lt_upstream::query::viewer;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
 
-/// The seeded `sim` dataset's list issues, which the TUI renders.
-fn sim_issues(seed: u64, size: usize) -> Vec<Issue> {
-    lt_runtime::sim::generate(seed, size).issues
+/// The generic `App` fixed to the test runtime: every test in this module
+/// exercises the same instantiation, so this shadows the generic `App` glob-
+/// imported above.
+type App = super::App<TestRuntime>;
+
+/// The deterministic `fake` dataset's list issues, which the TUI renders: a
+/// throwaway seeded database, discarded once the rows are read back.
+/// Fallible (in-memory SQLite setup); callers -- always `#[test]` fns --
+/// unwrap.
+fn sim_issues(size: usize) -> Result<Vec<Issue>> {
+    let mut db = lt_runtime::test_util::Memory::new()?;
+    let issues = u64::try_from(size).unwrap_or(u64::MAX);
+    let dataset = lt_runtime::fake::Dataset {
+        issues,
+        comments: 0,
+        users: issues.clamp(1, 20),
+        teams: issues.clamp(1, 3),
+    };
+    lt_runtime::fake::seed(&mut db, dataset)?;
+    let conn = db.connect()?;
+    Ok(lt_runtime::db::query_issues(
+        &conn,
+        &lt_upstream::query::issues::IssuesVariables {
+            filter: None,
+            sort: None,
+            first: Some(250),
+            after: None,
+        },
+    )?
+    .nodes)
 }
 
 /// Draw one frame at `w`x`h` and return the rendered buffer as text.
@@ -42,8 +70,8 @@ fn authenticated(name: &str, org: &str) -> AuthStatus {
 /// An `App` seeded with sim issues and a fixed identity for a stable header.
 /// Fallible (in-memory SQLite setup); callers -- always `#[test]` fns --
 /// unwrap.
-fn app_with_issues(seed: u64, size: usize) -> Result<App> {
-    let mut app = App::for_test(sim_issues(seed, size))?;
+fn app_with_issues(size: usize) -> Result<App> {
+    let mut app = App::for_test(sim_issues(size)?)?;
     app.auth = authenticated("Ada Lovelace", "Acme");
     Ok(app)
 }
@@ -57,7 +85,7 @@ fn item(label: &str, id: Option<&str>) -> PopupItem {
 
 #[test]
 fn list_navigation_clamps_within_bounds() {
-    let mut app = app_with_issues(0, 10).unwrap();
+    let mut app = app_with_issues(10).unwrap();
     app.viewport_height = 4;
     app.list_mut().table_state.select(Some(0));
     let vh = app.viewport_height;
@@ -90,7 +118,7 @@ fn navigation_on_empty_list_is_noop() {
 
 #[test]
 fn apply_fetched_selection_resets_or_clamps() {
-    let mut app = app_with_issues(0, 3).unwrap();
+    let mut app = app_with_issues(3).unwrap();
     app.list_mut().table_state.select(Some(2));
     app.list_mut().apply_fetched_selection(true); // reset
     assert_eq!(app.list_mut().table_state.selected(), Some(0));
@@ -107,9 +135,9 @@ fn apply_fetched_selection_resets_or_clamps() {
 
 #[test]
 fn detail_scroll_saturates() {
-    let issue = sim_issues(0, 1)[0].clone();
+    let issue = sim_issues(1).unwrap()[0].clone();
     let (tx, _rx) = std::sync::mpsc::channel();
-    let runtime = test_runtime(lt_runtime::test_util::Database::memory().unwrap(), tx);
+    let runtime = test_runtime(lt_runtime::test_util::Memory::new().unwrap(), tx);
     let mut detail = build_cached_detail(&issue, &runtime);
     detail.scroll(ScrollMotion::Down, 10);
     assert_eq!(detail.scroll, 1);
@@ -131,7 +159,7 @@ fn popup_move_clamps_and_cancel_resets_stack() {
     // j/Down and Esc aren't bound in the popup's own table; drive them
     // through the full key-dispatch cascade instead of calling the handler
     // directly.
-    let mut app = app_with_issues(0, 1).unwrap();
+    let mut app = app_with_issues(1).unwrap();
     let issue_id = app.list_mut().issues[0].id.inner().to_string();
     app.views.push(View::Popup(PopupView {
         kind: PopupKind::Priority,
@@ -164,7 +192,7 @@ fn popup_move_clamps_and_cancel_resets_stack() {
 fn close_detail_clears_pane_state() {
     // Esc resolves at the floor, which pops the pane -- except the comment
     // input's narrower Esc (cancel the draft) wins first.
-    let mut app = app_with_issues(0, 1).unwrap();
+    let mut app = app_with_issues(1).unwrap();
     let issue = app.list_mut().issues[0].clone();
     let mut detail = build_cached_detail(&issue, &app.runtime);
     detail.scroll = 5;
@@ -184,7 +212,7 @@ fn close_detail_clears_pane_state() {
 
 #[test]
 fn filter_sort_sync_and_replacement() {
-    let mut app = app_with_issues(0, 1).unwrap();
+    let mut app = app_with_issues(1).unwrap();
     app.list_mut().query.filter = search_query::parse_query_ast("sort:title+");
     app.list_mut().query.sync_sort_from_filter();
     assert!(matches!(
@@ -255,13 +283,13 @@ fn assignee_items_put_me_first_and_skip_viewer() {
 
 #[test]
 fn list_view() {
-    let mut app = app_with_issues(0, 12).unwrap();
+    let mut app = app_with_issues(12).unwrap();
     insta::assert_snapshot!(draw(&mut app, 100, 20));
 }
 
 #[test]
 fn list_view_wide_terminal_grows_title_column() {
-    let mut app = app_with_issues(0, 12).unwrap();
+    let mut app = app_with_issues(12).unwrap();
     insta::assert_snapshot!(draw(&mut app, 160, 20));
 }
 
@@ -274,7 +302,7 @@ fn empty_list() {
 
 #[test]
 fn detail_overlay() {
-    let mut app = app_with_issues(0, 12).unwrap();
+    let mut app = app_with_issues(12).unwrap();
     let issue = app.list_mut().issues[0].clone();
     let detail = build_cached_detail(&issue, &app.runtime);
     app.views.push(View::Detail(Box::new(detail)));
@@ -283,9 +311,9 @@ fn detail_overlay() {
 
 #[test]
 fn detail_overlay_shows_parent_reference() {
-    let mut app = app_with_issues(0, 12).unwrap();
+    let mut app = app_with_issues(12).unwrap();
     let mut issue = app.list_mut().issues[0].clone();
-    issue.parent = Some(lt_types::types::Parent {
+    issue.parent = Some(lt_upstream::query::types::Parent {
         id: "parent-1".into(),
         identifier: "ENG-1".to_string(),
     });
@@ -300,7 +328,7 @@ fn detail_overlay_shows_parent_reference() {
 
 #[test]
 fn priority_popup() {
-    let mut app = app_with_issues(0, 12).unwrap();
+    let mut app = app_with_issues(12).unwrap();
     let issue_id = app.list_mut().issues[0].id.inner().to_string();
     app.views.push(View::Popup(PopupView {
         kind: PopupKind::Priority,
@@ -315,9 +343,9 @@ fn priority_popup() {
 
 #[test]
 fn search_overlay() {
-    let mut app = app_with_issues(0, 12).unwrap();
+    let mut app = app_with_issues(12).unwrap();
     let mut overlay = SearchOverlay::new();
-    overlay.results = sim_issues(0, 12);
+    overlay.results = sim_issues(12).unwrap();
     overlay.has_searched = true;
     overlay.table_state.select(Some(0));
     app.views.push(View::Search(overlay));
@@ -328,7 +356,7 @@ fn search_overlay() {
 /// branch, reachable from both the list top and a focused Detail view.
 #[test]
 fn pending_chord_indicator_shows_at_list_top() {
-    let mut app = app_with_issues(0, 3).unwrap();
+    let mut app = app_with_issues(3).unwrap();
     app.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
     assert!(app.pending_key.is_some());
     let out = draw(&mut app, 80, 10);
@@ -340,7 +368,7 @@ fn pending_chord_indicator_shows_at_list_top() {
 
 #[test]
 fn pending_chord_indicator_shows_over_detail_view() {
-    let mut app = app_with_issues(0, 3).unwrap();
+    let mut app = app_with_issues(3).unwrap();
     let issue = app.list_mut().issues[0].clone();
     let detail = build_cached_detail(&issue, &app.runtime);
     app.views.push(View::Detail(Box::new(detail)));
@@ -355,14 +383,14 @@ fn pending_chord_indicator_shows_over_detail_view() {
 
 #[test]
 fn help_popup() {
-    let mut app = app_with_issues(0, 12).unwrap();
+    let mut app = app_with_issues(12).unwrap();
     app.views.push(View::Help(HelpPopup::new()));
     insta::assert_snapshot!(draw(&mut app, 100, 24));
 }
 
 #[test]
 fn new_issue_modal() {
-    let mut app = app_with_issues(0, 12).unwrap();
+    let mut app = app_with_issues(12).unwrap();
     let mut modal = test_new_issue_modal(&app.runtime);
     modal.focused_field = NewIssueField::Title;
     modal.title = TextInput::from("Fix the renderer".to_string());

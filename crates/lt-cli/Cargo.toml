@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 lt-config.workspace = true
-lt-types.workspace = true
+lt-upstream.workspace = true
 lt-runtime.workspace = true
 lt-tui.workspace = true
 anyhow.workspace = true

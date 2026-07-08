@@ -10,7 +10,7 @@ anyhow.workspace = true
 chrono.workspace = true
 crossterm = "0.29"
 lt-runtime.workspace = true
-lt-types.workspace = true
+lt-upstream.workspace = true
 open.workspace = true
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.0"
@@ -18,10 +18,11 @@ tracing.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
-lt-runtime = { workspace = true, features = ["test-util"] }
+lt-runtime = { workspace = true, features = ["test-util", "fake"] }
+lt-upstream = { workspace = true, features = ["test-util"] }
 
 [features]
-sim = ["lt-runtime/fake"]
+fake = ["lt-runtime/fake"]
 
 [lints]
 workspace = true

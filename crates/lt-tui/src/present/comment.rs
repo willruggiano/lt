@@ -1,4 +1,4 @@
-use lt_types::comments::Comment;
+use lt_upstream::query::comments::Comment;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 

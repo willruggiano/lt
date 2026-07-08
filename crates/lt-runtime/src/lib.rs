@@ -11,9 +11,9 @@ pub mod sync;
 
 mod runtime;
 pub use ops::{load, refresh};
-pub use runtime::Runtime;
 #[cfg(feature = "fake")]
 pub use runtime::SimSeed;
+pub use runtime::{Runtime, RuntimeApi};
 
 // Command orchestration for the CLI.
 pub mod auth;

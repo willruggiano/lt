@@ -2,7 +2,7 @@
 // `do_fetch`/pagination, `run_app` via `EventPump::Scripted`, double-esc,
 // and sync/login typestate transitions, all fed directly (no live threads).
 //
-// Tests drive the real `Runtime` over an in-memory `Database`, never
+// Tests drive the real `Runtime` over an in-memory `Memory` database, never
 // starting `run()` (docs/design/operation-seam-adr.md, "Decision 7"):
 // initial reads and write propagation are synchronous. A composed view's
 // one-shot upstream freshness refresh (the state/assignee popup, the
@@ -12,16 +12,22 @@
 // construction, the team-change re-execute, and the pure `reanchor` helper.
 
 use crossterm::event::KeyModifiers;
-use lt_runtime::test_util::Database;
-use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
-use lt_types::inputs::{CommentCreateInput, IssueCreateInput, IssueUpdateInput};
-use lt_types::issues::{
+use lt_runtime::db::Storage;
+use lt_runtime::test_util::Memory;
+use lt_upstream::query::comments::{CommentCreateMutation, CommentCreateVariables};
+use lt_upstream::query::inputs::{CommentCreateInput, IssueCreateInput, IssueUpdateInput};
+use lt_upstream::query::issues::{
     IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
+
+/// The generic `App` fixed to the test runtime: every test in this module
+/// exercises the same instantiation, so this shadows the generic `App` glob-
+/// imported above.
+type App = super::App<TestRuntime>;
 
 /// Apply every event currently queued -- the test-side equivalent of
 /// `run_app`'s post-wait drain.
@@ -65,9 +71,9 @@ fn key(c: char) -> KeyEvent {
 /// A list issue with a deterministic `updated_at` so DESC ordering is stable
 /// across the page boundary. State/team ids mirror their names so the
 /// relational upsert reconstructs them.
-fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Issue {
-    use lt_types::types;
-    let ts = lt_types::scalars::DateTime(
+fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_upstream::query::types::Issue {
+    use lt_upstream::query::types;
+    let ts = lt_upstream::query::scalars::DateTime(
         format!("2026-01-{day:02}T00:00:00Z")
             .parse()
             .unwrap_or_default(),
@@ -77,7 +83,7 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
         identifier: ident.to_string(),
         title: format!("issue {ident}"),
         priority_label: "No priority".to_string(),
-        priority: lt_types::scalars::Priority(0),
+        priority: lt_upstream::query::scalars::Priority(0),
         state: types::WorkflowState {
             id: state.into(),
             name: state.to_string(),
@@ -105,7 +111,7 @@ fn db_issue(id: &str, ident: &str, state: &str, day: u32) -> lt_types::types::Is
 /// resolve them, deduplicated by `(team_id, state_id)`.
 fn seed_states_from(
     conn: &lt_runtime::test_util::Connection,
-    rows: &[lt_types::types::Issue],
+    rows: &[lt_upstream::query::types::Issue],
 ) -> Result<()> {
     let mut seen = std::collections::HashSet::new();
     for issue in rows {
@@ -120,13 +126,13 @@ fn seed_states_from(
     Ok(())
 }
 
-/// Build an `App` backed by a fresh in-memory `Database` seeded with `rows`,
-/// with its `Runtime` sharing that same database, returning the database
-/// handle too so a test can seed further rows later (shared-cache: any
-/// connection off this handle reaches the same rows the app's `Runtime`
+/// Build an `App` backed by a fresh in-memory `Memory` database seeded with
+/// `rows`, with its `Runtime` sharing that same database, returning the
+/// database handle too so a test can seed further rows later (shared-cache:
+/// any connection off this handle reaches the same rows the app's `Runtime`
 /// reads/writes).
-fn app_with_db_and_handle(rows: &[lt_types::types::Issue]) -> Result<(App, Database)> {
-    let db = Database::memory()?;
+fn app_with_db_and_handle(rows: &[lt_upstream::query::types::Issue]) -> Result<(App, Memory)> {
+    let db = Memory::new()?;
     {
         let conn = db.connect()?;
         seed_states_from(&conn, rows)?;
@@ -139,12 +145,12 @@ fn app_with_db_and_handle(rows: &[lt_types::types::Issue]) -> Result<(App, Datab
 
 /// [`app_with_db_and_handle`], for the (common) case where the test never
 /// needs to seed further rows after construction.
-fn app_with_db(rows: &[lt_types::types::Issue]) -> Result<App> {
+fn app_with_db(rows: &[lt_upstream::query::types::Issue]) -> Result<App> {
     Ok(app_with_db_and_handle(rows)?.0)
 }
 
 /// Push a `Detail` view for `issue`, reading its comment thread.
-fn open_detail_for(app: &mut App, issue: &lt_types::types::Issue) {
+fn open_detail_for(app: &mut App, issue: &lt_upstream::query::types::Issue) {
     let detail = build_cached_detail(issue, &app.runtime);
     app.views.push(View::Detail(Box::new(detail)));
 }
@@ -273,7 +279,7 @@ fn open_with_filterful_query_matches_post_sync_refetch() {
         db_issue("2", "ENG-2", "Done", 4),
         db_issue("3", "ENG-3", "Todo", 3),
     ];
-    let db = Database::memory().unwrap();
+    let db = Memory::new().unwrap();
     {
         let conn = db.connect().unwrap();
         seed_states_from(&conn, &rows).unwrap();
@@ -307,7 +313,7 @@ fn confirm_search_hands_off_the_query_not_the_viewport_capped_rows() {
     // viewport, but the base list's query limit (the default, 50) is far
     // larger -- confirm must hand off the query so the base list refetches
     // the full match set, not the overlay's capped rows.
-    let mut rows: Vec<lt_types::types::Issue> = (1..=6)
+    let mut rows: Vec<lt_upstream::query::types::Issue> = (1..=6)
         .map(|i| db_issue(&i.to_string(), &format!("ENG-{i}"), "Todo", i))
         .collect();
     rows.push(db_issue("7", "ENG-7", "Done", 7));
@@ -345,7 +351,7 @@ fn build_cached_detail_populates_children_from_the_composed_read() {
     let mut parent = db_issue("p1", "ENG-9", "Todo", 9);
     parent.title = "the parent".to_string();
     let mut child = db_issue("c1", "ENG-10", "Done", 8);
-    child.parent = Some(lt_types::types::Parent {
+    child.parent = Some(lt_upstream::query::types::Parent {
         id: "p1".into(),
         identifier: "ENG-9".to_string(),
     });
@@ -520,7 +526,7 @@ fn popup_confirm_writes_through_the_db_and_refreshes_the_focused_base() {
     lt_runtime::test_util::upsert_team_state(
         &db.connect().unwrap(),
         "ENG",
-        &lt_types::types::WorkflowState {
+        &lt_upstream::query::types::WorkflowState {
             id: "done-state".into(),
             name: "Done".to_string(),
             position: 1.0,
@@ -926,13 +932,13 @@ fn popup_scroll_supports_the_shared_motion_set() {
 
 // -- typestates: consume_sync_event / consume_login_event, L/refresh -----
 
-fn ada() -> lt_types::viewer::Viewer {
-    lt_types::viewer::Viewer {
-        user: lt_types::types::User {
+fn ada() -> lt_upstream::query::viewer::Viewer {
+    lt_upstream::query::viewer::Viewer {
+        user: lt_upstream::query::types::User {
             id: "u1".into(),
             name: "Ada".to_string(),
         },
-        organization: lt_types::viewer::Organization {
+        organization: lt_upstream::query::viewer::Organization {
             id: "o1".into(),
             name: "Acme".to_string(),
             url_key: "acme".to_string(),
@@ -1075,7 +1081,7 @@ fn seed_team_states(conn: &lt_runtime::test_util::Connection, team_id: &str) -> 
     lt_runtime::test_util::upsert_team_state(
         conn,
         team_id,
-        &lt_types::types::WorkflowState {
+        &lt_upstream::query::types::WorkflowState {
             id: "s-todo".into(),
             name: "Todo".to_string(),
             position: 1.0,
@@ -1084,7 +1090,7 @@ fn seed_team_states(conn: &lt_runtime::test_util::Connection, team_id: &str) -> 
     lt_runtime::test_util::upsert_team_state(
         conn,
         team_id,
-        &lt_types::types::WorkflowState {
+        &lt_upstream::query::types::WorkflowState {
             id: "s-done".into(),
             name: "Done".to_string(),
             position: 2.0,

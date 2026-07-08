@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lt_runtime::Runtime;
-use lt_types::issues::{IssueCreateMutation, IssueCreateVariables};
-use lt_types::new_issue::{NewIssueData, NewIssueQuery, NewIssueVariables};
-use lt_types::types::User;
+use lt_runtime::RuntimeApi;
+use lt_upstream::query::issues::{IssueCreateMutation, IssueCreateVariables};
+use lt_upstream::query::new_issue::{NewIssueData, NewIssueQuery, NewIssueVariables};
+use lt_upstream::query::types::User;
 
 use super::{
     App, Keymap, PopupItem, ScrollMotion, TextInput, Unbound, View, keymap, priority_popup_items,
@@ -90,7 +90,7 @@ impl NewIssueModal {
     /// Re-execute `vars` and re-read the whole form: teams re-anchored by
     /// id, states/assignees rebuilt from whatever the current vars' team
     /// scope produced, `loading` cleared.
-    pub(crate) fn apply_update(&mut self, runtime: &Runtime) {
+    pub(crate) fn apply_update<R: RuntimeApi>(&mut self, runtime: &R) {
         let data = match runtime.execute::<NewIssueQuery>(self.vars.clone()) {
             Ok(data) => data,
             Err(e) => {
@@ -123,13 +123,13 @@ impl NewIssueModal {
     /// This modal's declared keymap, by focused field: the text fields
     /// (Title/Description) forward to their own editor; the picker fields
     /// (Team/Priority/State/Assignee) navigate.
-    pub(crate) fn keymap(&self) -> &'static Keymap {
+    pub(crate) fn keymap<R: RuntimeApi>(&self) -> Keymap<R> {
         match self.focused_field {
-            NewIssueField::Title | NewIssueField::Description => &TEXT_KEYMAP,
+            NewIssueField::Title | NewIssueField::Description => text_keymap(),
             NewIssueField::Team
             | NewIssueField::Priority
             | NewIssueField::State
-            | NewIssueField::Assignee => &PICKER_KEYMAP,
+            | NewIssueField::Assignee => picker_keymap(),
         }
     }
 }
@@ -138,8 +138,8 @@ impl NewIssueModal {
 /// not live updates: a throwaway team-less `NewIssueQuery` vars over
 /// `runtime`, every picker empty. Callers mutate the `pub` fields to set up
 /// their scenario.
-#[cfg(all(test, feature = "sim"))]
-pub(crate) fn test_new_issue_modal(runtime: &lt_runtime::Runtime) -> NewIssueModal {
+#[cfg(all(test, feature = "fake"))]
+pub(crate) fn test_new_issue_modal<R: RuntimeApi>(runtime: &R) -> NewIssueModal {
     let vars = NewIssueVariables::new(None);
     drop(runtime.execute::<NewIssueQuery>(vars.clone()));
     NewIssueModal {
@@ -175,14 +175,14 @@ fn reanchor(items: &[PopupItem], id: Option<&str>) -> usize {
 
 /// A cache-first `NewIssueQuery` read for `vars`, falling back to
 /// `NewIssueData::default()` (and logging) on failure.
-fn read_new_issue(runtime: &Runtime, vars: NewIssueVariables) -> NewIssueData {
+fn read_new_issue<R: RuntimeApi>(runtime: &R, vars: NewIssueVariables) -> NewIssueData {
     runtime.execute::<NewIssueQuery>(vars).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "new issue read failed");
         NewIssueData::default()
     })
 }
 
-impl super::App {
+impl<R: RuntimeApi> super::App<R> {
     pub(crate) fn open_new_issue_modal(&mut self) {
         // Pre-fill team from the base list's active filter if set.
         let preset_team = match self.base() {
@@ -315,7 +315,7 @@ impl super::App {
 fn build_issue_create_input(
     modal: &NewIssueModal,
     team_id: &str,
-) -> lt_types::inputs::IssueCreateInput {
+) -> lt_upstream::query::inputs::IssueCreateInput {
     let title = modal.title.value.trim().to_string();
     let description = if modal.description.trim().is_empty() {
         None
@@ -336,7 +336,7 @@ fn build_issue_create_input(
         .get(modal.assignee_selected)
         .and_then(|a| a.id.clone());
 
-    lt_types::inputs::IssueCreateInput {
+    lt_upstream::query::inputs::IssueCreateInput {
         title,
         team_id: team_id.to_string(),
         description,
@@ -349,7 +349,7 @@ fn build_issue_create_input(
 /// The assignee popup items: "Me (name)" first if known, then "Unassigned",
 /// then the remaining team members (excluding the viewer).
 pub(crate) fn build_assignee_items(
-    viewer: Option<&lt_types::viewer::Viewer>,
+    viewer: Option<&lt_upstream::query::viewer::Viewer>,
     members: Vec<User>,
 ) -> Vec<PopupItem> {
     let mut items: Vec<PopupItem> = Vec::new();
@@ -411,24 +411,32 @@ pub(crate) static PICKER_BINDINGS: keymap::Table = &[
     ),
 ];
 
-pub(crate) static PICKER_KEYMAP: Keymap = Keymap {
-    layers: &[PICKER_BINDINGS, FORM_NAV, keymap::GLOBAL],
-    apply: Some(apply_new_issue),
-    unbound: Unbound::Swallow,
-};
+static PICKER_LAYERS: keymap::Layers = &[PICKER_BINDINGS, FORM_NAV, keymap::GLOBAL];
+
+pub(crate) fn picker_keymap<R: RuntimeApi>() -> Keymap<R> {
+    Keymap {
+        layers: PICKER_LAYERS,
+        apply: Some(apply_new_issue),
+        unbound: Unbound::Swallow,
+    }
+}
 
 /// New-issue modal, text fields (Title/Description): everything but
 /// `FORM_NAV`'s rows forwards to the focused field's editor (`enter` inserts
 /// a newline in Description).
-pub(crate) static TEXT_KEYMAP: Keymap = Keymap {
-    layers: &[FORM_NAV],
-    apply: Some(apply_new_issue),
-    unbound: Unbound::Forward(forward_text),
-};
+static TEXT_LAYERS: keymap::Layers = &[FORM_NAV];
+
+pub(crate) fn text_keymap<R: RuntimeApi>() -> Keymap<R> {
+    Keymap {
+        layers: TEXT_LAYERS,
+        apply: Some(apply_new_issue),
+        unbound: Unbound::Forward(forward_text),
+    }
+}
 
 /// `Submit`/`NextField`/`PrevField` are shared by both keymaps;
 /// `Confirm`/`PickMe` only resolve from the picker keymap.
-pub(crate) fn apply_new_issue(app: &mut App, i: usize, action: keymap::Action) {
+pub(crate) fn apply_new_issue<R: RuntimeApi>(app: &mut App<R>, i: usize, action: keymap::Action) {
     match action {
         keymap::Action::Submit => app.new_issue_submit(i),
         keymap::Action::NextField | keymap::Action::Confirm => new_issue_advance(app, i),
@@ -455,7 +463,7 @@ pub(crate) fn apply_new_issue(app: &mut App, i: usize, action: keymap::Action) {
 
 /// Advance to the next field: leaving Team swaps the team-scoped
 /// subscriptions; any other field just advances.
-fn new_issue_advance(app: &mut App, i: usize) {
+fn new_issue_advance<R: RuntimeApi>(app: &mut App<R>, i: usize) {
     let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
         return;
     };
@@ -470,7 +478,7 @@ fn new_issue_advance(app: &mut App, i: usize) {
 
 /// Forward an unbound key to the focused text field's own editor, using the
 /// raw crossterm event rather than the normalized `Key`.
-pub(crate) fn forward_text(app: &mut App, i: usize, ev: KeyEvent) {
+pub(crate) fn forward_text<R: RuntimeApi>(app: &mut App<R>, i: usize, ev: KeyEvent) {
     let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
     let Some(View::NewIssue(modal)) = app.views.get_mut(i) else {
         return;
@@ -543,7 +551,7 @@ fn new_issue_picker_state<'a>(
     }
 }
 
-#[cfg(all(test, feature = "sim"))]
+#[cfg(all(test, feature = "fake"))]
 mod tests {
     use super::*;
 
