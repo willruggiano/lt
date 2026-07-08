@@ -7,27 +7,24 @@ pub mod service;
 use anyhow::Result;
 use chrono::Utc;
 use lt_storage::db;
-use lt_types::issues::{IssuesQuery, IssuesVariables};
-use lt_types::states::{AllWorkflowStatesQuery, AllWorkflowStatesVariables};
-use lt_types::teams::TeamsQuery;
-use lt_types::viewer::ViewerQuery;
-use lt_upstream::client::{GraphqlTransport, execute};
+use lt_upstream::query::issues::{IssuesQuery, IssuesVariables};
+use lt_upstream::query::states::{AllWorkflowStatesQuery, AllWorkflowStatesVariables};
+use lt_upstream::query::teams::TeamsQuery;
+use lt_upstream::query::viewer::ViewerQuery;
+use lt_upstream::transport::{Transport, execute};
 
 use crate::ops::Fill;
 
 /// Persist the authenticated viewer's identity into `sync_meta` so cached reads
 /// can resolve `me` without a network round-trip. Goes through the same
 /// `Fill` seam every other operation does.
-fn persist_viewer(conn: &rusqlite::Connection, transport: &dyn GraphqlTransport) -> Result<()> {
+fn persist_viewer(conn: &rusqlite::Connection, transport: &dyn Transport) -> Result<()> {
     crate::ops::refresh::<ViewerQuery>(conn, transport, ())
 }
 
 /// Paginate the org-wide `AllWorkflowStatesQuery` to exhaustion, upserting
 /// each page as it arrives via its `Fill` impl.
-fn sync_workflow_states(
-    conn: &rusqlite::Connection,
-    transport: &dyn GraphqlTransport,
-) -> Result<()> {
+fn sync_workflow_states(conn: &rusqlite::Connection, transport: &dyn Transport) -> Result<()> {
     let mut cursor: Option<String> = None;
     loop {
         let vars = AllWorkflowStatesVariables {
@@ -49,10 +46,7 @@ fn sync_workflow_states(
 /// issue page: an issue's `state_id` must already reference a locally known
 /// row by the time its row lands (sync owns workflow states; issue upserts
 /// never write them).
-fn sync_reference_data(
-    conn: &rusqlite::Connection,
-    transport: &dyn GraphqlTransport,
-) -> Result<()> {
+fn sync_reference_data(conn: &rusqlite::Connection, transport: &dyn Transport) -> Result<()> {
     crate::ops::refresh::<TeamsQuery>(conn, transport, ())?;
     sync_workflow_states(conn, transport)
 }
@@ -65,7 +59,7 @@ fn sync_reference_data(
 /// cursor (`None` for the first page); `full`/`delta` supply the filter.
 fn sync_pages<F>(
     conn: &rusqlite::Connection,
-    transport: &dyn GraphqlTransport,
+    transport: &dyn Transport,
     mut make_vars: F,
 ) -> Result<()>
 where
@@ -89,8 +83,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use lt_types::issues::sample_issue_node;
-    use lt_upstream::client::FakeTransport;
+    use lt_storage::db::{Memory, Storage};
+    use lt_upstream::query::issues::sample_issue_node;
+    use lt_upstream::transport::FakeTransport;
     use serde_json::json;
 
     use super::*;
@@ -125,7 +120,7 @@ mod tests {
         db::upsert_team_state(
             conn,
             "ENG",
-            &lt_types::types::WorkflowState {
+            &lt_upstream::query::types::WorkflowState {
                 id: "s".into(),
                 name: "Todo".to_string(),
                 position: 1.0,
@@ -136,7 +131,7 @@ mod tests {
 
     #[test]
     fn sync_pages_upserts_each_page_and_paginates_to_exhaustion() {
-        let conn = db::Database::memory().unwrap().connect().unwrap();
+        let conn = Memory::new().unwrap().connect().unwrap();
         seed_sample_issue_node_state(&conn);
         let transport = FakeTransport::new(vec![
             page(&[sample_issue_node("1")], true, Some("cur")),
@@ -153,7 +148,7 @@ mod tests {
 
     #[test]
     fn sync_pages_records_last_synced_at() {
-        let conn = db::Database::memory().unwrap().connect().unwrap();
+        let conn = Memory::new().unwrap().connect().unwrap();
         let transport = FakeTransport::new(vec![page(&[], false, None)]);
 
         sync_pages(&conn, &transport, plain_vars).unwrap();
@@ -180,7 +175,7 @@ mod tests {
 
     #[test]
     fn sync_workflow_states_paginates_to_exhaustion_and_scopes_by_team() {
-        let conn = db::Database::memory().unwrap().connect().unwrap();
+        let conn = Memory::new().unwrap().connect().unwrap();
         let transport = FakeTransport::new(vec![
             states_page(&[state_node("s1", "Todo", "t1")], true, Some("cur")),
             states_page(&[state_node("s2", "Done", "t2")], false, None),
@@ -196,7 +191,7 @@ mod tests {
 
     #[test]
     fn sync_reference_data_fetches_teams_then_workflow_states() {
-        let conn = db::Database::memory().unwrap().connect().unwrap();
+        let conn = Memory::new().unwrap().connect().unwrap();
         let transport = FakeTransport::new(vec![
             json!({ "teams": { "nodes": [{ "id": "t1", "name": "Eng" }] } }),
             states_page(&[state_node("s1", "Todo", "t1")], false, None),

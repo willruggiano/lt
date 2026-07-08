@@ -1,45 +1,47 @@
-//! The operation seam: the [`Query`]/[`Fill`]/[`Mutation`] traits every
-//! operation implements (docs/design/operation-seam-adr.md, "Decision 1"),
-//! their per-operation impls -- thin, calling `lt-storage`'s public cache
-//! functions -- and the generic local-read/upstream-refresh drivers built on
-//! top of them, plus the [`Operation`] dispatch trait behind
-//! [`crate::Runtime::execute`] (docs/design/unified-execute-adr.md, "Decision
-//! 2"). Fragment-to-SQL lowering stays crate-private in `lt-storage`; this
-//! module only ever calls its `pub fn`s.
+//! The operation seam: the [`Read`]/[`Fill`]/[`Write`] traits every operation
+//! implements (docs/design/operation-seam-adr.md, "Decision 1"), their
+//! per-operation impls -- thin, calling `lt-storage`'s public cache functions
+//! -- and the generic local-read/upstream-refresh drivers built on top of
+//! them, plus the [`Operation`] dispatch trait behind [`crate::Runtime::execute`]
+//! (docs/design/unified-execute-adr.md, "Decision 2"). Fragment-to-SQL
+//! lowering stays crate-private in `lt-storage`; this module only ever calls
+//! its `pub fn`s.
 
 use anyhow::{Context, Result};
 use lt_storage::db;
-use lt_storage::db::Connection;
-use lt_types::comments::{CommentCreateMutation, CommentsQuery, CommentsVariables};
-use lt_types::detail::{IssueDetailData, IssueDetailQuery};
-use lt_types::graphql::GraphqlOperation;
-use lt_types::issues::{IssueCreateMutation, IssueUpdateMutation, IssuesQuery};
-use lt_types::members::{TeamMembersQuery, UserConnection};
-use lt_types::new_issue::{NewIssueData, NewIssueQuery};
-use lt_types::states::{AllWorkflowStatesQuery, TeamStatesQuery, WorkflowStateConnection};
-use lt_types::teams::{TeamConnection, TeamsQuery};
-use lt_types::types::WorkflowState;
-use lt_types::viewer::ViewerQuery;
-use lt_upstream::client::{GraphqlTransport, execute};
+use lt_storage::db::{Connection, Storage};
+use lt_upstream::query::comments::{CommentCreateMutation, CommentsQuery, CommentsVariables};
+use lt_upstream::query::detail::{IssueDetailData, IssueDetailQuery};
+use lt_upstream::query::graphql::GraphqlOperation;
+use lt_upstream::query::issues::{IssueCreateMutation, IssueUpdateMutation, IssuesQuery};
+use lt_upstream::query::members::{TeamMembersQuery, UserConnection};
+use lt_upstream::query::new_issue::{NewIssueData, NewIssueQuery};
+use lt_upstream::query::states::{
+    AllWorkflowStatesQuery, TeamStatesQuery, WorkflowStateConnection,
+};
+use lt_upstream::query::teams::{TeamConnection, TeamsQuery};
+use lt_upstream::query::types::WorkflowState;
+use lt_upstream::query::viewer::ViewerQuery;
+use lt_upstream::transport::{Transport, execute};
 
 use crate::runtime::Runtime;
 
 /// A local, cache-backed read of an operation's result.
-pub trait Query: GraphqlOperation {
-    fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output>;
+pub trait Read: GraphqlOperation {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output>;
 }
 
 /// Write an already-fetched operation response into the cache: the read
 /// path's fetch-and-fill, shared by [`refresh`] and the sync drivers
 /// (`sync::sync_pages`, `sync::sync_workflow_states`). Every query-kind
 /// operation implements this; a mutation-kind operation's local write is
-/// [`Mutation::enqueue`] instead -- the two never overlap on one operation.
+/// [`Write::enqueue`] instead -- the two never overlap on one operation.
 pub trait Fill: GraphqlOperation {
     fn fill(conn: &Connection, vars: &Self::Variables, out: &Self::Output) -> Result<()>;
 }
 
 /// The drainer's ack context: the op-log row's own identity, as recorded by
-/// [`Mutation::enqueue`] and read back at replay.
+/// [`Write::enqueue`] and read back at replay.
 pub struct AckContext<'a> {
     pub seq: i64,
     pub id: &'a str,
@@ -50,7 +52,7 @@ pub struct AckContext<'a> {
 /// (`IssueUpdateMutation`, `IssueCreateMutation`, `CommentCreateMutation`) --
 /// a query operation's fetched-response cache write is [`Fill`] instead, so
 /// this trait carries no query-only "unsupported" defaults.
-pub trait Mutation: GraphqlOperation {
+pub trait Write: GraphqlOperation {
     /// Write the operation's optimistic local effect and enqueue its op-log
     /// row from `vars`, atomically. Returns the id it wrote under (`vars.id`
     /// for an update, the fabricated id for a create) so the caller can read
@@ -67,11 +69,11 @@ pub trait Mutation: GraphqlOperation {
 }
 
 // ---------------------------------------------------------------------------
-// Query / Fill impls
+// Read / Fill impls
 // ---------------------------------------------------------------------------
 
-impl Query for IssuesQuery {
-    fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+impl Read for IssuesQuery {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
         db::query_issues(conn, vars)
     }
 }
@@ -84,8 +86,8 @@ impl Fill for IssuesQuery {
     }
 }
 
-impl Query for TeamsQuery {
-    fn query(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
+impl Read for TeamsQuery {
+    fn read(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
         Ok(TeamConnection {
             nodes: db::query_teams(conn)?,
         })
@@ -98,8 +100,8 @@ impl Fill for TeamsQuery {
     }
 }
 
-impl Query for TeamStatesQuery {
-    fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+impl Read for TeamStatesQuery {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
         Ok(WorkflowStateConnection {
             nodes: db::query_team_states(conn, &vars.team_id)?,
         })
@@ -137,8 +139,8 @@ impl Fill for AllWorkflowStatesQuery {
     }
 }
 
-impl Query for TeamMembersQuery {
-    fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+impl Read for TeamMembersQuery {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
         Ok(UserConnection {
             nodes: db::query_team_members(conn, &vars.team_id)?,
         })
@@ -156,8 +158,8 @@ impl Fill for TeamMembersQuery {
     }
 }
 
-impl Query for NewIssueQuery {
-    fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+impl Read for NewIssueQuery {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
         let teams = db::query_teams(conn)?;
         let (states, members) = if vars.has_team {
             (
@@ -180,8 +182,8 @@ impl Query for NewIssueQuery {
 impl Fill for NewIssueQuery {
     /// `out.viewer` is never persisted here: it is always `None` from the
     /// wire (`NewIssueQuery`'s document does not select it, see
-    /// `lt_types::new_issue`), and the display value is sourced from the
-    /// cache via `Query` instead.
+    /// `lt_upstream::query::new_issue`), and the display value is sourced
+    /// from the cache via `Read` instead.
     fn fill(conn: &Connection, vars: &Self::Variables, out: &Self::Output) -> Result<()> {
         db::upsert_teams(conn, &out.teams)?;
         if vars.has_team {
@@ -196,8 +198,8 @@ impl Fill for NewIssueQuery {
     }
 }
 
-impl Query for ViewerQuery {
-    fn query(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
+impl Read for ViewerQuery {
+    fn read(conn: &Connection, _vars: &Self::Variables) -> Result<Self::Output> {
         db::viewer(conn)
     }
 }
@@ -211,11 +213,11 @@ impl Fill for ViewerQuery {
     }
 }
 
-impl Query for IssueDetailQuery {
+impl Read for IssueDetailQuery {
     /// `None` when the id is locally absent: the current detail view opens
     /// from a listed (already-cached) issue, so absence means a stale cache
     /// after an upstream delete, not a bug to panic over.
-    fn query(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
+    fn read(conn: &Connection, vars: &Self::Variables) -> Result<Self::Output> {
         let Some(issue) = db::query_issue_by_id(conn, &vars.id)? else {
             return Ok(None);
         };
@@ -262,10 +264,10 @@ impl Fill for CommentsQuery {
 }
 
 // ---------------------------------------------------------------------------
-// Mutation impls -- the three real op-log mutations
+// Write impls -- the three real op-log mutations
 // ---------------------------------------------------------------------------
 
-impl Mutation for IssueUpdateMutation {
+impl Write for IssueUpdateMutation {
     fn enqueue(conn: &Connection, vars: Self::Variables) -> Result<String> {
         db::op_log::enqueue_issue_update(conn, vars)
     }
@@ -279,7 +281,7 @@ impl Mutation for IssueUpdateMutation {
     }
 }
 
-impl Mutation for IssueCreateMutation {
+impl Write for IssueCreateMutation {
     fn enqueue(conn: &Connection, vars: Self::Variables) -> Result<String> {
         db::op_log::enqueue_issue_create(conn, &vars)
     }
@@ -293,7 +295,7 @@ impl Mutation for IssueCreateMutation {
     }
 }
 
-impl Mutation for CommentCreateMutation {
+impl Write for CommentCreateMutation {
     fn enqueue(conn: &Connection, vars: Self::Variables) -> Result<String> {
         db::op_log::enqueue_comment_create(conn, &vars)
     }
@@ -313,19 +315,15 @@ impl Mutation for CommentCreateMutation {
 // Generic drivers
 // ---------------------------------------------------------------------------
 
-/// One-shot local read: `Op::query` over `conn`. The search overlay's
+/// One-shot local read: `Op::read` over `conn`. The search overlay's
 /// debounced preview and the CLI's cached reads share this path.
-pub fn load<Op: Query>(conn: &Connection, vars: &Op::Variables) -> Result<Op::Output> {
-    Op::query(conn, vars)
+pub fn load<Op: Read>(conn: &Connection, vars: &Op::Variables) -> Result<Op::Output> {
+    Op::read(conn, vars)
 }
 
 /// Upstream refresh: fetch `Op` through `transport`, then fill its output
 /// into the cache.
-pub fn refresh<Op>(
-    conn: &Connection,
-    transport: &dyn GraphqlTransport,
-    vars: Op::Variables,
-) -> Result<()>
+pub fn refresh<Op>(conn: &Connection, transport: &dyn Transport, vars: Op::Variables) -> Result<()>
 where
     Op: Fill,
     Op::Variables: Clone,
@@ -345,49 +343,29 @@ where
 /// most operations, [`IssueDetailQuery`]'s own impl (below) for its
 /// fetch-to-exhaustion comment pagination.
 pub trait Refresh: Fill {
-    fn refresh(
-        conn: &Connection,
-        transport: &dyn GraphqlTransport,
-        vars: Self::Variables,
-    ) -> Result<()>;
+    fn refresh(conn: &Connection, transport: &dyn Transport, vars: Self::Variables) -> Result<()>;
 }
 
 impl Refresh for IssuesQuery {
-    fn refresh(
-        conn: &Connection,
-        transport: &dyn GraphqlTransport,
-        vars: Self::Variables,
-    ) -> Result<()> {
+    fn refresh(conn: &Connection, transport: &dyn Transport, vars: Self::Variables) -> Result<()> {
         refresh::<IssuesQuery>(conn, transport, vars)
     }
 }
 
 impl Refresh for TeamsQuery {
-    fn refresh(
-        conn: &Connection,
-        transport: &dyn GraphqlTransport,
-        vars: Self::Variables,
-    ) -> Result<()> {
+    fn refresh(conn: &Connection, transport: &dyn Transport, vars: Self::Variables) -> Result<()> {
         refresh::<TeamsQuery>(conn, transport, vars)
     }
 }
 
 impl Refresh for TeamStatesQuery {
-    fn refresh(
-        conn: &Connection,
-        transport: &dyn GraphqlTransport,
-        vars: Self::Variables,
-    ) -> Result<()> {
+    fn refresh(conn: &Connection, transport: &dyn Transport, vars: Self::Variables) -> Result<()> {
         refresh::<TeamStatesQuery>(conn, transport, vars)
     }
 }
 
 impl Refresh for TeamMembersQuery {
-    fn refresh(
-        conn: &Connection,
-        transport: &dyn GraphqlTransport,
-        vars: Self::Variables,
-    ) -> Result<()> {
+    fn refresh(conn: &Connection, transport: &dyn Transport, vars: Self::Variables) -> Result<()> {
         refresh::<TeamMembersQuery>(conn, transport, vars)
     }
 }
@@ -401,11 +379,7 @@ impl Refresh for IssueDetailQuery {
     /// replacing ([`CommentsQuery`]'s own `Fill::fill`): a delete-first per
     /// page would wipe the previous page's inserts. Children stay a single
     /// first-page fetch (capped at 250 by the document itself).
-    fn refresh(
-        conn: &Connection,
-        transport: &dyn GraphqlTransport,
-        vars: Self::Variables,
-    ) -> Result<()> {
+    fn refresh(conn: &Connection, transport: &dyn Transport, vars: Self::Variables) -> Result<()> {
         // A just-created optimistic issue (synced_at NULL) has no upstream
         // counterpart; refreshing its fabricated id would be a doomed wire
         // call. An absent id is not locally-unsynced, so a first-fetch of an
@@ -436,79 +410,98 @@ impl Refresh for IssueDetailQuery {
 }
 
 impl Refresh for NewIssueQuery {
-    fn refresh(
-        conn: &Connection,
-        transport: &dyn GraphqlTransport,
-        vars: Self::Variables,
-    ) -> Result<()> {
+    fn refresh(conn: &Connection, transport: &dyn Transport, vars: Self::Variables) -> Result<()> {
         refresh::<NewIssueQuery>(conn, transport, vars)
     }
 }
 
 impl Refresh for ViewerQuery {
-    fn refresh(
-        conn: &Connection,
-        transport: &dyn GraphqlTransport,
-        vars: Self::Variables,
-    ) -> Result<()> {
+    fn refresh(conn: &Connection, transport: &dyn Transport, vars: Self::Variables) -> Result<()> {
         refresh::<ViewerQuery>(conn, transport, vars)
     }
 }
 
 /// [`Runtime::execute`]'s dispatch, by operation kind
 /// (docs/design/unified-execute-adr.md, "Decision 2"): a query op reads the
-/// cache. `Query` and `Mutation` are disjoint traits, so this is hand-written
-/// per operation rather than a blanket impl -- three lines choosing the seam,
-/// an ENG-16 codegen target.
-pub trait Operation: lt_types::graphql::GraphqlOperation {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output>;
+/// cache. `Read` and `Write` are disjoint traits, so this is hand-written per
+/// operation rather than a blanket impl -- three lines choosing the seam, an
+/// ENG-16 codegen target.
+pub trait Operation: GraphqlOperation {
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output>;
 }
 
 /// Shared body for every query-kind [`Operation`] impl: a cache-first read
 /// over a fresh connection.
-fn query_execute<Op: Query>(runtime: &Runtime, vars: &Op::Variables) -> Result<Op::Output> {
-    Op::query(&runtime.connect()?, vars)
+fn query_execute<Op: Read, S: Storage, T: Transport>(
+    runtime: &Runtime<S, T>,
+    vars: &Op::Variables,
+) -> Result<Op::Output> {
+    Op::read(&runtime.connect()?, vars)
 }
 
 impl Operation for IssuesQuery {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
-        query_execute::<Self>(runtime, &vars)
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
+        query_execute::<Self, S, T>(runtime, &vars)
     }
 }
 
 impl Operation for TeamsQuery {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
-        query_execute::<Self>(runtime, &vars)
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
+        query_execute::<Self, S, T>(runtime, &vars)
     }
 }
 
 impl Operation for TeamStatesQuery {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
-        query_execute::<Self>(runtime, &vars)
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
+        query_execute::<Self, S, T>(runtime, &vars)
     }
 }
 
 impl Operation for TeamMembersQuery {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
-        query_execute::<Self>(runtime, &vars)
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
+        query_execute::<Self, S, T>(runtime, &vars)
     }
 }
 
 impl Operation for NewIssueQuery {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
-        query_execute::<Self>(runtime, &vars)
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
+        query_execute::<Self, S, T>(runtime, &vars)
     }
 }
 
 impl Operation for ViewerQuery {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
-        query_execute::<Self>(runtime, &vars)
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
+        query_execute::<Self, S, T>(runtime, &vars)
     }
 }
 
 impl Operation for IssueDetailQuery {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
-        query_execute::<Self>(runtime, &vars)
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
+        query_execute::<Self, S, T>(runtime, &vars)
     }
 }
 
@@ -517,7 +510,10 @@ impl Operation for IssueDetailQuery {
 /// promptly -- the write-side mirror of [`query_execute`]. Returns the id
 /// the write was recorded under, so the caller can read the optimistic
 /// entity back out of the cache.
-fn mutation_execute<M: Mutation>(runtime: &Runtime, vars: M::Variables) -> Result<String> {
+fn mutation_execute<M: Write, S: Storage, T: Transport>(
+    runtime: &Runtime<S, T>,
+    vars: M::Variables,
+) -> Result<String> {
     let conn = runtime.connect()?;
     let id = M::enqueue(&conn, vars)?;
     runtime.emit_update();
@@ -526,24 +522,33 @@ fn mutation_execute<M: Mutation>(runtime: &Runtime, vars: M::Variables) -> Resul
 }
 
 impl Operation for IssueCreateMutation {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
-        let id = mutation_execute::<Self>(runtime, vars)?;
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
+        let id = mutation_execute::<Self, S, T>(runtime, vars)?;
         db::query_issue_by_id(&runtime.connect()?, &id)?
             .context("optimistic issue create vanished from the cache")
     }
 }
 
 impl Operation for IssueUpdateMutation {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
-        let id = mutation_execute::<Self>(runtime, vars)?;
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
+        let id = mutation_execute::<Self, S, T>(runtime, vars)?;
         db::query_issue_by_id(&runtime.connect()?, &id)
     }
 }
 
 impl Operation for CommentCreateMutation {
-    fn execute(runtime: &Runtime, vars: Self::Variables) -> Result<Self::Output> {
+    fn execute<S: Storage, T: Transport>(
+        runtime: &Runtime<S, T>,
+        vars: Self::Variables,
+    ) -> Result<Self::Output> {
         let issue_id = vars.input.issue_id.clone();
-        let id = mutation_execute::<Self>(runtime, vars)?;
+        let id = mutation_execute::<Self, S, T>(runtime, vars)?;
         db::query_comments(&runtime.connect()?, &issue_id)?
             .into_iter()
             .find(|c| c.id.inner() == id)
@@ -554,24 +559,25 @@ impl Operation for CommentCreateMutation {
 #[cfg(test)]
 mod tests {
     use lt_storage::db;
-    use lt_types::comments::Comment;
-    use lt_types::detail::IssueDetailVariables;
-    use lt_types::inputs::IssueCreateInput;
-    use lt_types::issues::IssueCreateVariables;
-    use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
-    use lt_types::states::{
+    use lt_storage::db::Memory;
+    use lt_upstream::query::comments::Comment;
+    use lt_upstream::query::detail::IssueDetailVariables;
+    use lt_upstream::query::inputs::IssueCreateInput;
+    use lt_upstream::query::issues::IssueCreateVariables;
+    use lt_upstream::query::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
+    use lt_upstream::query::states::{
         AllWorkflowStatesVariables, TeamRef, TeamStatesQuery, TeamVariables as StatesTeamVariables,
         WorkflowStateWithTeam, WorkflowStateWithTeamConnection,
     };
-    use lt_types::teams::TeamsQuery;
-    use lt_types::types;
-    use lt_upstream::client::FakeTransport;
+    use lt_upstream::query::teams::TeamsQuery;
+    use lt_upstream::query::types;
+    use lt_upstream::transport::FakeTransport;
     use serde_json::json;
 
     use super::*;
 
     fn conn() -> rusqlite::Connection {
-        db::Database::memory().unwrap().connect().unwrap()
+        Memory::new().unwrap().connect().unwrap()
     }
 
     #[test]
@@ -679,7 +685,7 @@ mod tests {
         let vars = StatesTeamVariables {
             team_id: "t1".to_string(),
         };
-        let states = TeamStatesQuery::query(&conn, &vars).unwrap();
+        let states = TeamStatesQuery::read(&conn, &vars).unwrap();
         assert_eq!(
             states
                 .nodes
@@ -714,7 +720,7 @@ mod tests {
                     team: TeamRef { id: "t2".into() },
                 },
             ],
-            page_info: lt_types::pagination::PageInfo::default(),
+            page_info: lt_upstream::query::pagination::PageInfo::default(),
         };
 
         let vars = AllWorkflowStatesVariables {
@@ -758,8 +764,8 @@ mod tests {
         );
     }
 
-    fn new_issue_vars(team_id: Option<&str>) -> lt_types::new_issue::NewIssueVariables {
-        lt_types::new_issue::NewIssueVariables::new(team_id.map(str::to_string))
+    fn new_issue_vars(team_id: Option<&str>) -> lt_upstream::query::new_issue::NewIssueVariables {
+        lt_upstream::query::new_issue::NewIssueVariables::new(team_id.map(str::to_string))
     }
 
     #[test]
@@ -774,7 +780,7 @@ mod tests {
         )
         .unwrap();
 
-        let data = NewIssueQuery::query(&conn, &new_issue_vars(None)).unwrap();
+        let data = NewIssueQuery::read(&conn, &new_issue_vars(None)).unwrap();
         assert_eq!(data.teams.len(), 1);
         assert!(data.states.is_empty());
         assert!(data.members.is_empty());
@@ -804,7 +810,7 @@ mod tests {
         .unwrap();
         db::replace_team_memberships(&conn, "t1", &["u1"]).unwrap();
 
-        let data = NewIssueQuery::query(&conn, &new_issue_vars(Some("t1"))).unwrap();
+        let data = NewIssueQuery::read(&conn, &new_issue_vars(Some("t1"))).unwrap();
         assert_eq!(data.states.len(), 1);
         assert_eq!(data.members.len(), 1);
     }
@@ -883,7 +889,7 @@ mod tests {
         comments_page: serde_json::Value,
         children: &[serde_json::Value],
     ) -> serde_json::Value {
-        let mut issue = lt_types::issues::sample_issue_node(id);
+        let mut issue = lt_upstream::query::issues::sample_issue_node(id);
         issue["comments"] = comments_page;
         issue["children"] = json!({
             "nodes": children,
@@ -908,7 +914,7 @@ mod tests {
     fn read_is_none_for_a_locally_absent_issue() {
         let conn = conn();
         assert!(
-            IssueDetailQuery::query(&conn, &detail_vars("missing"))
+            IssueDetailQuery::read(&conn, &detail_vars("missing"))
                 .unwrap()
                 .is_none()
         );
@@ -929,7 +935,7 @@ mod tests {
         .unwrap();
         let parent = lt_storage::db::op_log::sample_base_issue("1");
         let mut child = lt_storage::db::op_log::sample_base_issue("2");
-        child.parent = Some(lt_types::types::Parent {
+        child.parent = Some(lt_upstream::query::types::Parent {
             id: "1".into(),
             identifier: "ENG-1".to_string(),
         });
@@ -947,7 +953,7 @@ mod tests {
         )
         .unwrap();
 
-        let data = IssueDetailQuery::query(&conn, &detail_vars("1"))
+        let data = IssueDetailQuery::read(&conn, &detail_vars("1"))
             .unwrap()
             .unwrap();
         assert_eq!(data.issue.identifier, "ENG-1");
@@ -1003,7 +1009,7 @@ mod tests {
         db::upsert_team_state(
             &conn,
             "ENG",
-            &lt_types::types::WorkflowState {
+            &lt_upstream::query::types::WorkflowState {
                 id: "s".into(),
                 name: "Todo".to_string(),
                 position: 1.0,
@@ -1012,7 +1018,7 @@ mod tests {
         .unwrap();
         db::upsert_comments(
             &conn,
-            &[lt_types::comments::Comment {
+            &[lt_upstream::query::comments::Comment {
                 id: "old".into(),
                 body: "stale".to_string(),
                 created_at: "2025-01-01T00:00:00Z".parse().unwrap(),
@@ -1026,7 +1032,7 @@ mod tests {
         let transport = FakeTransport::new(vec![issue_detail_response(
             "i1",
             comments_page(&[comment_node("c1", "2026-01-01T00:00:00Z")], false, None),
-            &[lt_types::issues::sample_issue_node("child-1")],
+            &[lt_upstream::query::issues::sample_issue_node("child-1")],
         )]);
 
         IssueDetailQuery::refresh(&conn, &transport, detail_vars("i1")).unwrap();
@@ -1048,6 +1054,18 @@ mod tests {
     #[test]
     fn refresh_appends_paginated_comment_pages_to_the_first_page() {
         let conn = conn();
+        // `sample_issue_node`'s state must already be locally known (sync owns
+        // workflow states; issue upserts never write them).
+        db::upsert_team_state(
+            &conn,
+            "ENG",
+            &WorkflowState {
+                id: "s".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
         let transport = FakeTransport::new(vec![
             // The composed document's own first page, with more to come.
             issue_detail_response(
@@ -1092,7 +1110,7 @@ mod tests {
         db::upsert_team_state(
             &conn,
             "ENG",
-            &lt_types::types::WorkflowState {
+            &lt_upstream::query::types::WorkflowState {
                 id: "s-todo".into(),
                 name: "Todo".to_string(),
                 position: 1.0,
@@ -1138,7 +1156,7 @@ mod tests {
         refresh::<NewIssueQuery>(
             &conn,
             &transport,
-            lt_types::new_issue::NewIssueVariables::new(Some("t1".to_string())),
+            lt_upstream::query::new_issue::NewIssueVariables::new(Some("t1".to_string())),
         )
         .unwrap();
 
@@ -1150,7 +1168,7 @@ mod tests {
     fn viewer_query_apply_of_none_is_a_noop() {
         let conn = conn();
         ViewerQuery::fill(&conn, &(), &None).unwrap();
-        assert!(ViewerQuery::query(&conn, &()).unwrap().is_none());
+        assert!(ViewerQuery::read(&conn, &()).unwrap().is_none());
     }
 
     #[test]

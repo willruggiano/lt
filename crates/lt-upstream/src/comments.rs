@@ -7,9 +7,9 @@
 mod tests {
     use serde_json::json;
 
-    use crate::client::{FakeTransport, execute};
     use crate::query::comments::CommentCreateMutation;
     use crate::query::inputs::CommentCreateInput;
+    use crate::transport::{FakeTransport, execute};
 
     #[test]
     fn comment_create_replay_returns_server_comment() {

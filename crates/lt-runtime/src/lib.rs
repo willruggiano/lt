@@ -11,19 +11,19 @@ pub mod sync;
 
 mod runtime;
 pub use ops::{load, refresh};
-#[cfg(feature = "sim")]
+pub use runtime::Runtime;
+#[cfg(feature = "fake")]
 pub use runtime::SimSeed;
-pub use runtime::{HttpTransportSource, Runtime, TransportSource};
 
 // Command orchestration for the CLI.
 pub mod auth;
 
 // Store read/write facade re-exported so downstream crates name one seam.
-#[cfg(feature = "sim")]
-pub use lt_storage::sim;
+#[cfg(feature = "fake")]
+pub use lt_storage::fake;
 pub use lt_storage::{db, search_query, text};
-pub use lt_types::clock::Clock;
-pub use lt_types::query;
+pub use lt_upstream::query::clock::Clock;
+pub use lt_upstream::query::sort as query;
 
 /// Test-only seam for constructing/seeding an in-memory database without
 /// naming `lt_runtime::db` (docs/design/operation-seam-adr.md, "Decision 4":
@@ -32,5 +32,5 @@ pub use lt_types::query;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util {
     pub use lt_storage::db::op_log::sample_base_issue;
-    pub use lt_storage::db::{Connection, Database, set_viewer, upsert_issues, upsert_team_state};
+    pub use lt_storage::db::{Connection, Memory, set_viewer, upsert_issues, upsert_team_state};
 }

@@ -9,15 +9,16 @@ const GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 /// Abstraction over the Linear GraphQL endpoint.
 ///
 /// The method is intentionally non-generic so the trait stays object-safe:
-/// callers take `&dyn GraphqlTransport` and tests can substitute a fake. Typed
+/// callers take `&dyn Transport` and tests can substitute a fake. Typed
 /// deserialization happens in the free [`execute`] function.
-pub trait GraphqlTransport {
+pub trait Transport {
     /// Execute `query` with `variables` and return the GraphQL `data` payload,
     /// or an error when the transport fails or the response carries `errors`.
     fn query(&self, query: &str, variables: Value) -> Result<Value>;
 }
 
-/// Production transport: a Bearer-authenticated POST to Linear over HTTP.
+/// Production transport: a Bearer-authenticated POST to Linear over HTTP,
+/// under a token fixed at construction.
 pub struct HttpTransport {
     token: String,
 }
@@ -30,7 +31,7 @@ impl HttpTransport {
     }
 }
 
-impl GraphqlTransport for HttpTransport {
+impl Transport for HttpTransport {
     fn query(&self, query: &str, variables: Value) -> Result<Value> {
         // Build the body by moving `variables` in (the json! macro would only
         // borrow it, leaving the by-value parameter unconsumed).
@@ -54,6 +55,21 @@ impl GraphqlTransport for HttpTransport {
     }
 }
 
+/// Production transport for `lt-runtime`'s long-lived `Runtime`: loads (and
+/// silently refreshes, per [`crate::auth::refresh::load_or_refresh_token`])
+/// the stored OAuth token on every call, rather than fixing it once like
+/// [`HttpTransport`]. Reconciles `Runtime<S, T>` holding one `T` for its whole
+/// lifetime with a token that can expire mid-run.
+#[derive(Default)]
+pub struct RefreshingHttpTransport;
+
+impl Transport for RefreshingHttpTransport {
+    fn query(&self, query: &str, variables: Value) -> Result<Value> {
+        let token = crate::auth::refresh::load_or_refresh_token()?;
+        HttpTransport::new(token.access_token).query(query, variables)
+    }
+}
+
 /// Unwrap a GraphQL response envelope: return the `data` payload, or an error
 /// when `errors` is present or `data` is absent.
 fn parse_graphql_response(body: Value) -> Result<Value> {
@@ -73,7 +89,7 @@ fn parse_graphql_response(body: Value) -> Result<Value> {
 /// Run one [`GraphqlOperation`] through `transport`, sending its typed
 /// variables and decoding the response into its domain output: the decoded
 /// envelope recomposes into `Op::Output` via its `TryFrom` impl.
-pub fn execute<Op>(transport: &dyn GraphqlTransport, variables: Op::Variables) -> Result<Op::Output>
+pub fn execute<Op>(transport: &dyn Transport, variables: Op::Variables) -> Result<Op::Output>
 where
     Op: GraphqlOperation,
     Op::Output: TryFrom<Op, Error = anyhow::Error>,
@@ -86,8 +102,8 @@ where
     Op::Output::try_from(decoded)
 }
 
-/// Test double for [`GraphqlTransport`]: returns scripted `data` payloads in
-/// order and records the `(query, variables)` of each call. Shared across the
+/// Test double for [`Transport`]: returns scripted `data` payloads in order
+/// and records the `(query, variables)` of each call. Shared across the
 /// crate's fetcher tests and the `lt-runtime` sync/comment tests (via the
 /// `test-util` feature).
 #[cfg(any(test, feature = "test-util"))]
@@ -113,7 +129,7 @@ impl FakeTransport {
 }
 
 #[cfg(any(test, feature = "test-util"))]
-impl GraphqlTransport for FakeTransport {
+impl Transport for FakeTransport {
     fn query(&self, query: &str, variables: Value) -> Result<Value> {
         self.calls.borrow_mut().push((query.to_string(), variables));
         self.responses

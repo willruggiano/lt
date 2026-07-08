@@ -2,10 +2,10 @@
 //! here; the rest of the workspace reaches it through `lt-cli`'s adapter.
 
 pub mod auth;
-pub mod client;
 pub mod comments;
 pub mod issues;
 pub mod query;
+pub mod transport;
 
 // Re-exported so downstream crates (`lt-storage`, `lt-runtime`, ...) can
 // construct/read the `id` fields on the fragment types in `query::types`

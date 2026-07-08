@@ -7,7 +7,6 @@ publish = false
 
 [dependencies]
 lt-config.workspace = true
-lt-types.workspace = true
 lt-storage.workspace = true
 lt-upstream.workspace = true
 anyhow.workspace = true
@@ -24,9 +23,9 @@ lt-upstream = { workspace = true, features = ["test-util"] }
 
 [features]
 # Deterministic simulation testing. See docs/design/dst.md.
-sim = ["lt-storage/fake"]
+fake = ["lt-storage/fake"]
 # Expose test-only helpers (in-memory DB, sample data) to dependent crates.
-test-util = ["lt-storage/test-util", "lt-types/test-util"]
+test-util = ["lt-storage/test-util", "lt-upstream/test-util"]
 
 [lints]
 workspace = true

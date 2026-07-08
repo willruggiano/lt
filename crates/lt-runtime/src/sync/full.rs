@@ -1,12 +1,12 @@
 use anyhow::Result;
-use lt_types::issues::{IssueSort, IssuesVariables};
-use lt_types::query::{SortDirection, SortField};
-use lt_upstream::client::GraphqlTransport;
+use lt_upstream::query::issues::{IssueSort, IssuesVariables};
+use lt_upstream::query::{SortDirection, SortField};
+use lt_upstream::transport::Transport;
 
 /// Fetch every page from the Linear API and upsert into SQLite over `conn`,
 /// using `transport` for every request. Sets `sync_meta`
 /// key='`last_synced_at`' to the current UTC timestamp on success.
-pub fn run(conn: &rusqlite::Connection, transport: &dyn GraphqlTransport) -> Result<()> {
+pub fn run(conn: &rusqlite::Connection, transport: &dyn Transport) -> Result<()> {
     // Drain queued local mutations before re-fetching the world.
     super::drain::drain(conn, transport)?;
     // Persist the viewer so cached reads can resolve `me` offline.

@@ -1621,7 +1621,6 @@ dependencies = [
  "chrono",
  "lt-config",
  "lt-storage",
- "lt-types",
  "lt-upstream",
  "rusqlite",
  "serde_json",

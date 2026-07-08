@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 
-use crate::client::{HttpTransport, execute};
 use crate::query::viewer::ViewerQuery;
+use crate::transport::{HttpTransport, execute};
 
 /// Load the stored token and fetch the viewer identity (the `lt auth status`
 /// data path). Presentation (printing `user:`/`id:`/`organization:`) lives in

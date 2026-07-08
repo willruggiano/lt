@@ -8,19 +8,19 @@
 
 use anyhow::{Result, bail};
 use lt_storage::db::op_log::{self, PendingOp};
-use lt_types::comments::CommentCreateMutation;
-use lt_types::graphql::GraphqlOperation;
-use lt_types::issues::{IssueCreateMutation, IssueUpdateMutation};
-use lt_upstream::client::{GraphqlTransport, execute};
+use lt_upstream::query::comments::CommentCreateMutation;
+use lt_upstream::query::graphql::GraphqlOperation;
+use lt_upstream::query::issues::{IssueCreateMutation, IssueUpdateMutation};
+use lt_upstream::transport::{Transport, execute};
 use rusqlite::Connection;
 
-use crate::ops::{AckContext, Mutation};
+use crate::ops::{AckContext, Write};
 
 /// Replay every sendable pending op, recording (not aborting on) per-op
 /// failures. An op that is not yet sendable (a referenced id is still
 /// un-synced) is left pending without an error. Returns whether at least one
 /// op was replayed (the caller's changed-signal).
-pub fn drain(conn: &Connection, transport: &dyn GraphqlTransport) -> Result<bool> {
+pub fn drain(conn: &Connection, transport: &dyn Transport) -> Result<bool> {
     let mut changed = false;
     for op in op_log::pending_operations(conn)? {
         match replay(conn, transport, &op) {
@@ -33,7 +33,7 @@ pub fn drain(conn: &Connection, transport: &dyn GraphqlTransport) -> Result<bool
 }
 
 /// `Ok(false)` = skipped because not yet sendable; `Ok(true)` = replayed+acked.
-fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -> Result<bool> {
+fn replay(conn: &Connection, transport: &dyn Transport, op: &PendingOp) -> Result<bool> {
     if !op_log::op_is_sendable(conn, op)? {
         return Ok(false);
     }
@@ -47,11 +47,11 @@ fn replay(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -
 }
 
 /// Rebuild the op's wire vars from the row it points at, execute the
-/// mutation, then let the operation's own [`Mutation::ack`] reconcile the
-/// base and retire it.
-fn replay_op<M>(conn: &Connection, transport: &dyn GraphqlTransport, op: &PendingOp) -> Result<()>
+/// mutation, then let the operation's own [`Write::ack`] reconcile the base
+/// and retire it.
+fn replay_op<M>(conn: &Connection, transport: &dyn Transport, op: &PendingOp) -> Result<()>
 where
-    M: Mutation,
+    M: Write,
     M::Output: TryFrom<M, Error = anyhow::Error>,
 {
     let vars = M::replay_vars(conn, &op.id)?;
@@ -69,20 +69,24 @@ where
 #[cfg(test)]
 mod tests {
     use lt_storage::db::op_log::sample_base_issue as base_issue;
-    use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
-    use lt_types::inputs::{CommentCreateInput, IssueCreateInput, IssueUpdateInput};
-    use lt_types::issues::{
+    use lt_storage::db::{Memory, Storage};
+    use lt_upstream::query::comments::{CommentCreateMutation, CommentCreateVariables};
+    use lt_upstream::query::inputs::{CommentCreateInput, IssueCreateInput, IssueUpdateInput};
+    use lt_upstream::query::issues::{
         IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
     };
-    use lt_upstream::client::FakeTransport;
+    use lt_upstream::transport::FakeTransport;
     use rusqlite::Connection;
     use serde_json::json;
 
     use super::*;
 
     fn db_with_issue(id: &str) -> Connection {
-        let db = lt_storage::db::Database::memory().unwrap();
+        let db = Memory::new().unwrap();
         let conn = db.connect().unwrap();
+        // `base_issue`'s state must already be locally known (sync owns
+        // workflow states; issue upserts never write them).
+        seed_state(&conn, "s-todo", "Todo", 1.0);
         lt_storage::db::upsert_issues(&conn, &[base_issue(id)]).unwrap();
         conn
     }
@@ -94,7 +98,7 @@ mod tests {
         lt_storage::db::upsert_team_state(
             conn,
             "ENG",
-            &lt_types::types::WorkflowState {
+            &lt_upstream::query::types::WorkflowState {
                 id: id.into(),
                 name: name.to_string(),
                 position,
@@ -180,7 +184,7 @@ mod tests {
 
     #[test]
     fn drains_issue_create_and_attaches_server_id() {
-        let db = lt_storage::db::Database::memory().unwrap();
+        let db = Memory::new().unwrap();
         let conn = db.connect().unwrap();
         // The optimistic create defaults to the team's first cached state
         // (sync owns workflow states; issue upserts never write them).
@@ -195,6 +199,10 @@ mod tests {
         };
         IssueCreateMutation::enqueue(&conn, IssueCreateVariables { input }).unwrap();
 
+        // The server response's own issue fixture carries a different state
+        // ("s") than the optimistic default ("s-todo"); it too must already
+        // be locally known for the ack's upsert to resolve it.
+        seed_state(&conn, "s", "Todo", 1.0);
         let mut server_issue = lt_upstream::issues::sample_issue_node("1");
         server_issue["id"] = json!("real-1");
         server_issue["identifier"] = json!("ENG-42");

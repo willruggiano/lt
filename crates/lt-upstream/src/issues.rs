@@ -17,7 +17,7 @@ pub use crate::query::issues::sample_issue_node;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::{FakeTransport, execute};
+    use crate::transport::{FakeTransport, execute};
 
     #[test]
     fn create_returns_server_identity() {

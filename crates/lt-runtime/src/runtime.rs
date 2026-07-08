@@ -1,9 +1,8 @@
 //! The concrete data runtime. It owns the sync/login loop, one-shot
 //! background upstream refreshes for a composed view opening
 //! (docs/design/unified-execute-adr.md, "Decision 3"), and every write; it is
-//! the only place in the TUI's runtime that touches `HttpTransport`/cynic
-//! directly (behind the injected [`TransportSource`]). `lt-cli` constructs it
-//! and injects it into `tui::run`.
+//! the only place in the TUI's runtime that touches a live `Transport`
+//! directly. `lt-cli` constructs it and injects it into `tui::run`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,11 +12,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use lt_storage::db;
-use lt_storage::db::{Connection, Database};
-use lt_types::viewer::{self, ViewerQuery};
+use lt_storage::db::{Connection, Sqlite, Storage};
 use lt_upstream::auth::login_non_interactive;
-use lt_upstream::auth::refresh::load_or_refresh_token;
-use lt_upstream::client::{GraphqlTransport, HttpTransport, execute};
+use lt_upstream::query::viewer::{self, ViewerQuery};
+use lt_upstream::transport::{RefreshingHttpTransport, Transport, execute};
 
 use crate::ops::{Operation, Refresh};
 use crate::sync::service::{LoginEvent, OnEvent, RuntimeEvent, SyncEvent};
@@ -25,29 +23,10 @@ use crate::sync::service::{LoginEvent, OnEvent, RuntimeEvent, SyncEvent};
 /// The loop's periodic delta-sync cadence.
 const SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Where `Runtime` acquires a live transport for a refresh. Production
-/// construction (`load_or_refresh_token` + `HttpTransport::new`) moves out of
-/// per-call sites into one injected source, built fresh on every acquisition
-/// so a refreshed token is always current; tests inject one that hands out
-/// `FakeTransport` responses.
-pub trait TransportSource: Send + Sync {
-    fn acquire(&self) -> Result<Box<dyn GraphqlTransport>>;
-}
-
-/// The production transport source.
-pub struct HttpTransportSource;
-
-impl TransportSource for HttpTransportSource {
-    fn acquire(&self) -> Result<Box<dyn GraphqlTransport>> {
-        let token = load_or_refresh_token()?;
-        Ok(Box::new(HttpTransport::new(token.access_token)))
-    }
-}
-
 /// A one-shot upstream refresh, erased by [`Runtime::refresh`] into a thunk
 /// the loop runs once (docs/design/unified-execute-adr.md, "Decision 3"):
-/// fetch via `client::execute`, apply via `Fill`.
-type RefreshThunk = Box<dyn FnOnce(&Connection, &dyn GraphqlTransport) -> Result<()> + Send>;
+/// fetch via `transport::execute`, apply via `Fill`.
+type RefreshThunk = Box<dyn FnOnce(&Connection, &dyn Transport) -> Result<()> + Send>;
 
 /// A command sent through the runtime's internal channel: the public methods
 /// (`refresh`/`request_sync`/`login`) plus the login worker's private
@@ -210,15 +189,15 @@ impl RunLoop {
 }
 
 /// [`Runtime::seed_sim`]'s summary, for the caller's report line.
-#[cfg(feature = "sim")]
+#[cfg(feature = "fake")]
 pub struct SimSeed {
     pub issues: usize,
     pub comments: usize,
 }
 
-pub struct Runtime {
-    db: Mutex<Database>,
-    transports: Box<dyn TransportSource>,
+pub struct Runtime<S: Storage, T: Transport> {
+    storage: Mutex<S>,
+    transport: T,
     on_event: Arc<OnEvent>,
     /// One-shot refresh thunks awaiting the loop (`Runtime::refresh`), keyed
     /// by a fresh id so `Command`/`Action` stay plain `Copy` data; removed
@@ -232,12 +211,12 @@ pub struct Runtime {
     commands_rx: Mutex<Option<mpsc::Receiver<Command>>>,
 }
 
-impl Runtime {
-    pub fn new(db: Database, transports: Box<dyn TransportSource>, on_event: OnEvent) -> Self {
+impl<S: Storage, T: Transport> Runtime<S, T> {
+    pub fn new(storage: S, transport: T, on_event: OnEvent) -> Self {
         let (commands_tx, commands_rx) = mpsc::channel();
         Self {
-            db: Mutex::new(db),
-            transports,
+            storage: Mutex::new(storage),
+            transport,
             on_event: Arc::new(on_event),
             pending_refreshes: Mutex::new(HashMap::new()),
             next_refresh_id: AtomicU64::new(0),
@@ -253,28 +232,21 @@ impl Runtime {
             .take()
     }
 
-    /// A fresh connection to the injected database.
+    /// A fresh connection to the injected storage.
     pub(crate) fn connect(&self) -> Result<Connection> {
-        self.db
+        self.storage
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .connect()
     }
 
-    /// Best-effort viewer identity via the injected transport source, for the
-    /// login worker's direct report (`LoginEvent::Success`, not a cache
-    /// read). Ordinary sync cycles persist the viewer through the `Fill`
-    /// seam instead (`sync::persist_viewer`); the header re-executes
-    /// `ViewerQuery` on every `Update` and picks that up.
+    /// Best-effort viewer identity via the injected transport, for the login
+    /// worker's direct report (`LoginEvent::Success`, not a cache read).
+    /// Ordinary sync cycles persist the viewer through the `Fill` seam
+    /// instead (`sync::persist_viewer`); the header re-executes `ViewerQuery`
+    /// on every `Update` and picks that up.
     fn viewer_identity(&self) -> Option<viewer::Viewer> {
-        let transport = match self.transports.acquire() {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::debug!(error = %e, "viewer_identity: failed to acquire transport");
-                return None;
-            }
-        };
-        match execute::<ViewerQuery>(transport.as_ref(), ()) {
+        match execute::<ViewerQuery>(&self.transport, ()) {
             Ok(viewer) => viewer,
             Err(e) => {
                 tracing::debug!(error = %e, "viewer_identity: viewer query failed");
@@ -362,8 +334,7 @@ impl Runtime {
 
     fn run_refresh_thunk(&self, thunk: RefreshThunk) -> Result<()> {
         let conn = self.connect()?;
-        let transport = self.transports.acquire()?;
-        thunk(&conn, transport.as_ref())
+        thunk(&conn, &self.transport)
     }
 
     /// One full or delta sync cycle: emits `Sync(Started)`, then the cycle's
@@ -410,22 +381,20 @@ impl Runtime {
     /// loop's serialization of all base writes.
     pub fn drain_now(&self) -> Result<()> {
         let conn = self.connect()?;
-        let transport = self.transports.acquire()?;
-        if crate::sync::drain::drain(&conn, transport.as_ref())? {
+        if crate::sync::drain::drain(&conn, &self.transport)? {
             self.emit_update();
         }
         Ok(())
     }
 
-    /// Connect, acquire a transport, run the requested full or delta sync
-    /// body, then emit `Update`.
+    /// Connect, run the requested full or delta sync body over the injected
+    /// transport, then emit `Update`.
     fn sync_now(&self, full: bool) -> Result<()> {
         let conn = self.connect()?;
-        let transport = self.transports.acquire()?;
         if full {
-            crate::sync::full::run(&conn, transport.as_ref())?;
+            crate::sync::full::run(&conn, &self.transport)?;
         } else {
-            crate::sync::delta::run(&conn, transport.as_ref())?;
+            crate::sync::delta::run(&conn, &self.transport)?;
         }
         self.emit_update();
         Ok(())
@@ -440,32 +409,43 @@ impl Runtime {
         self.sync_now(false)
     }
 
-    /// Seed the local database from the deterministic `sim` generator: no
-    /// sync cycle to establish workflow states offline, so they are derived
-    /// from the seeded issues' own state fragments (ADR "Sim compatibility"),
-    /// as is team membership (from the issues' team/assignee and
-    /// team/creator pairs). Marks the cache fresh and records a viewer
-    /// identity (a real assignee from the dataset) so the `--assignee=me`
-    /// filter resolves offline.
-    #[cfg(feature = "sim")]
-    pub fn seed_sim(&self, seed: u64, size: usize) -> Result<SimSeed> {
-        let dataset = crate::sim::generate(seed, size);
-        let conn = self.connect()?;
-        for (team_id, state) in crate::sim::derive_workflow_states(&dataset.issues) {
-            db::upsert_team_state(&conn, &team_id, &state)?;
+    /// Seed the local database from the deterministic `fake` generator: no
+    /// sync cycle to establish workflow states offline, so `lt_storage::fake::seed`
+    /// derives them from the seeded issues' own state fragments (ADR "Sim
+    /// compatibility"), as is team membership. Marks the cache fresh and
+    /// records a viewer identity (a real assignee from the dataset) so the
+    /// `--assignee=me` filter resolves offline.
+    #[cfg(feature = "fake")]
+    pub fn seed_sim(&self, size: usize) -> Result<SimSeed> {
+        let issues = u64::try_from(size).unwrap_or(u64::MAX);
+        let dataset = lt_storage::fake::Dataset {
+            issues,
+            comments: issues.saturating_mul(2),
+            users: issues.clamp(1, 20),
+            teams: issues.clamp(1, 3),
+        };
+        {
+            let mut storage = self.storage.lock().unwrap_or_else(PoisonError::into_inner);
+            lt_storage::fake::seed(&mut *storage, dataset)?;
         }
-        db::upsert_issues(&conn, &dataset.issues)?;
-        db::upsert_comments(&conn, &dataset.comments)?;
-        db::derive_team_memberships_from_issues(&conn)?;
+
+        let conn = self.connect()?;
         db::set_meta(&conn, "last_synced_at", &chrono::Utc::now().to_rfc3339())?;
-        if let Some(assignee) = dataset.issues.iter().find_map(|i| i.assignee.clone()) {
+
+        let page = db::query_issues(
+            &conn,
+            &lt_upstream::query::issues::IssuesVariables {
+                filter: None,
+                sort: None,
+                first: Some(250),
+                after: None,
+            },
+        )?;
+        if let Some(assignee) = page.nodes.iter().find_map(|i| i.assignee.clone()) {
             db::set_viewer(
                 &conn,
                 &viewer::Viewer {
-                    user: lt_types::types::User {
-                        id: assignee.id,
-                        name: assignee.name,
-                    },
+                    user: assignee,
                     organization: viewer::Organization {
                         id: String::new().into(),
                         name: String::new(),
@@ -474,9 +454,10 @@ impl Runtime {
                 },
             )?;
         }
+
         Ok(SimSeed {
-            issues: dataset.issues.len(),
-            comments: dataset.comments.len(),
+            issues: size,
+            comments: usize::try_from(dataset.comments).unwrap_or(usize::MAX),
         })
     }
 
@@ -494,7 +475,15 @@ impl Runtime {
     }
 }
 
-impl Runtime {
+/// `run`'s loop needs to hand `&self` to a spawned login-worker thread, so
+/// this block's bounds -- `S: Send` (for `Mutex<S>: Sync`), `T: Send + Sync`
+/// (the transport is read directly off `self`, not behind a `Mutex`) -- are
+/// exactly what `Runtime<S, T>: Sync` requires.
+impl<S, T> Runtime<S, T>
+where
+    S: Storage + Send,
+    T: Transport + Send + Sync,
+{
     /// Execute one action: a full/delta cycle updates `run`'s bookkeeping in
     /// place; a refresh and a login spawn are self-contained.
     fn perform<'scope>(
@@ -509,26 +498,6 @@ impl Runtime {
             Action::SpawnLogin => self.spawn_login(scope),
             Action::Drain => self.perform_drain(),
         }
-    }
-
-    /// `Action::Drain`'s body: run the drain, panic-guarded like a sync cycle
-    /// since it shares the same DB/network I/O on the loop thread.
-    fn perform_drain(&self) {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.drain_now())) {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!(error = %e, "immediate outbox drain failed"),
-            Err(_) => tracing::warn!("immediate outbox drain panicked"),
-        }
-    }
-
-    /// Run one cycle and fold its outcome into `run`'s pause bookkeeping,
-    /// then push the deadline out another interval.
-    fn run_cycle(&self, full: bool, run: &mut RunLoop) {
-        match self.cycle(full) {
-            CycleOutcome::NotAuthenticated => run.state.mark_not_authenticated(),
-            CycleOutcome::Done | CycleOutcome::Error => {}
-        }
-        run.deadline = Instant::now() + SYNC_INTERVAL;
     }
 
     /// Spawn the login worker on the loop's thread-scope: it runs the OAuth
@@ -591,6 +560,28 @@ impl Runtime {
             }
         });
     }
+}
+
+impl<S: Storage, T: Transport> Runtime<S, T> {
+    /// `Action::Drain`'s body: run the drain, panic-guarded like a sync cycle
+    /// since it shares the same DB/network I/O on the loop thread.
+    fn perform_drain(&self) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.drain_now())) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "immediate outbox drain failed"),
+            Err(_) => tracing::warn!("immediate outbox drain panicked"),
+        }
+    }
+
+    /// Run one cycle and fold its outcome into `run`'s pause bookkeeping,
+    /// then push the deadline out another interval.
+    fn run_cycle(&self, full: bool, run: &mut RunLoop) {
+        match self.cycle(full) {
+            CycleOutcome::NotAuthenticated => run.state.mark_not_authenticated(),
+            CycleOutcome::Done | CycleOutcome::Error => {}
+        }
+        run.deadline = Instant::now() + SYNC_INTERVAL;
+    }
 
     /// User-initiated: nudges the loop into an immediate full sync (the `r`
     /// key).
@@ -616,21 +607,32 @@ impl Runtime {
     }
 }
 
+impl Default for Runtime<Sqlite, RefreshingHttpTransport> {
+    /// The production runtime: the per-profile SQLite file, and a transport
+    /// that loads/refreshes the stored OAuth token on every call. `lt-cli`
+    /// still supplies its own `on_event`, so this exists for callers that
+    /// have none to report -- a no-op callback.
+    fn default() -> Self {
+        Self::new(Sqlite, RefreshingHttpTransport, Box::new(|_event| {}))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc as std_mpsc;
 
-    use lt_types::comments::{CommentCreateMutation, CommentCreateVariables};
-    use lt_types::inputs::{CommentCreateInput, IssueCreateInput};
-    use lt_types::issues::{
+    use lt_storage::db::Memory;
+    use lt_upstream::query::comments::{CommentCreateMutation, CommentCreateVariables};
+    use lt_upstream::query::inputs::{CommentCreateInput, IssueCreateInput};
+    use lt_upstream::query::issues::{
         IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
         IssuesQuery, IssuesVariables, sample_issue_node,
     };
-    use lt_types::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
-    use lt_types::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
-    use lt_types::teams::TeamsQuery;
-    use lt_types::types;
-    use lt_upstream::client::FakeTransport;
+    use lt_upstream::query::members::{TeamMembersQuery, TeamVariables as MembersTeamVariables};
+    use lt_upstream::query::states::{TeamStatesQuery, TeamVariables as StatesTeamVariables};
+    use lt_upstream::query::teams::TeamsQuery;
+    use lt_upstream::query::types;
+    use lt_upstream::transport::FakeTransport;
     use serde_json::json;
 
     use super::*;
@@ -736,12 +738,18 @@ mod tests {
         (on_event, rx)
     }
 
-    fn runtime_over(db: Database) -> (Runtime, std_mpsc::Receiver<RuntimeEvent>) {
+    /// A `Runtime` over an in-memory database and a scripted transport,
+    /// thread-free: nothing here calls `run`, so `FakeTransport` (`!Sync`)
+    /// can be used directly rather than wrapped for `Send + Sync`.
+    fn runtime_over(
+        db: Memory,
+        transport: FakeTransport,
+    ) -> (
+        Runtime<Memory, FakeTransport>,
+        std_mpsc::Receiver<RuntimeEvent>,
+    ) {
         let (on_event, rx) = on_event_channel();
-        (
-            Runtime::new(db, Box::new(HttpTransportSource), on_event),
-            rx,
-        )
+        (Runtime::new(db, transport, on_event), rx)
     }
 
     fn issues_vars() -> IssuesVariables {
@@ -755,7 +763,7 @@ mod tests {
 
     #[test]
     fn execute_reads_the_cache_synchronously() {
-        let db = Database::memory().unwrap();
+        let db = Memory::new().unwrap();
         {
             let conn = db.connect().unwrap();
             db::upsert_teams(
@@ -767,7 +775,7 @@ mod tests {
             )
             .unwrap();
         }
-        let (runtime, _rx) = runtime_over(db);
+        let (runtime, _rx) = runtime_over(db, FakeTransport::new(Vec::new()));
 
         let teams = runtime.execute::<TeamsQuery>(()).unwrap();
 
@@ -777,7 +785,7 @@ mod tests {
 
     #[test]
     fn create_issue_emits_update_and_a_reexecute_sees_it() {
-        let db = Database::memory().unwrap();
+        let db = Memory::new().unwrap();
         {
             let conn = db.connect().unwrap();
             // The team itself must already be cached (`enqueue_issue_create`
@@ -803,7 +811,7 @@ mod tests {
             )
             .unwrap();
         }
-        let (runtime, rx) = runtime_over(db);
+        let (runtime, rx) = runtime_over(db, FakeTransport::new(Vec::new()));
         assert!(
             runtime
                 .execute::<IssuesQuery>(issues_vars())
@@ -836,13 +844,13 @@ mod tests {
     #[test]
     fn create_comment_emits_update_and_a_reexecute_of_the_detail_sees_it() {
         let db = db_with_a_todo_issue("issue-1");
-        let (runtime, rx) = runtime_over(db);
-        let detail_vars = lt_types::detail::IssueDetailVariables {
+        let (runtime, rx) = runtime_over(db, FakeTransport::new(Vec::new()));
+        let detail_vars = lt_upstream::query::detail::IssueDetailVariables {
             id: "issue-1".to_string(),
         };
         assert!(
             runtime
-                .execute::<lt_types::detail::IssueDetailQuery>(detail_vars.clone())
+                .execute::<lt_upstream::query::detail::IssueDetailQuery>(detail_vars.clone())
                 .unwrap()
                 .unwrap()
                 .comments
@@ -863,7 +871,7 @@ mod tests {
         assert!(matches!(ev, RuntimeEvent::Update));
 
         let data = runtime
-            .execute::<lt_types::detail::IssueDetailQuery>(detail_vars)
+            .execute::<lt_upstream::query::detail::IssueDetailQuery>(detail_vars)
             .unwrap()
             .unwrap();
         assert_eq!(data.comments.len(), 1);
@@ -875,12 +883,12 @@ mod tests {
         // `Update` is unscoped: it carries no entity id, so any write's
         // signal is indistinguishable from any other's.
         let db = db_with_a_todo_issue("issue-1");
-        let (runtime, rx) = runtime_over(db);
+        let (runtime, rx) = runtime_over(db, FakeTransport::new(Vec::new()));
 
         let updated = runtime
             .execute::<IssueUpdateMutation>(IssueUpdateVariables {
                 id: "issue-1".to_string(),
-                input: lt_types::inputs::IssueUpdateInput {
+                input: lt_upstream::query::inputs::IssueUpdateInput {
                     priority: Some(1),
                     ..Default::default()
                 },
@@ -894,35 +902,6 @@ mod tests {
 
     // -- Runtime::refresh: one-shot upstream freshness --------------------
 
-    struct FakeGraphql(Arc<Mutex<FakeTransport>>);
-
-    impl GraphqlTransport for FakeGraphql {
-        fn query(&self, query: &str, variables: serde_json::Value) -> Result<serde_json::Value> {
-            self.0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .query(query, variables)
-        }
-    }
-
-    // `FakeTransport` is `!Sync` (its scripted queue is a `RefCell`); a
-    // `Mutex` around the shared transport gives `FakeSource` the
-    // `Send + Sync` `TransportSource` requires without changing
-    // `FakeTransport` itself.
-    struct FakeSource(Arc<Mutex<FakeTransport>>);
-
-    impl FakeSource {
-        fn new(transport: FakeTransport) -> Self {
-            Self(Arc::new(Mutex::new(transport)))
-        }
-    }
-
-    impl TransportSource for FakeSource {
-        fn acquire(&self) -> Result<Box<dyn GraphqlTransport>> {
-            Ok(Box::new(FakeGraphql(Arc::clone(&self.0))))
-        }
-    }
-
     /// A single scripted `team.states` page, shared by every test that drives
     /// a `TeamStatesQuery` refresh.
     fn team_states_page_transport() -> FakeTransport {
@@ -933,13 +912,9 @@ mod tests {
 
     #[test]
     fn refresh_runs_the_thunk_and_emits_update() {
-        let db = Database::memory().unwrap();
+        let db = Memory::new().unwrap();
         let (on_event, rx) = on_event_channel();
-        let runtime = Runtime::new(
-            db,
-            Box::new(FakeSource::new(team_states_page_transport())),
-            on_event,
-        );
+        let runtime = Runtime::new(db, team_states_page_transport(), on_event);
         let commands_rx = runtime.take_commands_rx().unwrap();
 
         runtime.refresh::<TeamStatesQuery>(StatesTeamVariables {
@@ -962,12 +937,12 @@ mod tests {
 
     #[test]
     fn team_members_refresh_runs_the_thunk_and_emits_update() {
-        let db = Database::memory().unwrap();
+        let db = Memory::new().unwrap();
         let fake = FakeTransport::new(vec![json!({ "team": { "members": { "nodes": [
             { "id": "u1", "name": "Ada" }
         ] } } })]);
         let (on_event, rx) = on_event_channel();
-        let runtime = Runtime::new(db, Box::new(FakeSource::new(fake)), on_event);
+        let runtime = Runtime::new(db, fake, on_event);
         let commands_rx = runtime.take_commands_rx().unwrap();
 
         runtime.refresh::<TeamMembersQuery>(MembersTeamVariables {
@@ -990,21 +965,21 @@ mod tests {
 
     #[test]
     fn viewer_refresh_runs_the_thunk_and_emits_update() {
-        let db = Database::memory().unwrap();
+        let db = Memory::new().unwrap();
         let fake = FakeTransport::new(vec![json!({
             "viewer": { "id": "u1", "name": "Ada", "organization": { "id": "o1", "name": "Acme", "urlKey": "acme" } }
         })]);
         let (on_event, rx) = on_event_channel();
-        let runtime = Runtime::new(db, Box::new(FakeSource::new(fake)), on_event);
+        let runtime = Runtime::new(db, fake, on_event);
         let commands_rx = runtime.take_commands_rx().unwrap();
         assert!(
             runtime
-                .execute::<lt_types::viewer::ViewerQuery>(())
+                .execute::<lt_upstream::query::viewer::ViewerQuery>(())
                 .unwrap()
                 .is_none()
         );
 
-        runtime.refresh::<lt_types::viewer::ViewerQuery>(());
+        runtime.refresh::<lt_upstream::query::viewer::ViewerQuery>(());
         let Ok(Command::Refresh(id)) = commands_rx.try_recv() else {
             unreachable!("expected a Refresh command");
         };
@@ -1014,7 +989,7 @@ mod tests {
         assert!(matches!(ev, RuntimeEvent::Update));
         assert_eq!(
             runtime
-                .execute::<lt_types::viewer::ViewerQuery>(())
+                .execute::<lt_upstream::query::viewer::ViewerQuery>(())
                 .unwrap()
                 .unwrap()
                 .user
@@ -1042,11 +1017,7 @@ mod tests {
     #[test]
     fn sync_full_upserts_issues_and_stamps_last_synced_at() {
         let (on_event, _rx) = on_event_channel();
-        let runtime = Runtime::new(
-            Database::memory().unwrap(),
-            Box::new(FakeSource::new(full_sync_transport())),
-            on_event,
-        );
+        let runtime = Runtime::new(Memory::new().unwrap(), full_sync_transport(), on_event);
 
         runtime.sync_full().unwrap();
 
@@ -1058,11 +1029,7 @@ mod tests {
     #[test]
     fn sync_delta_falls_back_to_full_before_any_prior_sync() {
         let (on_event, _rx) = on_event_channel();
-        let runtime = Runtime::new(
-            Database::memory().unwrap(),
-            Box::new(FakeSource::new(full_sync_transport())),
-            on_event,
-        );
+        let runtime = Runtime::new(Memory::new().unwrap(), full_sync_transport(), on_event);
 
         runtime.sync_delta().unwrap();
 
@@ -1073,12 +1040,12 @@ mod tests {
 
     // -- seed_sim: the deterministic offline dataset -----------------------
 
-    #[cfg(feature = "sim")]
+    #[cfg(feature = "fake")]
     #[test]
     fn seed_sim_populates_issues_and_stamps_meta() {
-        let (runtime, _rx) = runtime_over(Database::memory().unwrap());
+        let (runtime, _rx) = runtime_over(Memory::new().unwrap(), FakeTransport::new(Vec::new()));
 
-        let summary = runtime.seed_sim(0, 10).unwrap();
+        let summary = runtime.seed_sim(10).unwrap();
 
         assert_eq!(summary.issues, 10);
         let conn = runtime.connect().unwrap();
@@ -1092,8 +1059,8 @@ mod tests {
     /// `sample_base_issue`'s state must be locally known (sync owns workflow
     /// states; issue upserts never write them), so the read model's join
     /// resolves it.
-    fn db_with_a_todo_issue(id: &str) -> Database {
-        let db = Database::memory().unwrap();
+    fn db_with_a_todo_issue(id: &str) -> Memory {
+        let db = Memory::new().unwrap();
         let conn = db.connect().unwrap();
         db::upsert_team_state(
             &conn,
@@ -1109,11 +1076,11 @@ mod tests {
         db
     }
 
-    fn update_priority_to_urgent(runtime: &Runtime, id: &str) {
+    fn update_priority_to_urgent<T: Transport>(runtime: &Runtime<Memory, T>, id: &str) {
         runtime
             .execute::<IssueUpdateMutation>(IssueUpdateVariables {
                 id: id.to_string(),
-                input: lt_types::inputs::IssueUpdateInput {
+                input: lt_upstream::query::inputs::IssueUpdateInput {
                     priority: Some(1),
                     ..Default::default()
                 },
@@ -1123,7 +1090,10 @@ mod tests {
 
     #[test]
     fn update_issue_sends_a_drain_command() {
-        let (runtime, _rx) = runtime_over(db_with_a_todo_issue("issue-1"));
+        let (runtime, _rx) = runtime_over(
+            db_with_a_todo_issue("issue-1"),
+            FakeTransport::new(Vec::new()),
+        );
         let commands_rx = runtime.take_commands_rx().unwrap();
 
         update_priority_to_urgent(&runtime, "issue-1");
@@ -1137,11 +1107,7 @@ mod tests {
             json!({ "issueUpdate": { "success": true, "issue": null } }),
         ]);
         let (on_event, rx) = on_event_channel();
-        let runtime = Runtime::new(
-            db_with_a_todo_issue("issue-1"),
-            Box::new(FakeSource::new(fake)),
-            on_event,
-        );
+        let runtime = Runtime::new(db_with_a_todo_issue("issue-1"), fake, on_event);
 
         update_priority_to_urgent(&runtime, "issue-1");
         // The optimistic overlay's own `Update`, from `execute` itself.
@@ -1174,11 +1140,7 @@ mod tests {
         // No scripted responses: the transport errors, simulating offline.
         let fake = FakeTransport::new(vec![]);
         let (on_event, rx) = on_event_channel();
-        let runtime = Runtime::new(
-            db_with_a_todo_issue("issue-1"),
-            Box::new(FakeSource::new(fake)),
-            on_event,
-        );
+        let runtime = Runtime::new(db_with_a_todo_issue("issue-1"), fake, on_event);
 
         update_priority_to_urgent(&runtime, "issue-1");
         // The optimistic overlay's own `Update`.

@@ -1,6 +1,6 @@
 //! The vocabulary the [`crate::Runtime`] reports to its consumer (the TUI).
 
-use lt_types::viewer;
+use lt_upstream::query::viewer;
 
 /// Everything the runtime reports, delivered through the [`OnEvent`] callback
 /// the runtime is constructed with.
