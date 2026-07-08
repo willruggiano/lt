@@ -1,20 +1,16 @@
 //! Shared helpers for GraphQL-schema-driven codegen.
 //!
-//! Called from `lt-types/build.rs` and `lt-storage/build.rs`, which are thin
-//! drivers: resolve paths, load the allowlist, call the codegen functions
-//! here, write the results to `OUT_DIR`.
+//! Called from `lt-upstream/build.rs` and `lt-storage/build.rs`, which are
+//! thin drivers: resolve paths, load the field specs, call the codegen
+//! functions here, write the results to `OUT_DIR`.
 
 // Build scripts report failure by panicking, which is idiomatic and cannot
 // propagate a `Result`; this crate exists only to be called from build
 // scripts, so the same exemption applies here.
 #![allow(clippy::panic)]
 
-use std::collections::HashMap;
-
-use graphql_parser::schema::{Definition, Document, TypeDefinition};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use serde::Deserialize;
 
 pub mod affinity;
 pub mod classify;
@@ -23,140 +19,32 @@ pub mod emit_grammar;
 pub mod emit_sql;
 pub mod ref_fragment;
 pub mod schema_model;
+pub mod search_fields;
 pub mod selection_model;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct SortFieldSpec {
     /// Sort key as typed by the user after "sort:" (e.g. "updated").
     pub key: String,
-    /// Field name inside `IssueSortInput` (schema-validated).
+    /// Field name inside `IssueSortInput`.
     pub gql_field: String,
     /// SQLite column name used in ORDER BY clauses. Not read by either build
     /// script: `lt-storage/src/db/filters.rs::sort_column` maps sort fields
     /// to registered `SortCol` consts by hand (type-safe-sql-adr.md), and
-    /// this field is kept only so the TOML documents that mapping for humans.
+    /// this field documents that mapping for humans.
     pub sql_col: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct FieldSpec {
     /// Stem key as typed by the user (e.g. "assignee").
     pub key: String,
-    /// Field name inside `IssueFilter` (schema-validated).
+    /// Field name inside `IssueFilter`.
     pub gql_field: String,
-    /// Expected base GraphQL type name (schema-validated).
+    /// Expected base GraphQL type name.
     pub gql_type: String,
-}
-
-/// The `search_filter_fields.toml` allowlist, shared by both build scripts.
-/// `lt-types/build.rs` reads only `sort_field`; `lt-storage/build.rs` reads
-/// both.
-#[derive(Debug, Deserialize)]
-pub struct AllowlistConfig {
-    pub field: Vec<FieldSpec>,
-    #[serde(default)]
-    pub sort_field: Vec<SortFieldSpec>,
-}
-
-/// Recursively unwrap NonNull/List wrappers and return the base named type.
-fn base_type_name<'a>(ty: &'a graphql_parser::schema::Type<'a, String>) -> &'a str {
-    use graphql_parser::schema::Type;
-    match ty {
-        Type::NamedType(name) => name.as_str(),
-        Type::NonNullType(inner) | Type::ListType(inner) => base_type_name(inner),
-    }
-}
-
-/// Parse the GraphQL schema and return a map of `input_type`'s field names to
-/// their base type names.
-pub fn extract_input_object_fields(schema_src: &str, input_type: &str) -> HashMap<String, String> {
-    let doc: Document<String> = graphql_parser::parse_schema(schema_src)
-        .unwrap_or_else(|e| panic!("Failed to parse GraphQL schema: {e}"));
-
-    for def in &doc.definitions {
-        if let Definition::TypeDefinition(TypeDefinition::InputObject(input)) = def
-            && input.name == input_type
-        {
-            let mut map = HashMap::new();
-            for field in &input.fields {
-                let base = base_type_name(&field.value_type).to_string();
-                map.insert(field.name.clone(), base);
-            }
-            return map;
-        }
-    }
-
-    panic!("{input_type} input type not found in the GraphQL schema");
-}
-
-/// Validate every `[[sort_field]]` entry against `IssueSortInput` in the schema
-/// and require at least one entry so the generated `SortField` enum is
-/// non-empty. Panics (build-script convention) on any mismatch.
-// Internal build-time helper with exactly two callers, both passing the map
-// returned by `extract_input_object_fields` (default-hasher `HashMap`);
-// generalizing over `BuildHasher` adds no real value here.
-#[allow(clippy::implicit_hasher)]
-pub fn validate_sort_fields(
-    sort_fields: &[SortFieldSpec],
-    issue_sort_input_fields: &HashMap<String, String>,
-) {
-    let mut errors: Vec<String> = Vec::new();
-    for spec in sort_fields {
-        if !issue_sort_input_fields.contains_key(&spec.gql_field) {
-            errors.push(format!(
-                "  sort_field key '{}': field '{}' does not exist in IssueSortInput",
-                spec.key, spec.gql_field
-            ));
-        }
-    }
-
-    assert!(
-        errors.is_empty(),
-        "build.rs: sort_field validation failed against IssueSortInput schema:\n{}\n\
-         Fix [[sort_field]] entries in build/search_filter_fields.toml.",
-        errors.join("\n")
-    );
-
-    assert!(
-        !sort_fields.is_empty(),
-        "build.rs: [[sort_field]] list in search_filter_fields.toml is empty"
-    );
-}
-
-/// Validate every `[[field]]` entry against `IssueFilter` in the schema: the
-/// `gql_field` must exist, and its schema type must match the declared
-/// `gql_type`. Panics (build-script convention) on any mismatch.
-#[allow(clippy::implicit_hasher)]
-pub fn validate_filter_fields(fields: &[FieldSpec], issue_filter_fields: &HashMap<String, String>) {
-    let mut errors: Vec<String> = Vec::new();
-    for spec in fields {
-        match issue_filter_fields.get(&spec.gql_field) {
-            None => {
-                errors.push(format!(
-                    "  allowlist key '{}': field '{}' does not exist in IssueFilter",
-                    spec.key, spec.gql_field
-                ));
-            }
-            Some(actual_type) => {
-                if actual_type != &spec.gql_type {
-                    errors.push(format!(
-                        "  allowlist key '{}': field '{}' has type '{}' in the schema \
-                         but the allowlist declares '{}'",
-                        spec.key, spec.gql_field, actual_type, spec.gql_type
-                    ));
-                }
-            }
-        }
-    }
-
-    assert!(
-        errors.is_empty(),
-        "build.rs: allowlist validation failed against IssueFilter schema:\n{}\n\
-         Fix build/search_filter_fields.toml or update the GraphQL schema snapshot.",
-        errors.join("\n")
-    );
 }
 
 /// Convert a lowercase key to `PascalCase` for use as an enum variant name.
@@ -178,7 +66,7 @@ pub fn to_pascal_case(s: &str) -> String {
 
 /// Generate the `SortField` enum with `label()`, `from_key()`, and `next()`.
 ///
-/// Variants are in TOML order.  `label()` returns the user-facing key string.
+/// Variants are in spec order.  `label()` returns the user-facing key string.
 /// `next()` cycles through variants in order, wrapping around.
 // Build-script-only helper: `validate_sort_fields` already asserted the list
 // is non-empty before this is called, so these `.expect()`s cannot fire.
@@ -223,8 +111,8 @@ pub fn gen_sort_field_enum(sort_fields: &[SortFieldSpec]) -> TokenStream {
     quote! {
         /// A sort field for the issues list.
         ///
-        /// Generated from `[[sort_field]]` entries in `build/search_filter_fields.toml`
-        /// by build.rs (bd-2w5). Do not edit by hand.
+        /// Generated from `lt_schema_codegen::search_fields::sort_fields()` by
+        /// build.rs (bd-2w5). Do not edit by hand.
         ///
         /// Kept clap-free so the data layer carries no CLI-parsing dependency;
         /// the `lt-cli` argument parser maps strings via [`SortField::from_key`].
@@ -288,8 +176,8 @@ pub fn gen_build_sort(sort_fields: &[SortFieldSpec]) -> TokenStream {
     quote! {
         /// Build the Linear GraphQL `sort` argument JSON for the given field and direction.
         ///
-        /// Generated from `[[sort_field]]` entries in `build/search_filter_fields.toml`
-        /// by build.rs (bd-2w5). Do not edit by hand.
+        /// Generated from `lt_schema_codegen::search_fields::sort_fields()` by
+        /// build.rs (bd-2w5). Do not edit by hand.
         pub fn build_sort(field: &SortField, desc: bool) -> serde_json::Value {
             let order = if desc { "Descending" } else { "Ascending" };
             let field_key = match field {
@@ -347,7 +235,7 @@ pub fn gen_parse_sort_value(sort_fields: &[SortFieldSpec]) -> TokenStream {
 // Code generation (quote-based) -- filter stems
 // ---------------------------------------------------------------------------
 
-/// `PascalCase` enum-variant idents, one per TOML field (in order).
+/// `PascalCase` enum-variant idents, one per field spec (in order).
 fn field_variants(fields: &[FieldSpec]) -> Vec<proc_macro2::Ident> {
     fields
         .iter()
@@ -357,7 +245,7 @@ fn field_variants(fields: &[FieldSpec]) -> Vec<proc_macro2::Ident> {
 
 /// Generate the `StemKey` enum.
 ///
-/// One variant per TOML field (in order) plus the hard-coded Sort variant.
+/// One variant per field spec (in order) plus the hard-coded Sort variant.
 pub fn gen_stem_key_enum(fields: &[FieldSpec]) -> TokenStream {
     let variants = field_variants(fields);
 
@@ -373,7 +261,7 @@ pub fn gen_stem_key_enum(fields: &[FieldSpec]) -> TokenStream {
 
 /// Generate the `StemKind` enum.
 ///
-/// Sort carries (field, dir); every TOML field carries a String value.
+/// Sort carries (field, dir); every field spec carries a String value.
 pub fn gen_stem_kind_enum(fields: &[FieldSpec]) -> TokenStream {
     let variants = field_variants(fields);
 
@@ -407,7 +295,7 @@ pub fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
         v
     };
 
-    // Build match arms for each TOML field.
+    // Build match arms for each field spec.
     let toml_arms = fields.iter().map(|f| {
         let key_str = &f.key;
         let variant = format_ident!("{}", to_pascal_case(key_str));
@@ -661,88 +549,12 @@ pub fn format_generated(header: &str, tokens: TokenStream) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FieldSpec, SortFieldSpec, extract_input_object_fields, to_pascal_case,
-        validate_filter_fields, validate_sort_fields,
-    };
+    use super::to_pascal_case;
 
     #[test]
     fn to_pascal_case_converts_snake_and_kebab_case() {
         assert_eq!(to_pascal_case("updated_at"), "UpdatedAt");
         assert_eq!(to_pascal_case("foo-bar"), "FooBar");
         assert_eq!(to_pascal_case("title"), "Title");
-    }
-
-    const SCHEMA: &str = r"
-        input IssueSortInput {
-            createdAt: DateTime
-            title: [String!]!
-        }
-
-        input IssueFilter {
-            assignee: NullableUserFilter
-        }
-    ";
-
-    #[test]
-    fn extract_input_object_fields_unwraps_nonnull_and_list() {
-        let fields = extract_input_object_fields(SCHEMA, "IssueSortInput");
-        assert_eq!(
-            fields.get("createdAt").map(String::as_str),
-            Some("DateTime")
-        );
-        assert_eq!(fields.get("title").map(String::as_str), Some("String"));
-    }
-
-    fn spec(key: &str, gql_field: &str) -> SortFieldSpec {
-        SortFieldSpec {
-            key: key.to_string(),
-            gql_field: gql_field.to_string(),
-            sql_col: "col".to_string(),
-        }
-    }
-
-    #[test]
-    fn validate_sort_fields_accepts_known_fields() {
-        let fields = extract_input_object_fields(SCHEMA, "IssueSortInput");
-        validate_sort_fields(&[spec("updated", "createdAt")], &fields);
-    }
-
-    #[test]
-    #[should_panic(expected = "does not exist in IssueSortInput")]
-    fn validate_sort_fields_panics_on_unknown_gql_field() {
-        let fields = extract_input_object_fields(SCHEMA, "IssueSortInput");
-        validate_sort_fields(&[spec("bogus", "nope")], &fields);
-    }
-
-    fn field_spec(key: &str, gql_field: &str, gql_type: &str) -> FieldSpec {
-        FieldSpec {
-            key: key.to_string(),
-            gql_field: gql_field.to_string(),
-            gql_type: gql_type.to_string(),
-        }
-    }
-
-    #[test]
-    fn validate_filter_fields_accepts_known_fields() {
-        let fields = extract_input_object_fields(SCHEMA, "IssueFilter");
-        validate_filter_fields(
-            &[field_spec("assignee", "assignee", "NullableUserFilter")],
-            &fields,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "does not exist in IssueFilter")]
-    fn validate_filter_fields_panics_on_unknown_gql_field() {
-        let fields = extract_input_object_fields(SCHEMA, "IssueFilter");
-        validate_filter_fields(&[field_spec("bogus", "nope", "String")], &fields);
-    }
-
-    #[test]
-    #[should_panic(expected = "has type")]
-    fn validate_filter_fields_panics_on_type_mismatch() {
-        let fields = extract_input_object_fields(SCHEMA, "IssueFilter");
-        validate_filter_fields(&[field_spec("assignee", "assignee", "String")], &fields);
     }
 }

@@ -209,9 +209,9 @@ pub fn to_camel_case(s: &str) -> String {
 mod tests {
     use super::{parse_fragments, to_camel_case};
 
-    // Mirrors `lt-types/src/types.rs:80-99` (the `Issue` fragment), plus a
-    // rename-covering struct and a non-`QueryFragment` struct to prove it is
-    // ignored.
+    // Mirrors `lt-upstream/src/query/types.rs:80-99` (the `Issue` fragment),
+    // plus a rename-covering struct and a non-`QueryFragment` struct to prove
+    // it is ignored.
     const FIXTURE: &str = r#"
         #[derive(Deserialize)]
         pub struct GraphqlResponse<T> {

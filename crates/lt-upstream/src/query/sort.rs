@@ -3,8 +3,8 @@
 
 use anyhow::{Result, anyhow};
 
-// SortField (label/from_key/next) -- generated from [[sort_field]] entries in
-// build/search_filter_fields.toml by build.rs (bd-2w5).
+// SortField (label/from_key/next) -- generated from
+// lt_schema_codegen::search_fields::sort_fields() by build.rs (bd-2w5).
 include!(concat!(env!("OUT_DIR"), "/sort_field.rs"));
 
 // build_sort(&SortField, desc) -> serde_json::Value -- generated (bd-2w5).

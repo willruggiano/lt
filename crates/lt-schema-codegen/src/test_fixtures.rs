@@ -2,8 +2,9 @@
 //! `emit_sql`) and `ref_fragment`: the real `Issue` fragment and its SDL, kept
 //! in one place so it is not duplicated per test module (`cpd`/`cargo dupes`).
 //!
-//! Mirrors `crates/lt-types/src/types.rs:21-99`: the `Issue` fragment and its
-//! `Parent`/`WorkflowState`/`Team`/`IssueLabelConnection` dependencies.
+//! Mirrors `crates/lt-upstream/src/query/types.rs:21-99`: the `Issue`
+//! fragment and its `Parent`/`WorkflowState`/`Team`/`IssueLabelConnection`
+//! dependencies.
 
 use std::collections::BTreeSet;
 

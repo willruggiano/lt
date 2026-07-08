@@ -2,8 +2,8 @@
 //! its SQLite column affinity.
 //!
 //! Keyed on the Rust type, not the GraphQL type: this is what lets `Priority`
-//! (GraphQL `Float`, backed by `u8` -- `lt-types/src/scalars.rs`) resolve to
-//! `Integer` rather than `Real`.
+//! (GraphQL `Float`, backed by `u8` -- `lt-upstream/src/query/scalars.rs`)
+//! resolve to `Integer` rather than `Real`.
 //!
 //! Fails closed (build-time panic, per this crate's build-script convention)
 //! on any type name the table does not list.

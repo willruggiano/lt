@@ -9,9 +9,8 @@ use std::{env, fs};
 use lt_schema_codegen::schema_model::{Schema, TypeKind};
 use lt_schema_codegen::selection_model::{Fragment, parse_fragments};
 use lt_schema_codegen::{
-    AllowlistConfig, classify, emit_ddl, emit_sql, extract_input_object_fields, format_generated,
-    gen_parse_sort_value, gen_parser_fn, gen_stem_key_enum, gen_stem_kind_enum,
-    validate_filter_fields, validate_sort_fields,
+    classify, emit_ddl, emit_sql, format_generated, gen_parse_sort_value, gen_parser_fn,
+    gen_stem_key_enum, gen_stem_kind_enum, search_fields,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -26,26 +25,7 @@ fn main() {
     // Tell cargo to re-run this script when these files change.
     println!("cargo:rerun-if-changed={}", schema_path.display());
     println!("cargo:rerun-if-changed={}", fragments_path.display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        manifest
-            .join("../../build/search_filter_fields.toml")
-            .display()
-    );
     println!("cargo:rerun-if-changed=build.rs");
-
-    // -----------------------------------------------------------------------
-    // Load the allowlist
-    // -----------------------------------------------------------------------
-    let toml_path = manifest.join("../../build/search_filter_fields.toml");
-    let toml_src = fs::read_to_string(&toml_path)
-        .unwrap_or_else(|e| panic!("Cannot read allowlist at {}: {e}", toml_path.display()));
-    let config: AllowlistConfig = toml::from_str(&toml_src).unwrap_or_else(|e| {
-        panic!(
-            "Failed to parse allowlist TOML at {}: {e}",
-            toml_path.display()
-        )
-    });
 
     // -----------------------------------------------------------------------
     // Load and parse the GraphQL schema
@@ -56,26 +36,17 @@ fn main() {
             schema_path.display()
         )
     });
-    let issue_filter_fields = extract_input_object_fields(&schema_src, "IssueFilter");
-    let issue_sort_input_fields = extract_input_object_fields(&schema_src, "IssueSortInput");
-
-    // -----------------------------------------------------------------------
-    // Validate every filter allowlist entry against the schema
-    // -----------------------------------------------------------------------
-    validate_filter_fields(&config.field, &issue_filter_fields);
-    validate_sort_fields(&config.sort_field, &issue_sort_input_fields);
-
-    let sort_fields = &config.sort_field;
 
     // -----------------------------------------------------------------------
     // Generate search_stems.rs
     // -----------------------------------------------------------------------
-    let fields = &config.field;
+    let fields = search_fields::filter_fields();
+    let sort_fields = search_fields::sort_fields();
 
-    let stem_key_enum = gen_stem_key_enum(fields);
-    let stem_kind_enum = gen_stem_kind_enum(fields);
-    let parse_sort_value_fn = gen_parse_sort_value(sort_fields);
-    let parser_fn = gen_parser_fn(fields);
+    let stem_key_enum = gen_stem_key_enum(&fields);
+    let stem_kind_enum = gen_stem_kind_enum(&fields);
+    let parse_sort_value_fn = gen_parse_sort_value(&sort_fields);
+    let parser_fn = gen_parser_fn(&fields);
 
     // Combine all fragments into a single TokenStream.
     // parse_sort_value must come before parser_fn, which calls it.

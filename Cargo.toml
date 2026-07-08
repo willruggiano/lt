@@ -22,7 +22,6 @@ lt-runtime = { path = "crates/lt-runtime" }
 lt-schema-codegen = { path = "crates/lt-schema-codegen" }
 lt-storage = { path = "crates/lt-storage" }
 lt-tui = { path = "crates/lt-tui" }
-lt-types = { path = "crates/lt-types" }
 lt-upstream = { path = "crates/lt-upstream" }
 open = "5"
 rand = "0.10"

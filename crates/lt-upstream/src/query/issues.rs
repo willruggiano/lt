@@ -2,9 +2,9 @@
 //! modelled as cynic `QueryFragment`s. These are the shared "currency" types;
 //! the fetch/replay lives in `lt-upstream`.
 //!
-//! [`IssueFilter`]/[`IssueSort`] are the typed, allowlisted filter/sort the
-//! build validates against the schema (`build/search_filter_fields.toml`).
-//! [`IssueFilter`] lowers to [`IssueFilterInput`] -- cynic `InputObject`s
+//! [`IssueFilter`]/[`IssueSort`] are the typed, allowlisted filter/sort keys
+//! (`lt_schema_codegen::search_fields`). [`IssueFilter`] lowers to
+//! [`IssueFilterInput`] -- cynic `InputObject`s
 //! mirroring the allowlisted subset of Linear's own `IssueFilter` shape --
 //! whose derived `Serialize` produces the wire JSON; `IssueSort`'s `Serialize`
 //! produces the wire `[IssueSortInput!]` JSON directly. `lt-storage` lowers

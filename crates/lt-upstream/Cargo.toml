@@ -25,7 +25,6 @@ chrono = { workspace = true, features = ["serde"] }
 [build-dependencies]
 cynic-codegen = { version = "3.13", features = ["rkyv"] }
 lt-schema-codegen.workspace = true
-toml = "1"
 
 [dev-dependencies]
 chrono.workspace = true
