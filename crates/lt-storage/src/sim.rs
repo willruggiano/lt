@@ -9,7 +9,7 @@ use fake::Fake;
 use fake::faker::company::en::{BsNoun, BsVerb, Buzzword, Industry};
 use fake::faker::lorem::en::{Paragraph, Sentence, Word};
 use fake::faker::name::en::Name;
-use lt_types::types;
+use lt_upstream::query::types;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
@@ -33,7 +33,7 @@ const BASE_SECS: i64 = 1_767_225_600;
 #[derive(PartialEq)]
 pub struct Dataset {
     pub issues: Vec<types::Issue>,
-    pub comments: Vec<lt_types::comments::Comment>,
+    pub comments: Vec<lt_upstream::query::comments::Comment>,
 }
 
 /// Uppercase the first character of `s`.
@@ -124,14 +124,19 @@ impl Generator {
 
     /// A `(created_at, updated_at)` pair where `updated_at >= created_at`,
     /// both within ~190 days of the fixed base.
-    fn timestamps(&mut self) -> (lt_types::scalars::DateTime, lt_types::scalars::DateTime) {
+    fn timestamps(
+        &mut self,
+    ) -> (
+        lt_upstream::query::scalars::DateTime,
+        lt_upstream::query::scalars::DateTime,
+    ) {
         let created = self.rng.random_range(0..15_552_000i64); // up to 180 days
         let updated = created + self.rng.random_range(0..864_000i64); // up to +10 days
         let c = self.base + Duration::seconds(created);
         let u = self.base + Duration::seconds(updated);
         (
-            lt_types::scalars::DateTime(c),
-            lt_types::scalars::DateTime(u),
+            lt_upstream::query::scalars::DateTime(c),
+            lt_upstream::query::scalars::DateTime(u),
         )
     }
 
@@ -263,7 +268,7 @@ impl Generator {
             id: format!("sim-{:016x}-{index}", self.seed).into(),
             identifier,
             title,
-            priority: lt_types::scalars::Priority(priority),
+            priority: lt_upstream::query::scalars::Priority(priority),
             // The team id is its key; entity ids mirror names so renamed-to-same
             // values collapse to one row in the relational base.
             state: types::WorkflowState {
@@ -294,14 +299,14 @@ impl Generator {
         }
     }
 
-    fn comments_for(&mut self, issue: &types::Issue) -> Vec<lt_types::comments::Comment> {
+    fn comments_for(&mut self, issue: &types::Issue) -> Vec<lt_upstream::query::comments::Comment> {
         let n = self.rng.random_range(0..4usize);
         let mut out = Vec::with_capacity(n);
         for c in 0..n {
             let (created_at, updated_at) = self.timestamps();
             let body: String = Sentence(8..18).fake_with_rng(&mut self.rng);
             let author = self.name();
-            out.push(lt_types::comments::Comment {
+            out.push(lt_upstream::query::comments::Comment {
                 id: format!("{}-c{c}", issue.id.inner()).into(),
                 body,
                 created_at,
@@ -360,6 +365,7 @@ mod tests {
 
     use super::*;
     use crate::db;
+    use crate::db::Storage;
 
     #[test]
     fn same_seed_is_deterministic() {
@@ -413,7 +419,7 @@ mod tests {
     #[test]
     fn round_trips_through_sqlite() {
         let d = generate(5, 30);
-        let database = crate::db::Database::memory().unwrap();
+        let database = crate::db::Memory::new().unwrap();
         let conn = database.connect().unwrap();
         for (team_id, state) in derive_workflow_states(&d.issues) {
             db::upsert_team_state(&conn, &team_id, &state).unwrap();
@@ -421,7 +427,7 @@ mod tests {
         db::upsert_issues(&conn, &d.issues).unwrap();
         db::upsert_comments(&conn, &d.comments).unwrap();
         // sanity: relational base reconstructs the rows.
-        let vars = lt_types::issues::IssuesVariables {
+        let vars = lt_upstream::query::issues::IssuesVariables {
             filter: None,
             sort: None,
             first: Some(250),

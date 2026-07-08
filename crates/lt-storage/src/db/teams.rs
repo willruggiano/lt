@@ -5,14 +5,15 @@
 //! `state_id` always references an already-known row.
 
 use anyhow::{Context, Result};
-use lt_types::types;
-use lt_types::types::{User, WorkflowState};
+use lt_upstream::query::types;
+use lt_upstream::query::types::{User, WorkflowState};
 use rusqlite::{Connection, params};
 
-use crate::db::sql::{self, EntityTable, Sql};
+use crate::db::crud::Insert;
+use crate::db::sql::{self, Sql};
 
-/// Ensure a skeleton team row exists (id only) so a team-scoped state FK
-/// holds; a later [`upsert_teams`] names it.
+/// Ensure a skeleton team row exists (empty-string placeholder name) so a
+/// team-scoped state FK holds; a later [`upsert_teams`] names it.
 pub(crate) fn mint_team(conn: &Connection, id: &str) -> Result<()> {
     sql::execute(conn, sql::MINT_TEAM, params![id], "mint team skeleton")
 }
@@ -31,21 +32,15 @@ pub fn upsert_team_state(conn: &Connection, team_id: &str, state: &WorkflowState
 }
 
 /// Generates `pub fn $fn_name(conn, entities: &[$ty]) -> Result<()>`,
-/// upserting each entity's `(id, name)` into `$table`. A declarative macro
-/// rather than a shared generic helper, so the near-identical typed wrappers
-/// ([`upsert_teams`], [`upsert_users`]) don't trip `cargo dupes` -- the same
-/// reason `sql::entity_upsert_sql!` exists.
+/// upserting each entity via its generated [`Insert`] impl. A declarative
+/// macro rather than a shared generic helper, so the near-identical typed
+/// wrappers ([`upsert_teams`], [`upsert_users`]) don't trip `cargo dupes`.
 macro_rules! upsert_entities_fn {
-    ($fn_name:ident, $doc:expr, $table:expr, $ty:ty) => {
+    ($fn_name:ident, $doc:expr, $ty:ty) => {
         #[doc = $doc]
         pub fn $fn_name(conn: &Connection, entities: &[$ty]) -> Result<()> {
             for entity in entities {
-                crate::db::issues::upsert_named_entity(
-                    conn,
-                    $table,
-                    entity.id.inner(),
-                    Some(&entity.name),
-                )?;
+                entity.insert(conn)?;
             }
             Ok(())
         }
@@ -55,13 +50,11 @@ macro_rules! upsert_entities_fn {
 upsert_entities_fn!(
     upsert_teams,
     "Upsert fetched teams into the `teams` table.",
-    EntityTable::Teams,
     types::Team
 );
 upsert_entities_fn!(
     upsert_users,
     "Upsert fetched users into the `users` table, so a team-membership join resolves names.",
-    EntityTable::Users,
     types::User
 );
 
@@ -182,10 +175,10 @@ pub fn derive_team_memberships_from_issues(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::op_log;
+    use crate::db::{Storage, op_log};
 
     fn test_db() -> Connection {
-        let db = crate::db::Database::memory().unwrap();
+        let db = crate::db::Memory::new().unwrap();
         db.connect().unwrap()
     }
 
@@ -342,6 +335,9 @@ mod tests {
             id: "u-creator".into(),
             name: "Creator".to_string(),
         });
+        // Sync owns workflow states -- the fixture issue's state must already
+        // be locally known for its upsert's foreign key to resolve.
+        upsert_team_state(&conn, "ENG", &issue.state).unwrap();
         crate::db::upsert_issues(&conn, &[issue]).unwrap();
 
         derive_team_memberships_from_issues(&conn).unwrap();

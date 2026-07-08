@@ -177,17 +177,21 @@ fn junction_table_names(fragment: &Fragment, schema: &Schema) -> Vec<String> {
 }
 
 /// The storage-only DDL fragment: the tables, columns, indexes, FTS5 index
-/// and triggers `crates/lt-storage/src/db/mod.rs`'s `MIGRATION_5` declares
-/// that no entity fragment carries (reference-data tables, sync bookkeeping,
-/// join tables, and the search index). Concatenated after the schema-driven
-/// entity/junction tables so its foreign keys resolve against them.
+/// and triggers the local cache needs that no entity fragment carries
+/// (reference-data tables, sync bookkeeping, join tables, and the search
+/// index). Concatenated after the schema-driven entity/junction tables so its
+/// foreign keys resolve against them.
 ///
-/// `workflow_states` carries no `team_id` here (unlike `MIGRATION_5`): no
-/// entity fragment selects `WorkflowState.team`, so the schema-driven table
-/// has no such column to index.
+/// `workflow_states.team_id` is added here rather than by the schema-driven
+/// `CREATE TABLE`: no entity fragment selects `WorkflowState.team`, so the
+/// column is storage-only, backing the team-scoped state queries
+/// (`QUERY_TEAM_STATES`, `UPSERT_WORKFLOW_STATE_SCOPED`).
 const STORAGE_DDL_SQL: &str = "\
     CREATE TABLE labels (id TEXT PRIMARY KEY, name TEXT);
     CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT, url_key TEXT);
+
+    ALTER TABLE workflow_states ADD COLUMN team_id TEXT REFERENCES teams(id) ON UPDATE CASCADE;
+    CREATE INDEX idx_workflow_states_team_id ON workflow_states (team_id);
 
     ALTER TABLE issues ADD COLUMN synced_at TEXT;
 
@@ -215,19 +219,26 @@ const STORAGE_DDL_SQL: &str = "\
         content='issues',
         content_rowid='rowid'
     );
-    CREATE TRIGGER issues_ai AFTER INSERT ON issues WHEN new.title IS NOT NULL BEGIN
+    CREATE TRIGGER issues_ai AFTER INSERT ON issues WHEN new.title != '' BEGIN
         INSERT INTO issues_fts(rowid, identifier, title)
         VALUES (new.rowid, new.identifier, new.title);
     END;
-    CREATE TRIGGER issues_ad AFTER DELETE ON issues WHEN old.title IS NOT NULL BEGIN
+    CREATE TRIGGER issues_ad AFTER DELETE ON issues WHEN old.title != '' BEGIN
         INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
         VALUES ('delete', old.rowid, old.identifier, old.title);
     END;
-    CREATE TRIGGER issues_au_del AFTER UPDATE ON issues WHEN old.title IS NOT NULL BEGIN
+    -- Re-indexing (delete, then insert) only when identifier/title actually
+    -- change: an UPDATE that leaves both untouched (state/priority/assignee
+    -- edits, the synced_at stamp) must not re-issue the FTS5 external-content
+    -- delete+insert pair, which corrupts the index if the deleted entry's
+    -- column values happen to be re-inserted unchanged in the same statement.
+    CREATE TRIGGER issues_au_del AFTER UPDATE ON issues
+        WHEN old.title != '' AND (new.title != old.title OR new.identifier != old.identifier) BEGIN
         INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
         VALUES ('delete', old.rowid, old.identifier, old.title);
     END;
-    CREATE TRIGGER issues_au_ins AFTER UPDATE ON issues WHEN new.title IS NOT NULL BEGIN
+    CREATE TRIGGER issues_au_ins AFTER UPDATE ON issues
+        WHEN new.title != '' AND (new.title != old.title OR new.identifier != old.identifier) BEGIN
         INSERT INTO issues_fts(rowid, identifier, title)
         VALUES (new.rowid, new.identifier, new.title);
     END;
@@ -262,7 +273,11 @@ fn write_generated_schema(
     let mut names: Vec<String> = Vec::new();
 
     for fragment in entity_fragments {
-        tokens.extend(emit_ddl::emit_create_table(fragment, schema, generated_types));
+        tokens.extend(emit_ddl::emit_create_table(
+            fragment,
+            schema,
+            generated_types,
+        ));
         names.push(format!(
             "CREATE_TABLE_{}",
             table_name(&fragment.graphql_type).to_uppercase()

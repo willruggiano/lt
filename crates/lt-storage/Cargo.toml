@@ -12,7 +12,7 @@ ignored = ["chumsky"]
 
 [dependencies]
 lt-config.workspace = true
-lt-types.workspace = true
+lt-upstream.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
@@ -22,7 +22,6 @@ rusqlite.workspace = true
 tracing.workspace = true
 chumsky = "0.13"
 fake = { version = "5.1.0", default-features = false, optional = true }
-rusqlite_migration = "2.6"
 
 [build-dependencies]
 lt-schema-codegen.workspace = true

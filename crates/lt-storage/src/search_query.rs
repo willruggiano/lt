@@ -32,8 +32,8 @@
 /// When the user presses `/`, the search bar is pre-populated with
 /// `sort:updated-` so the first thing they see is the most recently
 /// updated issues in descending order.
-use lt_types::issues::{AssigneeFilter, IssueFilter};
-use lt_types::query::{SortDirection, SortField};
+use lt_upstream::query::issues::{AssigneeFilter, IssueFilter};
+use lt_upstream::query::{SortDirection, SortField};
 
 // ---------------------------------------------------------------------------
 // Generated parser (bd-1pl): StemKey, StemKind, parse_query_ast_impl
@@ -594,13 +594,13 @@ mod tests {
 
 #[cfg(test)]
 mod merged_read_tests {
-    use lt_types::issues::IssuesVariables;
-    use lt_types::types;
+    use lt_upstream::query::issues::IssuesVariables;
+    use lt_upstream::query::types;
     use rusqlite::Connection;
 
     use super::*;
     use crate::db;
-    use crate::db::query_issues;
+    use crate::db::{Storage, query_issues};
 
     fn user(name: &str) -> types::User {
         types::User {
@@ -626,7 +626,7 @@ mod merged_read_tests {
             identifier: format!("ENG-{id}"),
             title: title.to_string(),
             priority_label: "Medium".to_string(),
-            priority: lt_types::scalars::Priority(3),
+            priority: lt_upstream::query::scalars::Priority(3),
             state: state("Todo"),
             assignee: None,
             team: types::Team {
@@ -645,7 +645,7 @@ mod merged_read_tests {
     }
 
     fn test_db() -> Connection {
-        let database = db::Database::memory().unwrap();
+        let database = db::Memory::new().unwrap();
         let conn = database.connect().unwrap();
 
         let mut r1 = issue("1", "fix oauth login");
@@ -711,7 +711,10 @@ mod merged_read_tests {
         let (filter, sort) = lower_ast(&ast);
         let vars = IssuesVariables {
             filter: (filter != IssueFilter::default()).then_some(filter),
-            sort: sort.map(|(field, direction)| lt_types::issues::IssueSort { field, direction }),
+            sort: sort.map(|(field, direction)| lt_upstream::query::issues::IssueSort {
+                field,
+                direction,
+            }),
             first: Some(limit),
             after: None,
         };

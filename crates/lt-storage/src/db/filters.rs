@@ -1,5 +1,5 @@
-use lt_types::issues::{AssigneeFilter, IssueFilter};
-use lt_types::query::SortField;
+use lt_upstream::query::SortField;
+use lt_upstream::query::issues::{AssigneeFilter, IssueFilter};
 
 use crate::db::sql::{self, BindParams, Frag, SortCol};
 
@@ -115,7 +115,7 @@ pub(crate) fn sort_column(sort: &SortField) -> SortCol {
 
 #[cfg(test)]
 mod tests {
-    use lt_types::scalars::Priority;
+    use lt_upstream::query::scalars::Priority;
 
     use super::*;
 

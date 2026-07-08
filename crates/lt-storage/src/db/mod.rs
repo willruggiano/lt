@@ -1,4 +1,5 @@
 pub mod comments;
+pub mod crud;
 pub mod filters;
 #[cfg(test)]
 mod generated_sql_tests;
@@ -11,28 +12,29 @@ pub mod viewer;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 pub use comments::{delete_comments_for_issue, query_comments, upsert_comments};
+pub use crud::{Delete, Insert, Select, Update};
 pub use issues::{
     count_fts_rows, count_issues, get_meta, issue_is_locally_unsynced, query_children,
     query_issue_by_id, query_issues, search_issues, search_issues_like, set_meta, upsert_issues,
 };
 pub use rusqlite::Connection;
-use rusqlite_migration::{M, Migrations};
 pub use teams::{
     derive_team_memberships_from_issues, query_team_members, query_team_states, query_teams,
     replace_team_memberships, upsert_team_state, upsert_teams, upsert_users,
 };
 pub use viewer::{set_viewer, viewer};
 
-/// Parse a stored RFC3339 timestamp column into the wire [`DateTime`](lt_types::scalars::DateTime)
-/// scalar via its `FromStr` impl. Storage always writes
-/// [`DateTime::to_rfc3339_millis`](lt_types::scalars::DateTime::to_rfc3339_millis),
+/// Parse a stored RFC3339 timestamp column into the wire
+/// [`DateTime`](lt_upstream::query::scalars::DateTime) scalar via its
+/// `FromStr` impl. Storage always writes
+/// [`DateTime::to_rfc3339_millis`](lt_upstream::query::scalars::DateTime::to_rfc3339_millis),
 /// so a parse failure here means the row is corrupt; surface it as a
 /// `rusqlite` error rather than silently defaulting.
 pub(crate) fn parse_datetime_column(
     s: &str,
-) -> std::result::Result<lt_types::scalars::DateTime, rusqlite::types::FromSqlError> {
+) -> std::result::Result<lt_upstream::query::scalars::DateTime, rusqlite::types::FromSqlError> {
     s.parse()
         .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
 }
@@ -77,304 +79,114 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(lt_dir.join("lt.db"))
 }
 
-const MIGRATION_1: &str = "\
-    CREATE TABLE issues (
-        id               TEXT PRIMARY KEY,
-        identifier       TEXT NOT NULL,
-        title            TEXT NOT NULL,
-        priority_label   TEXT NOT NULL,
-        description      TEXT,
-        created_at       TEXT NOT NULL,
-        updated_at       TEXT NOT NULL,
-        synced_at        TEXT NOT NULL,
-        parent_id        TEXT,
-        team_id          TEXT,
-        state_id         TEXT,
-        assignee_id      TEXT,
-        creator_id       TEXT,
-        project_id       TEXT,
-        cycle_id         TEXT
-    );
-    CREATE TABLE sync_meta (
-        key   TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-    );
-    CREATE VIRTUAL TABLE issues_fts USING fts5(
-        identifier,
-        title,
-        content='issues',
-        content_rowid='rowid'
-    );
-    CREATE TRIGGER issues_ai AFTER INSERT ON issues BEGIN
-        INSERT INTO issues_fts(rowid, identifier, title)
-        VALUES (new.rowid, new.identifier, new.title);
-    END;
-    CREATE TRIGGER issues_ad AFTER DELETE ON issues BEGIN
-        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
-        VALUES ('delete', old.rowid, old.identifier, old.title);
-    END;
-    CREATE TRIGGER issues_au AFTER UPDATE ON issues BEGIN
-        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
-        VALUES ('delete', old.rowid, old.identifier, old.title);
-        INSERT INTO issues_fts(rowid, identifier, title)
-        VALUES (new.rowid, new.identifier, new.title);
-    END;
-    CREATE TABLE issue_comments (
-        id          TEXT PRIMARY KEY,
-        issue_id    TEXT NOT NULL,
-        body        TEXT NOT NULL,
-        user_id     TEXT,
-        created_at  TEXT NOT NULL,
-        updated_at  TEXT NOT NULL,
-        synced_at   TEXT NOT NULL
-    );
-    CREATE INDEX idx_issue_comments_issue_id ON issue_comments (issue_id);
-    CREATE INDEX idx_issue_comments_created_at ON issue_comments (issue_id, created_at);
-    CREATE TABLE teams (id TEXT PRIMARY KEY, name TEXT NOT NULL);
-    CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL);
-    CREATE TABLE workflow_states (id TEXT PRIMARY KEY, name TEXT NOT NULL);
-    CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL);
-    CREATE TABLE cycles (id TEXT PRIMARY KEY, name TEXT);
-    CREATE TABLE labels (id TEXT PRIMARY KEY, name TEXT NOT NULL);
-    CREATE TABLE issue_labels (
-        issue_id TEXT NOT NULL,
-        label_id TEXT NOT NULL,
-        PRIMARY KEY (issue_id, label_id)
-    );
-    CREATE INDEX idx_issue_labels_label_id ON issue_labels (label_id);
-    CREATE TABLE pending_overlay (
-        entity_id TEXT NOT NULL,
-        field     TEXT NOT NULL,
-        value     TEXT,
-        PRIMARY KEY (entity_id, field)
-    );
-    CREATE TABLE outbox (
-        seq        INTEGER PRIMARY KEY AUTOINCREMENT,
-        op_type    TEXT NOT NULL,
-        entity_id  TEXT NOT NULL,
-        variables  TEXT NOT NULL,
-        status     TEXT NOT NULL DEFAULT 'pending',
-        attempts   INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
-        created_at TEXT NOT NULL
-    );
-    CREATE INDEX idx_outbox_pending ON outbox (status, seq);
-    CREATE INDEX idx_issues_team_id ON issues (team_id);
-    CREATE INDEX idx_issues_state_id ON issues (state_id);
-    CREATE INDEX idx_issues_team_state ON issues (team_id, state_id);
-    CREATE INDEX idx_issues_updated_at ON issues (updated_at);";
+include!(concat!(env!("OUT_DIR"), "/generated_schema.rs"));
 
-/// Team-scoped cache: `workflow_states` gains the columns the state/assignee
-/// pickers need (`docs/design/tui-app-event-queue-adr.md`, "Decision 4"), and
-/// `team_memberships` records who is on which team -- not inferrable from
-/// issues (an assignee is not provably a member).
-const MIGRATION_2: &str = "\
-    ALTER TABLE workflow_states ADD COLUMN team_id TEXT;
-    ALTER TABLE workflow_states ADD COLUMN position REAL;
-    CREATE INDEX idx_workflow_states_team_id ON workflow_states (team_id);
-    CREATE TABLE team_memberships (
-        team_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        PRIMARY KEY (team_id, user_id)
-    );";
+/// The `sync_meta` key the generated DDL's hash is stamped under: `open_db`
+/// compares it against the current build's hash so a binary upgrade whose
+/// generated schema changed rebuilds the cache instead of running against a
+/// stale one (the "disposable replica" open path).
+const SCHEMA_HASH_KEY: &str = "schema_hash";
 
-/// The viewer's organization, so `sync_meta` can key the viewer identity by
-/// `viewer_id`/`organization_id` rather than duplicating its name/url fields.
-const MIGRATION_3: &str = "\
-    CREATE TABLE organizations (
-        id      TEXT PRIMARY KEY,
-        name    TEXT NOT NULL,
-        url_key TEXT NOT NULL
-    );";
-
-/// `WorkflowState.position` is non-null on the wire and became a required
-/// `f64` in the read model; a database from before that change can carry
-/// `position IS NULL` rows written by the old team-only upsert (an
-/// issue-driven write that knew no position). Backfilling to `0` (rather than
-/// deleting the rows) keeps every issue's inner join on `workflow_states`
-/// resolving -- deleting would drop those issues from every query until the
-/// next team-states sync re-creates the row. The next targeted team sync
-/// overwrites `0` with Linear's real position; until then, a backfilled state
-/// sorts by its arbitrary `0` among real positions in the state/assignee
-/// pickers -- a cosmetic, self-healing ordering effect only.
-const MIGRATION_4: &str = "\
-    UPDATE workflow_states SET position = 0 WHERE position IS NULL;";
-
-/// Identity + op-log reset. The cache is a disposable replica; the only
-/// non-refetchable state (un-acked local edits) lived in the tables this drops,
-/// so a reset is correct. Foreign keys join on `id` (TEXT); `ON UPDATE CASCADE`
-/// carries a create-ack's `UPDATE issues SET id=…` to every referrer. Old
-/// (M1-M4) tables carry no FK constraints, so drop order is unconstrained; the
-/// new CREATEs are parent-before-child.
-const MIGRATION_5: &str = "\
-    DROP TRIGGER IF EXISTS issues_ai;
-    DROP TRIGGER IF EXISTS issues_ad;
-    DROP TRIGGER IF EXISTS issues_au;
-    DROP TABLE   IF EXISTS issues_fts;
-    DROP TABLE   IF EXISTS pending_overlay;
-    DROP TABLE   IF EXISTS outbox;
-    DROP TABLE   IF EXISTS issue_labels;
-    DROP TABLE   IF EXISTS issue_comments;
-    DROP TABLE   IF EXISTS team_memberships;
-    DROP TABLE   IF EXISTS workflow_states;
-    DROP TABLE   IF EXISTS issues;
-    DROP TABLE   IF EXISTS teams;
-    DROP TABLE   IF EXISTS users;
-    DROP TABLE   IF EXISTS projects;
-    DROP TABLE   IF EXISTS cycles;
-    DROP TABLE   IF EXISTS labels;
-    DROP TABLE   IF EXISTS organizations;
-    DROP TABLE   IF EXISTS sync_meta;
-
-    CREATE TABLE teams    (id TEXT PRIMARY KEY, name TEXT);
-    CREATE TABLE users    (id TEXT PRIMARY KEY, name TEXT);
-    CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT);
-    CREATE TABLE cycles   (id TEXT PRIMARY KEY, name TEXT);
-    CREATE TABLE labels   (id TEXT PRIMARY KEY, name TEXT);
-
-    CREATE TABLE workflow_states (
-        id       TEXT PRIMARY KEY,
-        name     TEXT,
-        team_id  TEXT REFERENCES teams(id) ON UPDATE CASCADE,
-        position REAL
-    );
-    CREATE INDEX idx_workflow_states_team_id ON workflow_states (team_id);
-
-    CREATE TABLE issues (
-        id             TEXT PRIMARY KEY,
-        identifier     TEXT,
-        title          TEXT,
-        priority_label TEXT,
-        description    TEXT,
-        created_at     TEXT,
-        updated_at     TEXT,
-        synced_at      TEXT,
-        parent_id      TEXT REFERENCES issues(id)          ON UPDATE CASCADE ON DELETE SET NULL,
-        team_id        TEXT REFERENCES teams(id)           ON UPDATE CASCADE,
-        state_id       TEXT REFERENCES workflow_states(id) ON UPDATE CASCADE,
-        assignee_id    TEXT REFERENCES users(id)           ON UPDATE CASCADE,
-        creator_id     TEXT REFERENCES users(id)           ON UPDATE CASCADE,
-        project_id     TEXT REFERENCES projects(id)        ON UPDATE CASCADE,
-        cycle_id       TEXT REFERENCES cycles(id)          ON UPDATE CASCADE
-    );
-    CREATE INDEX idx_issues_team_id    ON issues (team_id);
-    CREATE INDEX idx_issues_state_id   ON issues (state_id);
-    CREATE INDEX idx_issues_team_state ON issues (team_id, state_id);
-    CREATE INDEX idx_issues_parent_id  ON issues (parent_id);
-    CREATE INDEX idx_issues_updated_at ON issues (updated_at);
-
-    CREATE VIRTUAL TABLE issues_fts USING fts5(
-        identifier,
-        title,
-        content='issues',
-        content_rowid='rowid'
-    );
-    CREATE TRIGGER issues_ai AFTER INSERT ON issues WHEN new.title IS NOT NULL BEGIN
-        INSERT INTO issues_fts(rowid, identifier, title)
-        VALUES (new.rowid, new.identifier, new.title);
-    END;
-    CREATE TRIGGER issues_ad AFTER DELETE ON issues WHEN old.title IS NOT NULL BEGIN
-        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
-        VALUES ('delete', old.rowid, old.identifier, old.title);
-    END;
-    CREATE TRIGGER issues_au_del AFTER UPDATE ON issues WHEN old.title IS NOT NULL BEGIN
-        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
-        VALUES ('delete', old.rowid, old.identifier, old.title);
-    END;
-    CREATE TRIGGER issues_au_ins AFTER UPDATE ON issues WHEN new.title IS NOT NULL BEGIN
-        INSERT INTO issues_fts(rowid, identifier, title)
-        VALUES (new.rowid, new.identifier, new.title);
-    END;
-
-    CREATE TABLE issue_comments (
-        id         TEXT PRIMARY KEY,
-        issue_id   TEXT NOT NULL REFERENCES issues(id) ON UPDATE CASCADE ON DELETE CASCADE,
-        body       TEXT NOT NULL,
-        user_id    TEXT REFERENCES users(id) ON UPDATE CASCADE,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        synced_at  TEXT
-    );
-    CREATE INDEX idx_issue_comments_issue_id   ON issue_comments (issue_id);
-    CREATE INDEX idx_issue_comments_created_at ON issue_comments (issue_id, created_at);
-
-    CREATE TABLE issue_labels (
-        issue_id TEXT NOT NULL REFERENCES issues(id) ON UPDATE CASCADE ON DELETE CASCADE,
-        label_id TEXT NOT NULL REFERENCES labels(id) ON UPDATE CASCADE ON DELETE CASCADE,
-        PRIMARY KEY (issue_id, label_id)
-    );
-    CREATE INDEX idx_issue_labels_label_id ON issue_labels (label_id);
-
-    CREATE TABLE team_memberships (
-        team_id TEXT NOT NULL REFERENCES teams(id) ON UPDATE CASCADE ON DELETE CASCADE,
-        user_id TEXT NOT NULL REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE,
-        PRIMARY KEY (team_id, user_id)
-    );
-
-    CREATE TABLE organizations (
-        id      TEXT PRIMARY KEY,
-        name    TEXT,
-        url_key TEXT
-    );
-
-    CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-
-    CREATE TABLE op_log (
-        seq        INTEGER PRIMARY KEY AUTOINCREMENT,
-        operation  TEXT NOT NULL,
-        id         TEXT NOT NULL,
-        attempts   INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT
-    );
-    CREATE INDEX idx_op_log_operation_id ON op_log (operation, id);";
-
-/// The migration list: the single schema source for both `open_db()` and the
-/// `sql_validation` gate (docs/design/type-safe-sql-adr.md, "Migrations").
-fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![
-        M::up(MIGRATION_1),
-        M::up(MIGRATION_2),
-        M::up(MIGRATION_3),
-        M::up(MIGRATION_4),
-        M::up(MIGRATION_5),
-    ])
+/// A stable hash of [`GENERATED_DDL`], recomputed on every open (not stored
+/// in source): any change to the generated schema changes this value, which
+/// [`migrate_schema`] compares against whatever is stamped into the database
+/// it opens.
+fn schema_hash() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    GENERATED_DDL.hash(&mut hasher);
+    hasher.finish().to_string()
 }
 
-/// Refuse a pre-versioning database (`user_version` 0 but tables exist): delete it and re-sync.
-fn guard_against_legacy_database(conn: &Connection, path: &Path) -> Result<()> {
-    let user_version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .context("failed to read user_version")?;
-    if user_version != 0 {
-        return Ok(());
-    }
-
-    let table_count: i64 = sql::prepare(conn, sql::COUNT_TABLES)
-        .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
-        .context("failed to check for existing tables")?;
-    if table_count > 0 {
-        bail!(
-            "database at {} predates versioned migrations; delete it and re-run 'lt sync' to rebuild the cache",
-            path.display()
-        );
+/// Apply every generated DDL statement to a schema-less connection, in
+/// dependency order.
+fn apply_schema(conn: &Connection) -> Result<()> {
+    for ddl in GENERATED_DDL {
+        conn.execute_batch(ddl)
+            .context("failed to apply generated schema DDL")?;
     }
     Ok(())
 }
 
-/// Migrate `conn` to the latest schema, guarding against a legacy database at
-/// `path` first. Private: migrations run exactly once, from [`open_db`].
-fn run_migrations(conn: &mut Connection, path: &Path) -> Result<()> {
-    guard_against_legacy_database(conn, path)?;
-    migrations()
-        .to_latest(conn)
-        .context("failed to run migrations")
+/// Whether a table named `name` exists -- used to detect a brand-new
+/// database, where not even `sync_meta` exists yet to hold the schema hash.
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .context("failed to check for an existing table")?;
+    Ok(count > 0)
+}
+
+/// Drop every table the database currently has (dropping a table also drops
+/// its triggers and indexes), then reapply the current generated schema from
+/// scratch. Foreign key enforcement is suspended for the drop: the generated
+/// tables reference each other, and respecting that graph while dropping is
+/// unnecessary once enforcement is off.
+///
+/// Called only on a schema-hash mismatch (a binary upgrade whose generated
+/// schema changed since this database was last opened) -- the "disposable
+/// replica" open path. Whatever `op_log` rows are pending at that point are
+/// dropped with the rest of the cache; draining them to the server first, so
+/// a schema change never loses an un-synced local edit, is a sync-thread
+/// concern outside this crate, wired in a later task.
+fn rebuild_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .context("failed to disable foreign keys for schema rebuild")?;
+
+    let names: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .context("failed to list existing tables")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .context("failed to query existing tables")?;
+        let mut names = Vec::new();
+        for row in rows {
+            names.push(row.context("failed to read table name")?);
+        }
+        names
+    };
+
+    for name in names {
+        conn.execute(&format!("DROP TABLE IF EXISTS \"{name}\""), [])
+            .with_context(|| format!("failed to drop table {name}"))?;
+    }
+
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .context("failed to re-enable foreign keys after schema rebuild")?;
+
+    apply_schema(conn)
+}
+
+/// Ensure `conn`'s schema matches the current build's generated DDL: apply it
+/// fresh on an empty database, or rebuild it if the hash stamped by a
+/// previous open no longer matches (a binary upgrade, or a database that
+/// predates this scheme entirely). A matching hash is a no-op.
+fn migrate_schema(conn: &Connection) -> Result<()> {
+    let hash = schema_hash();
+    if !table_exists(conn, "sync_meta")? {
+        apply_schema(conn)?;
+        issues::set_meta(conn, SCHEMA_HASH_KEY, &hash)?;
+        return Ok(());
+    }
+    if issues::get_meta(conn, SCHEMA_HASH_KEY)?.as_deref() != Some(hash.as_str()) {
+        rebuild_schema(conn)?;
+        issues::set_meta(conn, SCHEMA_HASH_KEY, &hash)?;
+    }
+    Ok(())
 }
 
 /// Open a connection to the SQLite database at `uri` -- a filesystem path or a
-/// `file:...?mode=memory` URI -- and run migrations.
+/// `file:...?mode=memory` URI -- and ensure its schema is current.
 pub fn open_db(uri: impl AsRef<Path>) -> Result<Connection> {
     let uri = uri.as_ref();
-    let mut conn = Connection::open(uri)
+    let conn = Connection::open(uri)
         .with_context(|| format!("could not open database at {}", uri.display()))?;
     // The TUI and the CLI (e.g. `lt sync`) can open the same per-profile file
     // concurrently; wait out a contending writer instead of failing
@@ -383,67 +195,73 @@ pub fn open_db(uri: impl AsRef<Path>) -> Result<Connection> {
         .context("failed to set busy timeout")?;
     conn.pragma_update(None, "foreign_keys", true)
         .context("failed to enable foreign key enforcement")?;
-    run_migrations(&mut conn, uri)?;
+    migrate_schema(&conn)?;
     Ok(conn)
 }
 
-/// A handle to the issue database. The set of databases is closed -- the
-/// per-profile file on disk in normal use, or an isolated in-memory database in
-/// tests -- so it is an enum rather than a trait with two impls. Both are
-/// SQLite opened by path; `connect()` opens a fresh connection via `open_db`.
-pub enum Database {
-    /// The SQLite file on disk. Resolving the path and migrating is deferred to
-    /// `connect()`, so constructing this variant does no I/O.
-    File,
-    /// An isolated, shared-cache in-memory database for tests. SQLite destroys
-    /// a shared-cache in-memory database when its last connection closes, so
-    /// the handle holds one open connection for its own lifetime.
-    #[cfg(any(test, feature = "test-util"))]
-    Memory { uri: String, _keepalive: Connection },
+/// The connection-acquisition seam every module in this crate uses: [`Sqlite`]
+/// opens the per-profile file on disk; [`Memory`] (test-only) opens an
+/// isolated, shared-cache in-memory database. Every function elsewhere in
+/// `db` already takes `&Connection`, so the trait needs to abstract only
+/// acquiring one.
+pub trait Storage {
+    /// Open a fresh connection to this database.
+    fn connect(&self) -> Result<Connection>;
 }
 
-impl Database {
-    /// Build an isolated in-memory database, migrated and ready. Each call gets
-    /// a distinct shared cache so concurrent tests never share state.
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn memory() -> Result<Self> {
+/// The SQLite file on disk. Resolving the path and ensuring the schema is
+/// current is deferred to `connect()`, so constructing this does no I/O.
+pub struct Sqlite;
+
+impl Storage for Sqlite {
+    fn connect(&self) -> Result<Connection> {
+        open_db(db_path()?)
+    }
+}
+
+/// An isolated, shared-cache in-memory database for tests. SQLite destroys a
+/// shared-cache in-memory database when its last connection closes, so the
+/// handle holds one open connection for its own lifetime.
+#[cfg(any(test, feature = "test-util"))]
+pub struct Memory {
+    uri: String,
+    _keepalive: Connection,
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl Memory {
+    /// Build an isolated in-memory database, schema-current and ready. Each
+    /// call gets a distinct shared cache so concurrent tests never share
+    /// state.
+    pub fn new() -> Result<Self> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let uri = format!("file:lt_memdb_{n}?mode=memory&cache=shared");
         let keepalive = open_db(&uri)?;
-        Ok(Self::Memory {
+        Ok(Self {
             uri,
             _keepalive: keepalive,
         })
     }
 
-    /// Open a fresh connection to this database.
-    pub fn connect(&self) -> Result<Connection> {
-        match self {
-            Database::File => open_db(db_path()?),
-            #[cfg(any(test, feature = "test-util"))]
-            Database::Memory { uri, .. } => open_db(uri),
-        }
-    }
-
-    /// Open another handle onto the same database: for `File`, the same path
-    /// (there is only one); for `Memory`, a second keepalive connection on the
-    /// same shared-cache URI, so a second owner (e.g. a test's `Runtime`)
-    /// reads and writes the exact rows the first sees. Neither handle's
-    /// lifetime depends on the other's.
-    #[cfg(any(test, feature = "test-util"))]
+    /// Open another handle onto the same database: a second keepalive
+    /// connection on the same shared-cache URI, so a second owner (e.g. a
+    /// test's `Runtime`) reads and writes the exact rows the first sees.
+    /// Neither handle's lifetime depends on the other's.
     pub fn share(&self) -> Result<Self> {
-        match self {
-            Database::File => Ok(Database::File),
-            Database::Memory { uri, .. } => {
-                let keepalive = open_db(uri)?;
-                Ok(Database::Memory {
-                    uri: uri.clone(),
-                    _keepalive: keepalive,
-                })
-            }
-        }
+        let keepalive = open_db(&self.uri)?;
+        Ok(Self {
+            uri: self.uri.clone(),
+            _keepalive: keepalive,
+        })
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl Storage for Memory {
+    fn connect(&self) -> Result<Connection> {
+        open_db(&self.uri)
     }
 }
 
@@ -453,14 +271,14 @@ mod tests {
 
     #[test]
     fn query_issue_by_id_resolves_and_misses() {
-        let db = Database::memory().unwrap();
+        let db = Memory::new().unwrap();
         let conn = db.connect().unwrap();
         // `sample_base_issue`'s state must already be locally known (sync
         // owns workflow states; issue upserts never write them).
         teams::upsert_team_state(
             &conn,
             "ENG",
-            &lt_types::types::WorkflowState {
+            &lt_upstream::query::types::WorkflowState {
                 id: "s-todo".into(),
                 name: "Todo".to_string(),
                 position: 1.0,
@@ -478,34 +296,46 @@ mod tests {
     }
 
     #[test]
-    fn migrations_are_valid() {
-        migrations().validate().unwrap();
+    fn fresh_database_applies_schema_and_stamps_the_hash() {
+        let db = Memory::new().unwrap();
+        let conn = db.connect().unwrap();
+        assert_eq!(
+            issues::get_meta(&conn, SCHEMA_HASH_KEY).unwrap().as_deref(),
+            Some(schema_hash().as_str())
+        );
     }
 
-    /// We are pre-1.0 and keep no legacy-compatibility migration: a database
-    /// from before this crate adopted `rusqlite_migration` sits at
-    /// `user_version = 0` with tables already present. The guard must reject
-    /// it with an actionable message rather than silently patching it (or
-    /// worse, silently reinterpreting its rows under the new schema).
+    /// A stamped hash that no longer matches the generated DDL (simulating a
+    /// binary upgrade, or a database that predates this scheme) must drop
+    /// the previous cache and rebuild it from scratch, re-stamping the
+    /// current hash.
     #[test]
-    fn legacy_database_is_rejected_with_an_actionable_error() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        // A pre-versioned database, as the old hand-rolled probing code would
-        // have left behind: some tables, `user_version` untouched at 0.
-        conn.execute_batch("CREATE TABLE issues (id TEXT PRIMARY KEY);")
-            .unwrap();
+    fn schema_hash_mismatch_rebuilds_the_cache_and_drops_the_previous_data() {
+        let db = Memory::new().unwrap();
+        let conn = db.connect().unwrap();
+        teams::upsert_team_state(
+            &conn,
+            "ENG",
+            &lt_upstream::query::types::WorkflowState {
+                id: "s-todo".into(),
+                name: "Todo".to_string(),
+                position: 1.0,
+            },
+        )
+        .unwrap();
+        upsert_issues(&conn, &[op_log::sample_base_issue("9")]).unwrap();
+        assert!(query_issue_by_id(&conn, "9").unwrap().is_some());
 
-        let path = Path::new("/tmp/legacy-lt.db");
-        let err = run_migrations(&mut conn, path).unwrap_err();
+        issues::set_meta(&conn, SCHEMA_HASH_KEY, "stale-hash").unwrap();
+        drop(conn);
 
-        let message = err.to_string();
-        assert!(
-            message.contains("delete"),
-            "error should tell the user to delete the database: {message}"
-        );
-        assert!(
-            message.contains("/tmp/legacy-lt.db"),
-            "error should name the database path: {message}"
+        let rebuilt = open_db(&db.uri).unwrap();
+        assert!(query_issue_by_id(&rebuilt, "9").unwrap().is_none());
+        assert_eq!(
+            issues::get_meta(&rebuilt, SCHEMA_HASH_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(schema_hash().as_str())
         );
     }
 }

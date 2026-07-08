@@ -15,17 +15,18 @@
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use lt_types::comments::{Comment, CommentCreateMutation, CommentCreateVariables};
-use lt_types::graphql::GraphqlOperation;
-use lt_types::inputs::{Field, IssueCreateInput, IssueUpdateInput};
-use lt_types::issues::{
+use lt_upstream::query::comments::{Comment, CommentCreateMutation, CommentCreateVariables};
+use lt_upstream::query::graphql::GraphqlOperation;
+use lt_upstream::query::inputs::{Field, IssueCreateInput, IssueUpdateInput};
+use lt_upstream::query::issues::{
     IssueCreateMutation, IssueCreateVariables, IssueUpdateMutation, IssueUpdateVariables,
 };
-use lt_types::scalars::Priority;
-use lt_types::types;
+use lt_upstream::query::scalars::Priority;
+use lt_upstream::query::types;
 use rusqlite::{Connection, params};
 
-use crate::db::sql::{self, EntityTable};
+use crate::db::crud::Insert;
+use crate::db::sql;
 
 /// The optimistic identifier every locally-created issue carries until the
 /// drainer's ack replaces it with the server's real one.
@@ -54,9 +55,9 @@ pub fn fabricate_id() -> String {
 }
 
 /// Ensure a skeleton user row exists for `id`, without touching `name` --
-/// unlike [`crate::db::issues::upsert_named_entity`], which would blank out
-/// an already-known name when the caller has none to offer (an FK id offered
-/// by an edit's input, not a fetched fragment).
+/// unlike [`crate::db::crud::Insert`], which would blank out an
+/// already-known name when the caller has none to offer (an FK id offered by
+/// an edit's input, not a fetched fragment).
 fn mint_user(tx: &Connection, id: &str) -> Result<()> {
     sql::execute(tx, sql::MINT_USER, params![id], "mint user skeleton")
 }
@@ -108,11 +109,11 @@ pub fn enqueue_issue_update(conn: &Connection, vars: IssueUpdateVariables) -> Re
         )?;
     }
     if let Some(priority) = input.priority {
-        let label = Priority(u8::try_from(priority).unwrap_or(0)).label();
+        let priority = Priority(u8::try_from(priority).unwrap_or(0));
         sql::execute(
             &tx,
             sql::UPDATE_ISSUE_PRIORITY,
-            params![label, id],
+            params![priority.label(), priority.0, id],
             "apply issue priority edit",
         )?;
     }
@@ -190,7 +191,7 @@ pub fn ack_issue_update(
     } else {
         sql::execute(
             &tx,
-            sql::ACK_ISSUE_UPDATE,
+            sql::SET_ISSUE_SYNCED_AT,
             params![synced_at, id],
             "mark issue synced",
         )?;
@@ -215,37 +216,49 @@ pub fn enqueue_issue_create(conn: &Connection, vars: &IssueCreateVariables) -> R
     if let Some(aid) = input.assignee_id.as_deref() {
         mint_user(&tx, aid)?;
     }
-    let priority_label = Priority(
+    let priority = Priority(
         input
             .priority
             .and_then(|p| u8::try_from(p).ok())
             .unwrap_or(0),
-    )
-    .label();
-    let now = lt_types::scalars::DateTime(Utc::now()).to_rfc3339_millis();
+    );
+    let now = lt_upstream::query::scalars::DateTime(Utc::now());
     let id = fabricate_id();
-    sql::execute(
-        &tx,
-        sql::UPSERT_ISSUE,
-        params![
-            id,
-            OPTIMISTIC_ISSUE_IDENTIFIER,
-            input.title,
-            priority_label,
-            input.description,
-            now,
-            now,
-            Option::<&str>::None, // synced_at NULL
-            Option::<&str>::None, // parent_id
-            input.team_id,
-            state_id,
-            input.assignee_id,
-            Option::<&str>::None, // creator_id
-            Option::<&str>::None, // project_id
-            Option::<&str>::None, // cycle_id
-        ],
-        "insert optimistic issue",
-    )?;
+
+    // `team`/`assignee`/`state` carry only the ids `mint_team`/`mint_user`/
+    // `resolve_or_default_state` already anchored above -- an empty `name`
+    // placeholder, never upserted, so a real (already-synced) entity's name
+    // is not clobbered by this optimistic row's `Insert`.
+    let issue = types::Issue {
+        id: id.clone().into(),
+        identifier: OPTIMISTIC_ISSUE_IDENTIFIER.to_string(),
+        title: input.title.clone(),
+        priority_label: priority.label().to_string(),
+        priority,
+        state: types::WorkflowState {
+            id: state_id.into(),
+            name: String::new(),
+            position: 0.0,
+        },
+        assignee: input.assignee_id.clone().map(|aid| types::User {
+            id: aid.into(),
+            name: String::new(),
+        }),
+        team: types::Team {
+            id: input.team_id.clone().into(),
+            name: String::new(),
+        },
+        description: input.description.clone(),
+        labels: types::IssueLabelConnection { nodes: Vec::new() },
+        project: None,
+        cycle: None,
+        creator: None,
+        parent: None,
+        created_at: now,
+        updated_at: now,
+    };
+    issue.insert(&tx)?;
+
     sql::execute(
         &tx,
         sql::INSERT_OP,
@@ -298,7 +311,7 @@ pub fn issue_create_replay_vars(conn: &Connection, id: &str) -> Result<IssueCrea
 /// does not follow the cascade).
 pub fn ack_issue_create(conn: &Connection, seq: i64, id: &str, issue: &types::Issue) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    let fks = crate::db::issues::resolve_issue_fk_ids(&tx, issue)?;
+    crate::db::issues::ensure_issue_fks(&tx, issue)?;
     let synced_at = Utc::now().to_rfc3339();
     sql::execute(
         &tx,
@@ -309,17 +322,18 @@ pub fn ack_issue_create(conn: &Connection, seq: i64, id: &str, issue: &types::Is
             issue.identifier,
             issue.title,
             issue.priority_label,
+            issue.priority.0,
             issue.description,
             issue.created_at.to_rfc3339_millis(),
             issue.updated_at.to_rfc3339_millis(),
             synced_at,
-            fks.parent,
-            fks.team,
-            fks.state,
-            fks.assignee,
-            fks.creator,
-            fks.project,
-            fks.cycle,
+            issue.parent.as_ref().map(|p| p.id.inner()),
+            issue.team.id.inner(),
+            issue.state.id.inner(),
+            issue.assignee.as_ref().map(|u| u.id.inner()),
+            issue.creator.as_ref().map(|u| u.id.inner()),
+            issue.project.as_ref().map(|p| p.id.inner()),
+            issue.cycle.as_ref().map(|c| c.id.inner()),
         ],
         "attach issue identity",
     )?;
@@ -330,12 +344,7 @@ pub fn ack_issue_create(conn: &Connection, seq: i64, id: &str, issue: &types::Is
         "clear issue labels",
     )?;
     for label in &issue.labels.nodes {
-        crate::db::issues::upsert_named_entity(
-            &tx,
-            EntityTable::Labels,
-            label.id.inner(),
-            Some(&label.name),
-        )?;
+        crate::db::issues::upsert_label(&tx, label.id.inner(), &label.name)?;
         sql::execute(
             &tx,
             sql::INSERT_ISSUE_LABEL,
@@ -360,14 +369,9 @@ pub fn enqueue_comment_create(conn: &Connection, vars: &CommentCreateVariables) 
     crate::db::issues::mint_issue_skeleton(&tx, &vars.input.issue_id, None)?;
     let user = crate::db::viewer::viewer(&tx)?.map(|v| v.user);
     if let Some(u) = &user {
-        crate::db::issues::upsert_named_entity(
-            &tx,
-            EntityTable::Users,
-            u.id.inner(),
-            Some(&u.name),
-        )?;
+        u.insert(&tx)?;
     }
-    let now = lt_types::scalars::DateTime(Utc::now()).to_rfc3339_millis();
+    let now = lt_upstream::query::scalars::DateTime(Utc::now()).to_rfc3339_millis();
     let id = fabricate_id();
     sql::execute(
         &tx,
@@ -403,7 +407,7 @@ pub fn comment_create_replay_vars(conn: &Connection, id: &str) -> Result<Comment
             .query_row(params![id], |r| Ok((r.get("body")?, r.get("issue_id")?)))
             .with_context(|| format!("comment {id} not found for replay"))?;
     Ok(CommentCreateVariables {
-        input: lt_types::inputs::CommentCreateInput { issue_id, body },
+        input: lt_upstream::query::inputs::CommentCreateInput { issue_id, body },
     })
 }
 
@@ -482,7 +486,7 @@ pub fn sample_base_issue(id: &str) -> types::Issue {
         identifier: format!("ENG-{id}"),
         title: format!("issue {id}"),
         priority_label: "Normal".to_string(),
-        priority: lt_types::scalars::Priority(3),
+        priority: lt_upstream::query::scalars::Priority(3),
         state: types::WorkflowState {
             id: "s-todo".into(),
             name: "Todo".to_string(),
@@ -507,13 +511,14 @@ pub fn sample_base_issue(id: &str) -> types::Issue {
 #[cfg(test)]
 mod tests {
     use super::{sample_base_issue as base_issue, *};
+    use crate::db::Storage;
 
     /// A fresh in-memory database seeded with the `ENG`/`s-todo` workflow
     /// state -- sync owns workflow states, so every fixture issue's state
     /// must already be locally known before an upsert or an optimistic
     /// create resolves it.
     fn db_with_todo_state() -> Connection {
-        let db = crate::db::Database::memory().unwrap();
+        let db = crate::db::Memory::new().unwrap();
         let conn = db.connect().unwrap();
         crate::db::teams::upsert_team_state(
             &conn,
@@ -791,12 +796,12 @@ mod tests {
         let conn = db_with_issue("1");
         crate::db::viewer::set_viewer(
             &conn,
-            &lt_types::viewer::Viewer {
+            &lt_upstream::query::viewer::Viewer {
                 user: types::User {
                     id: "u-ada".into(),
                     name: "Ada".to_string(),
                 },
-                organization: lt_types::viewer::Organization {
+                organization: lt_upstream::query::viewer::Organization {
                     id: "org-1".into(),
                     name: "Acme".to_string(),
                     url_key: "acme".to_string(),
@@ -804,7 +809,7 @@ mod tests {
             },
         )
         .unwrap();
-        let input = lt_types::inputs::CommentCreateInput {
+        let input = lt_upstream::query::inputs::CommentCreateInput {
             issue_id: "1".to_string(),
             body: "hi".to_string(),
         };
@@ -822,7 +827,7 @@ mod tests {
     #[test]
     fn comment_create_replay_vars_reads_the_rows_current_state() {
         let conn = db_with_issue("1");
-        let input = lt_types::inputs::CommentCreateInput {
+        let input = lt_upstream::query::inputs::CommentCreateInput {
             issue_id: "1".to_string(),
             body: "hi".to_string(),
         };
@@ -836,7 +841,7 @@ mod tests {
     #[test]
     fn ack_comment_create_attaches_server_id_and_stamps_synced_at() {
         let conn = db_with_issue("1");
-        let input = lt_types::inputs::CommentCreateInput {
+        let input = lt_upstream::query::inputs::CommentCreateInput {
             issue_id: "1".to_string(),
             body: "hi".to_string(),
         };
@@ -891,7 +896,7 @@ mod tests {
 
     #[test]
     fn op_is_sendable_issue_create_gates_on_an_unsynced_local_parent() {
-        let db = crate::db::Database::memory().unwrap();
+        let db = crate::db::Memory::new().unwrap();
         let conn = db.connect().unwrap();
         crate::db::teams::upsert_team_state(
             &conn,

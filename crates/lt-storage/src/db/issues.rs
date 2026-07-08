@@ -1,14 +1,15 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use lt_types::issues::{IssueConnection, IssuesVariables};
-use lt_types::pagination::PageInfo;
-use lt_types::query::{SortDirection, SortField};
-use lt_types::scalars::Priority;
-use lt_types::types;
+use lt_upstream::query::issues::{IssueConnection, IssuesVariables};
+use lt_upstream::query::pagination::PageInfo;
+use lt_upstream::query::scalars::Priority;
+use lt_upstream::query::sort::{SortDirection, SortField};
+use lt_upstream::query::types;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::db::crud::Insert;
 use crate::db::parse_datetime_column;
-use crate::db::sql::{self, BindParams, EntityTable, Sql};
+use crate::db::sql::{self, BindParams, Sql};
 
 /// Reconstruct a [`types::Issue`] from a row selected by
 /// [`sql::QUERY_ISSUE_BY_ID`] (or any other statement or composed query built
@@ -16,7 +17,8 @@ use crate::db::sql::{self, BindParams, EntityTable, Sql};
 /// column alias.
 pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Issue> {
     let priority_label: String = row.get("priority_label")?;
-    let priority = Priority::from_label(&priority_label);
+    let priority: i64 = row.get("priority")?;
+    let priority = Priority(u8::try_from(priority).unwrap_or(0));
 
     let created_at: String = row.get("created_at")?;
     let updated_at: String = row.get("updated_at")?;
@@ -88,21 +90,9 @@ pub(crate) fn issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<types::Iss
     })
 }
 
-/// Upsert one `(id, name)` row into `table`, updating the name on id conflict
-/// (so a rename touches a single row). `name` is optional because
-/// `cycles.name` is nullable; the other tables always pass `Some`.
-pub(crate) fn upsert_named_entity(
-    conn: &Connection,
-    table: EntityTable,
-    id: &str,
-    name: Option<&str>,
-) -> Result<()> {
-    sql::execute(
-        conn,
-        table.upsert_sql(),
-        params![id, name],
-        &format!("upsert {}", table.as_str()),
-    )
+/// Upsert one `(id, name)` row into the reference-data `labels` table.
+pub(crate) fn upsert_label(conn: &Connection, id: &str, name: &str) -> Result<()> {
+    sql::execute(conn, sql::UPSERT_LABEL, params![id, name], "upsert label")
 }
 
 /// Resolve a workflow state id to itself if cached, else `None` (sync owns
@@ -117,75 +107,67 @@ pub(crate) fn resolve_state_id(tx: &Connection, state_id: &str) -> Result<Option
 
 /// Ensure a skeleton issue row exists for an FK reference (a not-yet-fetched
 /// parent, or a comment's issue anchor), without clobbering an already-cached
-/// row.
+/// row. Mints the sentinel team/workflow-state rows first: `team_id`/
+/// `state_id` are `NOT NULL` in the generated schema, and a bare FK anchor
+/// carries neither.
 pub(crate) fn mint_issue_skeleton(
     tx: &Connection,
     id: &str,
     identifier: Option<&str>,
 ) -> Result<()> {
+    crate::db::teams::mint_team(tx, "")?;
+    sql::execute(
+        tx,
+        sql::MINT_SENTINEL_STATE,
+        [],
+        "mint sentinel workflow state",
+    )?;
     sql::execute(
         tx,
         sql::MINT_ISSUE_SKELETON,
-        params![id, identifier],
+        params![id, identifier.unwrap_or("")],
         "mint issue skeleton",
     )
 }
 
-/// Every FK id an issue row carries, resolved so its `upsert`/create-ack can
-/// bind them directly.
-pub(crate) struct IssueFkIds {
-    pub(crate) team: Option<String>,
-    pub(crate) assignee: Option<String>,
-    pub(crate) creator: Option<String>,
-    pub(crate) project: Option<String>,
-    pub(crate) cycle: Option<String>,
-    pub(crate) state: Option<String>,
-    pub(crate) parent: Option<String>,
-}
-
-/// Every FK target of an issue fragment, resolved to its id: named entities
-/// (team/assignee/creator/project/cycle) upserted so their name is current;
-/// the state resolved-or-`None` (sync owns workflow states, so a state an
-/// issue references but the cache has never seen resolves to `NULL` rather
-/// than minting a positionless skeleton); the parent minted as a skeleton so
-/// its FK holds. Shared by [`upsert_issue_tx`] and
+/// Ensure every entity `issue` references exists locally, so its own row's
+/// foreign keys hold: upsert the named entities it carries (so their name is
+/// current), mint the parent as a skeleton (so its FK anchors even though it
+/// has not itself synced), and confirm the state is cached (sync owns
+/// workflow states -- an issue upsert never mints one; a state the cache has
+/// never seen is an error, since `state_id` is `NOT NULL` in the generated
+/// schema). Shared by [`upsert_issue_tx`] and
 /// [`crate::db::op_log::ack_issue_create`].
-pub(crate) fn resolve_issue_fk_ids(tx: &Connection, issue: &types::Issue) -> Result<IssueFkIds> {
-    upsert_named_entity(
-        tx,
-        EntityTable::Teams,
-        issue.team.id.inner(),
-        Some(&issue.team.name),
-    )?;
+pub(crate) fn ensure_issue_fks(tx: &Connection, issue: &types::Issue) -> Result<()> {
+    issue.team.insert(tx).context("failed to upsert team")?;
     if let Some(a) = &issue.assignee {
-        upsert_named_entity(tx, EntityTable::Users, a.id.inner(), Some(&a.name))?;
+        a.insert(tx).context("failed to upsert assignee")?;
     }
     if let Some(c) = &issue.creator {
-        upsert_named_entity(tx, EntityTable::Users, c.id.inner(), Some(&c.name))?;
+        c.insert(tx).context("failed to upsert creator")?;
     }
     if let Some(p) = &issue.project {
-        upsert_named_entity(tx, EntityTable::Projects, p.id.inner(), Some(&p.name))?;
+        p.insert(tx).context("failed to upsert project")?;
     }
     if let Some(c) = &issue.cycle {
-        upsert_named_entity(tx, EntityTable::Cycles, c.id.inner(), c.name.as_deref())?;
+        c.insert(tx).context("failed to upsert cycle")?;
     }
     if let Some(p) = &issue.parent {
         mint_issue_skeleton(tx, p.id.inner(), Some(p.identifier.as_str()))?;
     }
-    Ok(IssueFkIds {
-        team: Some(issue.team.id.inner().to_string()),
-        assignee: issue.assignee.as_ref().map(|u| u.id.inner().to_string()),
-        creator: issue.creator.as_ref().map(|u| u.id.inner().to_string()),
-        project: issue.project.as_ref().map(|p| p.id.inner().to_string()),
-        cycle: issue.cycle.as_ref().map(|c| c.id.inner().to_string()),
-        state: resolve_state_id(tx, issue.state.id.inner())?,
-        parent: issue.parent.as_ref().map(|p| p.id.inner().to_string()),
-    })
+    resolve_state_id(tx, issue.state.id.inner())?.with_context(|| {
+        format!(
+            "workflow state {} not cached -- run `lt sync`",
+            issue.state.id.inner()
+        )
+    })?;
+    Ok(())
 }
 
-/// Upsert fetched issue fragments into the relational base: upsert each
-/// referenced entity, write the issue row with its FK columns, and rebuild its
-/// label links. Runs in one transaction per call.
+/// Upsert fetched issue fragments into the relational base: ensure each
+/// referenced entity exists, write the issue row via the generated entity
+/// upsert, stamp `synced_at`, and rebuild its label links. Runs in one
+/// transaction per call.
 ///
 /// This is the sole source of the normalized base. A team rename touches one
 /// `teams` row; entities the UI later needs are already stored.
@@ -204,36 +186,22 @@ pub fn upsert_issues(conn: &Connection, issues: &[types::Issue]) -> Result<()> {
 }
 
 /// Upsert a single issue fragment into the relational base within an existing
-/// transaction: its referenced entities (mint-first, so every FK holds under
-/// `PRAGMA foreign_keys = ON`), the issue row, and its label links. Shared by
-/// [`upsert_issues`] and the op log's optimistic create.
+/// transaction: its referenced entities (ensured first, so every FK holds
+/// under `PRAGMA foreign_keys = ON`), the issue row, its `synced_at` stamp,
+/// and its label links. Shared by [`upsert_issues`] and the op log's
+/// optimistic create.
 pub(crate) fn upsert_issue_tx(
     tx: &Connection,
     issue: &types::Issue,
     synced_at: &str,
 ) -> Result<()> {
-    let fks = resolve_issue_fk_ids(tx, issue)?;
+    ensure_issue_fks(tx, issue)?;
+    issue.insert(tx)?;
     sql::execute(
         tx,
-        sql::UPSERT_ISSUE,
-        params![
-            issue.id.inner(),
-            issue.identifier,
-            issue.title,
-            issue.priority_label,
-            issue.description,
-            issue.created_at.to_rfc3339_millis(),
-            issue.updated_at.to_rfc3339_millis(),
-            synced_at,
-            fks.parent,
-            fks.team,
-            fks.state,
-            fks.assignee,
-            fks.creator,
-            fks.project,
-            fks.cycle,
-        ],
-        "upsert issue",
+        sql::SET_ISSUE_SYNCED_AT,
+        params![synced_at, issue.id.inner()],
+        "stamp issue synced_at",
     )?;
 
     sql::execute(
@@ -243,7 +211,7 @@ pub(crate) fn upsert_issue_tx(
         "clear issue labels",
     )?;
     for label in &issue.labels.nodes {
-        upsert_named_entity(tx, EntityTable::Labels, label.id.inner(), Some(&label.name))?;
+        upsert_label(tx, label.id.inner(), &label.name)?;
         sql::execute(
             tx,
             sql::INSERT_ISSUE_LABEL,
@@ -473,6 +441,7 @@ pub fn issue_is_locally_unsynced(conn: &Connection, id: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Storage;
 
     /// A list-shaped issue: state/assignee/team carry ids equal to their names
     /// so the relational upsert produces one entity row per distinct name.
@@ -508,9 +477,9 @@ mod tests {
     }
 
     /// Seed a team-scoped workflow state (`id`/`name` share the given
-    /// value) -- sync owns workflow states, so every state a fixture's
-    /// issues reference must already be locally known (issue upserts never
-    /// write them) for the read model's `JOIN` to resolve the row.
+    /// value) -- sync owns workflow states, so every fixture issue's state
+    /// must already be locally known (issue upserts never write them) for
+    /// the read model's `JOIN` to resolve the row.
     fn seed_state(conn: &Connection, team_id: &str, name: &str, position: f64) {
         crate::db::teams::upsert_team_state(
             conn,
@@ -525,7 +494,7 @@ mod tests {
     }
 
     fn test_db() -> Connection {
-        let db = crate::db::Database::memory().unwrap();
+        let db = crate::db::Memory::new().unwrap();
         let conn = db.connect().unwrap();
         seed_state(&conn, "ENG", "Todo", 1.0);
         seed_state(&conn, "ENG", "In Progress", 2.0);
@@ -598,7 +567,7 @@ mod tests {
     }
 
     fn graph_db() -> Connection {
-        let db = crate::db::Database::memory().unwrap();
+        let db = crate::db::Memory::new().unwrap();
         let conn = db.connect().unwrap();
         crate::db::teams::upsert_team_state(
             &conn,
@@ -621,7 +590,7 @@ mod tests {
     }
 
     /// `IssuesVariables` selecting `filter`, with no sort/pagination override.
-    fn vars(filter: lt_types::issues::IssueFilter) -> IssuesVariables {
+    fn vars(filter: lt_upstream::query::issues::IssueFilter) -> IssuesVariables {
         IssuesVariables {
             filter: Some(filter),
             sort: None,
@@ -635,7 +604,7 @@ mod tests {
         let conn = graph_db();
         let page = query_issues(
             &conn,
-            &vars(lt_types::issues::IssueFilter {
+            &vars(lt_upstream::query::issues::IssueFilter {
                 title: Some("Wire it up".to_string()),
                 ..Default::default()
             }),
@@ -678,8 +647,8 @@ mod tests {
         let conn = test_db();
         let issues = query_issues(
             &conn,
-            &vars(lt_types::issues::IssueFilter {
-                assignee: Some(lt_types::issues::AssigneeFilter::Contains(
+            &vars(lt_upstream::query::issues::IssueFilter {
+                assignee: Some(lt_upstream::query::issues::AssigneeFilter::Contains(
                     "alice".to_string(),
                 )),
                 ..Default::default()
@@ -699,8 +668,8 @@ mod tests {
         let conn = test_db();
         let issues = query_issues(
             &conn,
-            &vars(lt_types::issues::IssueFilter {
-                assignee: Some(lt_types::issues::AssigneeFilter::IsNull),
+            &vars(lt_upstream::query::issues::IssueFilter {
+                assignee: Some(lt_upstream::query::issues::AssigneeFilter::IsNull),
                 ..Default::default()
             }),
         )
@@ -713,7 +682,7 @@ mod tests {
     #[test]
     fn query_issues_applies_state_filter_and_limit() {
         let conn = test_db();
-        let filter = lt_types::issues::IssueFilter {
+        let filter = lt_upstream::query::issues::IssueFilter {
             state: Some("todo".to_string()),
             ..Default::default()
         };
@@ -782,7 +751,7 @@ mod tests {
     #[test]
     fn query_issues_paginates_with_a_filter_active() {
         let conn = test_db();
-        let filter = lt_types::issues::IssueFilter {
+        let filter = lt_upstream::query::issues::IssueFilter {
             state: Some("todo".to_string()),
             ..Default::default()
         };
@@ -844,9 +813,9 @@ mod tests {
 
     /// A fresh database with one child issue upserted whose parent (`p1`) is
     /// referenced but never itself synced -- so the upsert mints it as a bare
-    /// skeleton row (`title IS NULL`).
+    /// skeleton row (`title` is the empty-string placeholder).
     fn db_with_skeleton_parent_child() -> Connection {
-        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        let conn = crate::db::Memory::new().unwrap().connect().unwrap();
         seed_state(&conn, "ENG", "Todo", 1.0);
 
         let mut child = test_issue("1", None, "Todo");
@@ -890,9 +859,9 @@ mod tests {
         assert_eq!(found[0].id.inner(), "1");
     }
 
-    /// A skeleton parent (`title IS NULL`) must not be written into the FTS
-    /// shadow index -- so a MATCH query never surfaces it -- until it syncs
-    /// as a full, titled issue, at which point it becomes searchable.
+    /// A skeleton parent (empty-string title) must not be written into the
+    /// FTS shadow index -- so a MATCH query never surfaces it -- until it
+    /// syncs as a full, titled issue, at which point it becomes searchable.
     #[test]
     fn skeleton_parent_is_not_indexed_until_it_syncs() {
         let conn = db_with_skeleton_parent_child();
@@ -911,7 +880,7 @@ mod tests {
 
     #[test]
     fn issues_query_apply_upserts_the_page() {
-        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        let conn = crate::db::Memory::new().unwrap().connect().unwrap();
         // The invariant this reports on: sync established the state before
         // the issue page lands.
         seed_state(&conn, "ENG", "Todo", 1.0);
@@ -931,7 +900,7 @@ mod tests {
 
     #[test]
     fn issues_query_apply_of_an_empty_page_is_a_noop() {
-        let conn = crate::db::Database::memory().unwrap().connect().unwrap();
+        let conn = crate::db::Memory::new().unwrap().connect().unwrap();
         let out = IssueConnection {
             nodes: Vec::new(),
             page_info: PageInfo {

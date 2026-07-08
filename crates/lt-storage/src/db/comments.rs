@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use lt_types::comments::Comment;
-use lt_types::types::User;
+use lt_upstream::query::comments::Comment;
+use lt_upstream::query::types::User;
 use rusqlite::{Connection, params};
 
-use crate::db::parse_datetime_column;
-use crate::db::sql::{self, EntityTable};
+use crate::db::crud::Insert;
+use crate::db::{parse_datetime_column, sql};
 
 /// Insert or replace a slice of comments: mint the issue anchor so
 /// `issue_id`'s FK holds, upsert each comment's author into the `users`
@@ -24,12 +24,7 @@ pub fn upsert_comments(conn: &Connection, comments: &[Comment]) -> Result<()> {
             .with_context(|| format!("comment {} has no issue id", c.id.inner()))?;
         crate::db::issues::mint_issue_skeleton(conn, issue_id, None)?;
         if let Some(user) = &c.user {
-            crate::db::issues::upsert_named_entity(
-                conn,
-                EntityTable::Users,
-                user.id.inner(),
-                Some(&user.name),
-            )?;
+            user.insert(conn)?;
         }
         stmt.execute(params![
             c.id.inner(),
@@ -110,7 +105,8 @@ mod tests {
     }
 
     fn test_db() -> Connection {
-        let db = crate::db::Database::memory().unwrap();
+        use crate::db::Storage;
+        let db = crate::db::Memory::new().unwrap();
         db.connect().unwrap()
     }
 

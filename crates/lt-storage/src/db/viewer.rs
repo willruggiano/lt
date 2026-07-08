@@ -3,12 +3,13 @@
 //! rather than duplicating the name/organization fields directly.
 
 use anyhow::{Context, Result};
-use lt_types::types;
-use lt_types::viewer::{Organization, Viewer};
+use lt_upstream::query::types;
+use lt_upstream::query::viewer::{Organization, Viewer};
 use rusqlite::{Connection, params};
 
-use crate::db::issues::{get_meta, set_meta, upsert_named_entity};
-use crate::db::sql::{self, EntityTable};
+use crate::db::crud::Insert;
+use crate::db::issues::{get_meta, set_meta};
+use crate::db::sql;
 
 /// The `sync_meta` keys the viewer identity is stored under. Kept private so
 /// every reader/writer goes through [`viewer`] / [`set_viewer`] instead of
@@ -20,12 +21,7 @@ const ORGANIZATION_ID_KEY: &str = "organization_id";
 /// ids in `sync_meta` -- the keys [`viewer`] reads back to reconstruct the
 /// identity, rather than duplicating its name/organization fields.
 pub fn set_viewer(conn: &Connection, viewer: &Viewer) -> Result<()> {
-    upsert_named_entity(
-        conn,
-        EntityTable::Users,
-        viewer.user.id.inner(),
-        Some(&viewer.user.name),
-    )?;
+    viewer.user.insert(conn)?;
     sql::execute(
         conn,
         sql::UPSERT_ORGANIZATION,
@@ -100,7 +96,8 @@ mod tests {
     use super::*;
 
     fn test_db() -> Connection {
-        crate::db::Database::memory().unwrap().connect().unwrap()
+        use crate::db::Storage;
+        crate::db::Memory::new().unwrap().connect().unwrap()
     }
 
     fn ada() -> Viewer {
