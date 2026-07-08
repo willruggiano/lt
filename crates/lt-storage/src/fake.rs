@@ -1,17 +1,21 @@
-//! Deterministic dataset generation for simulation testing (feature = "sim").
+//! Deterministic dataset generation and seeding (feature = "fake").
 //!
 //! Design: `docs/design/dst.md`.
 
 use std::collections::HashSet;
 
+use anyhow::{Result, ensure};
 use chrono::{DateTime, Duration, Utc};
 use fake::Fake;
 use fake::faker::company::en::{BsNoun, BsVerb, Buzzword, Industry};
 use fake::faker::lorem::en::{Paragraph, Sentence, Word};
 use fake::faker::name::en::Name;
+use lt_upstream::query::comments::Comment;
 use lt_upstream::query::types;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
+
+use crate::db::{self, Storage};
 
 /// Linear's fixed priority vocabulary (matches the labels the TUI renders).
 const PRIORITIES: &[&str] = &["No priority", "Urgent", "High", "Normal", "Low"];
@@ -29,11 +33,28 @@ const STATES: &[&str] = &[
 /// 2026-01-01T00:00:00Z. Fixed base so timestamps never depend on the wall clock.
 const BASE_SECS: i64 = 1_767_225_600;
 
-/// A generated, deterministic dataset ready to upsert into the local DB.
-#[derive(PartialEq)]
+/// Fixed RNG seed for the generator: `seed`'s output depends only on
+/// `Dataset`'s counts, never on ambient input.
+const GENERATOR_SEED: u64 = 42;
+
+/// A dataset spec: how many of each entity [`seed`] should generate and write.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Dataset {
-    pub issues: Vec<types::Issue>,
-    pub comments: Vec<lt_upstream::query::comments::Comment>,
+    pub comments: u64,
+    pub issues: u64,
+    pub users: u64,
+    pub teams: u64,
+}
+
+impl Default for Dataset {
+    fn default() -> Self {
+        Self {
+            comments: 1_000_000,
+            issues: 100_000,
+            users: 100,
+            teams: 10,
+        }
+    }
 }
 
 /// Uppercase the first character of `s`.
@@ -72,14 +93,14 @@ fn team_key(name: &str, used: &HashSet<String>) -> String {
     }
 }
 
-/// Build 3-5 teams with distinct names and keys.
-fn build_teams(rng: &mut StdRng) -> Vec<(String, String)> {
-    let n = rng.random_range(3..6usize);
+/// Build `n` teams with distinct names and keys.
+fn build_teams(rng: &mut StdRng, n: usize) -> Vec<(String, String)> {
     let mut teams: Vec<(String, String)> = Vec::with_capacity(n);
     let mut names: HashSet<String> = HashSet::new();
     let mut keys: HashSet<String> = HashSet::new();
     let mut attempts = 0;
-    while teams.len() < n && attempts < n * 8 {
+    let max_attempts = n.saturating_mul(8).max(8);
+    while teams.len() < n && attempts < max_attempts {
         attempts += 1;
         let name: String = Industry().fake_with_rng(rng);
         if !names.insert(name.clone()) {
@@ -92,26 +113,51 @@ fn build_teams(rng: &mut StdRng) -> Vec<(String, String)> {
     teams
 }
 
-/// Seeded dataset generator. Holds the RNG, the generated teams, and their
-/// per-team identifier counters so `ENG-1`, `ENG-2`, ... stay sequential.
+/// Build `n` users with distinct names; a user's id mirrors its name, so the
+/// relational upsert dedupes a shared name to one row.
+fn build_users(rng: &mut StdRng, n: usize) -> Vec<types::User> {
+    let mut users: Vec<types::User> = Vec::with_capacity(n);
+    let mut names: HashSet<String> = HashSet::new();
+    let mut attempts = 0;
+    let max_attempts = n.saturating_mul(8).max(8);
+    while users.len() < n && attempts < max_attempts {
+        attempts += 1;
+        let name: String = Name().fake_with_rng(rng);
+        if !names.insert(name.clone()) {
+            continue;
+        }
+        users.push(types::User {
+            id: name.clone().into(),
+            name,
+        });
+    }
+    users
+}
+
+/// Seeded dataset generator. Holds the RNG, the generated teams and users,
+/// and the teams' per-team identifier counters so `ENG-1`, `ENG-2`, ... stay
+/// sequential. Every issue's assignee, creator, and every comment's author is
+/// drawn from `users`, so the written `users` table holds exactly
+/// `Dataset::users` rows.
 struct Generator {
     rng: StdRng,
-    seed: u64,
     teams: Vec<(String, String)>,
     team_counters: Vec<u32>,
+    users: Vec<types::User>,
     base: DateTime<Utc>,
 }
 
 impl Generator {
-    fn new(seed: u64) -> Self {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let teams = build_teams(&mut rng);
+    fn new(team_count: usize, user_count: usize) -> Self {
+        let mut rng = StdRng::seed_from_u64(GENERATOR_SEED);
+        let teams = build_teams(&mut rng, team_count);
         let team_counters = vec![0; teams.len()];
+        let users = build_users(&mut rng, user_count);
         Self {
             rng,
-            seed,
             teams,
             team_counters,
+            users,
             base: DateTime::<Utc>::from_timestamp(BASE_SECS, 0).unwrap_or_default(),
         }
     }
@@ -138,10 +184,6 @@ impl Generator {
             lt_upstream::query::scalars::DateTime(c),
             lt_upstream::query::scalars::DateTime(u),
         )
-    }
-
-    fn name(&mut self) -> String {
-        Name().fake_with_rng(&mut self.rng)
     }
 
     fn title(&mut self) -> String {
@@ -184,12 +226,22 @@ impl Generator {
         Some(format!("## {title}\n\n{para}\n\n- {b1}\n- {b2}\n- {b3}\n"))
     }
 
-    /// A user name for ~80% of issues; `None` (unassigned) for the rest.
-    fn maybe_user(&mut self) -> Option<String> {
+    /// A uniformly-random user from the generated pool, or `None` if the pool
+    /// is empty.
+    fn pick_user(&mut self) -> Option<types::User> {
+        if self.users.is_empty() {
+            return None;
+        }
+        let i = self.rng.random_range(0..self.users.len());
+        Some(self.users[i].clone())
+    }
+
+    /// A pooled user for ~80% of issues; `None` (unassigned) for the rest.
+    fn maybe_user(&mut self) -> Option<types::User> {
         if self.rng.random_ratio(1, 5) {
             None
         } else {
-            Some(self.name())
+            self.pick_user()
         }
     }
 
@@ -231,15 +283,6 @@ impl Generator {
         })
     }
 
-    /// Wrap an optional name as a fragment user whose id mirrors the name, so
-    /// the relational upsert dedupes a person to one `users` row.
-    fn user(name: Option<String>) -> Option<types::User> {
-        name.map(|name| types::User {
-            id: name.clone().into(),
-            name,
-        })
-    }
-
     fn issue(&mut self, index: usize, existing: &[types::Issue]) -> types::Issue {
         let team_idx = self.rng.random_range(0..self.teams.len());
         let (team_name, team_key) = self.teams[team_idx].clone();
@@ -248,11 +291,11 @@ impl Generator {
         let (created_at, updated_at) = self.timestamps();
         let title = self.title();
         let description = self.description(&title);
-        let assignee = Self::user(self.maybe_user());
+        let assignee = self.maybe_user();
         let labels = self.labels();
         let project = self.maybe_project();
         let cycle = self.maybe_cycle();
-        let creator = Self::user(Some(self.name()));
+        let creator = self.pick_user();
         let parent = self.maybe_parent(&team_key, existing);
         // `PRIORITIES` is ordered by level, so the picked index is the level
         // directly -- no label round trip needed.
@@ -265,7 +308,7 @@ impl Generator {
         let state_idx = self.rng.random_range(0..STATES.len());
         let state_name = STATES[state_idx].to_string();
         types::Issue {
-            id: format!("sim-{:016x}-{index}", self.seed).into(),
+            id: format!("issue-{index:016x}").into(),
             identifier,
             title,
             priority: lt_upstream::query::scalars::Priority(priority),
@@ -299,52 +342,30 @@ impl Generator {
         }
     }
 
-    fn comments_for(&mut self, issue: &types::Issue) -> Vec<lt_upstream::query::comments::Comment> {
-        let n = self.rng.random_range(0..4usize);
-        let mut out = Vec::with_capacity(n);
-        for c in 0..n {
-            let (created_at, updated_at) = self.timestamps();
-            let body: String = Sentence(8..18).fake_with_rng(&mut self.rng);
-            let author = self.name();
-            out.push(lt_upstream::query::comments::Comment {
-                id: format!("{}-c{c}", issue.id.inner()).into(),
-                body,
-                created_at,
-                updated_at,
-                user: Some(types::User {
-                    id: author.clone().into(),
-                    name: author,
-                }),
-                issue_id: Some(issue.id.inner().to_string()),
-            });
+    /// A single comment attached to `issue_id`, with `index` as its
+    /// dataset-unique suffix.
+    fn comment(&mut self, index: u64, issue_id: &str) -> Comment {
+        let (created_at, updated_at) = self.timestamps();
+        let body: String = Sentence(8..18).fake_with_rng(&mut self.rng);
+        Comment {
+            id: format!("comment-{index:016x}").into(),
+            body,
+            created_at,
+            updated_at,
+            user: self.pick_user(),
+            issue_id: Some(issue_id.to_string()),
         }
-        out
     }
-}
-
-/// Generate a deterministic dataset of `size` issues (plus their comments).
-#[must_use]
-pub fn generate(seed: u64, size: usize) -> Dataset {
-    let mut generator = Generator::new(seed);
-    let mut issues = Vec::with_capacity(size);
-    let mut comments = Vec::new();
-    for index in 0..size {
-        let issue = generator.issue(index, &issues);
-        comments.extend(generator.comments_for(&issue));
-        issues.push(issue);
-    }
-    Dataset { issues, comments }
 }
 
 /// Every `(team_id, WorkflowState)` pair a generated dataset's issues
 /// reference, deduplicated by `(team_id, state_id)`. Sync owns workflow
-/// states in production (issue upserts never write them), and `lt sim` has no
-/// sync cycle or per-team states API to seed from offline, so this mirrors
-/// [`derive_team_memberships_from_issues`](crate::db::derive_team_memberships_from_issues)'s
+/// states in production (issue upserts never write them), and the generator
+/// has no sync cycle or per-team states API to seed from offline, so this
+/// mirrors [`derive_team_memberships_from_issues`](crate::db::derive_team_memberships_from_issues)'s
 /// ADR "Sim compatibility" rationale for the workflow-states invariant
 /// instead.
-#[must_use]
-pub fn derive_workflow_states(issues: &[types::Issue]) -> Vec<(String, types::WorkflowState)> {
+fn derive_workflow_states(issues: &[types::Issue]) -> Vec<(String, types::WorkflowState)> {
     let mut seen = HashSet::new();
     let mut states = Vec::new();
     for issue in issues {
@@ -359,81 +380,158 @@ pub fn derive_workflow_states(issues: &[types::Issue]) -> Vec<(String, types::Wo
     states
 }
 
+/// Deterministically generate `dataset`'s teams, users, workflow states,
+/// issues, and comments, and write them into `storage`.
+pub fn seed<S: Storage>(storage: &mut S, dataset: Dataset) -> Result<()> {
+    let team_count = usize::try_from(dataset.teams).unwrap_or(usize::MAX);
+    let user_count = usize::try_from(dataset.users).unwrap_or(usize::MAX);
+    let issue_count = usize::try_from(dataset.issues).unwrap_or(usize::MAX);
+
+    ensure!(
+        team_count > 0 || issue_count == 0,
+        "cannot generate issues with zero teams"
+    );
+
+    let mut generator = Generator::new(team_count, user_count);
+
+    let mut issues = Vec::with_capacity(issue_count);
+    for index in 0..issue_count {
+        let issue = generator.issue(index, &issues);
+        issues.push(issue);
+    }
+    let states = derive_workflow_states(&issues);
+
+    let teams: Vec<types::Team> = generator
+        .teams
+        .iter()
+        .map(|(name, key)| types::Team {
+            id: key.clone().into(),
+            name: name.clone(),
+        })
+        .collect();
+
+    let conn = storage.connect()?;
+    db::upsert_teams(&conn, &teams)?;
+    db::upsert_users(&conn, &generator.users)?;
+    for (team_id, state) in &states {
+        db::upsert_team_state(&conn, team_id, state)?;
+    }
+    db::upsert_issues(&conn, &issues)?;
+
+    if !issues.is_empty() {
+        let mut comments = Vec::with_capacity(usize::try_from(dataset.comments).unwrap_or(0));
+        for index in 0..dataset.comments {
+            let issue = &issues[generator.rng.random_range(0..issues.len())];
+            comments.push(generator.comment(index, issue.id.inner()));
+        }
+        db::upsert_comments(&conn, &comments)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::db;
-    use crate::db::Storage;
+    use crate::db::{Memory, Select};
 
-    #[test]
-    fn same_seed_is_deterministic() {
-        assert!(generate(42, 64) == generate(42, 64));
+    fn small_dataset() -> Dataset {
+        Dataset {
+            comments: 20,
+            issues: 10,
+            users: 5,
+            teams: 2,
+        }
+    }
+
+    fn query_all_issues(conn: &rusqlite::Connection) -> Vec<types::Issue> {
+        db::query_issues(
+            conn,
+            &lt_upstream::query::issues::IssuesVariables {
+                filter: None,
+                sort: None,
+                first: Some(250),
+                after: None,
+            },
+        )
+        .unwrap()
+        .nodes
     }
 
     #[test]
-    fn different_seed_differs() {
-        assert!(generate(1, 64) != generate(2, 64));
+    fn default_dataset_matches_documented_sizes() {
+        let d = Dataset::default();
+        assert_eq!(d.comments, 1_000_000);
+        assert_eq!(d.issues, 100_000);
+        assert_eq!(d.users, 100);
+        assert_eq!(d.teams, 10);
     }
 
     #[test]
-    fn size_is_honored() {
-        assert_eq!(generate(7, 0).issues.len(), 0);
-        assert_eq!(generate(7, 250).issues.len(), 250);
+    fn fake_seed_round_trips_through_storage() {
+        let mut storage = Memory::new().unwrap();
+        seed(&mut storage, small_dataset()).unwrap();
+        let conn = storage.connect().unwrap();
+
+        // `db::query_teams` (not a raw row count) excludes the sentinel
+        // skeleton team `mint_issue_skeleton` mints as an FK anchor for
+        // comments and parent references.
+        assert_eq!(db::query_teams(&conn).unwrap().len(), 2);
+        let user_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(user_count, 5);
+
+        let issues = query_all_issues(&conn);
+        assert_eq!(issues.len(), 10);
+
+        let total_comments: usize = issues
+            .iter()
+            .map(|i| db::query_comments(&conn, i.id.inner()).unwrap().len())
+            .sum();
+        assert_eq!(total_comments, 20);
+
+        let via_crud = types::Issue::select(&conn, issues[0].id.inner())
+            .unwrap()
+            .unwrap();
+        assert_eq!(via_crud.identifier, issues[0].identifier);
     }
 
     #[test]
     fn identifiers_are_unique() {
-        let d = generate(99, 200);
-        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.inner()).collect();
-        assert_eq!(ids.len(), d.issues.len());
-        let idents: HashSet<&str> = d.issues.iter().map(|i| i.identifier.as_str()).collect();
-        assert_eq!(idents.len(), d.issues.len());
+        let mut storage = Memory::new().unwrap();
+        seed(&mut storage, small_dataset()).unwrap();
+        let conn = storage.connect().unwrap();
+
+        let issues = query_all_issues(&conn);
+        let ids: HashSet<&str> = issues.iter().map(|i| i.id.inner()).collect();
+        assert_eq!(ids.len(), issues.len());
+        let idents: HashSet<&str> = issues.iter().map(|i| i.identifier.as_str()).collect();
+        assert_eq!(idents.len(), issues.len());
     }
 
     #[test]
-    fn relations_reference_existing_issues() {
-        let d = generate(123, 200);
-        let ids: HashSet<&str> = d.issues.iter().map(|i| i.id.inner()).collect();
-        for issue in &d.issues {
+    fn parents_reference_generated_issues() {
+        let mut storage = Memory::new().unwrap();
+        seed(&mut storage, small_dataset()).unwrap();
+        let conn = storage.connect().unwrap();
+
+        let issues = query_all_issues(&conn);
+        let identifiers: HashSet<&str> = issues.iter().map(|i| i.identifier.as_str()).collect();
+        for issue in &issues {
             if let Some(parent) = &issue.parent {
                 assert!(
-                    ids.contains(parent.id.inner()),
+                    identifiers.contains(parent.identifier.as_str()),
                     "dangling parent {}",
-                    parent.id.inner()
+                    parent.identifier
                 );
-                assert_ne!(issue.id, parent.id, "issue is its own parent");
+                assert_ne!(
+                    issue.identifier, parent.identifier,
+                    "issue is its own parent"
+                );
             }
         }
-        for comment in &d.comments {
-            let issue_id = comment.issue_id.as_deref().unwrap();
-            assert!(
-                ids.contains(issue_id),
-                "comment {} references missing issue {issue_id}",
-                comment.id.inner(),
-            );
-        }
-    }
-
-    #[test]
-    fn round_trips_through_sqlite() {
-        let d = generate(5, 30);
-        let database = crate::db::Memory::new().unwrap();
-        let conn = database.connect().unwrap();
-        for (team_id, state) in derive_workflow_states(&d.issues) {
-            db::upsert_team_state(&conn, &team_id, &state).unwrap();
-        }
-        db::upsert_issues(&conn, &d.issues).unwrap();
-        db::upsert_comments(&conn, &d.comments).unwrap();
-        // sanity: relational base reconstructs the rows.
-        let vars = lt_upstream::query::issues::IssuesVariables {
-            filter: None,
-            sort: None,
-            first: Some(250),
-            after: None,
-        };
-        let queried = db::query_issues(&conn, &vars).unwrap();
-        assert_eq!(queried.nodes.len(), 30);
     }
 }

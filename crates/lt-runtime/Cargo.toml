@@ -24,7 +24,7 @@ lt-upstream = { workspace = true, features = ["test-util"] }
 
 [features]
 # Deterministic simulation testing. See docs/design/dst.md.
-sim = ["lt-storage/sim"]
+sim = ["lt-storage/fake"]
 # Expose test-only helpers (in-memory DB, sample data) to dependent crates.
 test-util = ["lt-storage/test-util", "lt-types/test-util"]
 

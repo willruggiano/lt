@@ -29,9 +29,18 @@ proc-macro2 = "1"
 quote = "1"
 toml = "1"
 
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3"
+
+[[bench]]
+name = "seed"
+harness = false
+required-features = ["fake"]
+
 [features]
 # Deterministic simulation testing. See docs/design/dst.md.
-sim = ["dep:fake"]
+fake = ["dep:fake"]
 # Expose test-only helpers (in-memory DB, sample data) to dependent crates.
 test-util = []
 
