@@ -1,15 +1,15 @@
 //! The comment domain: replay of queued `commentCreate` mutations. Fetching an
-//! issue's comment thread executes [`lt_types::comments::CommentsQuery`]
+//! issue's comment thread executes [`crate::query::comments::CommentsQuery`]
 //! directly (`lt-runtime`'s `IssueDetailQuery` refresh paginates it to
 //! exhaustion); persistence lives in `lt-storage`.
 
 #[cfg(test)]
 mod tests {
-    use lt_types::comments::CommentCreateMutation;
-    use lt_types::inputs::CommentCreateInput;
     use serde_json::json;
 
     use crate::client::{FakeTransport, execute};
+    use crate::query::comments::CommentCreateMutation;
+    use crate::query::inputs::CommentCreateInput;
 
     #[test]
     fn comment_create_replay_returns_server_comment() {
@@ -23,7 +23,7 @@ mod tests {
         })]);
         let created = execute::<CommentCreateMutation>(
             &transport,
-            lt_types::comments::CommentCreateVariables {
+            crate::query::comments::CommentCreateVariables {
                 input: CommentCreateInput {
                     issue_id: "i1".to_string(),
                     body: "hi".to_string(),
@@ -47,7 +47,7 @@ mod tests {
         })]);
         let err = execute::<CommentCreateMutation>(
             &transport,
-            lt_types::comments::CommentCreateVariables {
+            crate::query::comments::CommentCreateVariables {
                 input: CommentCreateInput {
                     issue_id: "i1".to_string(),
                     body: "hi".to_string(),

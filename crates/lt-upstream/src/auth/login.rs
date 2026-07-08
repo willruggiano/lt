@@ -6,9 +6,10 @@ use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use lt_config::{self, AuthToken};
-use lt_types::clock::Clock;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
+
+use crate::query::clock::Clock;
 
 const CALLBACK_PORT: u16 = 7342;
 const AUTH_URL: &str = "https://linear.app/oauth/authorize";

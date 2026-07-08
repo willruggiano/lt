@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, anyhow};
-use lt_types::graphql::GraphqlOperation;
-use lt_types::types::GraphqlResponse;
 use serde_json::Value;
+
+use crate::query::graphql::GraphqlOperation;
+use crate::query::types::GraphqlResponse;
 
 const GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 
@@ -153,9 +154,9 @@ mod tests {
         let transport = FakeTransport::new(vec![json!({
             "team": { "states": { "nodes": [] } }
         })]);
-        let states = execute::<lt_types::states::WorkflowStatesQuery>(
+        let states = execute::<crate::query::states::WorkflowStatesQuery>(
             &transport,
-            lt_types::states::TeamVariables {
+            crate::query::states::TeamVariables {
                 team_id: "t1".to_string(),
             },
         )
@@ -169,9 +170,9 @@ mod tests {
         // Missing the required `team` field, so decoding into the operation
         // envelope fails.
         let transport = FakeTransport::new(vec![json!({})]);
-        let Err(err) = execute::<lt_types::states::WorkflowStatesQuery>(
+        let Err(err) = execute::<crate::query::states::WorkflowStatesQuery>(
             &transport,
-            lt_types::states::TeamVariables {
+            crate::query::states::TeamVariables {
                 team_id: "t1".to_string(),
             },
         ) else {

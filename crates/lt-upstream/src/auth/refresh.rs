@@ -13,10 +13,10 @@
 ///     refresh grant itself fails.
 use anyhow::{Result, anyhow};
 use lt_config::AuthToken;
-use lt_types::clock::Clock;
 use tracing::{info, warn};
 
 use super::login::{TokenExchanger, TokenRefresh, lookup_stored_credentials};
+use crate::query::clock::Clock;
 
 /// Load the stored token, attempting an automatic re-authentication if the
 /// token is expired and client credentials are available.

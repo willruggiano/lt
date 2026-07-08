@@ -1,4 +1,4 @@
-//! The issue domain: create/update/replay mutations execute `lt-types::issues`
+//! The issue domain: create/update/replay mutations execute `query::issues`
 //! mutation types directly via `execute`; this module owns only the shared
 //! issue node fixture their tests reuse.
 
@@ -9,10 +9,10 @@
 
 /// A minimal GraphQL issue node matching [`Issue`]'s deserialization, shared by
 /// the fetch tests here and the `lt-runtime` delta-sync tests (via `test-util`).
-/// Defined once in `lt-types` (the fixture's data owner) and re-exported here
-/// so existing call sites keep this path.
+/// Defined once in `query::issues` (the fixture's data owner) and re-exported
+/// here so existing call sites keep this path.
 #[cfg(any(test, feature = "test-util"))]
-pub use lt_types::issues::sample_issue_node;
+pub use crate::query::issues::sample_issue_node;
 
 #[cfg(test)]
 mod tests {
@@ -24,10 +24,10 @@ mod tests {
         let transport = FakeTransport::new(vec![serde_json::json!({
             "issueCreate": { "success": true, "issue": sample_issue_node("1") }
         })]);
-        let created = execute::<lt_types::issues::IssueCreateMutation>(
+        let created = execute::<crate::query::issues::IssueCreateMutation>(
             &transport,
-            lt_types::issues::IssueCreateVariables {
-                input: lt_types::inputs::IssueCreateInput {
+            crate::query::issues::IssueCreateVariables {
+                input: crate::query::inputs::IssueCreateInput {
                     title: "New".to_string(),
                     team_id: "t1".to_string(),
                     description: None,
@@ -54,10 +54,10 @@ mod tests {
         let transport = FakeTransport::new(vec![serde_json::json!({
             "issueCreate": { "success": false, "issue": null }
         })]);
-        let Err(err) = execute::<lt_types::issues::IssueCreateMutation>(
+        let Err(err) = execute::<crate::query::issues::IssueCreateMutation>(
             &transport,
-            lt_types::issues::IssueCreateVariables {
-                input: lt_types::inputs::IssueCreateInput {
+            crate::query::issues::IssueCreateVariables {
+                input: crate::query::inputs::IssueCreateInput {
                     title: "New".to_string(),
                     team_id: "t1".to_string(),
                     description: None,
@@ -77,11 +77,11 @@ mod tests {
         let transport = FakeTransport::new(vec![serde_json::json!({
             "issueUpdate": { "success": true, "issue": sample_issue_node("1") }
         })]);
-        let issue = execute::<lt_types::issues::IssueUpdateMutation>(
+        let issue = execute::<crate::query::issues::IssueUpdateMutation>(
             &transport,
-            lt_types::issues::IssueUpdateVariables {
+            crate::query::issues::IssueUpdateVariables {
                 id: "i1".to_string(),
-                input: lt_types::inputs::IssueUpdateInput {
+                input: crate::query::inputs::IssueUpdateInput {
                     state_id: Some("s9".to_string()),
                     ..Default::default()
                 },
@@ -99,11 +99,11 @@ mod tests {
         let transport = FakeTransport::new(vec![serde_json::json!({
             "issueUpdate": { "success": true, "issue": null }
         })]);
-        let issue = execute::<lt_types::issues::IssueUpdateMutation>(
+        let issue = execute::<crate::query::issues::IssueUpdateMutation>(
             &transport,
-            lt_types::issues::IssueUpdateVariables {
+            crate::query::issues::IssueUpdateVariables {
                 id: "i1".to_string(),
-                input: lt_types::inputs::IssueUpdateInput {
+                input: crate::query::inputs::IssueUpdateInput {
                     state_id: Some("s9".to_string()),
                     ..Default::default()
                 },
