@@ -1,5 +1,7 @@
 pub mod comments;
 pub mod filters;
+#[cfg(test)]
+mod generated_sql_tests;
 pub mod issues;
 pub mod op_log;
 pub(crate) mod sql;

@@ -2,25 +2,30 @@
 // propagate a `Result`; exempt them from the crate-wide panic-safety lints.
 #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::{env, fs};
 
+use lt_schema_codegen::schema_model::{Schema, TypeKind};
+use lt_schema_codegen::selection_model::{Fragment, parse_fragments};
 use lt_schema_codegen::{
-    AllowlistConfig, extract_input_object_fields, format_generated, gen_parse_sort_value,
-    gen_parser_fn, gen_stem_key_enum, gen_stem_kind_enum, validate_filter_fields,
-    validate_sort_fields,
+    AllowlistConfig, classify, emit_ddl, emit_sql, extract_input_object_fields, format_generated,
+    gen_parse_sort_value, gen_parser_fn, gen_stem_key_enum, gen_stem_kind_enum,
+    validate_filter_fields, validate_sort_fields,
 };
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
     let manifest = Path::new(&manifest_dir);
     let schema_path = manifest.join("../../build/linear-schema-definition.graphql");
+    let fragments_path = manifest.join("../lt-upstream/src/query/types.rs");
 
     // Tell cargo to re-run this script when these files change.
     println!("cargo:rerun-if-changed={}", schema_path.display());
+    println!("cargo:rerun-if-changed={}", fragments_path.display());
     println!(
         "cargo:rerun-if-changed={}",
         manifest
@@ -88,4 +93,249 @@ fn main() {
     let stems_path = Path::new(&out_dir).join("search_stems.rs");
     fs::write(&stems_path, &out_src)
         .unwrap_or_else(|e| panic!("Cannot write {}: {e}", stems_path.display()));
+
+    // -----------------------------------------------------------------------
+    // Generate generated_schema.rs / generated_statements.rs from the
+    // hand-written entity fragments (`lt-upstream/src/query/types.rs`)
+    // -----------------------------------------------------------------------
+    let schema = Schema::parse(&schema_src)
+        .unwrap_or_else(|e| panic!("Failed to parse GraphQL SDL for entity codegen: {e}"));
+
+    let fragments_src = fs::read_to_string(&fragments_path).unwrap_or_else(|e| {
+        panic!(
+            "Cannot read fragment source at {}: {e}",
+            fragments_path.display()
+        )
+    });
+    let fragments = parse_fragments(&fragments_src)
+        .unwrap_or_else(|e| panic!("Failed to parse fragment source: {e}"));
+
+    // The canonical entity fragments: the top-level fragment for each
+    // `Node`-implementing object type Linear's schema declares. `IssueLabel`
+    // implements `Node` but is excluded: its storage table is the
+    // reference-data `labels(id, name)` table (hand-authored below), and the
+    // emitter would otherwise name it `issue_labels`, colliding with the
+    // `Issue.labels` junction table.
+    let entity_fragments: Vec<&Fragment> = fragments
+        .iter()
+        .filter(|f| {
+            f.rust_name == f.graphql_type
+                && f.graphql_type != "IssueLabel"
+                && matches!(
+                    schema.type_kind(&f.graphql_type),
+                    Some(TypeKind::Object {
+                        implements_node: true
+                    })
+                )
+        })
+        .collect();
+
+    let generated_types: BTreeSet<&str> = entity_fragments
+        .iter()
+        .map(|f| f.graphql_type.as_str())
+        .collect();
+
+    write_generated_schema(&out_dir, &entity_fragments, &schema, &generated_types);
+    write_generated_statements(&out_dir, &entity_fragments, &schema, &generated_types);
+}
+
+/// The generated table name for a GraphQL object type, mirroring
+/// `lt_schema_codegen::table_name` (crate-private there): `WorkflowState` ->
+/// `workflow_states`.
+fn table_name(graphql_type: &str) -> String {
+    format!("{}s", classify::to_snake_case(graphql_type))
+}
+
+/// The junction table name(s) `emit_ddl::emit_create_table` produces for
+/// `fragment`'s `*Connection` fields, so the DDL const list can name them
+/// without re-deriving `emit_ddl`'s private naming.
+fn junction_table_names(fragment: &Fragment, schema: &Schema) -> Vec<String> {
+    fragment
+        .fields
+        .iter()
+        .filter(|field| field.base_type.ends_with("Connection"))
+        .map(|field| {
+            let connection = schema
+                .object(&field.base_type)
+                .unwrap_or_else(|| panic!("schema has no object type `{}`", field.base_type));
+            let node_type = connection
+                .fields()
+                .find_map(|(name, ty)| (name == "nodes").then(|| ty.to_string()))
+                .unwrap_or_else(|| {
+                    panic!("connection type `{}` has no `nodes` field", field.base_type)
+                });
+            let node_entity = node_type
+                .strip_prefix(fragment.graphql_type.as_str())
+                .unwrap_or(node_type.as_str());
+            format!(
+                "{}_{}",
+                classify::to_snake_case(&fragment.graphql_type),
+                table_name(node_entity)
+            )
+        })
+        .collect()
+}
+
+/// The storage-only DDL fragment: the tables, columns, indexes, FTS5 index
+/// and triggers `crates/lt-storage/src/db/mod.rs`'s `MIGRATION_5` declares
+/// that no entity fragment carries (reference-data tables, sync bookkeeping,
+/// join tables, and the search index). Concatenated after the schema-driven
+/// entity/junction tables so its foreign keys resolve against them.
+///
+/// `workflow_states` carries no `team_id` here (unlike `MIGRATION_5`): no
+/// entity fragment selects `WorkflowState.team`, so the schema-driven table
+/// has no such column to index.
+const STORAGE_DDL_SQL: &str = "\
+    CREATE TABLE labels (id TEXT PRIMARY KEY, name TEXT);
+    CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT, url_key TEXT);
+
+    ALTER TABLE issues ADD COLUMN synced_at TEXT;
+
+    CREATE TABLE issue_comments (
+        id         TEXT PRIMARY KEY,
+        issue_id   TEXT NOT NULL REFERENCES issues(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        user_id    TEXT REFERENCES users(id) ON UPDATE CASCADE,
+        body       TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        synced_at  TEXT
+    );
+    CREATE INDEX idx_issue_comments_issue_id ON issue_comments (issue_id);
+    CREATE INDEX idx_issue_comments_created_at ON issue_comments (issue_id, created_at);
+
+    CREATE TABLE team_memberships (
+        team_id TEXT NOT NULL REFERENCES teams(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        PRIMARY KEY (team_id, user_id)
+    );
+
+    CREATE VIRTUAL TABLE issues_fts USING fts5(
+        identifier,
+        title,
+        content='issues',
+        content_rowid='rowid'
+    );
+    CREATE TRIGGER issues_ai AFTER INSERT ON issues WHEN new.title IS NOT NULL BEGIN
+        INSERT INTO issues_fts(rowid, identifier, title)
+        VALUES (new.rowid, new.identifier, new.title);
+    END;
+    CREATE TRIGGER issues_ad AFTER DELETE ON issues WHEN old.title IS NOT NULL BEGIN
+        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
+        VALUES ('delete', old.rowid, old.identifier, old.title);
+    END;
+    CREATE TRIGGER issues_au_del AFTER UPDATE ON issues WHEN old.title IS NOT NULL BEGIN
+        INSERT INTO issues_fts(issues_fts, rowid, identifier, title)
+        VALUES ('delete', old.rowid, old.identifier, old.title);
+    END;
+    CREATE TRIGGER issues_au_ins AFTER UPDATE ON issues WHEN new.title IS NOT NULL BEGIN
+        INSERT INTO issues_fts(rowid, identifier, title)
+        VALUES (new.rowid, new.identifier, new.title);
+    END;
+
+    CREATE TABLE op_log (
+        seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation  TEXT NOT NULL,
+        id         TEXT NOT NULL,
+        attempts   INTEGER DEFAULT 0,
+        last_error TEXT
+    );
+    CREATE INDEX idx_op_log_operation_id ON op_log (operation, id);
+
+    CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+    CREATE INDEX idx_issues_team_id ON issues (team_id);
+    CREATE INDEX idx_issues_state_id ON issues (state_id);
+    CREATE INDEX idx_issues_team_state ON issues (team_id, state_id);
+    CREATE INDEX idx_issues_parent_id ON issues (parent_id);
+    CREATE INDEX idx_issues_updated_at ON issues (updated_at);";
+
+/// Write `$OUT_DIR/generated_schema.rs`: one `pub const` per schema-driven
+/// entity/junction `CREATE TABLE`, the hand-authored [`STORAGE_DDL_SQL`], and
+/// a `GENERATED_DDL` slice naming every statement in dependency order.
+fn write_generated_schema(
+    out_dir: &str,
+    entity_fragments: &[&Fragment],
+    schema: &Schema,
+    generated_types: &BTreeSet<&str>,
+) {
+    let mut tokens = TokenStream::new();
+    let mut names: Vec<String> = Vec::new();
+
+    for fragment in entity_fragments {
+        tokens.extend(emit_ddl::emit_create_table(fragment, schema, generated_types));
+        names.push(format!(
+            "CREATE_TABLE_{}",
+            table_name(&fragment.graphql_type).to_uppercase()
+        ));
+        for junction in junction_table_names(fragment, schema) {
+            names.push(format!("CREATE_TABLE_{}", junction.to_uppercase()));
+        }
+    }
+
+    tokens.extend(quote! {
+        pub const STORAGE_DDL: &str = #STORAGE_DDL_SQL;
+    });
+    names.push("STORAGE_DDL".to_string());
+
+    let idents: Vec<_> = names.iter().map(|n| format_ident!("{n}")).collect();
+    tokens.extend(quote! {
+        /// Every generated DDL statement (or multi-statement batch), in
+        /// dependency order: the schema-driven entity/junction tables, then
+        /// the hand-authored storage-only tables/indexes/triggers.
+        pub const GENERATED_DDL: &[&str] = &[ #( #idents, )* ];
+    });
+
+    let header = "// generated_schema.rs -- generated by build.rs\n\
+                 // DO NOT EDIT -- regenerate by running `cargo build`\n\n";
+    let out_src = format_generated(header, tokens);
+    let path = Path::new(out_dir).join("generated_schema.rs");
+    fs::write(&path, &out_src).unwrap_or_else(|e| panic!("Cannot write {}: {e}", path.display()));
+}
+
+/// Write `$OUT_DIR/generated_statements.rs`: the upsert/update/delete/select
+/// statement per entity fragment, and a `GENERATED_STATEMENTS` slice naming
+/// every statement.
+fn write_generated_statements(
+    out_dir: &str,
+    entity_fragments: &[&Fragment],
+    schema: &Schema,
+    generated_types: &BTreeSet<&str>,
+) {
+    let mut tokens = TokenStream::new();
+    let mut names: Vec<String> = Vec::new();
+
+    for fragment in entity_fragments {
+        let table = table_name(&fragment.graphql_type).to_uppercase();
+        let statements: [(&str, TokenStream); 4] = [
+            (
+                "UPSERT",
+                emit_sql::emit_upsert(fragment, schema, generated_types),
+            ),
+            (
+                "UPDATE",
+                emit_sql::emit_update(fragment, schema, generated_types),
+            ),
+            ("DELETE", emit_sql::emit_delete(fragment)),
+            (
+                "SELECT",
+                emit_sql::emit_select(fragment, schema, generated_types),
+            ),
+        ];
+        for (prefix, stmt_tokens) in statements {
+            tokens.extend(stmt_tokens);
+            names.push(format!("{prefix}_{table}"));
+        }
+    }
+
+    let idents: Vec<_> = names.iter().map(|n| format_ident!("{n}")).collect();
+    tokens.extend(quote! {
+        /// Every generated CRUD statement, in entity-then-verb order.
+        pub const GENERATED_STATEMENTS: &[&str] = &[ #( #idents, )* ];
+    });
+
+    let header = "// generated_statements.rs -- generated by build.rs\n\
+                 // DO NOT EDIT -- regenerate by running `cargo build`\n\n";
+    let out_src = format_generated(header, tokens);
+    let path = Path::new(out_dir).join("generated_statements.rs");
+    fs::write(&path, &out_src).unwrap_or_else(|e| panic!("Cannot write {}: {e}", path.display()));
 }
