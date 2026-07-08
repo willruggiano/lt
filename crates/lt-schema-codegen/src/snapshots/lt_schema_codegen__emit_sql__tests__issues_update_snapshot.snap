@@ -1,0 +1,5 @@
+---
+source: crates/lt-schema-codegen/src/emit_sql.rs
+expression: "crate::format_generated(\"\", tokens)"
+---
+pub const UPDATE_ISSUES: &str = "UPDATE issues SET identifier = ?1, title = ?2, priority_label = ?3, priority = ?4, state_id = ?5, assignee_id = ?6, team_id = ?7, description = ?8, project_id = ?9, cycle_id = ?10, creator_id = ?11, parent_id = ?12, created_at = ?13, updated_at = ?14 WHERE id = ?15";

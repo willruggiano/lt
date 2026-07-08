@@ -18,9 +18,14 @@ use serde::Deserialize;
 
 pub mod affinity;
 pub mod classify;
+pub mod emit_ddl;
+pub mod emit_grammar;
+pub mod emit_sql;
 pub mod ref_fragment;
 pub mod schema_model;
 pub mod selection_model;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 
 #[derive(Debug, Deserialize)]
 pub struct SortFieldSpec {
@@ -621,6 +626,24 @@ pub fn gen_parser_fn(fields: &[FieldSpec]) -> TokenStream {
             (tokens, errors)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared emitter helpers (`emit_ddl`, `emit_sql`)
+// ---------------------------------------------------------------------------
+
+/// The generated table name for a GraphQL object type: `WorkflowState` ->
+/// `workflow_states`.
+pub(crate) fn table_name(graphql_type: &str) -> String {
+    format!("{}s", classify::to_snake_case(graphql_type))
+}
+
+/// A `pub const <PREFIX>_<NAME>: &str = <sql>;` declaration -- the shared
+/// tail every SQL-emitting generator (`emit_ddl`, `emit_sql`) produces, kept
+/// in one place so the ident-and-declare step is not duplicated per emitter.
+pub(crate) fn const_str_item(prefix: &str, name: &str, sql: &str) -> TokenStream {
+    let ident = format_ident!("{}_{}", prefix, name.to_uppercase());
+    quote! { pub const #ident: &str = #sql; }
 }
 
 // ---------------------------------------------------------------------------

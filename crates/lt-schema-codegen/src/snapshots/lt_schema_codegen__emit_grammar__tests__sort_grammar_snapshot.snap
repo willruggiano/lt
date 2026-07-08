@@ -1,0 +1,23 @@
+---
+source: crates/lt-schema-codegen/src/emit_grammar.rs
+expression: "crate::format_generated(\"\", tokens)"
+---
+/// A sort field over `IssueSortInput`'s scalar fields.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SortField {
+    CreatedAt,
+    UpdatedAt,
+    Priority,
+    Title,
+}
+impl SortField {
+    /// The identity `ORDER BY` clause for this field.
+    pub fn order_by(&self) -> &'static str {
+        match self {
+            SortField::CreatedAt => "ORDER BY created_at",
+            SortField::UpdatedAt => "ORDER BY updated_at",
+            SortField::Priority => "ORDER BY priority",
+            SortField::Title => "ORDER BY title",
+        }
+    }
+}

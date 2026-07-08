@@ -1,0 +1,5 @@
+---
+source: crates/lt-schema-codegen/src/emit_sql.rs
+expression: "crate::format_generated(\"\", tokens)"
+---
+pub const SELECT_ISSUES: &str = "SELECT id, identifier, title, priority_label, priority, state_id, assignee_id, team_id, description, project_id, cycle_id, creator_id, parent_id, created_at, updated_at FROM issues WHERE id = ?1";

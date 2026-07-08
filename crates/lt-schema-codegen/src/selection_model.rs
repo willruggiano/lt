@@ -33,18 +33,29 @@ pub struct FragmentField {
 /// `cynic::QueryFragment`. Other items (e.g. a plain response envelope
 /// struct) are ignored.
 pub fn parse_fragments(query_src: &str) -> syn::Result<Vec<Fragment>> {
-    syn::parse_file(query_src)?
+    parse_derived_structs(query_src, "QueryFragment")
+}
+
+/// Parse `InputObject` source text and extract every struct deriving
+/// `cynic::InputObject`. An `InputObject`'s field list has the identical
+/// syntactic shape [`parse_fragments`] extracts for `QueryFragment` structs.
+pub fn parse_input_objects(query_src: &str) -> syn::Result<Vec<Fragment>> {
+    parse_derived_structs(query_src, "InputObject")
+}
+
+fn parse_derived_structs(src: &str, derive_name: &str) -> syn::Result<Vec<Fragment>> {
+    syn::parse_file(src)?
         .items
         .into_iter()
         .filter_map(|item| match item {
-            Item::Struct(item_struct) if derives_query_fragment(&item_struct) => Some(item_struct),
+            Item::Struct(item_struct) if derives(&item_struct, derive_name) => Some(item_struct),
             _ => None,
         })
         .map(|item_struct| parse_fragment(&item_struct))
         .collect()
 }
 
-fn derives_query_fragment(item_struct: &ItemStruct) -> bool {
+fn derives(item_struct: &ItemStruct, derive_name: &str) -> bool {
     item_struct.attrs.iter().any(|attr| {
         attr.path().is_ident("derive")
             && attr
@@ -53,7 +64,7 @@ fn derives_query_fragment(item_struct: &ItemStruct) -> bool {
                     paths.iter().any(|path| {
                         path.segments
                             .last()
-                            .is_some_and(|seg| seg.ident == "QueryFragment")
+                            .is_some_and(|seg| seg.ident == derive_name)
                     })
                 })
     })

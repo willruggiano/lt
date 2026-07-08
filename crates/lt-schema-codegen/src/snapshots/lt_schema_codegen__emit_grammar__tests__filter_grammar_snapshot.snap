@@ -1,0 +1,20 @@
+---
+source: crates/lt-schema-codegen/src/emit_grammar.rs
+expression: "crate::format_generated(\"\", tokens)"
+---
+/// The key side of a filter stem token.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StemKey {
+    CreatedAt,
+    UpdatedAt,
+    Priority,
+    Title,
+}
+/// The fully-parsed meaning of a recognised filter stem.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StemKind {
+    CreatedAt { value: String },
+    UpdatedAt { value: String },
+    Priority { value: String },
+    Title { value: String },
+}

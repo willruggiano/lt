@@ -1,0 +1,5 @@
+---
+source: crates/lt-schema-codegen/src/emit_sql.rs
+expression: "crate::format_generated(\"\", tokens)"
+---
+pub const DELETE_ISSUES: &str = "DELETE FROM issues WHERE id = ?1";

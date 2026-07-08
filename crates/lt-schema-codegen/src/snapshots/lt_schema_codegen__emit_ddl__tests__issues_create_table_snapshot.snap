@@ -1,0 +1,6 @@
+---
+source: crates/lt-schema-codegen/src/emit_ddl.rs
+expression: pretty
+---
+pub const CREATE_TABLE_ISSUES: &str = "CREATE TABLE issues (id TEXT PRIMARY KEY, identifier TEXT NOT NULL, title TEXT NOT NULL, priority_label TEXT NOT NULL, priority INTEGER NOT NULL, state_id TEXT NOT NULL REFERENCES workflow_states(id) ON UPDATE CASCADE, assignee_id TEXT REFERENCES users(id) ON UPDATE CASCADE, team_id TEXT NOT NULL REFERENCES teams(id) ON UPDATE CASCADE, description TEXT, project_id TEXT REFERENCES projects(id) ON UPDATE CASCADE, cycle_id TEXT REFERENCES cycles(id) ON UPDATE CASCADE, creator_id TEXT REFERENCES users(id) ON UPDATE CASCADE, parent_id TEXT REFERENCES issues(id) ON UPDATE CASCADE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)";
+pub const CREATE_TABLE_ISSUE_LABELS: &str = "CREATE TABLE issue_labels (issue_id TEXT NOT NULL REFERENCES issues(id) ON UPDATE CASCADE ON DELETE CASCADE, label_id TEXT NOT NULL REFERENCES labels(id) ON UPDATE CASCADE ON DELETE CASCADE, PRIMARY KEY (issue_id, label_id))";
