@@ -6,9 +6,8 @@
 //! "clear the assignee" (`null`) is distinct from "leave it unchanged"
 //! (omitted).
 
+use linear_schema::linear as schema;
 use serde::{Serialize, Serializer};
-
-use super::schema;
 
 /// Three-valued optional for a nullable input field: `Absent` omits the field,
 /// `Null` sends `null` (clear), `Value` sends the value. A bare `Option<T>`

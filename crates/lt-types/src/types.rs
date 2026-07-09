@@ -2,10 +2,10 @@
 //! API and double as the domain/storage/render types. The GraphQL response
 //! envelope also lives here since it is transport-level, not an entity.
 
+use linear_schema::linear as schema;
 use serde::Deserialize;
 
 use crate::scalars::{DateTime, Priority};
-use crate::schema;
 
 #[derive(Deserialize)]
 pub struct GraphqlResponse<T> {

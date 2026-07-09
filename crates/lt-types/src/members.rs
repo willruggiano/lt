@@ -2,9 +2,9 @@
 //! modelled as a cynic `QueryFragment`. The fetch lives in `lt-upstream`.
 
 use cynic::QueryBuilder;
+use linear_schema::linear as schema;
 
 use crate::graphql::GraphqlOperation;
-use crate::schema;
 use crate::types::User;
 
 #[derive(cynic::QueryVariables, Clone)]

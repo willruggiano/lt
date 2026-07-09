@@ -1,0 +1,18 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+use std::env;
+use std::path::Path;
+
+fn main() {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let manifest = Path::new(&manifest_dir);
+    let schema_path = manifest.join("../../build/linear-schema-definition.graphql");
+
+    println!("cargo:rerun-if-changed={}", schema_path.display());
+    println!("cargo:rerun-if-changed=build.rs");
+
+    // Register linear schema for creating definitions
+    cynic_codegen::register_schema("linear")
+        .from_sdl_file(&schema_path)
+        .expect("failed to find graphql schema");
+}

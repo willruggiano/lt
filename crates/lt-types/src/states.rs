@@ -2,10 +2,10 @@
 //! modelled as a cynic `QueryFragment`. The fetch lives in `lt-upstream`.
 
 use cynic::QueryBuilder;
+use linear_schema::linear as schema;
 
 use crate::graphql::GraphqlOperation;
 use crate::pagination::PageInfo;
-use crate::schema;
 use crate::types::WorkflowState;
 
 #[derive(cynic::QueryVariables, Clone)]

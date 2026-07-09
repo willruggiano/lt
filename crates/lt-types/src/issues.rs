@@ -12,13 +12,13 @@
 
 use cynic::variables::VariableType;
 use cynic::{MutationBuilder, QueryBuilder};
+use linear_schema::linear as schema;
 
 use crate::graphql::{GraphqlOperation, ensure_success, extract_on_success};
 use crate::inputs::{IssueCreateInput, IssueUpdateInput};
 use crate::pagination::PageInfo;
 use crate::query::{SortDirection, SortField};
 use crate::scalars::Priority;
-use crate::schema;
 use crate::types::Issue;
 
 /// The allowlisted assignee filter: no assignee, an exact (typically

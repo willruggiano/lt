@@ -1368,6 +1368,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "linear-schema"
+version = "0.7.1"
+dependencies = [
+ "cynic",
+ "cynic-codegen",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1542,6 +1550,7 @@ dependencies = [
  "chrono",
  "cynic",
  "cynic-codegen",
+ "linear-schema",
  "lt-schema-codegen",
  "serde",
  "serde_json",

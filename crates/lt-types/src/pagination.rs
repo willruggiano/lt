@@ -2,7 +2,7 @@
 //! issues, comments): one cynic fragment reused across operations rather than
 //! copy-pasted per module.
 
-use crate::schema;
+use linear_schema::linear as schema;
 
 #[derive(Debug, Default, cynic::QueryFragment)]
 pub struct PageInfo {

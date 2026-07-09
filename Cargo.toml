@@ -14,8 +14,11 @@ description = "A local-first Linear TUI for terminal power users"
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock"] }
+cynic = { version = "3.13", default-features = false }
+cynic-codegen = { version = "3.13", features = ["rkyv"] }
 dirs = "6"
 insta = "1.48.0"
+linear-schema = { path = "crates/linear-schema" }
 lt-config = { path = "crates/lt-config" }
 lt-runtime = { path = "crates/lt-runtime" }
 lt-schema-codegen = { path = "crates/lt-schema-codegen" }

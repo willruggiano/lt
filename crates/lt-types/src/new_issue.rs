@@ -13,13 +13,14 @@
 //! empty-when-unused) `String`; `has_team` is the client-only gate.
 
 use cynic::QueryBuilder;
+use linear_schema::linear as schema;
 
 use crate::graphql::GraphqlOperation;
 use crate::members::UserConnection;
 use crate::states::WorkflowStateConnection;
 use crate::teams::TeamConnection;
 use crate::types::{Team, User, WorkflowState};
-use crate::{schema, viewer};
+use crate::viewer;
 
 #[derive(cynic::QueryVariables, Clone)]
 pub struct NewIssueVariables {

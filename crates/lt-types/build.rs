@@ -22,13 +22,12 @@ fn main() {
     println!("cargo:rerun-if-changed={}", toml_path.display());
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Make the snapshot available to `#[cynic::schema("linear")]` and the
-    // `QueryFragment` derives, which read it from `$OUT_DIR/cynic-schemas`.
+    // Register linear schema for creating structs for queries
     cynic_codegen::register_schema("linear")
         .from_sdl_file(&schema_path)
-        .expect("registering Linear schema with cynic")
+        .expect("failed to find graphql schema")
         .as_default()
-        .expect("setting cynic default schema");
+        .expect("failed registering default schema");
 
     // -----------------------------------------------------------------------
     // Load the allowlist

@@ -4,12 +4,12 @@
 //! joins.
 
 use cynic::{MutationBuilder, QueryBuilder};
+use linear_schema::linear as schema;
 
 use crate::graphql::{GraphqlOperation, extract_on_success};
 use crate::inputs::CommentCreateInput;
 use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
-use crate::schema;
 use crate::types::User;
 
 #[derive(cynic::QueryVariables, Clone)]

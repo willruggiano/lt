@@ -5,11 +5,11 @@
 //! (docs/design/operation-seam-adr.md, "Decision 3").
 
 use cynic::QueryBuilder;
+use linear_schema::linear as schema;
 
 use crate::comments::{Comment, CommentConnection};
 use crate::graphql::GraphqlOperation;
 use crate::issues::IssueConnection;
-use crate::schema;
 use crate::types::Issue;
 
 #[derive(cynic::QueryVariables, Clone)]

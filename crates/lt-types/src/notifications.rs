@@ -2,11 +2,11 @@
 //! shared "currency" types; the fetch lives in `lt-upstream`.
 
 use cynic::QueryBuilder;
+use linear_schema::linear as schema;
 
 use crate::graphql::GraphqlOperation;
 use crate::pagination::PageInfo;
 use crate::scalars::DateTime;
-use crate::schema;
 use crate::types::{Issue, User};
 
 #[derive(cynic::QueryVariables)]

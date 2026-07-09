@@ -20,6 +20,3 @@ pub mod viewer;
 // taking a direct `cynic` dependency -- cynic itself stays confined to
 // `lt-types`.
 pub use cynic::Id;
-
-#[cynic::schema("linear")]
-pub mod schema {}

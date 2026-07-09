@@ -7,14 +7,14 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+cynic.workspace = true
+linear-schema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Crate-specific: the GraphQL schema and query/input types live only here.
-cynic = { version = "3.13", default-features = false }
-chrono = { workspace = true, features = ["serde"] }
 
 [build-dependencies]
-cynic-codegen = { version = "3.13", features = ["rkyv"] }
+cynic-codegen.workspace = true
 lt-schema-codegen.workspace = true
 toml = "1"
 

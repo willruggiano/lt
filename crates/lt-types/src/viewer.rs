@@ -2,9 +2,10 @@
 //! These are the shared "currency" types; the fetch lives in `lt-upstream`.
 
 use cynic::QueryBuilder;
+use linear_schema::linear as schema;
 
 use crate::graphql::GraphqlOperation;
-use crate::{schema, types};
+use crate::types;
 
 #[derive(cynic::QueryFragment)]
 #[cynic(graphql_type = "Query")]

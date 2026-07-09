@@ -1,7 +1,7 @@
 //! Custom GraphQL scalars, modelled as newtypes so cynic can decode them
 //! directly (see the ADR: `docs/design/linear-api-types-codegen.md`).
 
-use crate::schema;
+use linear_schema::linear as schema;
 
 /// An ISO-8601 timestamp as returned by the Linear API, decoded straight into
 /// `chrono` (rather than kept as a raw `String`) so every consumer gets a
