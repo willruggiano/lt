@@ -15,6 +15,6 @@
 
     // documentation.md: fenced code blocks must declare a language.
     "MD040": { "language_only": true }, // fenced-code-language
-    "MD046": { "style": "fenced" }, // code-block-style
-  },
+    "MD046": { "style": "fenced" } // code-block-style
+  }
 }
