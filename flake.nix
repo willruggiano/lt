@@ -25,7 +25,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     cpd = {
-      url = "github:kucherenko/jscpd/v5.0.11";
+      url = "github:kucherenko/jscpd/v5.0.12";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     treefmt = {
