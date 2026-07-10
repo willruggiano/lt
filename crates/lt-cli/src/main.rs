@@ -81,16 +81,16 @@ fn run_tui(
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Keep the guard alive for the duration of main() so the background
+    // logging thread is not torn down prematurely.
+    let _guard = logging::init(cli.command.is_some());
+
     // Select the profile before anything touches auth, logs, or the DB.
     let profile = cli
         .profile
         .clone()
         .or_else(|| std::env::var("LT_PROFILE").ok().filter(|s| !s.is_empty()));
     lt_config::set_profile(profile)?;
-
-    // Keep the guard alive for the duration of main() so the background
-    // logging thread is not torn down prematurely.
-    let _guard = logging::init(cli.command.is_none());
 
     match cli.command {
         None => run_tui(

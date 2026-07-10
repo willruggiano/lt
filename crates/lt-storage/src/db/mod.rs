@@ -9,7 +9,7 @@ pub mod viewer;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 pub use comments::{delete_comments_for_issue, query_comments, upsert_comments};
 pub use issues::{
     count_fts_rows, count_issues, get_meta, issue_is_locally_unsynced, query_children,
@@ -67,8 +67,6 @@ pub(crate) fn query_rows_id_name_and<T, E: rusqlite::types::FromSql>(
 
 pub fn db_path() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir().context("could not determine local data directory")?;
-    // Each profile gets its own database so accounts/workspaces never share
-    // state and can run concurrently.
     let lt_dir = lt_config::profile_dir(&data_dir.join("lt"));
     fs::create_dir_all(&lt_dir)
         .with_context(|| format!("could not create directory: {}", lt_dir.display()))?;
@@ -162,10 +160,6 @@ const MIGRATION_1: &str = "\
     CREATE INDEX idx_issues_team_state ON issues (team_id, state_id);
     CREATE INDEX idx_issues_updated_at ON issues (updated_at);";
 
-/// Team-scoped cache: `workflow_states` gains the columns the state/assignee
-/// pickers need (`docs/design/tui-app-event-queue-adr.md`, "Decision 4"), and
-/// `team_memberships` records who is on which team -- not inferrable from
-/// issues (an assignee is not provably a member).
 const MIGRATION_2: &str = "\
     ALTER TABLE workflow_states ADD COLUMN team_id TEXT;
     ALTER TABLE workflow_states ADD COLUMN position REAL;
@@ -176,8 +170,6 @@ const MIGRATION_2: &str = "\
         PRIMARY KEY (team_id, user_id)
     );";
 
-/// The viewer's organization, so `sync_meta` can key the viewer identity by
-/// `viewer_id`/`organization_id` rather than duplicating its name/url fields.
 const MIGRATION_3: &str = "\
     CREATE TABLE organizations (
         id      TEXT PRIMARY KEY,
@@ -185,25 +177,9 @@ const MIGRATION_3: &str = "\
         url_key TEXT NOT NULL
     );";
 
-/// `WorkflowState.position` is non-null on the wire and became a required
-/// `f64` in the read model; a database from before that change can carry
-/// `position IS NULL` rows written by the old team-only upsert (an
-/// issue-driven write that knew no position). Backfilling to `0` (rather than
-/// deleting the rows) keeps every issue's inner join on `workflow_states`
-/// resolving -- deleting would drop those issues from every query until the
-/// next team-states sync re-creates the row. The next targeted team sync
-/// overwrites `0` with Linear's real position; until then, a backfilled state
-/// sorts by its arbitrary `0` among real positions in the state/assignee
-/// pickers -- a cosmetic, self-healing ordering effect only.
 const MIGRATION_4: &str = "\
     UPDATE workflow_states SET position = 0 WHERE position IS NULL;";
 
-/// Identity + op-log reset. The cache is a disposable replica; the only
-/// non-refetchable state (un-acked local edits) lived in the tables this drops,
-/// so a reset is correct. Foreign keys join on `id` (TEXT); `ON UPDATE CASCADE`
-/// carries a create-ack's `UPDATE issues SET id=…` to every referrer. Old
-/// (M1-M4) tables carry no FK constraints, so drop order is unconstrained; the
-/// new CREATEs are parent-before-child.
 const MIGRATION_5: &str = "\
     DROP TRIGGER IF EXISTS issues_ai;
     DROP TRIGGER IF EXISTS issues_ad;
@@ -326,8 +302,6 @@ const MIGRATION_5: &str = "\
     );
     CREATE INDEX idx_op_log_operation_id ON op_log (operation, id);";
 
-/// The migration list: the single schema source for both `open_db()` and the
-/// `sql_validation` gate (docs/design/type-safe-sql-adr.md, "Migrations").
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -338,71 +312,36 @@ fn migrations() -> Migrations<'static> {
     ])
 }
 
-/// Refuse a pre-versioning database (`user_version` 0 but tables exist): delete it and re-sync.
-fn guard_against_legacy_database(conn: &Connection, path: &Path) -> Result<()> {
-    let user_version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .context("failed to read user_version")?;
-    if user_version != 0 {
-        return Ok(());
-    }
-
-    let table_count: i64 = sql::prepare(conn, sql::COUNT_TABLES)
-        .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
-        .context("failed to check for existing tables")?;
-    if table_count > 0 {
-        bail!(
-            "database at {} predates versioned migrations; delete it and re-run 'lt sync' to rebuild the cache",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-/// Migrate `conn` to the latest schema, guarding against a legacy database at
-/// `path` first. Private: migrations run exactly once, from [`open_db`].
-fn run_migrations(conn: &mut Connection, path: &Path) -> Result<()> {
-    guard_against_legacy_database(conn, path)?;
+fn run_migrations(conn: &mut Connection) -> Result<()> {
     migrations()
         .to_latest(conn)
         .context("failed to run migrations")
 }
 
-/// Open a connection to the SQLite database at `uri` -- a filesystem path or a
-/// `file:...?mode=memory` URI -- and run migrations.
 pub fn open_db(uri: impl AsRef<Path>) -> Result<Connection> {
     let uri = uri.as_ref();
+    let path = uri.to_string_lossy();
+    tracing::info!(db = %path, "opening database");
     let mut conn = Connection::open(uri)
         .with_context(|| format!("could not open database at {}", uri.display()))?;
-    // The TUI and the CLI (e.g. `lt sync`) can open the same per-profile file
-    // concurrently; wait out a contending writer instead of failing
-    // immediately with SQLITE_BUSY.
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .context("failed to set busy timeout")?;
     conn.pragma_update(None, "foreign_keys", true)
         .context("failed to enable foreign key enforcement")?;
-    run_migrations(&mut conn, uri)?;
+    run_migrations(&mut conn)?;
     Ok(conn)
 }
 
-/// A handle to the issue database. The set of databases is closed -- the
-/// per-profile file on disk in normal use, or an isolated in-memory database in
-/// tests -- so it is an enum rather than a trait with two impls. Both are
-/// SQLite opened by path; `connect()` opens a fresh connection via `open_db`.
 pub enum Database {
-    /// The SQLite file on disk. Resolving the path and migrating is deferred to
-    /// `connect()`, so constructing this variant does no I/O.
     File,
-    /// An isolated, shared-cache in-memory database for tests. SQLite destroys
-    /// a shared-cache in-memory database when its last connection closes, so
-    /// the handle holds one open connection for its own lifetime.
     #[cfg(any(test, feature = "test-util"))]
-    Memory { uri: String, _keepalive: Connection },
+    Memory {
+        uri: String,
+        _keepalive: Connection,
+    },
 }
 
 impl Database {
-    /// Build an isolated in-memory database, migrated and ready. Each call gets
-    /// a distinct shared cache so concurrent tests never share state.
     #[cfg(any(test, feature = "test-util"))]
     pub fn memory() -> Result<Self> {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -425,11 +364,6 @@ impl Database {
         }
     }
 
-    /// Open another handle onto the same database: for `File`, the same path
-    /// (there is only one); for `Memory`, a second keepalive connection on the
-    /// same shared-cache URI, so a second owner (e.g. a test's `Runtime`)
-    /// reads and writes the exact rows the first sees. Neither handle's
-    /// lifetime depends on the other's.
     #[cfg(any(test, feature = "test-util"))]
     pub fn share(&self) -> Result<Self> {
         match self {
@@ -453,8 +387,6 @@ mod tests {
     fn query_issue_by_id_resolves_and_misses() {
         let db = Database::memory().unwrap();
         let conn = db.connect().unwrap();
-        // `sample_base_issue`'s state must already be locally known (sync
-        // owns workflow states; issue upserts never write them).
         teams::upsert_team_state(
             &conn,
             "ENG",
@@ -478,32 +410,5 @@ mod tests {
     #[test]
     fn migrations_are_valid() {
         migrations().validate().unwrap();
-    }
-
-    /// We are pre-1.0 and keep no legacy-compatibility migration: a database
-    /// from before this crate adopted `rusqlite_migration` sits at
-    /// `user_version = 0` with tables already present. The guard must reject
-    /// it with an actionable message rather than silently patching it (or
-    /// worse, silently reinterpreting its rows under the new schema).
-    #[test]
-    fn legacy_database_is_rejected_with_an_actionable_error() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        // A pre-versioned database, as the old hand-rolled probing code would
-        // have left behind: some tables, `user_version` untouched at 0.
-        conn.execute_batch("CREATE TABLE issues (id TEXT PRIMARY KEY);")
-            .unwrap();
-
-        let path = Path::new("/tmp/legacy-lt.db");
-        let err = run_migrations(&mut conn, path).unwrap_err();
-
-        let message = err.to_string();
-        assert!(
-            message.contains("delete"),
-            "error should tell the user to delete the database: {message}"
-        );
-        assert!(
-            message.contains("/tmp/legacy-lt.db"),
-            "error should name the database path: {message}"
-        );
     }
 }
