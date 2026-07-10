@@ -381,7 +381,7 @@ impl Runtime {
             return CycleOutcome::NotAuthenticated;
         }
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.sync_now(full)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.sync(full)));
 
         match result {
             Ok(Ok(())) => {
@@ -419,7 +419,7 @@ impl Runtime {
 
     /// Connect, acquire a transport, run the requested full or delta sync
     /// body, then emit `Update`.
-    fn sync_now(&self, full: bool) -> Result<()> {
+    pub fn sync(&self, full: bool) -> Result<()> {
         let conn = self.connect()?;
         let transport = self.transports.acquire()?;
         if full {
@@ -429,15 +429,6 @@ impl Runtime {
         }
         self.emit_update();
         Ok(())
-    }
-
-    pub fn sync_full(&self) -> Result<()> {
-        self.sync_now(true)
-    }
-
-    /// The delta counterpart of [`Runtime::sync_full`].
-    pub fn sync_delta(&self) -> Result<()> {
-        self.sync_now(false)
     }
 
     /// Seed the local database from the deterministic `sim` generator: no
@@ -1048,7 +1039,7 @@ mod tests {
             on_event,
         );
 
-        runtime.sync_full().unwrap();
+        runtime.sync(true).unwrap();
 
         let conn = runtime.connect().unwrap();
         assert!(db::query_issue_by_id(&conn, "1").unwrap().is_some());
@@ -1064,7 +1055,7 @@ mod tests {
             on_event,
         );
 
-        runtime.sync_delta().unwrap();
+        runtime.sync(false).unwrap();
 
         let conn = runtime.connect().unwrap();
         assert!(db::query_issue_by_id(&conn, "1").unwrap().is_some());

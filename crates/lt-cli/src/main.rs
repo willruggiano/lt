@@ -1,8 +1,7 @@
 mod auth;
 mod logging;
-mod sync;
 
-use std::io;
+use std::io::Write;
 use std::sync::{Arc, mpsc};
 
 use anyhow::Result;
@@ -11,9 +10,6 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "lt", about, version)]
 struct Cli {
-    /// Profile to use: each profile has its own credentials and local
-    /// database (one account/workspace per profile). Defaults to $`LT_PROFILE`
-    /// or "default".
     #[arg(long, global = true)]
     profile: Option<String>,
 
@@ -28,10 +24,11 @@ enum Commands {
         #[command(subcommand)]
         command: auth::AuthCommands,
     },
-    /// Sync issues from Linear (incremental by default; use 'full' subcommand for a full sync)
+    /// Sync issues from Linear (incremental by default)
     Sync {
-        #[command(subcommand)]
-        command: Option<sync::SyncCommands>,
+        /// Perform a full sync instead of an incremental sync
+        #[arg(long)]
+        full: bool,
     },
 }
 
@@ -99,11 +96,11 @@ fn main() -> Result<()> {
             lt_runtime::query::SortDirection::Descending,
             50,
         )?,
-        Some(Commands::Auth { command }) => auth::run(&mut io::stdout(), &command)?,
-        Some(Commands::Sync { command }) => {
+        Some(Commands::Auth { command }) => auth::run(&mut std::io::stdout(), &command)?,
+        Some(Commands::Sync { full }) => {
             let runtime = build_runtime(Box::new(|_| {}));
-            let cmd = command.unwrap_or(sync::SyncCommands::Delta);
-            sync::run(&mut io::stdout(), cmd, &runtime)?;
+            runtime.sync(full)?;
+            writeln!(std::io::stdout(), "Sync complete.")?;
         }
     }
     Ok(())
