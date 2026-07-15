@@ -67,7 +67,7 @@ pub(crate) fn query_rows_id_name_and<T, E: rusqlite::types::FromSql>(
 
 pub fn db_path() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir().context("could not determine local data directory")?;
-    let lt_dir = lt_config::profile_dir(&data_dir.join("lt"));
+    let lt_dir = lt_config::workspace_dir(&data_dir.join("lt"));
     fs::create_dir_all(&lt_dir)
         .with_context(|| format!("could not create directory: {}", lt_dir.display()))?;
     Ok(lt_dir.join("lt.db"))

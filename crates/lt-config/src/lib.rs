@@ -6,36 +6,32 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// Profiles -- separate auth + database per account/workspace
-// ---------------------------------------------------------------------------
+static WORKSPACE: OnceLock<String> = OnceLock::new();
 
-static PROFILE: OnceLock<String> = OnceLock::new();
-
-/// Select the active profile for this process.  Must be called once at
-/// startup, before any path helper is used.  `None` selects the profile
+/// Select the active workspace for this process.  Must be called once at
+/// startup, before any path helper is used. `None` selects the workspace
 /// named "default".
-pub fn set_profile(name: Option<String>) -> Result<()> {
-    if let Some(ref n) = name
+pub fn set_workspace(workspace: Option<String>) -> Result<()> {
+    if let Some(ref n) = workspace
         && (n.is_empty()
             || !n
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
     {
-        anyhow::bail!("invalid profile name {n:?}: use only letters, digits, '-' and '_'");
+        anyhow::bail!("invalid workspace name {n:?}: use only letters, digits, '-' and '_'");
     }
-    PROFILE
-        .set(name.unwrap_or_else(|| "default".to_string()))
-        .map_err(|_| anyhow::anyhow!("set_profile called more than once"))
+    WORKSPACE
+        .set(workspace.unwrap_or_else(|| "default".to_string()))
+        .map_err(|_| anyhow::anyhow!("set_workspace called more than once"))
 }
 
-fn profile() -> &'static str {
-    PROFILE.get().map_or("default", String::as_str)
+fn workspace() -> &'static str {
+    WORKSPACE.get().map_or("default", String::as_str)
 }
 
 /// Append the per-profile subdirectory to a base `lt` directory.
-pub fn profile_dir(base: &Path) -> PathBuf {
-    base.join("profiles").join(profile())
+pub fn workspace_dir(base: &Path) -> PathBuf {
+    base.join("workspaces").join(workspace())
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -78,7 +74,7 @@ pub fn log_dir() -> Result<PathBuf> {
 }
 
 pub fn state_dir() -> Result<PathBuf> {
-    let dir = profile_dir(
+    let dir = workspace_dir(
         &dirs::state_dir()
             .ok_or_else(|| anyhow::anyhow!("could not determine state directory"))?
             .join("lt"),
@@ -179,16 +175,16 @@ mod tests {
 
     #[test]
     fn set_profile_rejects_invalid_names() {
-        assert!(set_profile(Some(String::new())).is_err());
-        assert!(set_profile(Some("has space".to_string())).is_err());
-        assert!(set_profile(Some("slash/path".to_string())).is_err());
+        assert!(set_workspace(Some(String::new())).is_err());
+        assert!(set_workspace(Some("has space".to_string())).is_err());
+        assert!(set_workspace(Some("slash/path".to_string())).is_err());
     }
 
     #[test]
-    fn profile_dir_appends_profiles_and_active_profile() {
-        // No profile is selected in the test process, so it resolves to "default".
-        let dir = profile_dir(Path::new("/base/lt"));
-        assert_eq!(dir, PathBuf::from("/base/lt/profiles/default"));
+    fn workspace_dir_appends_workspaces_and_active_workspace() {
+        // No workspace is selected in the test process, so it resolves to "default".
+        let dir = workspace_dir(Path::new("/base/lt"));
+        assert_eq!(dir, PathBuf::from("/base/lt/workspaces/default"));
     }
 
     #[test]

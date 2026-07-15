@@ -23,7 +23,7 @@ lt-tui.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 # Crate-specific: only the binary parses args and configures logging.
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

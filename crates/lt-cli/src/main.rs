@@ -10,8 +10,9 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "lt", about, version)]
 struct Cli {
-    #[arg(long, global = true)]
-    profile: Option<String>,
+    /// Set the active Linear workspace
+    #[arg(short, long, global = true, env = "LT_PROFILE")]
+    workspace: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -80,14 +81,9 @@ fn main() -> Result<()> {
 
     // Keep the guard alive for the duration of main() so the background
     // logging thread is not torn down prematurely.
-    let _guard = logging::init(cli.command.is_some());
+    let _guard = logging::init(cli.command.is_some())?;
 
-    // Select the profile before anything touches auth, logs, or the DB.
-    let profile = cli
-        .profile
-        .clone()
-        .or_else(|| std::env::var("LT_PROFILE").ok().filter(|s| !s.is_empty()));
-    lt_config::set_profile(profile)?;
+    lt_config::set_workspace(cli.workspace)?;
 
     match cli.command {
         None => run_tui(
@@ -103,5 +99,6 @@ fn main() -> Result<()> {
             writeln!(std::io::stdout(), "Sync complete.")?;
         }
     }
+
     Ok(())
 }
