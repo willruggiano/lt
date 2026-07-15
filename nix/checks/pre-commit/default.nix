@@ -33,8 +33,6 @@
         deadnix.enable = true;
         shellcheck.enable = true;
         statix.enable = true;
-        # markdownlint-cli2 reads .markdownlint-cli2.jsonc for its globs and the
-        # custom wiki-link rule; git-hooks.nix ships only markdownlint (cli v1).
         markdownlint-cli2 = {
           enable = true;
           package = pkgs.markdownlint-cli2;

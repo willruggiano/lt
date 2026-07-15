@@ -3,5 +3,6 @@
     ./cargo-dupes
     ./claude-code
     ./lt
+    ./pi
   ];
 }
