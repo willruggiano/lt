@@ -75,10 +75,6 @@
         };
 
       toolchain = pkgs.rust-bin.fromRustupToolchainFile ../../../rust-toolchain.toml;
-      # toolchain = pkgs.rust-bin.selectLatestNightlyWith (toolchain:
-      #   toolchain.default.override {
-      #     extensions = ["rust-analyzer" "rust-src" "llvm-tools-preview"];
-      #   });
     };
   };
 }

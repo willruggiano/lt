@@ -13,6 +13,10 @@
       url = "github:numtide/llm-agents.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    cpd = {
+      url = "github:kucherenko/jscpd/v5.0.12";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     globset = {
       url = "github:pdtpartners/globset";
       inputs.nixpkgs-lib.follows = "nixpkgs";
@@ -22,10 +26,6 @@
     };
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    cpd = {
-      url = "github:kucherenko/jscpd/v5.0.12";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     treefmt = {
