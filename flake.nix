@@ -14,7 +14,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     cpd = {
-      url = "github:kucherenko/jscpd/v5.0.12";
+      url = "github:kucherenko/jscpd/v5.0.14";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     globset = {

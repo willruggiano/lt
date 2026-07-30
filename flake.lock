@@ -93,16 +93,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1783528917,
-        "narHash": "sha256-9VDzWOCtGpqZJfqYvrOGWhhk5QvyawT9lrHbKzjrNc8=",
+        "lastModified": 1785145763,
+        "narHash": "sha256-7WSA65yUHBdGCrL8WPvAzpjCumGhsp10HFGtW5+Uwj4=",
         "owner": "kucherenko",
         "repo": "jscpd",
-        "rev": "64258a9af460fc554c1ad884f976787378721d90",
+        "rev": "2a6a1a406a9b960547adcb11ec6409ded079d96e",
         "type": "github"
       },
       "original": {
         "owner": "kucherenko",
-        "ref": "v5.0.12",
+        "ref": "v5.0.14",
         "repo": "jscpd",
         "type": "github"
       }
