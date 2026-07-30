@@ -1,8 +1,5 @@
 .direnv/
 .envrc
-.jj/
-.envrc
 .pre-commit-config.yaml
 /result
 /target
-.sageox/kb/

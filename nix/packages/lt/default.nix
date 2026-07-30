@@ -22,6 +22,7 @@
     jail.additionalCombinators = cs:
       with cs; [
         (add-pkg-deps [config.packages.toolchain])
+        (readwrite (noescape "~/.cargo"))
       ];
 
     packages = {
@@ -76,5 +77,7 @@
 
       toolchain = pkgs.rust-bin.fromRustupToolchainFile ../../../rust-toolchain.toml;
     };
+
+    treefmt.programs.rustfmt.enable = true;
   };
 }

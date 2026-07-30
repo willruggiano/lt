@@ -4,13 +4,12 @@
   ];
 
   perSystem = {
-    inputs',
     lib,
     pkgs,
     ...
   }: {
     devshells.default = {
-      packages = [inputs'.cpd.packages.default pkgs.scc pkgs.sqlite];
+      packages = with pkgs; [scc sqlite];
       motd = lib.mkForce "";
     };
   };
