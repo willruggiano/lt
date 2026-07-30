@@ -14,7 +14,6 @@
             (add-pkg-deps [pkgs.sox])
             (readwrite (noescape "~/.claude"))
             (readwrite (noescape "~/.claude.json"))
-            (set-env "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" "1")
           ];
         git = {
           user.email = "noreply@anthropic.com";

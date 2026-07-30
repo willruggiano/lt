@@ -30,12 +30,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/bin/setup.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.agents/bin/setup.sh\"",
             "timeout": 600
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/bin/install-pre-commit.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.agents/bin/install-pre-commit.sh\"",
             "timeout": 300
           }
         ]
