@@ -2,7 +2,6 @@
   perSystem = {
     config,
     inputs',
-    pkgs,
     ...
   }: {
     devshells.default.packages = [config.packages.pi];

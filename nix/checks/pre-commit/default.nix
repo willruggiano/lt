@@ -25,19 +25,19 @@
 
     pre-commit.settings = {
       hooks = {
-        treefmt = {
-          enable = true;
-          package = config.packages.treefmt;
-        };
         deadnix.enable = true;
-        shellcheck.enable = true;
-        statix.enable = true;
-        markdownlint-cli2 = {
+        markdownlint = {
           enable = true;
           package = pkgs.markdownlint-cli2;
           entry = "${pkgs.markdownlint-cli2}/bin/markdownlint-cli2";
           files = "\\.md$";
           pass_filenames = false;
+        };
+        shellcheck.enable = true;
+        statix.enable = true;
+        treefmt = {
+          enable = true;
+          package = config.packages.treefmt;
         };
       };
     };
